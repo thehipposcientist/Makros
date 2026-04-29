@@ -173,6 +173,9 @@ MODALITY_ELLIPTICAL    = "elliptical"
 MODALITY_STAIR_CLIMBER = "stair_climber"
 MODALITY_OUTDOOR_RUN   = "outdoor_run"
 MODALITY_ASSAULT_BIKE  = "assault_bike"
+MODALITY_OUTDOOR_BIKE  = "outdoor_bike"
+MODALITY_SKIERG        = "skierg"
+MODALITY_VERSACLIMBER  = "versaclimber"
 
 # Order matters: more specific phrases before generic ones
 _MODALITY_KEYWORDS: list[tuple[str, str]] = [
@@ -180,12 +183,21 @@ _MODALITY_KEYWORDS: list[tuple[str, str]] = [
     (MODALITY_ASSAULT_BIKE,  "assault_bike"),
     (MODALITY_ASSAULT_BIKE,  "fan bike"),
     (MODALITY_ASSAULT_BIKE,  "airbike"),
+    (MODALITY_SKIERG,        "skierg"),
+    (MODALITY_SKIERG,        "ski erg"),
+    (MODALITY_VERSACLIMBER,  "versaclimber"),
+    (MODALITY_VERSACLIMBER,  "versa climber"),
     (MODALITY_TREADMILL,     "treadmill"),
     (MODALITY_TREADMILL,     "incline walk"),
     (MODALITY_TREADMILL,     "incline_walk"),
     (MODALITY_BIKE,          "stationary bike"),
     (MODALITY_BIKE,          "stationary_bike"),
     (MODALITY_BIKE,          "spin class"),
+    (MODALITY_OUTDOOR_BIKE,  "outdoor bike"),
+    (MODALITY_OUTDOOR_BIKE,  "outdoor cycling"),
+    (MODALITY_OUTDOOR_BIKE,  "cycling (outdoor)"),
+    (MODALITY_OUTDOOR_BIKE,  "cycling outdoor"),
+    (MODALITY_OUTDOOR_BIKE,  "bike ride"),
     (MODALITY_BIKE,          "cycling"),
     (MODALITY_BIKE,          "cycle"),
     (MODALITY_ROWER,         "rowing machine"),

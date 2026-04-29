@@ -2327,7 +2327,10 @@ CARDIO_OUTDOOR = [
         "is_machine": False,
         "is_unilateral": False,
         "description": "Steady outdoor bike ride",
-        "equipment": [],
+        "cardio_modality": "outdoor_bike",
+        "equipment": [
+            {"slug": "outdoor_bike", "role": "primary", "required": True},
+        ],
     },
     {
         "slug": "jump_rope",
@@ -2642,6 +2645,7 @@ SEED_EQUIPMENT = [
 
     # Free Weights
     {"slug": "dumbbells",          "name": "Dumbbells",                "category": "Free Weights", "icon": "\U0001f3cb\ufe0f"},
+    {"slug": "adjustable_dumbbells","name": "Adjustable dumbbells",    "category": "Free Weights", "icon": "\U0001f39b\ufe0f"},
     {"slug": "barbell",            "name": "Barbell",                  "category": "Free Weights", "icon": "\U0001f3cb\ufe0f"},
     {"slug": "kettlebell",         "name": "Kettlebell",               "category": "Free Weights", "icon": "\U0001f514"},
     {"slug": "ez_curl_bar",        "name": "EZ curl bar",              "category": "Free Weights", "icon": "\u3030\ufe0f"},
@@ -2709,6 +2713,11 @@ SEED_EQUIPMENT = [
     {"slug": "assault_bike",       "name": "Assault bike",             "category": "Cardio", "icon": "\U0001f4a8"},
     {"slug": "swimming_pool",      "name": "Swimming pool",            "category": "Cardio", "icon": "\U0001f3ca"},
     {"slug": "battle_ropes",       "name": "Battle ropes",             "category": "Cardio", "icon": "\U0001faa2"},
+    {"slug": "outdoor_bike",       "name": "Outdoor bike",             "category": "Cardio", "icon": "\U0001f6b2"},
+    {"slug": "skierg",             "name": "SkiErg",                   "category": "Cardio", "icon": "\u26f7\ufe0f"},
+    {"slug": "versaclimber",       "name": "VersaClimber",             "category": "Cardio", "icon": "\U0001f9d7"},
+    {"slug": "heavy_bag",          "name": "Heavy bag",                "category": "Cardio", "icon": "\U0001f94a"},
+    {"slug": "ruck_pack",          "name": "Ruck pack",                "category": "Cardio", "icon": "\U0001f392"},
 
     # Athletic / Functional
     {"slug": "plyo_box",           "name": "Plyo box (24\"+)",          "category": "Athletic / Functional", "icon": "\U0001f4e6"},
@@ -5676,7 +5685,7 @@ _NEW_2026_04_27 = [
         "power_type": "endurance",
         "default_tracking_mode": "distance",
         "description": "Loaded backpack walking — strength-cardio hybrid for body recomp",
-        "equipment": [],
+        "equipment": [{"slug": "ruck_pack", "role": "primary", "required": True}],
     },
     {
         "slug": "treadmill_walk",
@@ -5766,7 +5775,8 @@ _NEW_2026_04_27 = [
         "power_type": "endurance",
         "default_tracking_mode": "time",
         "description": "Ski simulator — upper-body and full-body cardiovascular demand",
-        "equipment": [{"slug": "rowing_machine", "role": "primary", "required": True}],
+        "cardio_modality": "skierg",
+        "equipment": [{"slug": "skierg", "role": "primary", "required": True}],
     },
     {
         "slug": "skierg_intervals",
@@ -5781,7 +5791,8 @@ _NEW_2026_04_27 = [
         "power_type": "conditioning",
         "default_tracking_mode": "time",
         "description": "High-intensity SkiErg sprint intervals",
-        "equipment": [{"slug": "rowing_machine", "role": "primary", "required": True}],
+        "cardio_modality": "skierg",
+        "equipment": [{"slug": "skierg", "role": "primary", "required": True}],
     },
     {
         "slug": "versaclimber",
@@ -5796,7 +5807,8 @@ _NEW_2026_04_27 = [
         "power_type": "conditioning",
         "default_tracking_mode": "time",
         "description": "Vertical climbing machine — full-body low-impact cardio",
-        "equipment": [{"slug": "stair_climber", "role": "primary", "required": True}],
+        "cardio_modality": "versaclimber",
+        "equipment": [{"slug": "versaclimber", "role": "primary", "required": True}],
     },
     {
         "slug": "boxing_heavy_bag",
@@ -5811,7 +5823,7 @@ _NEW_2026_04_27 = [
         "power_type": "conditioning",
         "default_tracking_mode": "time",
         "description": "Bag work rounds for conditioning, coordination, and aggression",
-        "equipment": [],
+        "equipment": [{"slug": "heavy_bag", "role": "primary", "required": True}],
     },
     {
         "slug": "shadow_boxing",
@@ -6400,6 +6412,7 @@ SEED_EXERCISES: list[dict] = (
     + _NEW_2026_04_13
     + _NEW_2026_04_13_PASS_2
     + _NEW_2026_04_26
+    + _NEW_2026_04_27
     + _NEW_2026_04_29
 )
 

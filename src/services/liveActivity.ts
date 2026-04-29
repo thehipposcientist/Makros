@@ -12,6 +12,8 @@ export interface RestActivityState {
   exerciseName: string;
   setNumber: number;       // 0-indexed current set
   totalSets: number;
+  startedAtMs: number;     // absolute epoch-ms when this rest began
+  durationSeconds: number; // original rest length, used by the lock-screen ring
   endDateMs: number;       // absolute epoch-ms when rest ends
   nextSetRecommendation: string;
   themeColorHex: string;   // e.g. "#15C7B8"
@@ -74,6 +76,8 @@ export async function startRestActivity(state: RestActivityState): Promise<strin
   try {
     const id = await n.startActivity({
       workoutId: state.workoutId ?? `workout_${Date.now()}`,
+      startedAtMs: state.startedAtMs,
+      durationSeconds: state.durationSeconds,
       endDateMs: state.endDateMs,
       exerciseName: state.exerciseName,
       setNumber: state.setNumber,
@@ -105,6 +109,20 @@ export async function updateRestActivity(
   } catch (e) {
     console.warn('[liveActivity] updateRestActivity failed:', e);
     return false;
+  }
+}
+
+export async function getRestActivityState(activityId: string | null): Promise<RestActivityState | null | undefined> {
+  if (!activityId) return null;
+  const n = getNative();
+  if (!n?.getActivityState) return undefined;
+  try {
+    const state = await n.getActivityState(activityId);
+    if (!state || typeof state !== 'object') return null;
+    return state as RestActivityState;
+  } catch (e) {
+    console.warn('[liveActivity] getRestActivityState failed:', e);
+    return null;
   }
 }
 

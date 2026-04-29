@@ -49,7 +49,7 @@ export type MobilitySubtype = 'yoga' | 'stretching' | 'foam_roll' | 'pilates';
 export type SportSubtype = 'basketball' | 'soccer' | 'tennis' | 'golf' | 'climbing' | 'boxing' | 'kickboxing' | 'martial_arts' | 'skiing' | 'other';
 export type RecoverySubtype = 'sauna' | 'ice_bath' | 'walk' | 'sleep' | 'meditation' | 'general';
 export type ActivityIntensity = 'easy' | 'moderate' | 'hard';
-export type CardioStyle = 'recovery' | 'steady' | 'intervals' | 'class';
+export type CardioStyle = 'recovery' | 'easy' | 'steady' | 'intervals' | 'class';
 export type ActivitySource = 'manual' | 'peloton' | 'apple_health' | 'garmin';
 
 export interface ManualActivity {
@@ -82,6 +82,20 @@ export interface GoalDetails {
   timelineWeeks?: number;    // derived from pace for performance/recomp goals
   startWeightLbs?: number;   // weight at goal start — used for progress meter
   goalStartedAt?: string;    // ISO date when goal was set — used for timeline meter
+}
+
+export interface StrengthEquipmentSettings {
+  dumbbells?: {
+    type?: 'fixed' | 'adjustable';
+    minLbs?: number;
+    maxLbs?: number;
+    incrementLbs?: number;
+  };
+  barbell?: {
+    barWeightLbs?: number;
+    platePairsLbs?: number[];
+    maxLoadLbs?: number;
+  };
 }
 
 // Hierarchical goal selection (new model)
@@ -199,6 +213,7 @@ export interface UserProfile {
   trainingDays?: number[];
   workoutDurationMinutes: number;
   equipment: string[];           // specific item names e.g. 'Dumbbells', 'Barbell'
+  equipmentSettings?: StrengthEquipmentSettings;
   foodsAvailable: string[];
   supplementsAvailable?: string[];  // supplements the user has / takes
   customFoods: CustomFoodItem[]; // user-added foods with AI-fetched macros

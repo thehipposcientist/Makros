@@ -42,7 +42,7 @@ import { WatchBridge } from '../../modules/thallo-watch-bridge';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { shouldHideWeight, shouldHideReps, formatDurationTarget } from '../utils/exerciseDisplay';
-import { startRestActivity, updateRestActivity, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
+import { startRestActivity, updateRestActivity, getRestActivityState, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
 import { isExerciseUsableWithEquipment, MAX_SWAP_SCORE, scoreSwapCandidate } from '../utils/swapScoring';
 
 /** Parse the top (ceiling) of a target rep string. Handles ranges like
@@ -84,13 +84,24 @@ interface WorkoutCoachMessage {
 
 type SetFeedback = 'easy' | 'good' | 'grind' | 'hard' | 'failure' | 'pain' | 'form_breakdown';
 
-// Feedback buttons removed — recommendations derive from actual vs target reps.
+// Feedback buttons gate next-set recommendations so the live coach can
+// combine reps, feel, and optional RIR instead of reacting to half the signal.
 
 const COACH_PROMPT_OPTIONS: Array<{ label: string; template: (exerciseName: string) => string }> = [
   { label: 'Form question', template: (name) => `Form check on ${name}: what 2-3 cues should I focus on next set?` },
   { label: 'Injury/pain', template: (name) => `I feel pain/discomfort during ${name}. What should I adjust right now?` },
   { label: 'Not feeling target', template: (name) => `I am not feeling ${name} in the target muscle. How should I fix setup and execution?` },
   { label: 'Lacking intensity', template: (name) => `This ${name} set feels too easy. Should I adjust reps, tempo, rest, or load?` },
+];
+
+const SET_FEEDBACK_OPTIONS: Array<{ value: SetFeedback; label: string }> = [
+  { value: 'easy', label: 'Easy' },
+  { value: 'good', label: 'Good' },
+  { value: 'grind', label: 'Grind' },
+  { value: 'hard', label: 'Hard' },
+  { value: 'failure', label: 'Failure' },
+  { value: 'pain', label: 'Pain' },
+  { value: 'form_breakdown', label: 'Form broke' },
 ];
 
 interface ExerciseLibraryItem {
@@ -1131,6 +1142,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
    *  without affecting any sets they already logged. */
   const [removedSetCounts, setRemovedSetCounts] = useState<Record<number, number>>({});
 
+  const getEffectiveTargetSetCount = useCallback((exIdx: number, exercise?: SessionExercise, minCount = 0) => {
+    const ex = exercise ?? exercises[exIdx];
+    if (!ex) return minCount;
+    const base = getTargetSetCount(ex.targetSets);
+    const extras = extraSetCounts[exIdx] ?? 0;
+    const removed = removedSetCounts[exIdx] ?? 0;
+    return Math.max(base + extras - removed, minCount);
+  }, [exercises, extraSetCounts, removedSetCounts]);
+
+  const clearLiveRecommendationState = useCallback((exIdx: number) => {
+    setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: undefined } : e));
+    setRestNextTarget(null);
+    setRestCue(null);
+    setAiErrorIdx(null);
+  }, [setExercises]);
+  const maybeRefreshRecommendationForExerciseRef = useRef<((
+    exIdx: number,
+    setsForExercise: CompletedSet[],
+    opts?: { ignorePendingRir?: boolean },
+  ) => Promise<void>) | null>(null);
+
   // Log-set modal (kept for extra sets beyond targetSets)
   const [logModalVisible, setLogModalVisible] = useState(false);
   const [logExIdx, setLogExIdx] = useState<number>(0);
@@ -1157,6 +1189,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [restForExercise, setRestForExercise] = useState<string | null>(null);
   const [restCue, setRestCue] = useState<string | null>(null);
   const [restNextTarget, setRestNextTarget] = useState<string | null>(null);
+  // Tracks the live value so rapid +/-15 taps and native Live Activity
+  // adjustments reconcile without waiting on a React render.
+  const restRemainingRef = useRef(restRemaining);
+  useEffect(() => { restRemainingRef.current = restRemaining; }, [restRemaining]);
   // Mirror cue + nextTarget into refs so startRestTimer can read latest values
   // synchronously when persisting the snapshot blob to AsyncStorage.
   const restNextTargetRef = useRef<string | null>(null);
@@ -1539,48 +1575,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const updatedSets = ex.sets.map((s, si) =>
         si === setIdx ? { ...s, weightLbs: newWeight, reps: newReps } : s
       );
+      const targetMax = parseTargetRepMax(ex.targetReps);
+      if (setIdx === updatedSets.length - 1 && targetMax != null && newReps >= targetMax && updatedSets[setIdx]?.rir == null) {
+        setPendingRir({ exIdx, setIdx });
+      } else if (pendingRir?.exIdx === exIdx && pendingRir.setIdx === setIdx) {
+        setPendingRir(null);
+      }
       setExercises(prev => prev.map((e, idx) =>
         idx === exIdx ? { ...e, sets: updatedSets } : e
       ));
       setEditingSetKey(null);
       setEditDraft({});
-      // Retrigger recommendation with a delay so the user can finish editing
-      if (authToken && updatedSets.length > 0) {
-        const targetSetCount = getTargetSetCount(ex.targetSets);
-        const extras = extraSetCounts[exIdx] ?? 0;
-        const removed = removedSetCounts[exIdx] ?? 0;
-        const effectiveTotal = Math.max(targetSetCount + extras - removed, updatedSets.length);
-        if (updatedSets.length < effectiveTotal) {
-          setAiLoadingIdx(exIdx);
-          getExerciseBests(ex.name).catch(() => null).then(bests => {
-            getWeightRecommendation(authToken, ex.name, goal, updatedSets, updatedSets.length + 1, {
-              targetSets: ex.targetSets,
-              targetReps: ex.targetReps,
-              progressionPace: 'moderate',
-              experienceLevel: 'intermediate',
-              recoveryLevel: 'normal',
-              phase: 'accumulation',
-              workoutFocus: workout.focus,
-              weekNumber: 1,
-              incrementLbs: (ex.equipment ?? '').toLowerCase().includes('dumbbell') ? 2.5 : 5,
-              allTimeBestWeightLbs: bests?.allTime?.weightLbs,
-              allTimeBestReps: bests?.allTime?.reps,
-              lastSessionBestWeightLbs: bests?.lastSession?.weightLbs,
-              lastSessionBestReps: bests?.lastSession?.reps,
-              plannedTargetWeightLbs: ex.targetWeightLbs ?? undefined,
-              exerciseSlug: ex.slug ?? undefined,
-              equipment: ex.equipment,
-              primaryMuscle: ex.primaryMuscle ?? undefined,
-            }).then(rec => {
-              const tip = `Set ${updatedSets.length + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
-              setExercises(prev => prev.map((e, idx) => idx === exIdx ? { ...e, aiRecommendation: tip } : e));
-              setAiLoadingIdx(null);
-            }).catch(() => setAiLoadingIdx(null));
-          });
-        }
-      }
+      clearLiveRecommendationState(exIdx);
+      maybeRefreshRecommendationForExerciseRef.current?.(exIdx, updatedSets);
     }, 800);
-  }, [editDraft, exercises, authToken, goal, workout.focus, extraSetCounts, removedSetCounts]);
+  }, [clearLiveRecommendationState, editDraft, exercises, pendingRir]);
 
   const handleSaveEditedSet = useCallback(() => {
     const w = parseFloat(editSetWeight);
@@ -1595,48 +1604,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const updatedSets = ex?.sets.map((s, si) =>
       si === editSetIdx ? { ...s, weightLbs: w, reps: r } : s
     ) ?? [];
+    const targetMax = parseTargetRepMax(ex?.targetReps);
+    if (ex && editSetIdx === updatedSets.length - 1 && targetMax != null && r >= targetMax && updatedSets[editSetIdx]?.rir == null) {
+      setPendingRir({ exIdx: editSetExIdx, setIdx: editSetIdx });
+    } else if (pendingRir?.exIdx === editSetExIdx && pendingRir.setIdx === editSetIdx) {
+      setPendingRir(null);
+    }
     setExercises(prev => prev.map((e, i) => {
       if (i !== editSetExIdx) return e;
       return { ...e, sets: updatedSets };
     }));
     setEditSetVisible(false);
-    // Re-run recommendation with the edited set values so the next-set
-    // suggestion reflects the actual load the user just logged.
-    if (authToken && ex && updatedSets.length > 0 && !shouldHideWeight({ name: ex.name, equipment: ex.equipment, reps: ex.targetReps })) {
-      const targetSetCount = getTargetSetCount(ex.targetSets);
-      const extras = extraSetCounts[editSetExIdx] ?? 0;
-      const removed = removedSetCounts[editSetExIdx] ?? 0;
-      const effectiveTotal = Math.max(targetSetCount + extras - removed, updatedSets.length);
-      if (updatedSets.length < effectiveTotal) {
-        setAiLoadingIdx(editSetExIdx);
-        getExerciseBests(ex.name).catch(() => null).then(bests => {
-          getWeightRecommendation(authToken, ex.name, goal, updatedSets, updatedSets.length + 1, {
-            targetSets: ex.targetSets,
-            targetReps: ex.targetReps,
-            progressionPace: 'moderate',
-            experienceLevel: 'intermediate',
-            recoveryLevel: 'normal',
-            phase: 'accumulation',
-            workoutFocus: workout.focus,
-            weekNumber: 1,
-            incrementLbs: (ex.equipment ?? '').toLowerCase().includes('dumbbell') ? 2.5 : 5,
-            allTimeBestWeightLbs: bests?.allTime?.weightLbs,
-            allTimeBestReps: bests?.allTime?.reps,
-            lastSessionBestWeightLbs: bests?.lastSession?.weightLbs,
-            lastSessionBestReps: bests?.lastSession?.reps,
-            plannedTargetWeightLbs: ex.targetWeightLbs ?? undefined,
-            exerciseSlug: ex.slug ?? undefined,
-            equipment: ex.equipment,
-            primaryMuscle: ex.primaryMuscle ?? undefined,
-          }).then(rec => {
-            const tip = `Set ${updatedSets.length + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
-            setExercises(prev => prev.map((e, idx) => idx === editSetExIdx ? { ...e, aiRecommendation: tip } : e));
-            setAiLoadingIdx(null);
-          }).catch(() => setAiLoadingIdx(null));
-        });
-      }
-    }
-  }, [editSetExIdx, editSetIdx, editSetWeight, editSetReps, exercises, authToken, goal, workout.focus, extraSetCounts, removedSetCounts]);
+    clearLiveRecommendationState(editSetExIdx);
+    maybeRefreshRecommendationForExerciseRef.current?.(editSetExIdx, updatedSets);
+  }, [clearLiveRecommendationState, editSetExIdx, editSetIdx, editSetWeight, editSetReps, exercises, pendingRir]);
 
   // Log a specific set slot inline (no modal).
   // `overrideDuration` bypasses the state read for timed exercises —
@@ -1723,12 +1704,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
     }).catch(() => {});
 
-    const targetSetCount = getTargetSetCount(ex.targetSets);
-    // Effective total includes user-added extras minus removed sets, so
-    // rest timers + AI tips still fire for sets added beyond the base target.
-    const extras         = extraSetCounts[exIdx] ?? 0;
-    const removed        = removedSetCounts[exIdx] ?? 0;
-    const effectiveTotal = Math.max(targetSetCount + extras - removed, ex.sets.length + 1);
+    const effectiveTotal = getEffectiveTargetSetCount(exIdx, ex, ex.sets.length + 1);
 
     // Insert or replace at the correct slot position
     const updatedSets = [...ex.sets];
@@ -1811,57 +1787,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       clearRestStateRef.current();
     }
 
-    // AI tip for next set (skip for timed/cardio exercises)
     const setsLogged = cleanSets.length;
     if (!timed && setsLogged < effectiveTotal) {
-      setAiLoadingIdx(exIdx);
-      try {
-        if (!authToken) throw new Error('Not authenticated');
-        // Anchor the recommendation on what this user has hit before —
-        // especially important for the first set of the session where
-        // `cleanSets` is still empty and the backend would otherwise
-        // fall back to a generic category default.
-        const bests = await getExerciseBests(ex.name).catch(() => null);
-        const rec = await getWeightRecommendation(authToken, ex.name, goal, cleanSets, setsLogged + 1, {
-          targetSets: ex.targetSets,
-          targetReps: ex.targetReps,
-          progressionPace: 'moderate',
-          experienceLevel: 'intermediate',
-          recoveryLevel: 'normal',
-          phase: 'accumulation',
-          workoutFocus: workout.focus,
-          weekNumber: 1,
-          incrementLbs: (ex.equipment ?? '').toLowerCase().includes('dumbbell') ? 2.5 : 5,
-          allTimeBestWeightLbs: bests?.allTime?.weightLbs,
-          allTimeBestReps: bests?.allTime?.reps,
-          lastSessionBestWeightLbs: bests?.lastSession?.weightLbs,
-          lastSessionBestReps: bests?.lastSession?.reps,
-          plannedTargetWeightLbs: ex.targetWeightLbs ?? undefined,
-          exerciseSlug: ex.slug ?? undefined,
-          equipment: ex.equipment,
-          primaryMuscle: ex.primaryMuscle ?? undefined,
-        });
-        const tip = `Set ${setsLogged + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
-        setRestNextTarget(`Set ${setsLogged + 1}: ${rec.weightLbs} lbs x ${rec.reps}`);
-        setRestCue(rec.tip);
-        setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: tip } : e));
-        // Push the updated next-set rec to the Live Activity on the lock screen.
-        if (liveActivityIdRef.current) {
-          updateRestActivity(liveActivityIdRef.current, {
-            setNumber: setsLogged,
-            totalSets: getTargetSetCount(ex.targetSets),
-            nextSetRecommendation: `${rec.weightLbs} lbs x ${rec.reps}`,
-            exerciseName: ex.name,
-            themeColorHex: theme.colors.primary,
-          }).catch(() => undefined);
-        }
-      } catch {
-        setAiErrorIdx(exIdx);
-      } finally {
-        setAiLoadingIdx(null);
+      const targetMax = parseTargetRepMax(ex.targetReps);
+      if (targetMax != null && newSet.reps >= targetMax) {
+        setPendingRir({ exIdx, setIdx: cleanSets.length - 1 });
+      } else if (pendingRir?.exIdx === exIdx) {
+        setPendingRir(null);
       }
+      clearLiveRecommendationState(exIdx);
+      console.log('[AI] Recommendation deferred until user rates the set.');
+    } else if (pendingRir?.exIdx === exIdx) {
+      setPendingRir(null);
     }
-  }, [setInputs, exercises, authToken, goal, workout.focus, extraSetCounts, removedSetCounts]);
+  }, [authToken, clearLiveRecommendationState, exercises, getEffectiveTargetSetCount, pendingRir, setInputs, workout.focus, workout.stimulus]);
   handleLogSetInlineRef.current = handleLogSetInline;
 
   const openAddExerciseModal = useCallback(async () => {
@@ -1955,6 +1894,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setActiveExIdx(updated.length - 1);
       return updated;
     });
+    setPreSetHints({});
     setAddExerciseModalVisible(false);
     setSwapTargetIdx(null);
     setExerciseSearch('');
@@ -2101,6 +2041,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           await endRestActivity(liveActivityIdRef.current);
           liveActivityIdRef.current = null;
         }
+        const startedAtMs = restStartAtRef.current || Date.now();
+        const durationSeconds = Math.max(1, seconds);
         const nextTarget = restNextTargetRef.current ?? 'Next set';
         const nextCue = restCueRef.current;
         const currentExercise = exercisesRef.current.find(ex => ex.name === exerciseName);
@@ -2108,7 +2050,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           exerciseName,
           setNumber: parseDisplaySetIndex(nextTarget),
           totalSets: getTargetSetCount(currentExercise?.targetSets),
-          endDateMs: Date.now() + seconds * 1000,
+          startedAtMs,
+          durationSeconds,
+          endDateMs: startedAtMs + durationSeconds * 1000,
           nextSetRecommendation: nextCue ? `${nextTarget} - ${nextCue}` : nextTarget,
           themeColorHex: theme.colors.primary,
           workoutId: `w_${workout.focus}_${Date.now()}`,
@@ -2194,6 +2138,45 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             restTimerRef.current = null;
             AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
           }
+        }
+        const activityId = liveActivityIdRef.current;
+        if (activityId) {
+          getRestActivityState(activityId).then(activityState => {
+            if (activityState === undefined || liveActivityIdRef.current !== activityId) return;
+            if (!activityState) {
+              clearRestStateRef.current();
+              return;
+            }
+            const remaining = Math.max(0, Math.ceil((activityState.endDateMs - Date.now()) / 1000));
+            if (remaining <= 0) {
+              clearRestStateRef.current();
+              return;
+            }
+            if (Math.abs(remaining - restRemainingRef.current) <= 1) return;
+
+            restStartAtRef.current = Date.now();
+            restTotalSecondsRef.current = remaining;
+            restDurationSeconds.current = remaining;
+            restExerciseNameRef.current = activityState.exerciseName;
+            restRemainingRef.current = remaining;
+            setRestRemaining(remaining);
+            setRestForExercise(activityState.exerciseName);
+            if (!restNextTargetRef.current) setRestNextTarget(activityState.nextSetRecommendation);
+            AsyncStorage.setItem('activeWorkoutRest', JSON.stringify({
+              startAtMs: restStartAtRef.current,
+              totalSeconds: remaining,
+              exerciseName: activityState.exerciseName,
+              nextTarget: restNextTargetRef.current ?? activityState.nextSetRecommendation,
+              cue: restCueRef.current,
+            })).catch(() => {});
+            rescheduleRestNotificationsRef.current({
+              seconds: remaining,
+              exerciseName: activityState.exerciseName,
+              nextSetLabel: restNextTargetRef.current ?? activityState.nextSetRecommendation,
+              aiCue: restCueRef.current,
+              includeStartAlert: false,
+            }).catch(() => undefined);
+          }).catch(() => {});
         }
       } else if (state === 'background' || state === 'inactive') {
         if (restStartAtRef.current > 0 && restTotalSecondsRef.current > 0 && restExerciseNameRef.current) {
@@ -2311,6 +2294,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         text: 'Remove',
         style: 'destructive',
         onPress: () => {
+          setPreSetHints({});
           setExercises(prev => prev.filter((_, idx) => idx !== exIdx));
           setActiveExIdx(prev => Math.max(0, prev > exIdx ? prev - 1 : Math.min(prev, exercises.length - 2)));
           if (restForExercise === exName) clearRestState();
@@ -2324,6 +2308,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     if (toIdx < 0 || toIdx >= exercises.length) return;
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+    setPreSetHints({});
     setExercises(prev => {
       const next = [...prev];
       [next[fromIdx], next[toIdx]] = [next[toIdx], next[fromIdx]];
@@ -2414,15 +2399,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
   };
 
-  // A ref that tracks the LIVE rest-remaining value so rapid taps on
-  // +/-15s accumulate properly. Without this, two fast clicks both
-  // close over the same stale `restRemaining` and only add the delta
-  // once. The interval already advances `restRemaining` independently;
-  // we keep the ref in sync so the next tap reads the most recent
-  // value, not whatever was current when the closure was built.
-  const restRemainingRef = useRef(restRemaining);
-  useEffect(() => { restRemainingRef.current = restRemaining; }, [restRemaining]);
-
   const adjustActiveRestRemaining = useCallback(async (delta: number) => {
     const current = restRemainingRef.current;
     if (current <= 0 || !restForExercise) return;
@@ -2452,7 +2428,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   const refreshRecommendationForExercise = useCallback(async (exIdx: number, setsForExercise: CompletedSet[]) => {
     const ex = exercises[exIdx];
-    const targetSetCount = ex ? getTargetSetCount(ex.targetSets) : 3;
+    const targetSetCount = ex ? getEffectiveTargetSetCount(exIdx, ex, setsForExercise.length) : 3;
     if (!ex || setsForExercise.length >= targetSetCount || !authToken) return;
     if (isTimedExercise(ex.name, ex.targetReps)) {
       const tip = getTimedExerciseTip(ex.name, ex.targetReps, setsForExercise);
@@ -2480,6 +2456,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setRestNextTarget(`Set ${setN}: ${ex.targetReps} reps`);
       setRestCue(baseTip);
       setExercises(prev => prev.map((item, i) => i === exIdx ? { ...item, aiRecommendation: baseTip } : item));
+      if (liveActivityIdRef.current) {
+        updateRestActivity(liveActivityIdRef.current, {
+          setNumber: setsForExercise.length,
+          totalSets: targetSetCount,
+          nextSetRecommendation: baseTip.replace(/^Set \d+:\s*/, ''),
+          exerciseName: ex.name,
+          themeColorHex: theme.colors.primary,
+        }).catch(() => undefined);
+      }
       return;
     }
 
@@ -2509,6 +2494,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setRestNextTarget(`Set ${setsForExercise.length + 1}: ${rec.weightLbs} lbs x ${rec.reps}`);
       setRestCue(rec.tip);
       setExercises(prev => prev.map((item, i) => i === exIdx ? { ...item, aiRecommendation: tip } : item));
+      if (liveActivityIdRef.current) {
+        updateRestActivity(liveActivityIdRef.current, {
+          setNumber: setsForExercise.length,
+          totalSets: targetSetCount,
+          nextSetRecommendation: `${rec.weightLbs} lbs x ${rec.reps} - ${rec.tip}`,
+          exerciseName: ex.name,
+          themeColorHex: theme.colors.primary,
+        }).catch(() => undefined);
+      }
 
       if (restRemaining > 0 && restForExercise === ex.name) {
         await rescheduleRestNotifications({
@@ -2524,7 +2518,33 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } finally {
       setAiLoadingIdx(null);
     }
-  }, [authToken, exercises, goal, rescheduleRestNotifications, restForExercise, restRemaining]);
+  }, [authToken, exercises, getEffectiveTargetSetCount, goal, rescheduleRestNotifications, restForExercise, restRemaining, theme.colors.primary]);
+
+  const maybeRefreshRecommendationForExercise = useCallback(async (
+    exIdx: number,
+    setsForExercise: CompletedSet[],
+    opts?: { ignorePendingRir?: boolean },
+  ) => {
+    const ex = exercises[exIdx];
+    const targetSetCount = ex ? getEffectiveTargetSetCount(exIdx, ex, setsForExercise.length) : 3;
+    if (!ex || setsForExercise.length === 0 || setsForExercise.length >= targetSetCount) return;
+
+    const lastSetIdx = setsForExercise.length - 1;
+    const lastSet = setsForExercise[lastSetIdx];
+    if (!lastSet) return;
+
+    const rirStillPending = !opts?.ignorePendingRir
+      && pendingRir?.exIdx === exIdx
+      && pendingRir.setIdx === lastSetIdx
+      && lastSet.rir == null;
+    if (rirStillPending || !lastSet.feedback) {
+      clearLiveRecommendationState(exIdx);
+      return;
+    }
+
+    await refreshRecommendationForExercise(exIdx, setsForExercise);
+  }, [clearLiveRecommendationState, exercises, getEffectiveTargetSetCount, pendingRir, refreshRecommendationForExercise]);
+  maybeRefreshRecommendationForExerciseRef.current = maybeRefreshRecommendationForExercise;
 
   const handleSetFeedback = useCallback(async (exIdx: number, feedback: SetFeedback) => {
     let nextSets: CompletedSet[] = [];
@@ -2543,9 +2563,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
 
     if (nextSets.length > 0) {
-      await refreshRecommendationForExercise(exIdx, nextSets);
+      await maybeRefreshRecommendationForExercise(exIdx, nextSets);
     }
-  }, [refreshRecommendationForExercise]);
+  }, [maybeRefreshRecommendationForExercise]);
 
   const handleSubmitFeedback = async (skip = false) => {
     // Close immediately — the user doesn't need a two-step confirmation
@@ -2766,7 +2786,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 weight_lbs: s.weightLbs ?? 0,
                 duration_seconds: s.durationSeconds ?? null,
                 feedback: s.feedback ?? null,
-                rir: null,
+                rir: s.rir ?? null,
                 heart_rate_avg: s.heartRateAvg ?? null,
                 ...(isLast && distVal != null ? { actual_distance: distVal } : {}),
                 ...(isLast && paceVal ? { actual_pace: paceVal } : {}),
@@ -2775,10 +2795,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             }),
           };
         });
+        const cardioLikeFocus = /cardio|conditioning|zone\s*2|interval|hiit|run|bike|row|swim/i.test(workout.focus);
+        const pureCardioFocus = /^(cardio|conditioning|zone\s*2|short intervals|long intervals|tempo)$/i.test(workout.focus.trim());
         const completeResp = await logWorkoutDone(authToken, dateKey(now), workout.focus, elapsed, exercisesPayload, {
-          category: 'strength',
+          category: pureCardioFocus ? 'cardio' : 'strength',
           subtype: workout.focus.toLowerCase().replace(/\s+/g, '_'),
           intensity: workout.stimulus === 'strength' ? 'hard' : workout.stimulus === 'volume' ? 'easy' : 'moderate',
+          cardioStyle: cardioLikeFocus ? (/interval|hiit/i.test(workout.focus) ? 'intervals' : 'steady') : undefined,
         }, healthMetrics);
         console.log('[workout] logWorkoutDone OK — fatigue should update on next load');
 
@@ -3307,11 +3330,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 {restCue ? <Text style={styles.headerRestCue} numberOfLines={2}>{restCue}</Text> : null}
               </View>
               <View style={styles.headerRestActions}>
-                <TouchableOpacity style={styles.headerRestBtn} onPress={() => adjustActiveRestRemaining(15)}>
-                  <Text style={styles.headerRestBtnText}>+15</Text>
-                </TouchableOpacity>
                 <TouchableOpacity style={styles.headerRestBtn} onPress={() => adjustActiveRestRemaining(-15)}>
                   <Text style={styles.headerRestBtnText}>-15</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.headerRestBtn} onPress={() => adjustActiveRestRemaining(15)}>
+                  <Text style={styles.headerRestBtnText}>+15</Text>
                 </TouchableOpacity>
                 <TouchableOpacity style={[styles.headerRestBtn, { backgroundColor: workoutPalette.strong, borderColor: workoutPalette.strong }]} onPress={clearRestState}>
                   <Text style={[styles.headerRestBtnText, { color: themeColors.background }]}>Skip</Text>
@@ -3733,7 +3756,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   return { ...e, sets };
                                 }));
                                 setPendingRir(null);
-                                refreshRecommendationForExercise(i, updatedSets);
+                                maybeRefreshRecommendationForExercise(i, updatedSets);
                               }}
                               style={{ flex: 1, minWidth: 44, paddingVertical: 8, borderRadius: 8, alignItems: 'center', backgroundColor: workoutPalette.strong }}>
                               <Text style={{ color: '#fff', fontSize: 13, fontWeight: '800' }}>{label}</Text>
@@ -3743,7 +3766,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       </View>
                       <TouchableOpacity onPress={() => {
                         setPendingRir(null);
-                        refreshRecommendationForExercise(i, exercises[i].sets);
+                        maybeRefreshRecommendationForExercise(i, exercises[i].sets, { ignorePendingRir: true });
                       }} style={{ alignSelf: 'flex-end', paddingVertical: 2 }}>
                         <Text style={{ fontSize: 11, color: themeColors.textMuted, fontWeight: '700' }}>Skip</Text>
                       </TouchableOpacity>
@@ -4176,6 +4199,38 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       </>
                     );
                   })()}
+
+                  {!timed && ex.sets.length > 0 && ex.sets.length < totalSetCount && (
+                    <View style={[styles.feedbackCard, { marginTop: 10 }]}>
+                      <Text style={styles.feedbackTitle}>
+                        {pendingRir?.exIdx === i ? 'How did that set feel after that effort?' : 'How did that set feel?'}
+                      </Text>
+                      <View style={styles.feedbackRow}>
+                        {SET_FEEDBACK_OPTIONS.map(option => {
+                          const active = ex.sets[ex.sets.length - 1]?.feedback === option.value;
+                          const isPain = option.value === 'pain';
+                          return (
+                            <TouchableOpacity
+                              key={option.value}
+                              style={[
+                                styles.feedbackChip,
+                                isPain && styles.feedbackChipPain,
+                                active && (isPain ? styles.feedbackChipPainActive : styles.feedbackChipActive),
+                              ]}
+                              onPress={() => handleSetFeedback(i, option.value)}>
+                              <Text style={[
+                                styles.feedbackChipText,
+                                isPain && styles.feedbackChipTextPain,
+                                active && !isPain && styles.feedbackChipTextActive,
+                              ]}>
+                                {option.label}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  )}
 
                   {(() => {
                     const timedInterval = isTimedExercise(ex.name, ex.targetReps) && totalSetCount >= 2;

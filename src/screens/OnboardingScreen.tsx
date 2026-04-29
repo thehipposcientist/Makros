@@ -31,12 +31,20 @@ import { deriveAge, validateBirthdate } from '../utils/age';
 import * as ImagePicker from 'expo-image-picker';
 import { colors, radius } from '../constants/theme';
 import {
-  Goal, GoalPace, Gender, UserProfile, PhysicalStats, GoalDetails, GoalSelection,
+  Goal, GoalPace, Gender, UserProfile, PhysicalStats, GoalDetails, GoalSelection, StrengthEquipmentSettings,
 } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal } from '../services/api';
 import { APPLE_HEALTH_PERMISSION_COPY, isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistHealthEnabled } from '../utils/workoutHistory';
+import {
+  DEFAULT_ADJUSTABLE_DUMBBELLS,
+  DEFAULT_PLATE_PAIRS_LBS,
+  PLATE_PAIR_OPTIONS_LBS,
+  hasAdjustableDumbbells,
+  hasPlateLoadedEquipment,
+  normalizeStrengthEquipmentSettings,
+} from '../utils/strengthEquipmentSettings';
 import {
   LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES,
   goalCategory,
@@ -256,8 +264,8 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
   {
     id: 'home_basic',
     label: 'Home (Basic)',
-    description: 'Dumbbells + bands',
-    items: ['Dumbbells', 'Resistance bands', 'Pull-up bar', 'Yoga mat', 'Jump rope', 'Foam roller'],
+    description: 'Adjustable DBs + bands',
+    items: ['Adjustable dumbbells', 'Resistance bands', 'Pull-up bar', 'Yoga mat', 'Jump rope', 'Foam roller'],
   },
   {
     id: 'home_full',
@@ -411,6 +419,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   // Step 5 — Equipment
   const [selectedEquipment, setSelectedEquipment] = useState<string[]>([]);
+  const [equipmentSettings, setEquipmentSettings] = useState<StrengthEquipmentSettings | undefined>(undefined);
   const [equipScanLoading, setEquipScanLoading] = useState(false);
   const [scannedEquipment, setScannedEquipment] = useState<string[]>([]);
   const [showEquipScanModal, setShowEquipScanModal] = useState(false);
@@ -604,6 +613,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       preferredSplit:         preferredSplit === 'auto' ? undefined : preferredSplit,
       workoutDurationMinutes: workoutDuration,
       equipment:              selectedEquipment,
+      equipmentSettings:      normalizeStrengthEquipmentSettings(equipmentSettings, selectedEquipment),
       foodsAvailable,
       supplementsAvailable: supplementsAvailable.length > 0 ? supplementsAvailable : undefined,
       customFoods: [],
@@ -1350,6 +1360,86 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     </View>
   );
 
+  const renderStrengthLoadSettings = () => {
+    const normalized = normalizeStrengthEquipmentSettings(equipmentSettings, selectedEquipment);
+    const dumbbells = normalized?.dumbbells ?? DEFAULT_ADJUSTABLE_DUMBBELLS;
+    const barbell = normalized?.barbell ?? { barWeightLbs: 45, platePairsLbs: DEFAULT_PLATE_PAIRS_LBS };
+    const showDumbbells = hasAdjustableDumbbells(selectedEquipment);
+    const showPlates = hasPlateLoadedEquipment(selectedEquipment);
+    if (!showDumbbells && !showPlates) return null;
+
+    const updateDumbbells = (patch: Partial<NonNullable<StrengthEquipmentSettings['dumbbells']>>) => {
+      setEquipmentSettings(prev => ({
+        ...(prev ?? {}),
+        dumbbells: { ...(prev?.dumbbells ?? DEFAULT_ADJUSTABLE_DUMBBELLS), ...patch, type: 'adjustable' },
+      }));
+    };
+    const updateBarbell = (patch: Partial<NonNullable<StrengthEquipmentSettings['barbell']>>) => {
+      setEquipmentSettings(prev => ({
+        ...(prev ?? {}),
+        barbell: { barWeightLbs: 45, platePairsLbs: DEFAULT_PLATE_PAIRS_LBS, ...(prev?.barbell ?? {}), ...patch },
+      }));
+    };
+    const togglePlate = (plate: number) => {
+      const current = barbell.platePairsLbs ?? DEFAULT_PLATE_PAIRS_LBS;
+      const next = current.includes(plate)
+        ? current.filter(p => p !== plate)
+        : [...current, plate].sort((a, b) => b - a);
+      updateBarbell({ platePairsLbs: next });
+    };
+
+    return (
+      <View style={{ marginTop: 16 }}>
+        <Text style={styles.sectionHeading}>Load setup</Text>
+        <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 10 }}>
+          We use this so suggested weights match what you can actually load.
+        </Text>
+        {showDumbbells && (
+          <View style={{ marginBottom: 12 }}>
+            <Text style={styles.foodCategoryLabel}>Adjustable dumbbells</Text>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              {[
+                { label: 'Min', value: dumbbells.minLbs, key: 'minLbs' },
+                { label: 'Max', value: dumbbells.maxLbs, key: 'maxLbs' },
+                { label: 'Step', value: dumbbells.incrementLbs, key: 'incrementLbs' },
+              ].map(item => (
+                <View key={item.key} style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 4 }}>{item.label}</Text>
+                  <TextInput
+                    style={styles.input}
+                    keyboardType="decimal-pad"
+                    value={String(item.value ?? '')}
+                    onChangeText={(text) => updateDumbbells({ [item.key]: parseFloat(text) || undefined } as any)}
+                    placeholder={String(item.value ?? '')}
+                    placeholderTextColor={colors.textMuted}
+                  />
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+        {showPlates && (
+          <View>
+            <Text style={styles.foodCategoryLabel}>Plate pairs you can load</Text>
+            <View style={styles.foodChips}>
+              {PLATE_PAIR_OPTIONS_LBS.map(plate => {
+                const selected = (barbell.platePairsLbs ?? DEFAULT_PLATE_PAIRS_LBS).includes(plate);
+                return (
+                  <TouchableOpacity
+                    key={plate}
+                    style={[styles.foodChip, selected && styles.foodChipActive]}
+                    onPress={() => togglePlate(plate)}>
+                    <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>{plate} lb</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        )}
+      </View>
+    );
+  };
+
   const renderEquipmentStep = () => (
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>Your Equipment</Text>
@@ -1457,6 +1547,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           );
         })
       )}
+
+      {renderStrengthLoadSettings()}
 
       {/* Equipment scan confirm modal */}
       <Modal visible={showEquipScanModal} transparent animationType="slide" onRequestClose={() => setShowEquipScanModal(false)}>

@@ -786,6 +786,7 @@ def propagate_session_targets(
     perf_profiles: Optional[dict] = None,
     all_exercises_by_slug: Optional[dict] = None,
     experience: str = "intermediate",
+    load_equipment_settings: dict | None = None,
 ) -> dict:
     """Mutate every exercise in the plan in place to add session-level
     progression targets based on the user's prior performance.
@@ -847,6 +848,18 @@ def propagate_session_targets(
                     prescribed_rep_range=rep_range,
                 )
                 if weight is not None:
+                    try:
+                        from .load_equipment import snap_load_lbs
+                        snapped = snap_load_lbs(
+                            weight,
+                            ex.get("equipment"),
+                            load_equipment_settings,
+                            fallback_increment=prescription.increment_lbs,
+                        )
+                        if snapped is not None:
+                            weight = float(snapped)
+                    except Exception:
+                        pass
                     ex["target_weight_lbs"] = round(weight, 1)
                 ex["progression_action"] = action
                 ex["progression_reason"] = reason
@@ -889,7 +902,20 @@ def propagate_session_targets(
                 ex["recommendation_reason"] = rec.reason
                 continue
             if rec.weight_lbs > 0:
-                ex["target_weight_lbs"] = round(rec.weight_lbs, 1)
+                weight = rec.weight_lbs
+                try:
+                    from .load_equipment import snap_load_lbs
+                    snapped = snap_load_lbs(
+                        weight,
+                        ex.get("equipment"),
+                        load_equipment_settings,
+                        fallback_increment=2.5 if "dumbbell" in (ex.get("equipment") or "").lower() else 5.0,
+                    )
+                    if snapped is not None:
+                        weight = float(snapped)
+                except Exception:
+                    pass
+                ex["target_weight_lbs"] = round(weight, 1)
             ex["progression_action"] = "hold"
             ex["progression_reason"] = (
                 "First session on this lift — establish a baseline before progressing"

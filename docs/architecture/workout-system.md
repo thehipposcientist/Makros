@@ -1,6 +1,6 @@
 # Workout System — Architecture
 
-Last updated: 2026-04-28
+Last updated: 2026-04-29
 
 ## Pipeline
 
@@ -34,6 +34,7 @@ open" regen is **removed**.
 | `planner.py` | Orchestrator: slot filling, scoring, exercise selection, injury blocking, dislike filtering. `build_planner_exercise` is the canonical exercise dict helper — all code paths must use it. Also houses `generate_recovery_day()`, `generate_mobility_day()`, `generate_cardio_day()`. |
 | `prescriptions.py` | Sets/reps/rest per archetype + slot role. Warmup always emits short DYNAMIC flow (2 sets × 6-8 reps, no rest, no static holds). |
 | `set_programming.py` | Intra-workout set scheme, load increments, next-set recommendations. |
+| `load_equipment.py` | Deterministic load snapping for adjustable dumbbells and plate-loaded equipment constraints. |
 | `in_workout_review.py` | Next-set suggestions — deterministic first, AI only when suspicious. |
 | `activity_impact.py` | 12-muscle-group fatigue model with decay, negative fatigue for recovery/mobility. |
 | `fitness_score.py` | 4-pillar fitness score: strength 30, cardio 30, consistency 25, recovery 15. |
@@ -85,6 +86,7 @@ All entry points must pass the same shape of inputs. Audited Apr 2026:
 - All query `most_recent_completed_focus(hours=240, limit=10)` and pass `recent_focus_buckets` + `recent_focus_families`.
 - All compute `muscle_fatigue` via `compute_rolling_fatigue` + `injury_muscle_fatigue_boost`.
 - All route through `generate_workout_plan` → `generate_weekly_recipe` → `_repair_adjacent_duplicates`.
+- All pass optional `load_equipment_settings` from `UserPreferences.equipment_settings` so planned and in-workout loads respect adjustable dumbbell range/step and available plate pairs.
 - **Focus mismatch fallback**: when requested focus isn't in recipe, the endpoint regenerates with `preferred_split` forced to the family containing that focus. Old behavior was label-only.
 
 **Entry points (post-PlanWeek migration):**

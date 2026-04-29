@@ -274,6 +274,7 @@ def start_new_week(
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
         muscle_fatigue=muscle_fatigue,
+        load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
 
     plan = generate_workout_plan(
@@ -851,6 +852,7 @@ def review_and_apply(
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
         muscle_fatigue=muscle_fatigue,
+        load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
 
     plan = generate_workout_plan(
@@ -1082,6 +1084,7 @@ def adapt_remaining(
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
         muscle_fatigue=muscle_fatigue,
+        load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
 
     plan = generate_workout_plan(
@@ -1195,6 +1198,7 @@ def regenerate_remaining(
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
         muscle_fatigue=muscle_fatigue,
+        load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
 
     plan = generate_workout_plan(

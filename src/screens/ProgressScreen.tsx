@@ -2179,6 +2179,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <DetectedWorkoutsCard
               themeName={userProfile.themePreference}
               appleWorkouts={healthSummary?.workoutDetails ?? null}
+              authToken={authToken}
               onAfterImport={() => {
                 // Reload local history so the just-imported session
                 // shows up in the streak / consistency widgets.
@@ -3464,6 +3465,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   intensity: session.manualActivity.intensity,
                   source: session.manualActivity.source,
                   cardioStyle: session.manualActivity.cardioStyle,
+                  distanceMiles: session.manualActivity.distanceMiles,
+                  caloriesBurned: session.manualActivity.caloriesBurned,
+                  avgHeartRate: session.manualActivity.avgHeartRate,
                 } : undefined,
               );
             } catch {}

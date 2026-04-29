@@ -211,6 +211,7 @@ def sync_onboarding(
     if prefs:
         prefs.days_per_week    = body.preferences.days_per_week
         prefs.equipment        = body.preferences.equipment
+        prefs.equipment_settings = body.preferences.equipment_settings
         prefs.foods_available  = body.preferences.foods_available
         prefs.updated_at       = now
     else:

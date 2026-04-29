@@ -1483,7 +1483,7 @@ def scan_equipment_photo(
     known_equipment = [
         "Pull-up bar", "Resistance bands", "Yoga mat", "Jump rope", "Foam roller",
         "Ab wheel", "Dip bars", "Suspension trainer",
-        "Dumbbells", "Barbell", "Kettlebell", "EZ curl bar", "Weight plates",
+        "Dumbbells", "Adjustable dumbbells", "Barbell", "Kettlebell", "EZ curl bar", "Weight plates",
         "Trap bar", "Medicine ball",
         "Flat bench", "Adjustable bench", "Incline bench",
         "Squat rack", "Power rack", "Landmine attachment",
@@ -1493,7 +1493,8 @@ def scan_equipment_photo(
         "Smith machine", "Hack squat machine", "Assisted pull-up machine",
         "Treadmill", "Stationary bike", "Elliptical", "Rowing machine",
         "Stair climber", "Assault bike", "Swimming pool", "Battle ropes",
-        "Plyo box", "Sled",
+        "Outdoor bike", "SkiErg", "VersaClimber", "Heavy bag", "Ruck pack",
+        "Plyo box (24\"+)", "Sled",
     ]
 
     _eq_messages = [

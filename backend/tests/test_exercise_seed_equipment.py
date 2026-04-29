@@ -81,10 +81,130 @@ def test_required_equipment_preserves_multi_gear_requirements() -> None:
     _ok("stability_ball_chest_press requires both dumbbells + swiss_ball")
 
 
+def test_cardio_backfill_equipment_is_concrete() -> None:
+    print("\n[test] cardio backfill exercises use concrete equipment slugs")
+    from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
+
+    equipment = {e["slug"] for e in SEED_EQUIPMENT}
+    required = {
+        "outdoor_bike",
+        "skierg",
+        "versaclimber",
+        "heavy_bag",
+        "ruck_pack",
+    }
+    assert required <= equipment, f"missing cardio equipment slugs: {sorted(required - equipment)}"
+
+    by_slug = {e["slug"]: e for e in SEED_EXERCISES}
+    cases = {
+        "cycling_outdoor": "outdoor_bike",
+        "rucking": "ruck_pack",
+        "skierg": "skierg",
+        "skierg_intervals": "skierg",
+        "versaclimber": "versaclimber",
+        "boxing_heavy_bag": "heavy_bag",
+    }
+    for exercise_slug, equipment_slug in cases.items():
+        ex = by_slug[exercise_slug]
+        slugs = {gear["slug"] for gear in ex.get("equipment", []) if gear.get("required", True)}
+        assert equipment_slug in slugs, f"{exercise_slug} required {slugs}, want {equipment_slug}"
+    _ok(f"{len(cases)} cardio exercises require concrete equipment")
+
+
+def test_generate_cardio_day_uses_seeded_names() -> None:
+    print("\n[test] generated cardio override days use seeded exercise names")
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.planner import generate_cardio_day
+
+    seeded_names = {e["name"] for e in SEED_EXERCISES}
+    day = generate_cardio_day(
+        45,
+        "fat_loss",
+        equipment_owned=["Stationary bike", "Jump rope"],
+    )
+    names = [ex["name"] for ex in day["exercises"]]
+    missing = [name for name in names if name not in seeded_names]
+    assert not missing, f"generated non-seeded cardio names: {missing}"
+    assert "Stationary Bike Intervals" in names, names
+    _ok(f"generated names are canonical: {names}")
+
+
+def test_adjustable_dumbbells_unlock_dumbbell_library() -> None:
+    print("\n[test] adjustable dumbbells unlock dumbbell exercises")
+    from app.seed_exercises_data import SEED_EQUIPMENT
+
+    by_name = {e["name"].lower(): e["slug"] for e in SEED_EQUIPMENT}
+    assert by_name.get("adjustable dumbbells") == "adjustable_dumbbells"
+
+    source = Path(__file__).parents[1] / "app" / "routers" / "ai" / "plans.py"
+    text = source.read_text()
+    assert '"adjustable_dumbbells" in owned' in text
+    assert 'owned.add("dumbbells")' in text
+    _ok("adjustable_dumbbells is canonical and aliases to dumbbells in planner filtering")
+
+
+def test_strength_load_settings_snap_to_available_weights() -> None:
+    print("\n[test] strength load settings snap to loadable weights")
+    from app.services.workout.load_equipment import load_increment_lbs, snap_load_lbs
+
+    dumbbell_settings = {
+        "dumbbells": {
+            "type": "adjustable",
+            "minLbs": 5,
+            "maxLbs": 50,
+            "incrementLbs": 5,
+        }
+    }
+    assert load_increment_lbs("Dumbbells", dumbbell_settings, fallback=2.5) == 5
+    assert snap_load_lbs(52.5, "Dumbbells", dumbbell_settings, fallback_increment=5) == 50
+    assert snap_load_lbs(17, "Dumbbells", dumbbell_settings, fallback_increment=5) == 15
+
+    plate_settings = {"barbell": {"barWeightLbs": 45, "platePairsLbs": [10]}}
+    assert load_increment_lbs("Barbell", plate_settings, fallback=5) == 20
+    assert snap_load_lbs(146, "Barbell", plate_settings, fallback_increment=20) == 145
+    assert snap_load_lbs(142.5, "Barbell", plate_settings, fallback_increment=20) == 125
+
+    assert snap_load_lbs(82.5, "Cable machine", None, fallback_increment=5) == 82.5
+    _ok("adjustable dumbbell, plate-loaded, and missing-setting paths behave")
+
+
+def test_scan_equipment_list_covers_new_equipment_names() -> None:
+    print("\n[test] equipment scan allowlist covers new canonical equipment names")
+    source = Path(__file__).parents[1] / "app" / "routers" / "ai" / "scanning.py"
+    tree = ast.parse(source.read_text())
+    known_equipment = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if getattr(target, "id", None) == "known_equipment":
+                    known_equipment = ast.literal_eval(node.value)
+                    break
+        if known_equipment is not None:
+            break
+    assert isinstance(known_equipment, list), "known_equipment not found"
+    required = {
+        "Adjustable dumbbells",
+        "Outdoor bike",
+        "SkiErg",
+        "VersaClimber",
+        "Heavy bag",
+        "Ruck pack",
+        "Plyo box (24\"+)",
+    }
+    missing = required - set(known_equipment)
+    assert not missing, f"scan allowlist missing: {sorted(missing)}"
+    _ok(f"{len(required)} new/exact equipment names present")
+
+
 cases = [
     test_seed_exercise_equipment_references_are_canonical,
     test_wger_import_equipment_map_uses_seed_slugs,
     test_required_equipment_preserves_multi_gear_requirements,
+    test_cardio_backfill_equipment_is_concrete,
+    test_generate_cardio_day_uses_seeded_names,
+    test_adjustable_dumbbells_unlock_dumbbell_library,
+    test_strength_load_settings_snap_to_available_weights,
+    test_scan_equipment_list_covers_new_equipment_names,
 ]
 
 

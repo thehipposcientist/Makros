@@ -1,6 +1,6 @@
 # Database Migrations
 
-Last updated: 2026-04-28
+Last updated: 2026-04-29
 
 ## Pattern
 
@@ -17,6 +17,7 @@ SQLModel `create_all` creates tables but does NOT ALTER existing columns. Idempo
 | `_ensure_user_recovery_columns` | `recovery_question` + `recovery_answer_hash`. |
 | `_ensure_workout_completion_stimulus_column` | Stimulus tracking on completions. |
 | `_ensure_workout_completion_health_columns` | Health signals on completions. |
+| `_ensure_user_preferences_equipment_settings_column` | `UserPreferences.equipment_settings` JSONB for plate/dumbbell loading constraints. |
 | `_ensure_exercise_tracking_mode_column` | `Exercise.default_tracking_mode`. |
 | `_ensure_food_metadata_classifier_v2_columns` | `protein_source` + `probiotic_flag` on `FoodMetadata`. |
 | `_ensure_daily_nutrition_metrics_v2_columns` | `plant_protein_g`, `animal_protein_g`, `probiotic_servings` on `DailyNutritionMetrics`. |

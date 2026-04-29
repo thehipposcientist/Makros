@@ -142,19 +142,47 @@ _LOW_ADHERENCE_PCT = 65.0
 
 
 def _sum_cardio_minutes(completions: list[WorkoutCompletion]) -> tuple[float, float]:
-    """Total cardio minutes + zone-2 minutes in the window. Zone 2 is
-    identified by cardio_style="steady" OR activity_intensity="easy"."""
+    """Total cardio minutes + zone-2 minutes in the window.
+
+    Pure cardio activities count their full duration. Lift + Cardio and
+    mixed sessions only count the finisher/conditioning portion so a
+    60-minute push day with 10-15 minutes of cardio does not become a
+    fake 60-minute Zone 2 session.
+    """
     total = 0.0
     zone2 = 0.0
     for c in completions:
-        if c.activity_category != "cardio":
-            continue
         mins = (c.duration_seconds or 0) / 60.0
-        total += mins
+        if mins <= 0:
+            continue
+
+        category = (c.activity_category or "").lower()
+        focus = (c.focus_label or "").lower()
+        subtype = (c.activity_subtype or "").lower()
         style = (c.cardio_style or "").lower()
         intensity = (c.activity_intensity or "").lower()
+
+        cardio_mins = 0.0
+        if category == "cardio":
+            cardio_mins = mins
+        elif category in {"sport", "active"} and (
+            "cardio" in focus
+            or subtype in {"soccer", "basketball", "tennis", "pickleball", "boxing", "kickboxing", "martial_arts", "dancing"}
+        ):
+            cardio_mins = mins
+        elif " + cardio" in focus or style in {"steady", "intervals", "easy", "recovery", "class"}:
+            cardio_mins = min(20.0, max(10.0, mins * 0.25))
+        elif (c.stimulus or "").lower() == "conditioning":
+            cardio_mins = mins
+
+        if cardio_mins <= 0:
+            continue
+
+        total += cardio_mins
         if style == "steady" or intensity == "easy":
-            zone2 += mins
+            zone2 += cardio_mins
+        elif " + cardio" in focus and style != "intervals":
+            zone2 += cardio_mins
     return total, zone2
 
 

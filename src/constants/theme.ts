@@ -1,7 +1,7 @@
 import { Platform, TextStyle, ViewStyle } from 'react-native';
 
 export type AppThemeName =
-  | 'midnight' | 'ocean'    | 'amethyst' | 'scarlet'
+  | 'midnight' | 'ocean'    | 'amethyst'
   | 'ember'    | 'wine'     | 'obsidian'
   | 'blossom'  | 'void'     | 'dusk'     | 'lavender' | 'aurora'
   | 'sunrise'  | 'parchment'| 'linen'    | 'mint'
@@ -230,37 +230,6 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#0C1428', strong: '#4878C8', text: '#98B8EE' },
       planner: { soft: '#181408', strong: '#E0B840', text: '#F8E080' },
       account: { soft: '#181408', strong: '#A88020', text: '#DCC060' },
-    },
-  },
-
-  // ── DARK / VIVID ─────────────────────────────────────────────────────────────
-
-  scarlet: {
-    name: 'scarlet',
-    label: 'Scarlet Rush',
-    description: 'Vivid performance red on neutral dark — bold, sporty, nothing subtle about it.',
-    colors: {
-      background:    '#0A0808',
-      surface:       '#141010',
-      surfaceRaised: '#1E1414',
-      border:        '#3C1818',
-      primary:       '#FF2020',
-      primaryDark:   '#CC0000',
-      primaryLight:  '#FF8888',
-      accent:        '#0088FF',
-      textPrimary:   '#FFF8F8',
-      textSecondary: '#CCA8A8',
-      textMuted:     '#886868',
-      error:         '#FF4444',
-      warning:       '#FFCC00',
-      success:       '#40CC60',
-    },
-    sections: {
-      workout: { soft: '#2C0808', strong: '#FF2020', text: '#FF9898' },
-      meals:   { soft: '#082038', strong: '#0088FF', text: '#88C8FF' },
-      ai:      { soft: '#0C0C1E', strong: '#6060C0', text: '#A8A8F0' },
-      planner: { soft: '#1E1808', strong: '#FFCC00', text: '#FFF080' },
-      account: { soft: '#220808', strong: '#FF4040', text: '#FFA0A0' },
     },
   },
 
@@ -595,30 +564,30 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
 
   seaglass: {
     name: 'seaglass',
-    label: 'Crimson',
-    description: 'Pale rose background with deep crimson primary and warm gold accent — bold, energetic, light.',
+    label: 'Sea Glass',
+    description: 'Pale seafoam background with teal glass primary and warm coral accent — airy, coastal, light.',
     colors: {
-      background:    '#FCEEEC',
+      background:    '#EEF8F5',
       surface:       '#FFFFFF',
-      surfaceRaised: '#F7DCD8',
-      border:        '#E0A8A0',
-      primary:       '#B5202A',
-      primaryDark:   '#8A0A1A',
-      primaryLight:  '#E26068',
-      accent:        '#C68A18',
-      textPrimary:   '#2A0606',
-      textSecondary: '#5C1818',
-      textMuted:     '#8A5050',
-      error:         '#9A2820',
-      warning:       '#B07820',
-      success:       '#1A8058',
+      surfaceRaised: '#D7EEE8',
+      border:        '#A9D4CA',
+      primary:       '#2C8C84',
+      primaryDark:   '#17645F',
+      primaryLight:  '#73C8BE',
+      accent:        '#D16F5C',
+      textPrimary:   '#0C2627',
+      textSecondary: '#315A5A',
+      textMuted:     '#668A88',
+      error:         '#C73A42',
+      warning:       '#A86F16',
+      success:       '#247A54',
     },
     sections: {
-      workout: { soft: '#F4D0CC', strong: '#B5202A', text: '#2A0606' },
-      meals:   { soft: '#F8E2BC', strong: '#C68A18', text: '#4A2E04' },
-      ai:      { soft: '#DFE0FA', strong: '#4A4ACC', text: '#0E0E58' },
-      planner: { soft: '#F9DCD2', strong: '#D04830', text: '#4A0A0A' },
-      account: { soft: '#F4E0E4', strong: '#B5202A', text: '#2A0606' },
+      workout: { soft: '#CFEAE6', strong: '#2C8C84', text: '#0E403D' },
+      meals:   { soft: '#F9DED8', strong: '#D16F5C', text: '#6A2418' },
+      ai:      { soft: '#DDE7FA', strong: '#3C72B8', text: '#123A68' },
+      planner: { soft: '#F7E9C8', strong: '#A86F16', text: '#543604' },
+      account: { soft: '#D8EFE8', strong: '#247A54', text: '#0A3A24' },
     },
   },
 
@@ -862,10 +831,41 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
 
 };
 
+export const THEME_PICKER_ORDER = [
+  'midnight', 'ocean', 'amethyst',
+  'ember', 'wine', 'obsidian',
+  'slate', 'blossom', 'void', 'dusk', 'lavender', 'aurora',
+  'sunrise', 'parchment', 'linen', 'mint',
+  'butter', 'seaglass', 'lilac', 'sky',
+  'rose', 'ash', 'cosmos',
+  'cinder', 'smoke', 'maroon',
+] as const satisfies readonly AppThemeName[];
+
+export const LIGHT_THEME_NAMES = [
+  'sunrise', 'parchment', 'linen', 'mint',
+  'butter', 'seaglass', 'lilac', 'sky', 'rose',
+] as const satisfies readonly AppThemeName[];
+
+const LEGACY_THEME_ALIASES: Record<string, AppThemeName> = {
+  scarlet: 'wine',
+};
+
+export function resolveThemeName(themeName?: AppThemeName | string): AppThemeName {
+  const candidate = themeName ?? 'slate';
+  if ((APP_THEMES as Record<string, AppTheme | undefined>)[candidate]) {
+    return candidate as AppThemeName;
+  }
+  return LEGACY_THEME_ALIASES[candidate] ?? 'slate';
+}
+
+export function isLightThemeName(themeName?: AppThemeName | string): boolean {
+  return (LIGHT_THEME_NAMES as readonly string[]).includes(resolveThemeName(themeName));
+}
+
 export const colors = APP_THEMES.slate.colors;
 
 export function getTheme(themeName?: AppThemeName | string): AppTheme {
-  return (APP_THEMES as Record<string, AppTheme>)[themeName ?? 'slate'] ?? APP_THEMES.slate;
+  return APP_THEMES[resolveThemeName(themeName)];
 }
 
 export const radius = {

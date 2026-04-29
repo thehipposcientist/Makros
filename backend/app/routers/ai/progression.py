@@ -348,6 +348,30 @@ def recommend_weight(
             week_number=max(1, body.weekNumber or 1),
         )
         ex_category = infer_exercise_category(body.exerciseName)
+        equipment_settings: dict | None = None
+        try:
+            from app.models import UserPreferences as _UserPreferences
+            prefs = db.exec(
+                select(_UserPreferences).where(_UserPreferences.user_id == current_user.id)
+            ).first()
+            equipment_settings = getattr(prefs, "equipment_settings", None) if prefs else None
+        except Exception:
+            equipment_settings = None
+        try:
+            from app.services.workout.load_equipment import load_increment_lbs, snap_load_lbs
+            fallback_increment = (
+                float(body.incrementLbs)
+                if body.incrementLbs and body.incrementLbs > 0
+                else (2.5 if "dumbbell" in (body.equipment or "").lower() else 5.0)
+            )
+            effective_increment_lbs = load_increment_lbs(
+                body.equipment,
+                equipment_settings,
+                fallback=fallback_increment,
+            )
+        except Exception:
+            snap_load_lbs = None  # type: ignore[assignment]
+            effective_increment_lbs = max(1.0, body.incrementLbs or 5.0)
         # Layered anchor pipeline for the first set of the session.
         # `recommendation_meta` carries the source + confidence + reason
         # back to the client so the UI can explain the pick.
@@ -482,11 +506,21 @@ def recommend_weight(
                         "reason": adj.reason,
                     }
 
+        if snap_load_lbs is not None and last_weight is not None and last_weight > 0:
+            snapped_last = snap_load_lbs(
+                last_weight,
+                body.equipment,
+                equipment_settings,
+                fallback_increment=effective_increment_lbs,
+            )
+            if snapped_last is not None:
+                last_weight = float(snapped_last)
+
         prescription = ExercisePrescription(
             exercise_name=body.exerciseName,
             category=ex_category,
             planned_sets=planned_sets,
-            increment_lbs=max(1.0, body.incrementLbs or 5.0),
+            increment_lbs=max(1.0, effective_increment_lbs),
             progression_priority=map_progression_priority(goal_type),
             default_start_weight_lbs=last_weight,
         )
@@ -522,9 +556,6 @@ def recommend_weight(
         rep_max    = int(rec.target_rep_max or rep_min)
         rec_reps   = max(1, round((rep_min + rep_max) / 2))
 
-        # ── Performance-based recommendation (feel buttons removed) ──
-        # Recommendations now derive from actual reps vs target reps.
-        # No feel-gating — the rec fires immediately after each set.
         last_logged = body.lastSets[-1] if body.lastSets else None
         last_logged_feel = (getattr(last_logged, "feedback", None) or None) if last_logged else None
 
@@ -539,15 +570,17 @@ def recommend_weight(
                     PlannedSet as SPPlannedSet,
                 )
                 # Build a minimal planned-set proxy for the reviewer.
-                # `progression_mode` defaults to reps_first which is
-                # the safest bias for volume work.
+                # Heavy rep schemes should review as load-first rather
+                # than pretending every set is generic volume work.
+                reviewed_set_type = "heavy_top" if inferred_set_type == SetType.TOP_SET else "volume"
+                reviewed_progression_mode = "load_first" if inferred_set_type == SetType.TOP_SET else "reps_first"
                 spp = SPPlannedSet(
                     set_number=int(last_logged.setNumber or 1),
-                    set_type="volume",
+                    set_type=reviewed_set_type,
                     target_reps=body.targetReps or f"{rep_min}-{rep_max}",
                     target_rir=float(last_logged.rir if last_logged.rir is not None else 2.0),
                     target_weight_lbs=float(last_weight or 0.0) or None,
-                    progression_mode="reps_first",
+                    progression_mode=reviewed_progression_mode,
                 )
                 exercise_stub = {
                     "name": body.exerciseName,
@@ -600,6 +633,16 @@ def recommend_weight(
                 tip = rec.coach_message
         else:
             tip = rec.coach_message
+
+        if snap_load_lbs is not None and rec_weight > 0:
+            snapped_rec = snap_load_lbs(
+                rec_weight,
+                body.equipment,
+                equipment_settings,
+                fallback_increment=effective_increment_lbs,
+            )
+            if snapped_rec is not None:
+                rec_weight = float(snapped_rec)
 
         return {
             "weightLbs": rec_weight,
@@ -1773,5 +1816,3 @@ def validate_food_macros(
     except Exception as exc:
         print(f"[validate_food_macros] failed: {exc}")
         return {"verdict": "insufficient_data", "notes": f"error: {exc}", "corrected": None}
-
-

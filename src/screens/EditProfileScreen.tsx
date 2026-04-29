@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import PressableScale from '../components/PressableScale';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import BarcodeScannerModal from '../components/BarcodeScannerModal';
-import BodyMeasurementsModal from '../components/BodyMeasurementsModal';
 import FormVideoModal from '../components/FormVideoModal';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
@@ -18,9 +17,9 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 import * as ImagePicker from 'expo-image-picker';
-import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood, Gender } from '../types';
+import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood, Gender, StrengthEquipmentSettings } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
-import { APP_THEMES, colors, getTheme, radius } from '../constants/theme';
+import { APP_THEMES, THEME_PICKER_ORDER, colors, getTheme, radius, resolveThemeName } from '../constants/theme';
 import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult, getCalorieRanges, CalorieRanges } from '../services/api';
 import {
   LAUNCH_GOALS, GOAL_CATEGORIES, goalCategory,
@@ -29,6 +28,14 @@ import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
 import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
 import SearchInput from '../components/SearchInput';
 import { ExerciseLibraryItem, humanizeToken, buildExerciseGuide } from '../utils/exerciseGuide';
+import {
+  DEFAULT_ADJUSTABLE_DUMBBELLS,
+  DEFAULT_PLATE_PAIRS_LBS,
+  PLATE_PAIR_OPTIONS_LBS,
+  hasAdjustableDumbbells,
+  hasPlateLoadedEquipment,
+  normalizeStrengthEquipmentSettings,
+} from '../utils/strengthEquipmentSettings';
 
 
 interface EditProfileScreenProps {
@@ -339,7 +346,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [targetEvent, setTargetEvent] = useState<string>(
     profile.goalDetails.targetEvent ?? ''
   );
-  const [themePreference, setThemePreference] = useState<AppThemeName>(profile.themePreference ?? 'slate');
+  const [themePreference, setThemePreference] = useState<AppThemeName>(resolveThemeName(profile.themePreference));
   // Dev toggle for the free/pro tier. Default to whatever the profile has;
   // undefined → pro so existing users keep the full feature set.
   const [subscriptionTier, setSubscriptionTier] = useState<'free' | 'pro'>(
@@ -352,7 +359,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   );
   const [currentWeightModalVisible, setCurrentWeightModalVisible] = useState(false);
   const [currentWeightInput, setCurrentWeightInput]               = useState('');
-  const [measurementsModalVisible, setMeasurementsModalVisible]   = useState(false);
 
   // Body mode fields
   const [bodyHeightFeet, setBodyHeightFeet] = useState<string>(
@@ -409,6 +415,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [calorieRanges, setCalorieRanges] = useState<CalorieRanges | null>(null);
   const [calorieRangesLoading, setCalorieRangesLoading] = useState(false);
   const [equipment, setEquipment]     = useState<string[]>(profile.equipment as string[]);
+  const [equipmentSettings, setEquipmentSettings] = useState<StrengthEquipmentSettings | undefined>(profile.equipmentSettings);
   const [foods, setFoods]             = useState<string[]>([
     ...profile.foodsAvailable,
     ...(profile.supplementsAvailable ?? []).map(s => '__supp__' + s),
@@ -942,6 +949,86 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     setEquipModalVisible(false);
   };
 
+  const renderStrengthLoadSettings = () => {
+    const normalized = normalizeStrengthEquipmentSettings(equipmentSettings, equipment);
+    const dumbbells = normalized?.dumbbells ?? DEFAULT_ADJUSTABLE_DUMBBELLS;
+    const barbell = normalized?.barbell ?? { barWeightLbs: 45, platePairsLbs: DEFAULT_PLATE_PAIRS_LBS };
+    const showDumbbells = hasAdjustableDumbbells(equipment);
+    const showPlates = hasPlateLoadedEquipment(equipment);
+    if (!showDumbbells && !showPlates) return null;
+
+    const updateDumbbells = (patch: Partial<NonNullable<StrengthEquipmentSettings['dumbbells']>>) => {
+      setEquipmentSettings(prev => ({
+        ...(prev ?? {}),
+        dumbbells: { ...(prev?.dumbbells ?? DEFAULT_ADJUSTABLE_DUMBBELLS), ...patch, type: 'adjustable' },
+      }));
+    };
+    const updateBarbell = (patch: Partial<NonNullable<StrengthEquipmentSettings['barbell']>>) => {
+      setEquipmentSettings(prev => ({
+        ...(prev ?? {}),
+        barbell: { barWeightLbs: 45, platePairsLbs: DEFAULT_PLATE_PAIRS_LBS, ...(prev?.barbell ?? {}), ...patch },
+      }));
+    };
+    const togglePlate = (plate: number) => {
+      const current = barbell.platePairsLbs ?? DEFAULT_PLATE_PAIRS_LBS;
+      const next = current.includes(plate)
+        ? current.filter(p => p !== plate)
+        : [...current, plate].sort((a, b) => b - a);
+      updateBarbell({ platePairsLbs: next });
+    };
+
+    return (
+      <View style={[styles.chipGroup, { marginTop: 4 }]}>
+        <Text style={styles.chipGroupLabel}>Load setup</Text>
+        <Text style={styles.sectionHint}>
+          We use this so suggested weights match what you can actually load.
+        </Text>
+        {showDumbbells && (
+          <View style={{ marginBottom: 12 }}>
+            <Text style={[styles.sectionLabel, { marginBottom: 8 }]}>Adjustable dumbbells</Text>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              {[
+                { label: 'Min', value: dumbbells.minLbs, key: 'minLbs' },
+                { label: 'Max', value: dumbbells.maxLbs, key: 'maxLbs' },
+                { label: 'Step', value: dumbbells.incrementLbs, key: 'incrementLbs' },
+              ].map(item => (
+                <View key={item.key} style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 11, color: tc.textMuted, marginBottom: 4 }}>{item.label}</Text>
+                  <TextInput
+                    style={[styles.searchInput, { marginBottom: 0, paddingVertical: 10, paddingHorizontal: 10, fontSize: 14 }]}
+                    keyboardType="decimal-pad"
+                    value={String(item.value ?? '')}
+                    onChangeText={(text) => updateDumbbells({ [item.key]: parseFloat(text) || undefined } as any)}
+                    placeholder={String(item.value ?? '')}
+                    placeholderTextColor={tc.textMuted}
+                  />
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+        {showPlates && (
+          <View>
+            <Text style={[styles.sectionLabel, { marginBottom: 8 }]}>Plate pairs you can load</Text>
+            <View style={styles.chips}>
+              {PLATE_PAIR_OPTIONS_LBS.map(plate => {
+                const selected = (barbell.platePairsLbs ?? DEFAULT_PLATE_PAIRS_LBS).includes(plate);
+                return (
+                  <TouchableOpacity
+                    key={plate}
+                    style={[styles.chip, selected && styles.chipActive]}
+                    onPress={() => togglePlate(plate)}>
+                    <Text style={[styles.chipText, selected && styles.chipTextActive]}>{plate} lb</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        )}
+      </View>
+    );
+  };
+
   const handleAnalyzeFoodPhoto = async (source: 'camera' | 'library') => {
     if (!authToken) {
       Alert.alert('Sign in required', 'You need to be signed in to analyze food photos.');
@@ -1140,6 +1227,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     if ((profile.workoutDurationMinutes ?? 60) !== duration) return true;
     if ((profile.preferredSplit ?? 'auto') !== preferredSplit) return true;
     if (!sameArr(profile.equipment, equipment)) return true;
+    if (JSON.stringify(normalizeStrengthEquipmentSettings(profile.equipmentSettings, profile.equipment ?? [])) !== JSON.stringify(normalizeStrengthEquipmentSettings(equipmentSettings, equipment))) return true;
     // Nutrition shape
     if ((profile.mealsPerDay ?? 3) !== mealsPerDay) return true;
     if ((profile.mealVariety ?? 5) !== mealVariety) return true;
@@ -1297,6 +1385,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       mealsPerDay: Math.min(10, Math.max(1, mealsPerDay)),
       allergies,
       equipment,
+      equipmentSettings: normalizeStrengthEquipmentSettings(equipmentSettings, equipment),
       foodsAvailable: actualFoods,
       customFoods,
       customExercises,
@@ -1679,18 +1768,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </TouchableOpacity>
         </View>
 
-        {/* ── Body Measurements ── */}
-        <View style={styles.section}>
-          <Text style={styles.sectionLabel}>Body Measurements</Text>
-          <TouchableOpacity
-            style={[styles.weightBtn, { gap: 8 }]}
-            onPress={() => setMeasurementsModalVisible(true)}>
-            <Ionicons name="body-outline" size={18} color={tc.primary} />
-            <Text style={{ fontSize: 15, fontWeight: '600', color: tc.textPrimary, flex: 1 }}>Log waist, chest, hips, arms…</Text>
-            <Text style={styles.editHint}>Log</Text>
-          </TouchableOpacity>
-        </View>
-
         {/* ── Target weight (weight goals only) ── */}
         {isWeightGoal && (
           <View style={styles.section}>
@@ -1991,6 +2068,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   </View>
                 </View>
               )}
+              {renderStrengthLoadSettings()}
             </>
           ))}
 
@@ -2514,7 +2592,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </View>
 
           <View style={styles.themeList}>
-            {(Object.values(APP_THEMES) as Array<(typeof APP_THEMES)[keyof typeof APP_THEMES]>).map((theme) => {
+            {THEME_PICKER_ORDER.map((themeName) => {
+              const theme = APP_THEMES[themeName];
               const selected = themePreference === theme.name;
               return (
                 <TouchableOpacity
@@ -2539,10 +2618,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                     )}
                   </View>
                   <View style={styles.themeSwatches}>
-                    <View style={[styles.themeSwatch, { backgroundColor: theme.sections.workout.strong }]} />
-                    <View style={[styles.themeSwatch, { backgroundColor: theme.sections.meals.strong }]} />
-                    <View style={[styles.themeSwatch, { backgroundColor: theme.sections.ai.strong }]} />
-                    <View style={[styles.themeSwatch, { backgroundColor: theme.colors.primary }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: theme.colors.background, borderColor: theme.colors.border }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: theme.colors.surfaceRaised, borderColor: theme.colors.border }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: theme.colors.primary, borderColor: theme.colors.border }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: theme.colors.accent, borderColor: theme.colors.border }]} />
                   </View>
                 </TouchableOpacity>
               );
@@ -3675,13 +3754,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         onClose={() => setBarcodeScanVisible(false)}
         onScan={handleBarcodeScan}
       />
-      <BodyMeasurementsModal
-        visible={measurementsModalVisible}
-        authToken={authToken}
-        currentWeight={profile.physicalStats?.weightLbs}
-        themeName={profile?.themePreference}
-        onClose={() => setMeasurementsModalVisible(false)}
-      />
       <FormVideoModal
         visible={!!videoExerciseName}
         exerciseName={videoExerciseName ?? ''}
@@ -3809,7 +3881,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   themeSelectedBadge: { borderWidth: 1, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, alignSelf: 'center' },
   themeSelectedText: { fontSize: 11, fontWeight: '700' },
   themeSwatches: { flexDirection: 'row', gap: 8 },
-  themeSwatch: { width: 28, height: 28, borderRadius: radius.full },
+  themeSwatch: { width: 28, height: 28, borderRadius: radius.full, borderWidth: 1 },
   themePreview: {
     marginTop: 12,
     borderWidth: 1,

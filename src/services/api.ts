@@ -210,6 +210,7 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
       daysPerWeek:            data.preferences.days_per_week,
       workoutDurationMinutes: 60,
       equipment:              data.preferences.equipment ?? [],
+      equipmentSettings:      data.preferences.equipment_settings ?? undefined,
       foodsAvailable:         data.preferences.foods_available ?? [],
       customFoods:            [],
       savedMeals:             [],
@@ -616,6 +617,7 @@ export async function getAIPlans(
     daysPerWeek:            profile.daysPerWeek,
     workoutDurationMinutes: profile.workoutDurationMinutes,
     equipment:              profile.equipment,
+    equipmentSettings:      profile.equipmentSettings ?? undefined,
     foodsAvailable:         profile.foodsAvailable,
     customFoodNames:        (profile.customFoods ?? []).map(f => f.name).filter(Boolean),
     supplementsAvailable:   profile.supplementsAvailable ?? [],
@@ -674,6 +676,7 @@ export async function getAIWorkoutPlan(
     daysPerWeek:            profile.daysPerWeek,
     workoutDurationMinutes: profile.workoutDurationMinutes,
     equipment:              profile.equipment,
+    equipmentSettings:      profile.equipmentSettings ?? undefined,
     foodsAvailable:         [],
     experienceLevel:        profile.experienceLevel,
     preferredSplit:         profile.preferredSplit || undefined,
@@ -952,6 +955,7 @@ export async function syncOnboarding(token: string, profile: import('../types').
       preferences: {
         days_per_week:   profile.daysPerWeek,
         equipment:       profile.equipment,
+        equipment_settings: profile.equipmentSettings ?? null,
         foods_available: profile.foodsAvailable,
       },
     }),
@@ -1247,6 +1251,9 @@ export async function logWorkoutDone(
     intensity?: string;
     source?: string;
     cardioStyle?: string;
+    distanceMiles?: number;
+    caloriesBurned?: number;
+    avgHeartRate?: number;
   },
   healthMetrics?: {
     caloriesBurned?: number;
@@ -1259,6 +1266,12 @@ export async function logWorkoutDone(
     notes?: string;
   },
 ): Promise<WorkoutCompleteResponse> {
+  const activityHrSummary = activity?.avgHeartRate
+    ? { avgBpm: activity.avgHeartRate, maxBpm: activity.avgHeartRate, zoneMinutes: [] }
+    : undefined;
+  const hrSummary = healthMetrics?.hrSummary ?? activityHrSummary;
+  const caloriesBurned = healthMetrics?.caloriesBurned ?? activity?.caloriesBurned;
+
   return request<WorkoutCompleteResponse>('/workouts/complete', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
@@ -1274,8 +1287,9 @@ export async function logWorkoutDone(
         activity_source: activity.source,
         cardio_style: activity.cardioStyle,
       } : {}),
-      ...(healthMetrics?.caloriesBurned ? { calories_burned: healthMetrics.caloriesBurned } : {}),
-      ...(healthMetrics?.hrSummary ? { hr_summary: healthMetrics.hrSummary } : {}),
+      ...(activity?.distanceMiles != null ? { distance_miles: activity.distanceMiles } : {}),
+      ...(caloriesBurned ? { calories_burned: caloriesBurned } : {}),
+      ...(hrSummary ? { hr_summary: hrSummary } : {}),
       ...(feedback?.feeling ? { feeling: feedback.feeling } : {}),
       ...(feedback?.intensity ? { intensity: feedback.intensity } : {}),
       ...(feedback?.sorenessAreas && feedback.sorenessAreas.length > 0 ? { soreness_areas: feedback.sorenessAreas } : {}),
@@ -1310,6 +1324,9 @@ export interface WorkoutCompletionRecord {
   activity_category?: string | null;
   activity_subtype?: string | null;
   activity_intensity?: string | null;
+  cardio_style?: string | null;
+  distance_miles?: number | null;
+  calories_burned?: number | null;
 }
 
 /** Fetch the user's recent completion markers. Skeleton data only — no set

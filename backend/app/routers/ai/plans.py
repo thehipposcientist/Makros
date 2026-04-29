@@ -121,6 +121,9 @@ def build_user_exercise_library(equipment_slugs: list[str] | None) -> list[dict]
         if slug:
             owned.add(slug)
 
+    if "adjustable_dumbbells" in owned:
+        owned.add("dumbbells")
+
     # Also accept the legacy bucket strings so a user with `equipment:
     # ["bodyweight"]` still gets bodyweight exercises even though
     # "bodyweight" isn't an Equipment slug.
@@ -306,6 +309,8 @@ def _resolve_owned_equipment_slugs(equipment: list[str] | None) -> set[str]:
         slug = name_to_slug.get(raw.lower())
         if slug:
             owned.add(slug)
+    if "adjustable_dumbbells" in owned:
+        owned.add("dumbbells")
     # Legacy bucket pass-through so `equipment: ["bodyweight"]` still
     # unlocks bodyweight exercises even though it isn't an Equipment slug.
     for bucket in ("bodyweight", "home", "dumbbells", "gym", "other"):
@@ -654,6 +659,7 @@ def _build_deterministic_workout(
         muscle_fatigue=fatigue_dict,
         user_age=user_age,
         completed_today_family=completed_today_family,
+        load_equipment_settings=req.equipmentSettings,
     )
 
     history_familiarity: dict[str, int] = {}
@@ -717,6 +723,7 @@ def _build_deterministic_workout(
                 perf_profiles=perf_profiles,
                 all_exercises_by_slug=all_by_slug,
                 experience=(req.experienceLevel or "intermediate"),
+                load_equipment_settings=req.equipmentSettings,
             )
         except Exception as e:
             print(f"[plan-gen workout] propagate_session_targets failed (non-fatal): {e}")
@@ -1225,6 +1232,7 @@ def _build_deterministic_workout(
                                 experience=(req.experienceLevel or "intermediate"),
                                 perf_profiles=perf_profiles_for_planner,
                                 all_exercises_by_slug=_all_by_slug,
+                                load_equipment_settings=req.equipmentSettings,
                             )
                 except Exception as e:
                     print(f"[plan-gen workout] re-stamp after AI regenerate failed (non-fatal): {e}")

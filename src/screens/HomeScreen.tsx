@@ -66,7 +66,7 @@ import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
 // CoachCheckinModal removed — coach chat handles check-ins now
-import { colors, elevations, getTheme, radius, typography } from '../constants/theme';
+import { APP_THEMES, THEME_PICKER_ORDER, colors, elevations, getTheme, isLightThemeName, radius, resolveThemeName, typography } from '../constants/theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
 // Inline-rendered tab content. Goals and Progress used to be modal
@@ -4998,7 +4998,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // matches the workout strip dimension-for-dimension.
   const mealDays: MealDay[] = _activeWeekMealDays();
 
-  const isLightTheme = ['sunrise', 'parchment', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'sky', 'rose'].includes(userProfile.themePreference ?? 'slate');
+  const isLightTheme = isLightThemeName(userProfile.themePreference);
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
 
   // Dark themes keep the atmospheric wash; light themes stay clean so
@@ -7520,6 +7520,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   intensity: session.manualActivity.intensity,
                   source: session.manualActivity.source,
                   cardioStyle: session.manualActivity.cardioStyle,
+                  distanceMiles: session.manualActivity.distanceMiles,
+                  caloriesBurned: session.manualActivity.caloriesBurned,
+                  avgHeartRate: session.manualActivity.avgHeartRate,
                 } : undefined,
               );
             } catch {}
@@ -9358,42 +9361,33 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         animationType="slide"
         onRequestClose={() => setShowSettings(false)}>
         {showSettings && userProfile && (() => {
-          type ThemeEntry = { key: import('../types').AppThemeName; label: string; swatch: string; mode: 'dark' | 'light' };
-          const allThemes: ThemeEntry[] = [
-            // Dark themes
-            { key: 'midnight',  label: 'Midnight',   swatch: '#15C7B8', mode: 'dark' },
-            { key: 'ocean',     label: 'Ocean',      swatch: '#00CCE8', mode: 'dark' },
-            { key: 'amethyst',  label: 'Amethyst',   swatch: '#9838F8', mode: 'dark' },
-            { key: 'ember',     label: 'Ember',      swatch: '#FF6018', mode: 'dark' },
-            { key: 'wine',      label: 'Wine',       swatch: '#C82848', mode: 'dark' },
-            { key: 'obsidian',  label: 'Black Gold', swatch: '#C09428', mode: 'dark' },
-            { key: 'scarlet',   label: 'Scarlet',    swatch: '#FF2020', mode: 'dark' },
-            { key: 'blossom',   label: 'Blossom',    swatch: '#FF1890', mode: 'dark' },
-            { key: 'void',      label: 'Void',       swatch: '#4C9EFF', mode: 'dark' },
-            { key: 'dusk',      label: 'Dusk',       swatch: '#E8A878', mode: 'dark' },
-            { key: 'lavender',  label: 'Lavender',   swatch: '#B898E0', mode: 'dark' },
-            { key: 'aurora',    label: 'Aurora',     swatch: '#40E8A0', mode: 'dark' },
-            { key: 'slate',     label: 'Slate',      swatch: '#F07848', mode: 'dark' },
-            { key: 'ash',       label: 'Ash',        swatch: '#48A8FF', mode: 'dark' },
-            { key: 'cosmos',    label: 'Cosmos',     swatch: '#FF8C30', mode: 'dark' },
-            { key: 'cinder',    label: 'Cinder',     swatch: '#FF2898', mode: 'dark' },
-            { key: 'smoke',     label: 'Smoke',      swatch: '#A0D820', mode: 'dark' },
-            { key: 'maroon',    label: 'Maroon',     swatch: '#20D8E8', mode: 'dark' },
-            // Light themes
-            { key: 'sunrise',   label: 'Sunrise',    swatch: '#F28C28', mode: 'light' },
-            { key: 'parchment', label: 'Parchment',  swatch: '#7C4F2A', mode: 'light' },
-            { key: 'linen',     label: 'Linen',      swatch: '#6A8030', mode: 'light' },
-            { key: 'mint',      label: 'Mint',       swatch: '#0E8078', mode: 'light' },
-            { key: 'butter',    label: 'Butter',     swatch: '#C07608', mode: 'light' },
-            { key: 'seaglass',  label: 'Seaglass',   swatch: '#B5202A', mode: 'light' },
-            { key: 'lilac',     label: 'Lilac',      swatch: '#6B3AA8', mode: 'light' },
-            { key: 'sky',       label: 'Sky',        swatch: '#0E7AB8', mode: 'light' },
-            { key: 'rose',      label: 'Rose',       swatch: '#C04870', mode: 'light' },
-          ];
+          type ThemeEntry = {
+            key: import('../types').AppThemeName;
+            label: string;
+            swatch: string;
+            background: string;
+            surface: string;
+            accent: string;
+            border: string;
+            mode: 'dark' | 'light';
+          };
+          const allThemes: ThemeEntry[] = THEME_PICKER_ORDER.map((key) => {
+            const theme = APP_THEMES[key];
+            return {
+              key,
+              label: theme.label,
+              swatch: theme.colors.primary,
+              background: theme.colors.background,
+              surface: theme.colors.surfaceRaised,
+              accent: theme.colors.accent,
+              border: theme.colors.border,
+              mode: isLightThemeName(key) ? 'light' : 'dark',
+            };
+          });
           const visibleThemes = showAllThemes ? allThemes : allThemes.slice(0, 8);
           const darkThemes = visibleThemes.filter(t => t.mode === 'dark');
           const lightThemes = visibleThemes.filter(t => t.mode === 'light');
-          const currentTheme = userProfile.themePreference ?? 'slate';
+          const currentTheme = resolveThemeName(userProfile.themePreference);
           return (
             <View style={{ flex: 1, backgroundColor: themeColors.background }}>
               {/* Header */}
@@ -9433,8 +9427,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             ]}
                             onPress={() => onProfileUpdate?.({ themePreference: t.key } as any, true)}
                             activeOpacity={0.8}>
-                            <View style={[styles.profileThemeSwatch, { backgroundColor: t.swatch }]} />
-                            <Text style={[styles.profileThemeLabel, { color: themeColors.textPrimary }]}>{t.label}</Text>
+                            <View style={[styles.profileThemeSwatch, { borderColor: t.border }]}>
+                              <View style={{ flex: 1, backgroundColor: t.background }} />
+                              <View style={{ flex: 1, backgroundColor: t.surface }} />
+                              <View style={{ flex: 1, backgroundColor: t.swatch }} />
+                              <View style={{ flex: 1, backgroundColor: t.accent }} />
+                            </View>
+                            <Text numberOfLines={2} style={[styles.profileThemeLabel, { color: themeColors.textPrimary }]}>{t.label}</Text>
                             {isActive && <Ionicons name="checkmark-circle" size={14} color={t.swatch} style={{ position: 'absolute', top: 4, right: 4 }} />}
                           </TouchableOpacity>
                         );
@@ -11217,18 +11216,22 @@ const styles = StyleSheet.create({
   profileThemeTile: {
     width: '47%',
     borderRadius: radius.md,
-    paddingVertical: 14,
+    minHeight: 58,
+    paddingVertical: 12,
     paddingHorizontal: 12,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
   },
   profileThemeSwatch: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
+    width: 36,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1,
+    overflow: 'hidden',
+    flexDirection: 'row',
   },
-  profileThemeLabel: { flex: 1, fontSize: 13, fontWeight: '700' },
+  profileThemeLabel: { flex: 1, flexShrink: 1, fontSize: 12, lineHeight: 15, fontWeight: '700' },
   profileThemeCheck: { fontSize: 14, fontWeight: '800' },
 
   // Profile tab — list of menu rows with section dividers.

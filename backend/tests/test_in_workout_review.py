@@ -145,8 +145,8 @@ def test_feel_conflict_hard_but_beat_top():
     _ok("hard-but-beat-top captured")
 
 
-def test_first_session_flagged():
-    print("\n[test] first session (no history) flagged")
+def test_first_session_not_flagged_without_conflict():
+    print("\n[test] first session (no history) stays deterministic unless feel conflicts")
     planned = _planned()
     det = recommend_next_set(
         exercise=_bench(), planned_set=planned,
@@ -157,8 +157,8 @@ def test_first_session_flagged():
         feel="good", previous_sets_this_session=[], last_session_sets=[],
         deterministic=det,
     )
-    assert any("first session" in r for r in reasons)
-    _ok("first-session flag present")
+    assert reasons == []
+    _ok("first session stays on deterministic path")
 
 
 def test_deterministic_reduce_but_feel_easy_flagged():
@@ -238,7 +238,7 @@ def _run_all() -> int:
         test_big_undershoot_flagged,
         test_feel_conflict_easy_but_missed,
         test_feel_conflict_hard_but_beat_top,
-        test_first_session_flagged,
+        test_first_session_not_flagged_without_conflict,
         test_deterministic_reduce_but_feel_easy_flagged,
         test_no_suspicion_happy_path,
         test_require_feel_blocks_when_feel_missing,

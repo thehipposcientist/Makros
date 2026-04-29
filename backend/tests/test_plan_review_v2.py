@@ -59,12 +59,27 @@ def _setup_user_with_goal(goal_type: str = "muscle_gain"):
     return s, u
 
 
-def _seed_completions(s, user_id, *, dates: list[date], focus="Push", duration_min=60):
+def _seed_completions(
+    s,
+    user_id,
+    *,
+    dates: list[date],
+    focus="Push",
+    duration_min=60,
+    activity_category=None,
+    cardio_style=None,
+    activity_intensity=None,
+    stimulus=None,
+):
     from app.models import WorkoutCompletion
     for d in dates:
         s.add(WorkoutCompletion(
             user_id=user_id, workout_date=d, focus_label=focus,
             duration_seconds=duration_min * 60, calories_burned=300,
+            activity_category=activity_category,
+            cardio_style=cardio_style,
+            activity_intensity=activity_intensity,
+            stimulus=stimulus,
         ))
     s.commit()
 
@@ -122,6 +137,28 @@ def test_full_adherence_no_reduce_days_rec():
     review = compute_weekly_review(s, u.id)
     rec_keys = [r.key for r in review.recommendations]
     assert "reduce_days" not in rec_keys
+
+
+def test_lift_plus_cardio_counts_finisher_minutes_not_full_session():
+    """A planned Push + Cardio day should contribute cardio minutes, but
+    only for the finisher portion."""
+    print("\n[test] lift + cardio contributes finisher cardio minutes")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    s, u = _setup_user_with_goal("body_recomp")
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    _seed_completions(
+        s,
+        u.id,
+        dates=[today],
+        focus="Push + Cardio",
+        duration_min=60,
+        activity_category="strength",
+        cardio_style="steady",
+    )
+    review = compute_weekly_review(s, u.id)
+    assert review.cardio_minutes == 15.0, review.cardio_minutes
+    assert review.zone2_minutes == 15.0, review.zone2_minutes
 
 
 # ── Headline ─────────────────────────────────────────────────

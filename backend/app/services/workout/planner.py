@@ -119,6 +119,10 @@ class PlannerInputs:
     # the conditioning prescriber uses them to build the most specific
     # prescription tier. Absent = RPE/duration fallback.
     user_equipment_capabilities: dict | None = None
+    # Strength loading constraints: barbell plate denominations and
+    # adjustable dumbbell range/step. Optional; missing preserves the
+    # legacy 5 lb / 2.5 lb load progression behavior.
+    load_equipment_settings: dict | None = None
 
 
 # ─── Goal bucket shim ────────────────────────────────────────────────────────
@@ -1036,6 +1040,7 @@ def build_planner_exercise(
     experience: str,
     perf_profiles: dict | None = None,
     all_exercises_by_slug: dict | None = None,
+    load_equipment_settings: dict | None = None,
 ) -> dict:
     """Build the canonical planner-output exercise dict from a seed
     exercise row + prescription. SINGLE source of truth for the shape
@@ -1084,6 +1089,7 @@ def build_planner_exercise(
         experience=experience,
         perf_profiles=perf_profiles,
         all_exercises_by_slug=all_exercises_by_slug,
+        load_equipment_settings=load_equipment_settings,
     )
     return out_ex
 
@@ -1110,6 +1116,7 @@ def _stamp_load_metadata(
     experience: str,
     perf_profiles: dict | None,
     all_exercises_by_slug: dict | None,
+    load_equipment_settings: dict | None = None,
 ) -> None:
     """Attach deterministic load recommendation + set-scheme metadata
     to a planner output exercise dict IN PLACE.
@@ -1165,6 +1172,20 @@ def _stamp_load_metadata(
             rec_reason = rec.reason
         except Exception as exc:  # defensive — never crash the planner
             logger.debug(f"[workout_planner] starting-weight recommendation failed for {exercise.get('slug')}: {exc}")
+
+    if target_w is not None:
+        try:
+            from .load_equipment import snap_load_lbs
+            snapped = snap_load_lbs(
+                target_w,
+                _equipment_label(exercise),
+                load_equipment_settings,
+                fallback_increment=2.5 if equipment_bucket == "dumbbell" else 5.0,
+            )
+            if snapped is not None:
+                target_w = float(snapped)
+        except Exception:
+            pass
 
     scheme = build_set_scheme(
         exercise,
@@ -1450,6 +1471,7 @@ def generate_workout_plan(
                 experience=inputs.experience,
                 perf_profiles=perf_profiles,
                 all_exercises_by_slug=all_exercises_by_slug,
+                load_equipment_settings=inputs.load_equipment_settings,
             )
             exercises_out.append(out_ex)
             # Warmup-role exercises don't count toward lifting volume.
@@ -1565,6 +1587,7 @@ def generate_workout_plan(
                     experience=inputs.experience,
                     perf_profiles=perf_profiles,
                     all_exercises_by_slug=all_exercises_by_slug,
+                    load_equipment_settings=inputs.load_equipment_settings,
                 )
                 exercises.append(core_out)
                 day["exercises"] = exercises
@@ -1730,6 +1753,7 @@ def generate_workout_plan(
                     experience=inputs.experience,
                     perf_profiles=perf_profiles,
                     all_exercises_by_slug=all_exercises_by_slug,
+                    load_equipment_settings=inputs.load_equipment_settings,
                 )
                 days_out[host].setdefault("exercises", []).append(focus_out)
                 if focus_ex.get("slug"):
@@ -2474,7 +2498,37 @@ def generate_cardio_day(
     hardcoded list tagged all machine cardio as generic "machine" which
     slipped past the equipment filter downstream.
     """
-    owned = {e.lower().strip() for e in (equipment_owned or [])}
+    equipment_name_to_slug = {}
+    try:
+        from app.seed_exercises_data import SEED_EQUIPMENT
+        equipment_name_to_slug = {
+            str(e.get("name", "")).lower().strip(): e.get("slug")
+            for e in SEED_EQUIPMENT
+        }
+    except Exception:
+        equipment_name_to_slug = {}
+
+    def _equipment_tokens(raw: str) -> set[str]:
+        lowered = (raw or "").lower().strip()
+        slugish = lowered.replace("-", "_").replace(" ", "_")
+        tokens = {lowered, slugish}
+        if mapped := equipment_name_to_slug.get(lowered):
+            tokens.add(str(mapped))
+        aliases = {
+            "bike": "stationary_bike",
+            "rower": "rowing_machine",
+            "ski_erg": "skierg",
+            "ski erg": "skierg",
+            "versa_climber": "versaclimber",
+            "heavy_bag": "heavy_bag",
+        }
+        if alias := aliases.get(lowered) or aliases.get(slugish):
+            tokens.add(alias)
+        return {t for t in tokens if t}
+
+    owned: set[str] = set()
+    for raw in (equipment_owned or []):
+        owned.update(_equipment_tokens(str(raw)))
     # Bodyweight is always available. "None" equivalent.
     owned.add("bodyweight")
     owned.add("none")
@@ -2486,19 +2540,19 @@ def generate_cardio_day(
     # Candidate pool — each carries its real equipment requirement so the
     # equipment filter actually works. "bodyweight" entries always survive.
     pool_intense = [
-        {"name": "Jump Rope",              "sets": 1, "reps": "5 min warm-up",                     "rest_seconds": 60, "equipment": "bodyweight",        "slot_role": "warmup",  "muscles_targeted": ["cardio", "calves"],       "_req": ["bodyweight", "jump_rope"]},
+        {"name": "Jump Rope",              "sets": 1, "reps": "5 min warm-up",                     "rest_seconds": 60, "equipment": "jump_rope",         "slot_role": "warmup",  "muscles_targeted": ["cardio", "calves"],       "_req": ["jump_rope"]},
         {"name": "Rowing Machine",         "sets": 1, "reps": f"{min(25, session_minutes - 15)} min steady", "rest_seconds": 0, "equipment": "rower",      "slot_role": "primary", "muscles_targeted": ["cardio", "back", "core"], "_req": ["rowing_machine", "rower"]},
-        {"name": "Assault Bike Intervals", "sets": 6, "reps": "30s on / 60s off",                  "rest_seconds": 60, "equipment": "assault_bike",      "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["assault_bike"]},
+        {"name": "Assault Bike",           "sets": 6, "reps": "30s on / 60s off",                  "rest_seconds": 60, "equipment": "assault_bike",      "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["assault_bike"]},
         {"name": "Treadmill Intervals",    "sets": 6, "reps": "60s on / 60s off",                  "rest_seconds": 60, "equipment": "treadmill",         "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["treadmill"]},
-        {"name": "Bike Sprints",           "sets": 8, "reps": "20s on / 40s off",                  "rest_seconds": 40, "equipment": "stationary_bike",   "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["stationary_bike", "bike"]},
-        {"name": "Outdoor Run Intervals",  "sets": 5, "reps": "2 min hard / 2 min easy",           "rest_seconds": 0,  "equipment": "bodyweight",        "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["bodyweight"]},
+        {"name": "Stationary Bike Intervals","sets": 8, "reps": "20s on / 40s off",                "rest_seconds": 40, "equipment": "stationary_bike",   "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["stationary_bike", "bike"]},
+        {"name": "Sprint Intervals",       "sets": 5, "reps": "2 min hard / 2 min easy",           "rest_seconds": 0,  "equipment": "bodyweight",        "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["bodyweight"]},
     ]
     pool_easy = [
-        {"name": "Incline Treadmill Walk", "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "treadmill",     "slot_role": "primary", "muscles_targeted": ["cardio", "glutes", "calves"], "_req": ["treadmill"]},
+        {"name": "Incline Walk",           "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "treadmill",     "slot_role": "primary", "muscles_targeted": ["cardio", "glutes", "calves"], "_req": ["treadmill"]},
         {"name": "Stair Climber",          "sets": 1, "reps": "10 min",                                "rest_seconds": 0, "equipment": "stair_climber", "slot_role": "primary", "muscles_targeted": ["cardio", "quads", "glutes"],  "_req": ["stair_climber"]},
-        {"name": "Stationary Bike (Zone 2)","sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "stationary_bike","slot_role": "primary","muscles_targeted": ["cardio", "quads"],          "_req": ["stationary_bike", "bike"]},
+        {"name": "Bike Zone 2",            "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "stationary_bike","slot_role": "primary","muscles_targeted": ["cardio", "quads"],          "_req": ["stationary_bike", "bike"]},
         {"name": "Outdoor Walk",           "sets": 1, "reps": f"{min(30, session_minutes - 5)} min",   "rest_seconds": 0, "equipment": "bodyweight",   "slot_role": "primary", "muscles_targeted": ["cardio", "glutes"],           "_req": ["bodyweight"]},
-        {"name": "Elliptical (Zone 2)",    "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "elliptical",    "slot_role": "primary", "muscles_targeted": ["cardio", "full_body"],        "_req": ["elliptical"]},
+        {"name": "Elliptical",             "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "elliptical",    "slot_role": "primary", "muscles_targeted": ["cardio", "full_body"],        "_req": ["elliptical"]},
         {"name": "Rowing Zone 2",          "sets": 1, "reps": f"{min(25, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "rower",         "slot_role": "primary", "muscles_targeted": ["cardio", "back"],             "_req": ["rowing_machine", "rower"]},
     ]
 

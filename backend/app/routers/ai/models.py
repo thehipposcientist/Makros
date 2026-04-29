@@ -46,6 +46,7 @@ class PlanRequest(BaseModel):
     daysPerWeek: int
     workoutDurationMinutes: int = 60
     equipment: list[str]
+    equipmentSettings: dict | None = None
     foodsAvailable: list[str]
     # User-created custom foods (AI-scanned, manually-added, etc.).
     # Passed to the meal skeleton so the picker can prioritize them —
@@ -98,6 +99,7 @@ class WorkoutOnlyRequest(BaseModel):
     daysPerWeek: int
     workoutDurationMinutes: int = 60
     equipment: list[str]
+    equipmentSettings: dict | None = None
 
     experienceLevel: str | None = None
     injuriesOrLimitations: list[str] = []

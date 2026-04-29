@@ -15,6 +15,8 @@ public struct RestTimerAttributes: ActivityAttributes {
     public typealias RestTimerState = ContentState
 
     public struct ContentState: Codable, Hashable {
+        public var startedAtMs: Double
+        public var durationSeconds: Double
         public var endDateMs: Double
         public var exerciseName: String
         public var setNumber: Int
@@ -49,8 +51,15 @@ public class ThalloLiveActivityModule: Module {
             guard #available(iOS 16.2, *) else { return nil }
             guard ActivityAuthorizationInfo().areActivitiesEnabled else { return nil }
 
+            let fallbackStartMs = Date().timeIntervalSince1970 * 1000
+            let fallbackEndMs = Date().addingTimeInterval(60).timeIntervalSince1970 * 1000
+            let endDateMs = doubleValue(payload["endDateMs"], fallback: fallbackEndMs)
+            let startedAtMs = doubleValue(payload["startedAtMs"], fallback: fallbackStartMs)
+            let durationSeconds = doubleValue(payload["durationSeconds"], fallback: max(1, (endDateMs - startedAtMs) / 1000))
             let state = RestTimerAttributes.ContentState(
-                endDateMs: doubleValue(payload["endDateMs"], fallback: Date().addingTimeInterval(60).timeIntervalSince1970 * 1000),
+                startedAtMs: startedAtMs,
+                durationSeconds: durationSeconds,
+                endDateMs: endDateMs,
                 exerciseName: (payload["exerciseName"] as? String) ?? "Exercise",
                 setNumber: intValue(payload["setNumber"], fallback: 0),
                 totalSets: intValue(payload["totalSets"], fallback: 0),
@@ -78,8 +87,12 @@ public class ThalloLiveActivityModule: Module {
         AsyncFunction("updateActivity") { (activityId: String, payload: [String: Any]) -> Bool in
             guard #available(iOS 16.2, *) else { return false }
             for activity in Activity<RestTimerAttributes>.activities where activity.id == activityId {
+                let startedAtMs = doubleValue(payload["startedAtMs"], fallback: activity.content.state.startedAtMs)
+                let endDateMs = doubleValue(payload["endDateMs"], fallback: activity.content.state.endDateMs)
                 let state = RestTimerAttributes.ContentState(
-                    endDateMs: doubleValue(payload["endDateMs"], fallback: activity.content.state.endDateMs),
+                    startedAtMs: startedAtMs,
+                    durationSeconds: doubleValue(payload["durationSeconds"], fallback: activity.content.state.durationSeconds),
+                    endDateMs: endDateMs,
                     exerciseName: (payload["exerciseName"] as? String) ?? activity.content.state.exerciseName,
                     setNumber: intValue(payload["setNumber"], fallback: activity.content.state.setNumber),
                     totalSets: intValue(payload["totalSets"], fallback: activity.content.state.totalSets),
@@ -90,6 +103,25 @@ public class ThalloLiveActivityModule: Module {
                 return true
             }
             return false
+        }
+
+        AsyncFunction("getActivityState") { (activityId: String) -> [String: Any]? in
+            guard #available(iOS 16.2, *) else { return nil }
+            for activity in Activity<RestTimerAttributes>.activities where activity.id == activityId {
+                let state = activity.content.state
+                return [
+                    "startedAtMs": state.startedAtMs,
+                    "durationSeconds": state.durationSeconds,
+                    "endDateMs": state.endDateMs,
+                    "exerciseName": state.exerciseName,
+                    "setNumber": state.setNumber,
+                    "totalSets": state.totalSets,
+                    "nextSetRecommendation": state.nextSetRecommendation,
+                    "themeColorHex": state.themeColorHex,
+                    "workoutId": activity.attributes.workoutId
+                ]
+            }
+            return nil
         }
 
         // End the activity. dismissalPolicy 'immediate' removes it from the

@@ -8,9 +8,10 @@ public struct RestTimerAttributes: ActivityAttributes {
     public typealias RestTimerState = ContentState
 
     public struct ContentState: Codable, Hashable {
-        // Absolute end time (ms since epoch) so the widget can render a
-        // live-ticking countdown via Text(timerInterval:) without needing
-        // update pushes every second.
+        // Timing context lets the widget animate the lock-screen ring locally
+        // without needing update pushes every second.
+        public var startedAtMs: Double
+        public var durationSeconds: Double
         public var endDateMs: Double
         public var exerciseName: String
         public var setNumber: Int
@@ -19,6 +20,8 @@ public struct RestTimerAttributes: ActivityAttributes {
         public var themeColorHex: String
 
         public init(
+            startedAtMs: Double,
+            durationSeconds: Double,
             endDateMs: Double,
             exerciseName: String,
             setNumber: Int,
@@ -26,6 +29,8 @@ public struct RestTimerAttributes: ActivityAttributes {
             nextSetRecommendation: String,
             themeColorHex: String
         ) {
+            self.startedAtMs = startedAtMs
+            self.durationSeconds = durationSeconds
             self.endDateMs = endDateMs
             self.exerciseName = exerciseName
             self.setNumber = setNumber

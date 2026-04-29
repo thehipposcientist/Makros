@@ -85,6 +85,7 @@ class UserPreferences(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", unique=True, index=True)
     days_per_week: int = Field(default=3)
     equipment: list = Field(default_factory=list, sa_column=Column(JSON))
+    equipment_settings: dict | None = Field(default=None, sa_column=Column(JSON))
     foods_available: list = Field(default_factory=list, sa_column=Column(JSON))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -930,6 +931,7 @@ class WorkoutCompletion(SQLModel, table=True):
     activity_intensity: str | None = Field(default=None)
     activity_source: str | None = Field(default=None)
     cardio_style: str | None = Field(default=None)
+    distance_miles: float | None = Field(default=None)
     calories_burned: int | None = Field(default=None)
     hr_summary: dict | None = Field(default=None, sa_column=Column(JSON))
     resolved_muscle_fatigue: dict | None = Field(default=None, sa_column=Column(JSON))
@@ -1440,6 +1442,7 @@ class GoalUpsert(SQLModel):
 class PreferencesUpsert(SQLModel):
     days_per_week: int
     equipment: list[str]       # item names e.g. "Dumbbells", "Pull-up bar"
+    equipment_settings: dict | None = None
     foods_available: list[str]
 
 class OnboardingSync(SQLModel):

@@ -111,7 +111,7 @@ def _ensure_workout_completion_stimulus_column() -> None:
 
 
 def _ensure_workout_completion_health_columns() -> None:
-    """Add calories_burned + hr_summary + post-workout feedback columns
+    """Add distance/calories/HR + post-workout feedback columns
     to workout_completions if missing. Feedback fields (feeling /
     intensity / soreness_areas / feedback_notes) are read by
     weekly_review's struggle metrics + the trainer context."""
@@ -119,6 +119,10 @@ def _ensure_workout_completion_health_columns() -> None:
         return
     try:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS distance_miles DOUBLE PRECISION"
+            ))
             conn.execute(text(
                 "ALTER TABLE workout_completions "
                 "ADD COLUMN IF NOT EXISTS calories_burned INTEGER"
@@ -145,6 +149,24 @@ def _ensure_workout_completion_health_columns() -> None:
             ))
     except Exception as e:
         print(f"[migration] workout_completions health columns add failed (non-fatal): {e}")
+
+
+def _ensure_user_preferences_equipment_settings_column() -> None:
+    """Add strength-equipment load settings to user_preferences.
+
+    This stores optional plate/dumbbell loading constraints separately
+    from the owned-equipment list so existing profiles keep working.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE user_preferences "
+                "ADD COLUMN IF NOT EXISTS equipment_settings JSONB"
+            ))
+    except Exception as e:
+        print(f"[migration] user_preferences equipment_settings add failed (non-fatal): {e}")
 
 
 def _ensure_exercise_tracking_mode_column() -> None:
@@ -1106,6 +1128,7 @@ def create_db_and_tables():
     _ensure_food_nutrition_extras_column()
     _ensure_workout_completion_stimulus_column()
     _ensure_workout_completion_health_columns()
+    _ensure_user_preferences_equipment_settings_column()
     _ensure_user_recovery_columns()
     _ensure_exercise_tracking_mode_column()
     _ensure_exercise_video_id_column()

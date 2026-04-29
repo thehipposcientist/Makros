@@ -19,13 +19,15 @@ import { AppThemeName, WorkoutSession } from '../types';
 import { isHealthKitAvailable } from '../services/appleHealth';
 import { detectUnloggedWorkouts, dismissHkImports, ImportCandidate } from '../utils/workoutAutoImport';
 import LogActivityModal, { LogActivityPrefill } from './LogActivityModal';
-import { saveWorkoutSession } from '../utils/workoutHistory';
+import { dateKey, saveWorkoutSession } from '../utils/workoutHistory';
+import { logWorkoutDone } from '../services/api';
 
 interface Props {
   themeName?: AppThemeName;
   /** Optional — parent can pass in already-fetched HK workouts to avoid
    *  a double fetch when it's already querying `readHealthSummary`. */
   appleWorkouts?: any[] | null;
+  authToken?: string | null;
   onAfterImport?: () => void;
   lookbackDays?: number;
 }
@@ -58,7 +60,7 @@ function regexClassify(activityName: string): Pick<LogActivityPrefill, 'category
   return { category: 'cardio', subtype: 'other', cardioStyle: 'steady' };
 }
 
-export default function DetectedWorkoutsCard({ themeName, appleWorkouts, onAfterImport, lookbackDays = 7 }: Props) {
+export default function DetectedWorkoutsCard({ themeName, appleWorkouts, authToken, onAfterImport, lookbackDays = 7 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const [candidates, setCandidates] = useState<ImportCandidate[] | null>(null);
@@ -117,6 +119,25 @@ export default function DetectedWorkoutsCard({ themeName, appleWorkouts, onAfter
 
   const handleSave = async (session: WorkoutSession) => {
     await saveWorkoutSession(session);
+    if (authToken) {
+      await logWorkoutDone(
+        authToken,
+        dateKey(new Date(session.date)),
+        session.focus,
+        session.durationSeconds,
+        undefined,
+        session.manualActivity ? {
+          category: session.manualActivity.category,
+          subtype: session.manualActivity.subtype,
+          intensity: session.manualActivity.intensity,
+          source: session.manualActivity.source,
+          cardioStyle: session.manualActivity.cardioStyle,
+          distanceMiles: session.manualActivity.distanceMiles,
+          caloriesBurned: session.manualActivity.caloriesBurned,
+          avgHeartRate: session.manualActivity.avgHeartRate,
+        } : undefined,
+      ).catch(() => undefined);
+    }
     setCandidates(prev => (prev ?? []).filter(c => c.externalId !== session.id));
     onAfterImport?.();
   };

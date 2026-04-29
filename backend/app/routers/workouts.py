@@ -78,6 +78,7 @@ class WorkoutCompleteRequest(BaseModel):
     activity_intensity: str | None = None
     activity_source: str | None = None
     cardio_style: str | None = None
+    distance_miles: float | None = None
     calories_burned: int | None = None
     hr_summary: dict | None = None  # {avgBpm, maxBpm, zoneMinutes}
     # Post-workout feedback. Used by weekly_review's struggle metrics
@@ -432,14 +433,20 @@ def generate_single_day(
 
     # Look up user's age from profile for age-adjusted planning.
     user_age: int | None = None
+    load_equipment_settings: dict | None = None
     try:
-        from app.models import UserProfile as UserProfileModel
+        from app.models import UserProfile as UserProfileModel, UserPreferences as UserPreferencesModel
         prof_row = db.exec(
             select(UserProfileModel).where(UserProfileModel.user_id == current_user.id)
         ).first()
         user_age = prof_row.age if prof_row else None
+        prefs_row = db.exec(
+            select(UserPreferencesModel).where(UserPreferencesModel.user_id == current_user.id)
+        ).first()
+        load_equipment_settings = getattr(prefs_row, "equipment_settings", None) if prefs_row else None
     except Exception:
         user_age = None
+        load_equipment_settings = None
 
     # Build planner inputs
     inputs = PlannerInputs(
@@ -457,6 +464,7 @@ def generate_single_day(
         recent_focus_families=recent_focus_families,
         muscle_fatigue=fatigue_snapshot.muscle_fatigue.to_dict() if fatigue_snapshot else None,
         user_age=user_age,
+        load_equipment_settings=load_equipment_settings,
     )
 
     # Generate full plan (fast — deterministic, no AI)
@@ -726,14 +734,20 @@ def generate_full_week(
         logger.debug(f"[generate-week] fatigue check failed: {e}")
 
     user_age: int | None = None
+    load_equipment_settings: dict | None = None
     try:
-        from app.models import UserProfile as UserProfileModel
+        from app.models import UserProfile as UserProfileModel, UserPreferences as UserPreferencesModel
         prof_row = db.exec(
             select(UserProfileModel).where(UserProfileModel.user_id == current_user.id)
         ).first()
         user_age = prof_row.age if prof_row else None
+        prefs_row = db.exec(
+            select(UserPreferencesModel).where(UserPreferencesModel.user_id == current_user.id)
+        ).first()
+        load_equipment_settings = getattr(prefs_row, "equipment_settings", None) if prefs_row else None
     except Exception:
         user_age = None
+        load_equipment_settings = None
 
     inputs = PlannerInputs(
         goal=body.goal,
@@ -750,6 +764,7 @@ def generate_full_week(
         recent_focus_families=recent_focus_families,
         muscle_fatigue=fatigue_snapshot.muscle_fatigue.to_dict() if fatigue_snapshot else None,
         user_age=user_age,
+        load_equipment_settings=load_equipment_settings,
     )
 
     # Single-day swap mode: caller sent their current week. Skip the
@@ -1215,6 +1230,7 @@ def mark_workout_complete(
         existing.activity_intensity = body.activity_intensity or existing.activity_intensity
         existing.activity_source    = body.activity_source or existing.activity_source
         existing.cardio_style       = body.cardio_style or existing.cardio_style
+        existing.distance_miles     = body.distance_miles if body.distance_miles is not None else existing.distance_miles
         existing.calories_burned    = body.calories_burned if body.calories_burned is not None else existing.calories_burned
         existing.hr_summary         = body.hr_summary if body.hr_summary is not None else existing.hr_summary
         existing.feeling            = body.feeling if body.feeling is not None else existing.feeling
@@ -1235,6 +1251,7 @@ def mark_workout_complete(
             activity_intensity=body.activity_intensity,
             activity_source=body.activity_source,
             cardio_style=body.cardio_style,
+            distance_miles=body.distance_miles,
             calories_burned=body.calories_burned,
             hr_summary=body.hr_summary,
             feeling=body.feeling,
@@ -1342,7 +1359,7 @@ def mark_workout_complete(
                         set_number=set_payload.set_number,
                         actual_reps=set_payload.reps,
                         actual_weight_lbs=set_payload.weight_lbs,
-                        rir_target=set_payload.rir,
+                        actual_rir=set_payload.rir,
                         duration_seconds=set_payload.duration_seconds,
                         comfort_rating=set_payload.comfort_rating,
                         actual_distance=set_payload.actual_distance,
@@ -1571,12 +1588,18 @@ def mark_workout_complete(
         if gear_items:
             focus_lower = (body.focus_label or "").lower()
             exercise_names_lower = [ep.name.lower() for ep in (body.exercises or [])]
-            # Sum actual_distance from sets (treadmill, bike, rower, etc.)
-            total_distance_miles = 0.0
+            # Prefer structured set distance when present. Manual/imported
+            # cardio often arrives as session-level distance only.
+            total_set_distance_miles = 0.0
             for ep in (body.exercises or []):
                 for s in ep.sets:
                     if hasattr(s, "actual_distance") and s.actual_distance:
-                        total_distance_miles += s.actual_distance
+                        total_set_distance_miles += s.actual_distance
+            total_distance_miles = (
+                total_set_distance_miles
+                if total_set_distance_miles > 0
+                else float(body.distance_miles or 0.0)
+            )
             for gear in gear_items:
                 keywords = [kw.lower() for kw in (gear.auto_track_keywords or [])]
                 if not keywords:
@@ -1771,7 +1794,7 @@ def sync_in_progress_workout(
                     set_number=set_payload.set_number,
                     actual_reps=set_payload.reps,
                     actual_weight_lbs=set_payload.weight_lbs,
-                    rir_target=set_payload.rir,
+                    actual_rir=set_payload.rir,
                     duration_seconds=set_payload.duration_seconds,
                     comfort_rating=set_payload.comfort_rating,
                     actual_distance=set_payload.actual_distance,
@@ -2003,6 +2026,9 @@ def list_completions(
             "activity_category": r.activity_category,
             "activity_subtype": r.activity_subtype,
             "activity_intensity": r.activity_intensity,
+            "cardio_style": r.cardio_style,
+            "distance_miles": r.distance_miles,
+            "calories_burned": r.calories_burned,
         }
         for r in rows
     ]
@@ -2078,6 +2104,47 @@ def get_pace_history(
             "duration_seconds": dur,
             "metrics": metrics,
         })
+
+    completion_rows = db.exec(
+        select(WorkoutCompletion)
+        .where(
+            WorkoutCompletion.user_id == current_user.id,
+            WorkoutCompletion.workout_date >= cutoff,
+            WorkoutCompletion.distance_miles.isnot(None),
+        )
+        .order_by(WorkoutCompletion.workout_date.asc())
+    ).all()
+
+    def _pace_from_duration(distance_miles: float | None, duration_seconds: int | None) -> str | None:
+        if not distance_miles or distance_miles <= 0 or not duration_seconds or duration_seconds <= 0:
+            return None
+        pace_min = (duration_seconds / 60.0) / distance_miles
+        mins = int(pace_min)
+        secs = int(round((pace_min - mins) * 60))
+        if secs == 60:
+            mins += 1
+            secs = 0
+        return f"{mins}:{secs:02d}/mi"
+
+    for row in completion_rows:
+        if exercise and exercise.lower() not in (row.activity_subtype or row.focus_label or "").lower():
+            continue
+        distance_miles = float(row.distance_miles or 0.0)
+        if distance_miles <= 0:
+            continue
+        points.append({
+            "exercise": row.activity_subtype or row.focus_label,
+            "date": row.workout_date.isoformat(),
+            "distance": distance_miles,
+            "pace": _pace_from_duration(distance_miles, row.duration_seconds),
+            "duration_seconds": row.duration_seconds,
+            "metrics": {
+                "source": row.activity_source,
+                "category": row.activity_category,
+                "cardio_style": row.cardio_style,
+            },
+        })
+    points.sort(key=lambda p: p["date"])
     return {"points": points}
 
 
