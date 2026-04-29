@@ -18,7 +18,6 @@ interface Props {
 }
 
 interface MeasurementFields {
-  weight: string;
   waist: string;
   chest: string;
   hips: string;
@@ -29,12 +28,11 @@ interface MeasurementFields {
 }
 
 const EMPTY: MeasurementFields = {
-  weight: '', waist: '', chest: '', hips: '',
+  waist: '', chest: '', hips: '',
   bicep: '', thigh: '', calf: '', bodyFat: '',
 };
 
 const FIELDS: Array<{ key: keyof MeasurementFields; label: string; unit: string }> = [
-  { key: 'weight',  label: 'Weight',    unit: 'lbs' },
   { key: 'waist',   label: 'Waist',     unit: 'in' },
   { key: 'chest',   label: 'Chest',     unit: 'in' },
   { key: 'hips',    label: 'Hips',      unit: 'in' },
@@ -46,27 +44,19 @@ const FIELDS: Array<{ key: keyof MeasurementFields; label: string; unit: string 
 
 export default function BodyMeasurementsModal({ visible, authToken, currentWeight, themeName, onClose, onSaved }: Props) {
   const tc = getTheme(themeName).colors;
-  const [fields, setFields] = useState<MeasurementFields>(() => ({
-    ...EMPTY,
-    weight: currentWeight ? String(currentWeight) : '',
-  }));
+  const [fields, setFields] = useState<MeasurementFields>(EMPTY);
   const [saving, setSaving] = useState(false);
 
   const set = (key: keyof MeasurementFields, val: string) =>
     setFields(f => ({ ...f, [key]: val }));
 
   const handleSave = async () => {
-    const weight = parseFloat(fields.weight);
-    if (!fields.weight || isNaN(weight) || weight < 50 || weight > 700) {
-      Alert.alert('Weight required', 'Please enter a valid weight (50–700 lbs).');
-      return;
-    }
     setSaving(true);
     try {
       const parse = (v: string) => { const n = parseFloat(v); return isNaN(n) ? undefined : n; };
       await submitWeeklyCheckin(authToken, {
         checkin_date: new Date().toISOString().slice(0, 10),
-        weight_lbs: weight,
+        weight_lbs: currentWeight ?? 0,
         waist_in: parse(fields.waist),
         chest_in: parse(fields.chest),
         hips_in: parse(fields.hips),
@@ -78,7 +68,7 @@ export default function BodyMeasurementsModal({ visible, authToken, currentWeigh
         sleep: 3,
         adherence: 3,
       });
-      setFields({ ...EMPTY, weight: fields.weight });
+      setFields(EMPTY);
       onSaved?.();
       onClose();
     } catch {
@@ -109,7 +99,7 @@ export default function BodyMeasurementsModal({ visible, authToken, currentWeigh
               </TouchableOpacity>
             </View>
             <Text style={{ fontSize: 13, color: tc.textMuted, paddingHorizontal: 20, marginBottom: 16 }}>
-              Log your measurements to track progress over time. Only weight is required.
+              Log your measurements to track body composition over time. All fields are optional.
             </Text>
 
             <ScrollView style={{ paddingHorizontal: 20 }} keyboardShouldPersistTaps="handled">
@@ -132,7 +122,7 @@ export default function BodyMeasurementsModal({ visible, authToken, currentWeigh
                       value={fields[key]}
                       onChangeText={v => set(key, v)}
                       keyboardType="decimal-pad"
-                      placeholder={key === 'weight' ? 'Required' : 'Optional'}
+                      placeholder="Optional"
                       placeholderTextColor={tc.textMuted}
                     />
                     <Text style={{ fontSize: 14, color: tc.textMuted, minWidth: 24 }}>{unit}</Text>

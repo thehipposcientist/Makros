@@ -262,6 +262,19 @@ def recommend_weight(
     Each step past (1) also populates a `recommendation` field on the
     response so the client can show the user *why* a weight was picked."""
     try:
+        # Bodyweight gate: exercises performed with bodyweight (no added load)
+        # never get a weight recommendation. Short-circuit before any tier logic.
+        # The client also guards via shouldHideWeight(), but this prevents
+        # non-zero weights from leaking through edge cases (e.g. historical
+        # data with weight for an exercise the user is now doing unloaded).
+        if (body.equipment or "").strip().lower() in ("bodyweight", "none", "bw"):
+            return {
+                "weightLbs": 0.0, "reps": 0,
+                "tip": "", "action": "continue", "repRange": None,
+                "debug": {}, "recommendation": None, "awaitingFeel": False,
+                "source": "bodyweight", "suspicionReasons": [], "fatigue_override": False,
+            }
+
         planned_set_count = body.targetSets if body.targetSets and body.targetSets > 0 else max(1, body.nextSetNumber)
         # Forward the plan's per-exercise rep target onto every planned set
         # so the progression engine honors the plan's intent instead of

@@ -8,7 +8,68 @@ import { getStreak, StreakSummary } from '../services/api';
 interface Props {
   authToken: string;
   themeName?: AppThemeName;
+  displayName?: string;
 }
+
+const DAILY_MOTTOS = [
+  "Every rep is a vote for who you're becoming.",
+  "The only workout you regret is the one you skipped.",
+  "Show up. That's 80% of it.",
+  "Discipline is just doing it on the days you don't feel like it.",
+  "Strong is built, not born.",
+  "One more set. One more day. One more week.",
+  "The body achieves what the mind believes.",
+  "Consistency beats intensity. Every time.",
+  "You don't have to be great to start, but you have to start to be great.",
+  "Progress is progress, no matter how small.",
+  "Earned, not given.",
+  "Champions train. Everyone else just exercises.",
+  "The pain you feel today is the strength you feel tomorrow.",
+  "Make yourself proud.",
+  "Small steps still move you forward.",
+  "Be the hardest worker in the room.",
+  "It always seems impossible until it's done.",
+  "Your future self is watching.",
+  "Push harder than yesterday.",
+  "The grind doesn't stop.",
+  "Results come to those who show up.",
+  "Train like there's no off-season.",
+  "You are stronger than your excuses.",
+  "The only bad workout is the one that didn't happen.",
+  "Outwork your doubt.",
+  "Fall in love with the process.",
+  "Built different.",
+  "Sweat now. Shine later.",
+  "Earn your rest.",
+  "Keep going — you're closer than you think.",
+  "Fuel the fire.",
+  "Hard work compounds.",
+  "Every session leaves a mark.",
+  "Today's effort is tomorrow's edge.",
+  "The standard is the standard.",
+  "No shortcuts. No excuses.",
+  "Your best competition is yesterday's you.",
+  "Commit to the process, trust the results.",
+  "Do it for the version of you that doubted it.",
+  "Train hard. Recover smart. Repeat.",
+  "One decision at a time.",
+  "You've got this.",
+  "Make it count.",
+];
+
+function getDailyMotto(name?: string): string {
+  const now = new Date();
+  const dayOfYear = Math.floor((now.getTime() - new Date(now.getFullYear(), 0, 0).getTime()) / 86400000);
+  const motto = DAILY_MOTTOS[dayOfYear % DAILY_MOTTOS.length];
+  if (name) {
+    const first = name.split(/[\s_]/)[0];
+    const cap = first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
+    return `${cap} — ${motto}`;
+  }
+  return motto;
+}
+
+export { getDailyMotto };
 
 export function coachingCopy(compliance_7d: number, current_streak: number): string {
   if (current_streak === 0 && compliance_7d < 30) {
@@ -23,31 +84,13 @@ export function coachingCopy(compliance_7d: number, current_streak: number): str
   return "On fire. Don't break the chain.";
 }
 
-/**
- * Small dashboard widget showing current streak + 7-day compliance with
- * coaching copy. Always visible once we have a streak or any 7d activity.
- */
-export default function StreakConsistencyWidget({ authToken, themeName }: Props) {
-  // getTheme returns { colors, sections, ... } — pull `.colors` so dark
-  // themes actually render with themed contrast. Prior code destructured
-  // `tc.text` / `tc.textMuted` which are undefined → RN fell back to
-  // black text on a dark background.
+export default function StreakConsistencyWidget({ authToken, themeName, displayName }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
-  const workoutPalette = theme.sections.workout;
   const [data, setData] = useState<StreakSummary | null>(null);
 
-  // Track the last streak we animated for so we don't re-pulse every
-  // render (e.g. theme change re-runs this widget). Ref updates only
-  // after the animation kicks off.
   const lastAnimatedStreak = useRef<number | null>(null);
   const streakScale = useRef(new Animated.Value(1)).current;
-
-  // Continuous flame pulse when the user is "on fire" (compliance_7d >= 80).
-  // Subtle 1.0 ↔ 1.025 oscillation — enough to feel alive, not distracting.
-  // Held separate from `streakScale` so the one-shot tick-up pulse can
-  // compose cleanly without fighting the loop. Leaves at exact 1.0 when
-  // the tier drops so the flame doesn't quiver in non-fire states.
   const flamePulse = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -56,15 +99,11 @@ export default function StreakConsistencyWidget({ authToken, themeName }: Props)
       try {
         const r = await getStreak(authToken);
         if (alive) setData(r);
-      } catch {
-        /* silent — widget just won't render */
-      }
+      } catch { /* silent */ }
     })();
     return () => { alive = false; };
   }, [authToken]);
 
-  // Pulse the streak number + flame when the count ticks up. First load
-  // seeds the ref without firing the animation.
   useEffect(() => {
     if (!data) return;
     const cur = data.current_streak;
@@ -79,8 +118,6 @@ export default function StreakConsistencyWidget({ authToken, themeName }: Props)
     lastAnimatedStreak.current = cur;
   }, [data?.current_streak, streakScale]);
 
-  // "On fire" loop: drive only when compliance_7d >= 80 and stop + reset
-  // to 1.0 otherwise. Native driver keeps it free on the JS thread.
   const onFire = (data?.compliance_7d ?? 0) >= 80;
   useEffect(() => {
     if (!onFire) {
@@ -97,58 +134,43 @@ export default function StreakConsistencyWidget({ authToken, themeName }: Props)
     return () => { loop.stop(); };
   }, [onFire, flamePulse]);
 
-  if (!data) return null;
-  // Render only when there's something to celebrate (non-zero) or the
-  // user has been training (compliance > 0). Pure zero → hide.
-  if (data.current_streak === 0 && data.compliance_7d === 0) return null;
-
-  const copy = coachingCopy(data.compliance_7d, data.current_streak);
+  const motto = getDailyMotto(displayName);
 
   return (
     <View style={{
       borderRadius: radius.md,
-      paddingHorizontal: 10, paddingVertical: 6,
+      paddingHorizontal: 10, paddingVertical: 8,
       marginBottom: 8,
       flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
     }}>
-      {/* Primary streak chip — small, tinted by theme border so it
-          doesn't dominate the screen. */}
-      <View style={{
-        flexDirection: 'row', alignItems: 'center', gap: 4,
-        paddingHorizontal: 8, paddingVertical: 4,
-        borderRadius: 12,
-        backgroundColor: tc.surface,
-        borderWidth: 1, borderColor: tc.border,
-      }}>
-        <Animated.View style={{ transform: [{ scale: streakScale }, { scale: flamePulse }] }}>
-          <Ionicons name="flame" size={12} color={tc.warning} />
-        </Animated.View>
-        <Animated.Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary, fontVariant: ['tabular-nums'] as any, transform: [{ scale: streakScale }] }}>
-          {data.current_streak}
-        </Animated.Text>
-        <Text style={{ fontSize: 10, color: tc.textSecondary }}>
-          day{data.current_streak === 1 ? '' : 's'}
-        </Text>
-      </View>
-      {/* Secondary compliance chip — muted. */}
-      <View style={{
-        paddingHorizontal: 8, paddingVertical: 4,
-        borderRadius: 12,
-        backgroundColor: tc.surface,
-        borderWidth: 1, borderColor: tc.border,
-      }}>
-        <Text style={{ fontSize: 11, color: tc.textSecondary }}>
-          {data.compliance_7d}% wk
-        </Text>
-      </View>
-      {/* Coaching copy — plain text, wraps if needed. */}
+      {/* Flame + streak days — only when streak > 0 */}
+      {data && data.current_streak > 0 && (
+        <View style={{
+          flexDirection: 'row', alignItems: 'center', gap: 4,
+          paddingHorizontal: 8, paddingVertical: 4,
+          borderRadius: 12,
+          backgroundColor: tc.surface,
+          borderWidth: 1, borderColor: tc.border,
+        }}>
+          <Animated.View style={{ transform: [{ scale: streakScale }, { scale: flamePulse }] }}>
+            <Ionicons name="flame" size={12} color={tc.warning} />
+          </Animated.View>
+          <Animated.Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary, fontVariant: ['tabular-nums'] as any, transform: [{ scale: streakScale }] }}>
+            {data.current_streak}
+          </Animated.Text>
+          <Text style={{ fontSize: 10, color: tc.textSecondary }}>
+            day{data.current_streak === 1 ? '' : 's'}
+          </Text>
+        </View>
+      )}
+      {/* Daily personalized motto */}
       <Text
         style={{ flex: 1, fontSize: 11, color: tc.textMuted, fontStyle: 'italic' }}
         numberOfLines={2}
       >
-        {copy}
+        {motto}
       </Text>
     </View>
   );

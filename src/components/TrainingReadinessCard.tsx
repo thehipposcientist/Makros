@@ -148,10 +148,13 @@ interface Props {
    *  watch drift caused by independent compute calls. */
   onScoreComputed?: (score: number, label: string) => void;
   defaultExpanded?: boolean;
+  /** When true the card reframes from "are you ready?" to "how is recovery
+   *  going?" — different dial label, copy, and muscle-bar framing. */
+  workoutDone?: boolean;
 }
 
 export default function TrainingReadinessCard({
-  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed, defaultExpanded,
+  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed, defaultExpanded, workoutDone,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -454,7 +457,7 @@ export default function TrainingReadinessCard({
             style={{ fontSize: 18, fontWeight: '900', color: labelColor, lineHeight: 20 }}
           />
           <Text style={{ fontSize: 7, fontWeight: '700', color: labelColor + 'BB', letterSpacing: 0.4, marginTop: -1 }}>
-            READY
+            {workoutDone ? 'DONE' : 'READY'}
           </Text>
         </View>
         <View style={{ flex: 1 }}>
@@ -462,11 +465,15 @@ export default function TrainingReadinessCard({
               "Fatigued"). Large and color-coded but NOT the focus name,
               so the user can't confuse it with the "Push" header below. */}
           <Text style={{ fontSize: 18, fontWeight: '800', color: labelColor, lineHeight: 22 }}>
-            {prep.label}
+            {workoutDone ? 'Recovering' : prep.label}
           </Text>
           {/* Small caption beneath — ties readiness to today's focus
               without competing with the workout card. */}
-          {focusLabel ? (
+          {workoutDone ? (
+            <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 1 }} numberOfLines={1}>
+              Workout done · recovery in progress
+            </Text>
+          ) : focusLabel ? (
             <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 1 }} numberOfLines={1}>
               for {focusLabel} · {prep.signalsPresent}/{prep.signalsTotal} signals
             </Text>
@@ -477,9 +484,13 @@ export default function TrainingReadinessCard({
           )}
           {!expanded && (
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 3 }} numberOfLines={1}>
-              {prep.insights[0] ?? (relevantMuscles.length > 0
-                ? `${relevantMuscles.map(([m]) => m.replace('_', ' ')).join(', ')} recovery shown`
-                : 'All tracked signals look clean')}
+              {workoutDone
+                ? (relevantMuscles.length > 0
+                    ? `${relevantMuscles.map(([m]) => m.replace('_', ' ')).join(', ')} load tracked`
+                    : 'Rest up — muscles recharging')
+                : (prep.insights[0] ?? (relevantMuscles.length > 0
+                    ? `${relevantMuscles.map(([m]) => m.replace('_', ' ')).join(', ')} recovery shown`
+                    : 'All tracked signals look clean'))}
             </Text>
           )}
         </View>
@@ -492,7 +503,7 @@ export default function TrainingReadinessCard({
           {relevantMuscles.length > 0 && (
             <View style={{ marginBottom: 8 }}>
               <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 4 }}>
-                {focusMuscles.length > 0 ? 'TODAY\'S MUSCLES' : 'MOST FATIGUED'}
+                {workoutDone ? 'POST-WORKOUT LOAD' : (focusMuscles.length > 0 ? 'TODAY\'S MUSCLES' : 'MOST FATIGUED')}
               </Text>
               {relevantMuscles.map(([muscle, fat], mIdx) => {
                 const pct = Math.round(fat * 100);

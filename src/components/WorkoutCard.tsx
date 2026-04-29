@@ -172,21 +172,102 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
 
       {/* ── Exercise list ───────────────────────────────────────────────── */}
       <View style={styles.body}>
-        {workout.exercises.map((exercise, index) => (
-          <FadeInView key={index} delay={index * 40} duration={260} slideDistance={6}>
-            <ExerciseRow
-              index={index}
-              exercise={exercise}
-              isLast={index === workout.exercises.length - 1}
-              section={s}
-              c={c}
-              styles={styles}
-              onOpenVideo={onOpenExerciseVideo}
-              onSwap={onSwapExercise}
-              onView={onViewExercise}
-            />
-          </FadeInView>
-        ))}
+        {(() => {
+          // Group consecutive core-role exercises (2+) into circuit blocks.
+          // Single core exercises render as normal rows.
+          type Group =
+            | { kind: 'single'; exercise: typeof workout.exercises[0]; originalIndex: number }
+            | { kind: 'circuit'; exercises: { ex: typeof workout.exercises[0]; originalIndex: number }[] };
+          const groups: Group[] = [];
+          let i = 0;
+          while (i < workout.exercises.length) {
+            const ex = workout.exercises[i];
+            const role = ((ex as any)._role ?? (ex as any).slot_role ?? '').toLowerCase();
+            if (role === 'core') {
+              // Collect the run of core exercises
+              const run: { ex: typeof ex; originalIndex: number }[] = [{ ex, originalIndex: i }];
+              let j = i + 1;
+              while (j < workout.exercises.length) {
+                const nex = workout.exercises[j];
+                const nrole = ((nex as any)._role ?? (nex as any).slot_role ?? '').toLowerCase();
+                if (nrole === 'core') { run.push({ ex: nex, originalIndex: j }); j++; }
+                else break;
+              }
+              if (run.length >= 2) {
+                groups.push({ kind: 'circuit', exercises: run });
+              } else {
+                groups.push({ kind: 'single', exercise: ex, originalIndex: i });
+              }
+              i = j;
+            } else {
+              groups.push({ kind: 'single', exercise: ex, originalIndex: i });
+              i++;
+            }
+          }
+
+          return groups.map((group, gi) => {
+            if (group.kind === 'single') {
+              const isLast = gi === groups.length - 1;
+              return (
+                <FadeInView key={group.originalIndex} delay={group.originalIndex * 40} duration={260} slideDistance={6}>
+                  <ExerciseRow
+                    index={group.originalIndex}
+                    exercise={group.exercise}
+                    isLast={isLast}
+                    section={s}
+                    c={c}
+                    styles={styles}
+                    onOpenVideo={onOpenExerciseVideo}
+                    onSwap={onSwapExercise}
+                    onView={onViewExercise}
+                  />
+                </FadeInView>
+              );
+            }
+            // Circuit block
+            const sets = Number(group.exercises[0].ex.sets) || 3;
+            return (
+              <FadeInView key={`circuit-${gi}`} delay={group.exercises[0].originalIndex * 40} duration={260} slideDistance={6}>
+                <View style={{
+                  borderRadius: 12, borderWidth: 1.5,
+                  borderColor: s.strong + '55', marginBottom: 10,
+                  overflow: 'hidden',
+                }}>
+                  <View style={{
+                    flexDirection: 'row', alignItems: 'center', gap: 6,
+                    backgroundColor: s.soft, paddingHorizontal: 12, paddingVertical: 7,
+                  }}>
+                    <Ionicons name="repeat" size={13} color={s.strong} />
+                    <Text style={{ fontSize: 11, fontWeight: '800', color: s.strong, letterSpacing: 0.5 }}>
+                      CORE CIRCUIT · {sets} ROUNDS
+                    </Text>
+                    <Text style={{ fontSize: 11, color: s.strong + '88', marginLeft: 'auto' }}>
+                      Minimal rest between exercises
+                    </Text>
+                  </View>
+                  {group.exercises.map(({ ex, originalIndex }, ei) => (
+                    <View key={originalIndex} style={ei < group.exercises.length - 1 ? {
+                      borderBottomWidth: 1, borderBottomColor: c.border,
+                    } : undefined}>
+                      <ExerciseRow
+                        index={originalIndex}
+                        exercise={ex}
+                        isLast={false}
+                        section={s}
+                        c={c}
+                        styles={styles}
+                        onOpenVideo={onOpenExerciseVideo}
+                        onSwap={onSwapExercise}
+                        onView={onViewExercise}
+                        circuitMode
+                      />
+                    </View>
+                  ))}
+                </View>
+              </FadeInView>
+            );
+          });
+        })()}
       </View>
 
     </View>
@@ -210,7 +291,7 @@ function StatItem({ icon, value, color }: {
 
 // ── ExerciseRow ───────────────────────────────────────────────────────────────
 
-function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo, onSwap, onView }: {
+function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo, onSwap, onView, circuitMode }: {
   index: number;
   exercise: WorkoutDay['exercises'][number];
   isLast: boolean;
@@ -220,9 +301,10 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
   onOpenVideo?: (name: string) => void;
   onSwap?: (exerciseIndex: number, exerciseName: string) => void;
   onView?: (name: string) => void;
+  circuitMode?: boolean;
 }) {
   return (
-    <View style={[styles.exRow, !isLast && { borderBottomWidth: 1, borderBottomColor: c.border + '66' }]}>
+    <View style={[styles.exRow, !isLast && !circuitMode && { borderBottomWidth: 1, borderBottomColor: c.border + '66' }]}>
       {/* Thumbnail — YouTube video frame when available, numbered tile
           otherwise. Tapping the thumbnail launches the form-video modal
           (separate hit target from the whole row so an accidental tap
@@ -322,13 +404,15 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
             soft={section.soft}
             text={section.text}
           />
-          <Chip
-            icon="timer-outline"
-            label={`${exercise.restSeconds}s rest`}
-            strong={section.strong}
-            soft={section.soft}
-            text={section.text}
-          />
+          {!circuitMode && (
+            <Chip
+              icon="timer-outline"
+              label={`${exercise.restSeconds}s rest`}
+              strong={section.strong}
+              soft={section.soft}
+              text={section.text}
+            />
+          )}
           {/* Muscle chip — driven off `primary_muscle` from the planner.
               Humanized (chest → Chest, full_body → Full Body). Skipped
               for mobility/systemic/cardio exercises where the muscle

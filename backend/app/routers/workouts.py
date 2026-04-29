@@ -1441,6 +1441,16 @@ def mark_workout_complete(
             "duration_seconds": body.duration_seconds,
             "date": str(body.workout_date),
             "exercise_count": len(body.exercises) if body.exercises else 0,
+            "exercises": [
+                {
+                    "name": ex.name,
+                    "sets": [
+                        {"reps": s.actual_reps, "weight": s.actual_weight_lbs}
+                        for s in ex.sets
+                    ],
+                }
+                for ex in (body.exercises or [])
+            ],
         })
     except Exception:
         pass
@@ -1509,6 +1519,46 @@ def mark_workout_complete(
         except Exception as e:
             logger.info(f"[workouts/complete] PR detection failed (non-fatal): {e}")
             prs = []
+
+    # ── Gear mileage auto-accumulation ──
+    # For each active gear item with auto_track_keywords, check if the
+    # workout focus or any exercise name contains a matching keyword.
+    # Distance from exercises is accumulated (actual_distance fields).
+    # Best-effort: never blocks a successful completion.
+    try:
+        from app.models import GearItem
+        gear_items = db.exec(
+            select(GearItem)
+            .where(GearItem.user_id == current_user.id)
+            .where(GearItem.is_active == True)
+        ).all()
+        if gear_items:
+            focus_lower = (body.focus_label or "").lower()
+            exercise_names_lower = [ep.name.lower() for ep in (body.exercises or [])]
+            # Sum actual_distance from sets (treadmill, bike, rower, etc.)
+            total_distance_miles = 0.0
+            for ep in (body.exercises or []):
+                for s in ep.sets:
+                    if hasattr(s, "actual_distance") and s.actual_distance:
+                        total_distance_miles += s.actual_distance
+            for gear in gear_items:
+                keywords = [kw.lower() for kw in (gear.auto_track_keywords or [])]
+                if not keywords:
+                    continue
+                matched = any(
+                    kw in focus_lower or any(kw in en for en in exercise_names_lower)
+                    for kw in keywords
+                )
+                if matched:
+                    from datetime import timezone as _tz
+                    gear.accumulated_miles += total_distance_miles
+                    gear.accumulated_sessions += 1
+                    gear.updated_at = datetime.now(timezone.utc)
+                    db.add(gear)
+            if gear_items:
+                db.commit()
+    except Exception as e:
+        logger.debug(f"[workouts/complete] gear accumulation failed (non-fatal): {e}")
 
     return {
         "ok": True,

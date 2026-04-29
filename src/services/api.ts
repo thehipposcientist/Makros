@@ -1549,6 +1549,79 @@ export async function searchExerciseAI(
   return { results: filtered };
 }
 
+// ─── Cardio equipment profiles ───────────────────────────────────────────────
+
+export interface CardioEquipmentProfile {
+  id: number;
+  category: string;
+  equipment_type: string;
+  display_name: string;
+  brand: string | null;
+  model_name: string | null;
+  location: string;
+  capabilities: string[];
+  notes: string | null;
+}
+
+export async function getCardioEquipment(token: string): Promise<CardioEquipmentProfile[]> {
+  return request<CardioEquipmentProfile[]>('/profile/cardio-equipment', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function addCardioEquipment(
+  token: string,
+  body: Omit<CardioEquipmentProfile, 'id'>,
+): Promise<CardioEquipmentProfile> {
+  return request<CardioEquipmentProfile>('/profile/cardio-equipment', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateCardioEquipment(
+  token: string,
+  id: number,
+  body: Omit<CardioEquipmentProfile, 'id'>,
+): Promise<CardioEquipmentProfile> {
+  return request<CardioEquipmentProfile>(`/profile/cardio-equipment/${id}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteCardioEquipment(token: string, id: number): Promise<void> {
+  await request<void>(`/profile/cardio-equipment/${id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getCardioCapabilityTokens(token: string): Promise<{ token: string; label: string; modalities: string[] }[]> {
+  return request<any[]>('/profile/cardio-equipment/capabilities', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function suggestExercisesForWorkout(
+  token: string,
+  body: {
+    workout_focus: string;
+    current_exercises: string[];
+    equipment?: string[];
+    injuries?: string[];
+  },
+): Promise<{ results: AIExerciseResult[] }> {
+  const res = await request<{ results: AIExerciseResult[] }>('/ai/exercise-suggest', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  return { results: res.results ?? [] };
+}
+
 // ─── Async plan-job queue ────────────────────────────────────────────────────
 //
 // The client enqueues a plan-gen job, then polls for the result. This
@@ -2375,6 +2448,24 @@ export interface NutritionScoreWeekly {
 
 export async function getNutritionScore(token: string, days = 7): Promise<{ today: NutritionScoreToday; weekly: NutritionScoreWeekly }> {
   return request(`/meals/score?days=${days}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export interface AdjustedDailyTarget {
+  base_daily_target: number;
+  adjusted_calories: number;
+  adjustment_applied: number;
+  at_cap: boolean;
+  days_remaining: number;
+  weekly_budget_remaining: number;
+  note: string | null;
+  adjusted_macros: { protein_g: number; carbs_g: number; fat_g: number } | null;
+}
+
+export async function getAdjustedDailyTarget(token: string, date?: string): Promise<AdjustedDailyTarget> {
+  const q = date ? `?target_date=${date}` : '';
+  return request(`/meals/adjusted-daily-target${q}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -3443,6 +3534,7 @@ export interface FeedItem {
     duration_seconds?: number;
     date?: string;
     exercise_count?: number;
+    exercises?: Array<{ name: string; sets: Array<{ reps: number; weight: number | null }> }>;
     streak?: number;
     caption?: string;
     photo_base64?: string;
@@ -3522,5 +3614,84 @@ export async function parseMealText(
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({ text }),
   }, 25000, true);
+}
+
+// ─── Gear tracking ──────────────────────────────────────────────────────────
+
+export interface GearItem {
+  id: number;
+  name: string;
+  gear_type: string;
+  purchase_date: string | null;
+  starting_miles: number;
+  accumulated_miles: number;
+  accumulated_sessions: number;
+  is_active: boolean;
+  retirement_threshold_miles: number | null;
+  auto_track_keywords: string[];
+  notes: string | null;
+  created_at: string;
+  // Computed by backend
+  total_miles: number;
+  pct_used: number | null;
+  recommendation: string | null;
+}
+
+export interface GearItemCreate {
+  name: string;
+  gear_type: string;
+  purchase_date?: string | null;
+  starting_miles?: number;
+  retirement_threshold_miles?: number | null;
+  auto_track_keywords?: string[];
+  notes?: string | null;
+}
+
+export async function listGear(token: string): Promise<GearItem[]> {
+  return request<GearItem[]>('/gear', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function addGear(token: string, body: GearItemCreate): Promise<GearItem> {
+  return request<GearItem>('/gear', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateGear(token: string, id: number, body: GearItemCreate): Promise<GearItem> {
+  return request<GearItem>(`/gear/${id}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteGear(token: string, id: number): Promise<void> {
+  await request<void>(`/gear/${id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function logGearMiles(
+  token: string,
+  id: number,
+  miles: number,
+  sessions?: number,
+): Promise<GearItem> {
+  return request<GearItem>(`/gear/${id}/log-miles`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ miles, sessions: sessions ?? 1 }),
+  });
+}
+
+export async function getGearRecommendations(token: string): Promise<GearItem[]> {
+  return request<GearItem[]>('/gear/recommendations', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
 }
 

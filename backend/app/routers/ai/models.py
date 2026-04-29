@@ -244,6 +244,12 @@ class ExerciseSearchRequest(BaseModel):
     injuries: list[str] | None = None     # list of injuries to avoid
     exclude: list[str] | None = None      # exercise names the user already has — do not return these
 
+class WorkoutSuggestRequest(BaseModel):
+    workout_focus: str                     # e.g. "Push", "Legs", "Pull"
+    current_exercises: list[str] = []      # exercises already in the session
+    equipment: list[str] | None = None
+    injuries: list[str] | None = None
+
 class SupplementLookupRequest(BaseModel):
     name: str
 

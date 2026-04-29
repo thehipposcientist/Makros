@@ -73,6 +73,7 @@ import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
 // so the bottom nav stays pinned and feels like a single-page app.
 import ProgressScreen from './ProgressScreen';
 import EditProfileScreen from './EditProfileScreen';
+import GearScreen from './GearScreen';
 import { computeNutritionScore } from '../utils/nutritionScore';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { getActiveWatchSessionId, setActiveWatchSessionId } from '../utils/activeWatchSession';
@@ -1133,7 +1134,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Bottom-tab navigation. All five tabs render inline content within
   // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
   // and never disappears no matter which tab is active.
-  const [activeTab, setActiveTabRaw]      = useState<'friends' | 'workout' | 'meals' | 'progress' | 'profile'>('workout');
+  const [activeTab, setActiveTabRaw]      = useState<'friends' | 'workout' | 'meals' | 'progress' | 'you'>('workout');
   const progressFade = useRef(new Animated.Value(0)).current;
   const setActiveTab = useCallback((tab: typeof activeTab) => {
     setActiveTabRaw(tab);
@@ -1142,15 +1143,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       Animated.timing(progressFade, { toValue: 1, duration: 300, useNativeDriver: true }).start();
     }
     AsyncStorage.setItem('lastActiveTab', tab).catch(() => {});
-  }, []);
-  useEffect(() => {
-    AsyncStorage.getItem('lastActiveTab').then(saved => {
-      const tab = saved === 'goals' ? 'friends' : saved;
-      if (tab && ['friends', 'workout', 'meals', 'progress', 'profile'].includes(tab)) {
-        setActiveTabRaw(tab as typeof activeTab);
-        if (tab === 'progress') progressFade.setValue(1);
-      }
-    }).catch(() => {});
   }, []);
   // Sub-tab inside each main tab.
   // Workouts: plan | exercises | muscles | equipment
@@ -1161,6 +1153,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [expandedWorkoutHistoryId, setExpandedWorkoutHistoryId] = useState<string | null>(null);
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros' | 'history'>('plan');
   const [viewingFriend, setViewingFriend] = useState<import('../services/api').SocialDigestFriend | null>(null);
+  const [friendFeedItems, setFriendFeedItems] = useState<import('../services/api').FeedItem[]>([]);
+  const [friendFeedLoading, setFriendFeedLoading] = useState(false);
+  const [expandedFeedItemId, setExpandedFeedItemId] = useState<number | null>(null);
   const [expandedHistoryDate, setExpandedHistoryDate] = useState<string | null>(null);
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
   // gutHealthToday removed — NutritionCard now computes gut health from plan data
@@ -1233,7 +1228,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // shows up without a full reload.
   const [profileHealthScore, setProfileHealthScore] = useState<import('../types').HealthScoreResult | null>(null);
   useEffect(() => {
-    if (activeTab === 'profile') {
+    if (activeTab === 'you') {
       loadHealthScore().then(setProfileHealthScore).catch(() => setProfileHealthScore(null));
       // Lightweight friend-count poll for the Profile entry row.
       if (authToken) {
@@ -1301,6 +1296,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     workout: WorkoutDay;
     exerciseIndex: number;
     exerciseName: string;
+    dayKey: string;
   } | null>(null);
   const [libraryActiveTab, setLibraryActiveTab] = useState<'exercises' | 'muscles'>('exercises');
   const [showSupplementLibrary, setShowSupplementLibrary] = useState(false);
@@ -1539,6 +1535,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
   const [showFriends, setShowFriends] = useState(false);
   const [showGoalEditor, setShowGoalEditor] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showGearScreen, setShowGearScreen] = useState(false);
   const [showReadiness, setShowReadiness] = useState(false);
   const [readinessBadge, setReadinessBadge] = useState<{ score: number; label: string } | null>(null);
   const [pendingFriendCount, setPendingFriendCount] = useState(0);
@@ -1578,6 +1576,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [todayProbioticCfu, setTodayProbioticCfu] = useState<number | null>(null);
   const [proteinBreakdown, setProteinBreakdown] = useState<any | null>(null);
   const [todaySupplementMicros, setTodaySupplementMicros] = useState<Array<{ ingredient_slug?: string | null; ingredient_name?: string | null; custom_name?: string | null; dose_amount: number; dose_unit: string; taken_count: number }> | null>(null);
+  const [adjustedDailyTarget, setAdjustedDailyTarget] = useState<import('../services/api').AdjustedDailyTarget | null>(null);
   useEffect(() => {
     if (!authToken) return;
     let cancelled = false;
@@ -1608,6 +1607,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     })();
     return () => { cancelled = true; };
   }, [authToken, checkedMealsByDate, nutritionPlansByDate]);
+
+  // Weekly calorie budget — fetch once per day when on the meals tab.
+  // Re-fetches whenever logged meals change (checkedMealsByDate is the
+  // nearest proxy; the backend sums actual MealItem rows so it's authoritative).
+  useEffect(() => {
+    if (!authToken) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getAdjustedDailyTarget } = await import('../services/api');
+        const result = await getAdjustedDailyTarget(authToken, todayKey());
+        if (!cancelled) setAdjustedDailyTarget(result);
+      } catch { /* non-fatal — today's card falls back to static targets */ }
+    })();
+    return () => { cancelled = true; };
+  }, [authToken, checkedMealsByDate]);
 
   const persistDayState = useCallback(async (dayKey: string, patch: { skipped_focus?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any }) => {
     if (!authToken) return;
@@ -5469,9 +5484,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               />
             )}
 
-            {/* Streak + consistency widget (Feature 8) */}
+            {/* Streak + daily motto */}
             {workoutSubTab === 'plan' && authToken && (
-              <StreakConsistencyWidget authToken={authToken} themeName={userProfile.themePreference} />
+              <StreakConsistencyWidget authToken={authToken} themeName={userProfile.themePreference} displayName={username || undefined} />
             )}
 
             {/* Combined "Today's training readiness" — fuses Recovery (per-muscle
@@ -5492,6 +5507,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     proteinTarget={todayPlan?.targets?.protein ?? null}
                     calorieTarget={todayPlan?.targets?.calories ?? null}
                     todaysFocus={todaysFocus}
+                    workoutDone={todayDone}
                     onScoreComputed={(score, label) => {
                       canonicalPrepRef.current = { score, label, computedAt: Date.now() };
                       setReadinessBadge({ score, label });
@@ -5635,29 +5651,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             )}
 
 
-            {workoutSubTab === 'plan' && availabilityItems.length > 0 && (
-              <View style={{
-                flexDirection: 'row', alignItems: 'center', gap: 6,
-                paddingHorizontal: 2, marginBottom: 8,
-                flexWrap: 'wrap',
-              }}>
-                <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginRight: 4 }}>
-                  This week
-                </Text>
-                {availabilityItems.slice(0, 3).map(item => (
-                  <View key={item.label} style={{
-                    paddingHorizontal: 8, paddingVertical: 3,
-                    borderRadius: 10,
-                    borderWidth: 1, borderColor: themeColors.border,
-                    backgroundColor: themeColors.surface,
-                  }}>
-                    <Text style={{ fontSize: 11, color: themeColors.textSecondary, fontWeight: '600' }}>
-                      {item.label}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            )}
             {workoutSubTab === 'plan' && (() => {
               const splitRaw = (userProfile.preferredSplit || '').toLowerCase();
               const collapseUpper = ['upper_lower', 'upper lower', 'full_body', 'full body'].some(kw => splitRaw.includes(kw))
@@ -5804,7 +5797,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
               const _sortedSchedule = scheduleForRender
                 .map((s, origIdx) => ({ s, origIdx }))
-                .sort((a) => dateKey(a.s.date) === todayKey() ? -1 : 1);
+                .sort((a, b) => {
+                  const aToday = dateKey(a.s.date) === todayKey();
+                  const bToday = dateKey(b.s.date) === todayKey();
+                  if (aToday !== bToday) return aToday ? -1 : 1;
+                  return a.s.date.getTime() - b.s.date.getTime();
+                });
               const _todayAtTop = _sortedSchedule.length > 0 && dateKey(_sortedSchedule[0].s.date) === todayKey();
               return _sortedSchedule.map(({ s: item, origIdx: i }, renderIdx) => {
               const key = dateKey(item.date);
@@ -6063,7 +6061,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       );
                       return;
                     }
-                    setSwapExerciseState({ workout, exerciseIndex: exIdx, exerciseName: exName });
+                    setSwapExerciseState({ workout, exerciseIndex: exIdx, exerciseName: exName, dayKey: key });
                   }}
                   onOpenExerciseVideo={(exName) => {
                     // Launched from the small thumbnail on an exercise
@@ -6208,7 +6206,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               transparent
               onRequestClose={() => setShowReadiness(false)}
             >
-              <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+              <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.82)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
                 <TouchableOpacity style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }} activeOpacity={1} onPress={() => setShowReadiness(false)} />
                 <View style={{ width: '100%', maxHeight: '85%' }} pointerEvents="box-none">
                   <ScrollView scrollEnabled showsVerticalScrollIndicator={false}>
@@ -6236,6 +6234,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             proteinTarget={todayPlanR?.targets?.protein ?? null}
                             calorieTarget={todayPlanR?.targets?.calories ?? null}
                             todaysFocus={todaysFocusR}
+                            workoutDone={todayDone}
                             defaultExpanded
                             onScoreComputed={(score, label) => {
                               canonicalPrepRef.current = { score, label, computedAt: Date.now() };
@@ -6899,6 +6898,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         <Text style={{ fontWeight: '700', color: themeColors.textSecondary }}>{Math.round(totalFat)}</Text>
                         {t.fat > 0 ? `/${t.fat}g F` : 'g F'}
                       </Text>
+                      {/* Weekly budget adjustment — only on today's card, only
+                          when the shift is >15 kcal so on-target days are quiet. */}
+                      {isToday && adjustedDailyTarget && Math.abs(adjustedDailyTarget.adjustment_applied) > 15 && (
+                        <Text style={{ fontSize: 10, color: adjustedDailyTarget.adjustment_applied > 0 ? themeColors.success : themeColors.warning, marginTop: 2, fontWeight: '600' }}>
+                          {adjustedDailyTarget.adjustment_applied > 0 ? '↑' : '↓'}{' '}
+                          {Math.abs(Math.round(adjustedDailyTarget.adjustment_applied))} kcal weekly adjustment
+                          {adjustedDailyTarget.note ? ` · ${adjustedDailyTarget.note}` : ''}
+                        </Text>
+                      )}
                     </View>
                     {/* Per-day nutrition score badge */}
                     {(() => {
@@ -7063,30 +7071,79 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </View>
               )}
 
-              {/* Motivational nudge when friend is active */}
-              {viewingFriend.share_enabled && viewingFriend.sessions > 0 && (
-                <View style={{
-                  backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
-                  borderRadius: 14, padding: 16, marginBottom: 16, flexDirection: 'row', alignItems: 'center', gap: 10,
-                }}>
-                  <Ionicons name="fitness-outline" size={20} color={themeColors.success} />
-                  <Text style={{ flex: 1, fontSize: 12, color: themeColors.textSecondary, lineHeight: 17 }}>
-                    {viewingFriend.display_name || viewingFriend.username} has logged {viewingFriend.sessions} session{viewingFriend.sessions === 1 ? '' : 's'} this week.
-                  </Text>
-                </View>
-              )}
-
-              {/* Empty state when sharing is on but no sessions */}
-              {viewingFriend.share_enabled && viewingFriend.sessions === 0 && (
-                <View style={{
-                  backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
-                  borderRadius: 14, padding: 20, alignItems: 'center', marginBottom: 16,
-                }}>
-                  <Ionicons name="barbell-outline" size={24} color={themeColors.textMuted} />
-                  <Text style={{ fontSize: 12, color: themeColors.textMuted, marginTop: 8, textAlign: 'center' }}>
-                    No sessions logged this week yet.
-                  </Text>
-                </View>
+              {/* Workout feed */}
+              {viewingFriend.share_enabled && (
+                <>
+                  {friendFeedLoading && (
+                    <View style={{ alignItems: 'center', paddingVertical: 20 }}>
+                      <ActivityIndicator size="small" color={themeColors.primary} />
+                    </View>
+                  )}
+                  {!friendFeedLoading && friendFeedItems.length === 0 && (
+                    <View style={{
+                      backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
+                      borderRadius: 14, padding: 20, alignItems: 'center', marginBottom: 16,
+                    }}>
+                      <Ionicons name="barbell-outline" size={24} color={themeColors.textMuted} />
+                      <Text style={{ fontSize: 12, color: themeColors.textMuted, marginTop: 8, textAlign: 'center' }}>
+                        No sessions logged this week yet.
+                      </Text>
+                    </View>
+                  )}
+                  {!friendFeedLoading && friendFeedItems.map(item => {
+                    const p = item.payload;
+                    const isExpanded = expandedFeedItemId === item.id;
+                    const mins = p.duration_seconds ? Math.round(p.duration_seconds / 60) : null;
+                    const dateLabel = p.date ? new Date(p.date + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) : '';
+                    return (
+                      <TouchableOpacity
+                        key={item.id}
+                        activeOpacity={0.85}
+                        onPress={() => {
+                          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                          setExpandedFeedItemId(isExpanded ? null : item.id);
+                        }}
+                        style={{
+                          backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
+                          borderRadius: 14, marginBottom: 10, overflow: 'hidden',
+                        }}
+                      >
+                        <View style={{ flexDirection: 'row', alignItems: 'center', padding: 14, gap: 10 }}>
+                          <View style={{
+                            width: 36, height: 36, borderRadius: 10, backgroundColor: themeColors.primary + '18',
+                            alignItems: 'center', justifyContent: 'center',
+                          }}>
+                            <Ionicons name="barbell-outline" size={18} color={themeColors.primary} />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={{ fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>{p.focus ?? 'Workout'}</Text>
+                            <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 1 }}>
+                              {dateLabel}{mins ? `  ·  ${mins} min` : ''}{p.exercise_count ? `  ·  ${p.exercise_count} exercises` : ''}
+                            </Text>
+                          </View>
+                          <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
+                        </View>
+                        {isExpanded && p.exercises && p.exercises.length > 0 && (
+                          <View style={{ borderTopWidth: 1, borderTopColor: themeColors.border, paddingHorizontal: 14, paddingVertical: 10, gap: 8 }}>
+                            {p.exercises.map((ex, ei) => (
+                              <View key={ei}>
+                                <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textPrimary, marginBottom: 3 }}>{ex.name}</Text>
+                                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
+                                  {ex.sets.map(s => `${s.reps} reps${s.weight ? ` @ ${s.weight} lbs` : ''}`).join('  ·  ')}
+                                </Text>
+                              </View>
+                            ))}
+                          </View>
+                        )}
+                        {isExpanded && (!p.exercises || p.exercises.length === 0) && (
+                          <View style={{ borderTopWidth: 1, borderTopColor: themeColors.border, padding: 14 }}>
+                            <Text style={{ fontSize: 12, color: themeColors.textMuted }}>No exercise detail available.</Text>
+                          </View>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </>
               )}
 
               {!viewingFriend.share_enabled ? (
@@ -7109,7 +7166,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               themeName={userProfile.themePreference}
               inline
               onViewFriend={(userId, displayName, digestFriend) => {
-                if (digestFriend) setViewingFriend(digestFriend);
+                if (digestFriend) {
+                  setViewingFriend(digestFriend);
+                  setFriendFeedItems([]);
+                  setExpandedFeedItemId(null);
+                  if (digestFriend.share_enabled && authToken) {
+                    setFriendFeedLoading(true);
+                    import('../services/api').then(api =>
+                      api.getUserFeed(authToken, digestFriend.user_id)
+                    ).then(res => {
+                      setFriendFeedItems(res.items.filter(i => i.event_type === 'workout_completed'));
+                    }).catch(() => {}).finally(() => setFriendFeedLoading(false));
+                  }
+                }
               }}
             />
           )}
@@ -7135,46 +7204,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </ErrorBoundary>
       </Animated.View>
 
-      {/* ── Profile tab ─────────────────────────────────────────────── */}
-      {activeTab === 'profile' && (<ErrorBoundary>{(() => {
+      {/* ── You tab ─────────────────────────────────────────────────── */}
+      {activeTab === 'you' && (<ErrorBoundary>{(() => {
         const ps = userProfile.physicalStats;
         const heightStr = ps ? `${ps.heightFeet}'${ps.heightInches}"` : '—';
-        type ThemeEntry = { key: import('../types').AppThemeName; label: string; swatch: string; mode: 'dark' | 'light' };
-        const allThemes: ThemeEntry[] = [
-          // Dark themes
-          { key: 'midnight',  label: 'Midnight',   swatch: '#15C7B8', mode: 'dark' },
-          { key: 'ocean',     label: 'Ocean',      swatch: '#00CCE8', mode: 'dark' },
-          { key: 'amethyst',  label: 'Amethyst',   swatch: '#9838F8', mode: 'dark' },
-          { key: 'ember',     label: 'Ember',      swatch: '#FF6018', mode: 'dark' },
-          { key: 'wine',      label: 'Wine',       swatch: '#C82848', mode: 'dark' },
-          { key: 'obsidian',  label: 'Black Gold', swatch: '#C09428', mode: 'dark' },
-          { key: 'scarlet',   label: 'Scarlet',    swatch: '#FF2020', mode: 'dark' },
-          { key: 'blossom',   label: 'Blossom',    swatch: '#FF1890', mode: 'dark' },
-          { key: 'void',      label: 'Void',       swatch: '#4C9EFF', mode: 'dark' },
-          { key: 'dusk',      label: 'Dusk',       swatch: '#E8A878', mode: 'dark' },
-          { key: 'lavender',  label: 'Lavender',   swatch: '#B898E0', mode: 'dark' },
-          { key: 'aurora',    label: 'Aurora',     swatch: '#40E8A0', mode: 'dark' },
-          { key: 'slate',     label: 'Slate',      swatch: '#F07848', mode: 'dark' },
-          { key: 'ash',       label: 'Ash',        swatch: '#48A8FF', mode: 'dark' },
-          { key: 'cosmos',    label: 'Cosmos',     swatch: '#FF8C30', mode: 'dark' },
-          { key: 'cinder',    label: 'Cinder',     swatch: '#FF2898', mode: 'dark' },
-          { key: 'smoke',     label: 'Smoke',      swatch: '#A0D820', mode: 'dark' },
-          { key: 'maroon',    label: 'Maroon',     swatch: '#20D8E8', mode: 'dark' },
-          // Light themes
-          { key: 'sunrise',   label: 'Sunrise',    swatch: '#F28C28', mode: 'light' },
-          { key: 'parchment', label: 'Parchment',  swatch: '#7C4F2A', mode: 'light' },
-          { key: 'linen',     label: 'Linen',      swatch: '#6A8030', mode: 'light' },
-          { key: 'mint',      label: 'Mint',       swatch: '#0E8078', mode: 'light' },
-          { key: 'butter',    label: 'Butter',     swatch: '#C07608', mode: 'light' },
-          { key: 'seaglass',  label: 'Seaglass',   swatch: '#B5202A', mode: 'light' },
-          { key: 'lilac',     label: 'Lilac',      swatch: '#6B3AA8', mode: 'light' },
-          { key: 'sky',       label: 'Sky',        swatch: '#0E7AB8', mode: 'light' },
-          { key: 'rose',      label: 'Rose',       swatch: '#C04870', mode: 'light' },
-        ];
-        const visibleThemes = showAllThemes ? allThemes : allThemes.slice(0, 8);
-        const darkThemes = visibleThemes.filter(t => t.mode === 'dark');
-        const lightThemes = visibleThemes.filter(t => t.mode === 'light');
-        const currentTheme = userProfile.themePreference ?? 'midnight';
         return (
         <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
           {/* User info header */}
@@ -7192,6 +7225,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {ps?.weightLbs ? `${ps.weightLbs} lb` : '—'}  ·  {heightStr}  ·  age {ps?.age ?? '—'}
               </Text>
             </View>
+            <TouchableOpacity
+              onPress={() => setShowSettings(true)}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              style={{ padding: 4 }}
+            >
+              <Ionicons name="settings-outline" size={22} color={themeColors.textMuted} />
+            </TouchableOpacity>
           </View>
 
           {/* Quick data references — fitness score, body scan, weight */}
@@ -7223,200 +7263,47 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
           </View>
 
-          {/* Goal entry — opens inline EditProfileScreen in goal mode */}
-          <TouchableOpacity
-            style={[styles.profileRow, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}
-            onPress={() => setShowGoalEditor(true)}
-            activeOpacity={0.85}
-          >
-            <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
-              <Ionicons name="flag-outline" size={18} color={themeColors.primary} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.profileRowTitle, { color: themeColors.textPrimary }]}>Goal</Text>
-              <Text style={[styles.profileRowSub, { color: themeColors.textSecondary }]}>
-                {goalLabel || 'Set your training goal'}
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={18} color={themeColors.textMuted} />
-          </TouchableOpacity>
-
-          {/* Theme picker — 2-column grid of swatches. Showing the most
-              popular 8; the rest live in the full themes screen via
-              the "More themes" link below. */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginBottom: 0 }]}>THEME</Text>
-            <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setShowAllThemes(!showAllThemes); }} activeOpacity={0.7}>
-              <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary }}>{showAllThemes ? 'Show less' : 'Show more'}</Text>
-            </TouchableOpacity>
-          </View>
-          {([
-            { label: 'Dark', items: darkThemes, icon: 'moon-outline' as const },
-            ...(lightThemes.length > 0 ? [{ label: 'Light', items: lightThemes, icon: 'sunny-outline' as const }] : []),
-          ] as const).map(group => (
-            <View key={group.label}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 6, marginTop: group.label === 'Light' ? 10 : 0 }}>
-                <Ionicons name={group.icon} size={12} color={themeColors.textMuted} />
-                <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5 }}>{group.label.toUpperCase()}</Text>
-              </View>
-              <View style={styles.profileThemeGrid}>
-                {group.items.map(t => {
-                  const isActive = currentTheme === t.key;
-                  return (
-                    <TouchableOpacity
-                      key={t.key}
-                      style={[
-                        styles.profileThemeTile,
-                        { backgroundColor: themeColors.surface, borderColor: isActive ? t.swatch : themeColors.border, borderWidth: isActive ? 2 : 1 },
-                      ]}
-                      onPress={() => onProfileUpdate?.({ themePreference: t.key } as any, true)}
-                      activeOpacity={0.8}>
-                      <View style={[styles.profileThemeSwatch, { backgroundColor: t.swatch }]} />
-                      <Text style={[styles.profileThemeLabel, { color: themeColors.textPrimary }]}>{t.label}</Text>
-                      {isActive && <Ionicons name="checkmark-circle" size={14} color={t.swatch} style={{ position: 'absolute', top: 4, right: 4 }} />}
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            </View>
-          ))}
-
-          {/* Body & Stats */}
-          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>BODY & STATS</Text>
+          {/* MY STUFF */}
+          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 4 }]}>MY STUFF</Text>
           <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+            {/* Goal */}
+            <TouchableOpacity
+              style={styles.profileMenuItem}
+              onPress={() => setShowGoalEditor(true)}
+              activeOpacity={0.85}
+            >
+              <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
+                <Ionicons name="flag-outline" size={18} color={themeColors.primary} />
+              </View>
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Goal</Text>
+                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>{goalLabel || 'Set your training goal'}</Text>
+              </View>
+              <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
+            </TouchableOpacity>
+            {/* Body & Stats */}
             <TouchableOpacity style={styles.profileMenuItem} onPress={onEditBody}>
-              <Ionicons name="person-outline" size={18} color={themeColors.textSecondary} style={{ marginRight: 8 }} />
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Edit Physical Stats</Text>
+              <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
+                <Ionicons name="person-outline" size={18} color={themeColors.primary} />
+              </View>
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Body & Stats</Text>
                 <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Weight, height, age, biological sex</Text>
               </View>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
-          </View>
-
-          {/* Workout Reminders */}
-          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>REMINDERS</Text>
-          <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-            <View style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Workout Reminders</Text>
-                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Daily notification on training days</Text>
+            {/* Gear */}
+            <TouchableOpacity style={styles.profileMenuItem} onPress={() => setShowGearScreen(true)}>
+              <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
+                <Ionicons name="walk-outline" size={18} color={themeColors.primary} />
               </View>
-              <Switch
-                value={reminderEnabled}
-                onValueChange={async (v) => {
-                  setReminderEnabled(v);
-                  const { saveReminderSettings } = await import('../utils/workoutReminders');
-                  await saveReminderSettings({ enabled: v, hour: 8, minute: 0 });
-                }}
-                trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
-                thumbColor={reminderEnabled ? themeColors.primary : themeColors.textMuted}
-              />
-            </View>
-          </View>
-
-          {/* Feedback Settings — haptics + sounds + vibration + the
-              Apple Health connect toggle. Apple Health is in this
-              group (not a separate Progress-tab card) so users find
-              it alongside the other device-level toggles. Toggling
-              ON triggers the HealthKit auth prompt; OFF persists the
-              disabled flag and stops polling. */}
-          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>FEEDBACK & DEVICE</Text>
-          <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-            {([
-              { key: 'hapticsEnabled' as const, label: 'Haptic Feedback', desc: 'Vibrate on taps and actions' },
-              { key: 'soundsEnabled' as const, label: 'Sounds', desc: 'Play tone when rest timer ends (in-app, mixes with music)' },
-              { key: 'restNotificationSoundEnabled' as const, label: 'Background Alert Sound', desc: 'Sound on the rest-end notification when the app is closed. iOS briefly ducks music — leave OFF if you listen to Spotify mid-workout.' },
-              { key: 'vibrationEnabled' as const, label: 'Vibration', desc: 'Vibrate on rest timer and alerts' },
-            ]).map(opt => (
-              <View key={opt.key} style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
-                <View style={{ flex: 1, paddingRight: 10 }}>
-                  <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>{opt.label}</Text>
-                  <Text style={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 15 }}>{opt.desc}</Text>
-                </View>
-                <Switch
-                  value={feedbackSettings[opt.key]}
-                  onValueChange={async (v) => {
-                    const { saveSettings } = await import('../utils/feedback');
-                    const updated = await saveSettings({ [opt.key]: v });
-                    setFeedbackSettings(updated);
-                  }}
-                  trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
-                  thumbColor={feedbackSettings[opt.key] ? themeColors.primary : themeColors.textMuted}
-                />
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Gear Tracker</Text>
+                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Track mileage on shoes, bikes & equipment</Text>
               </View>
-            ))}
-            {/* Rest timer sound picker */}
-            <View style={[styles.profileMenuItem, { flexDirection: 'column', alignItems: 'flex-start', gap: 10 }]}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Rest Timer Sound</Text>
-                  <Text style={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 15 }}>
-                    Tap to preview. Selected plays when your rest ends.
-                  </Text>
-                </View>
-              </View>
-              <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
-                {(['chime', 'beep', 'ping', 'double'] as const).map((snd) => {
-                  const active = (feedbackSettings.restTimerSound ?? 'chime') === snd;
-                  const labels: Record<string, string> = { chime: 'Chime', beep: 'Beep', ping: 'Ping', double: 'Double' };
-                  return (
-                    <TouchableOpacity
-                      key={snd}
-                      activeOpacity={0.75}
-                      onPress={async () => {
-                        const { saveSettings, playRestTimerDone } = await import('../utils/feedback');
-                        const updated = await saveSettings({ restTimerSound: snd });
-                        setFeedbackSettings(updated);
-                        playRestTimerDone();
-                      }}
-                      style={{
-                        flexDirection: 'row', alignItems: 'center', gap: 5,
-                        paddingHorizontal: 12, paddingVertical: 7,
-                        borderRadius: 20, borderWidth: 1.5,
-                        borderColor: active ? themeColors.primary : themeColors.border,
-                        backgroundColor: active ? themeColors.primary + '18' : 'transparent',
-                      }}
-                    >
-                      <Ionicons
-                        name={active ? 'radio-button-on' : 'radio-button-off'}
-                        size={14}
-                        color={active ? themeColors.primary : themeColors.textMuted}
-                      />
-                      <Text style={{ fontSize: 13, fontWeight: active ? '700' : '400', color: active ? themeColors.primary : themeColors.textSecondary }}>
-                        {labels[snd]}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
-            </View>
-            <AppleHealthToggleRow themeColors={themeColors} userAge={userProfile.physicalStats?.age ?? null} />
-          </View>
-
-          {/* Account + Sign out */}
-          <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>ACCOUNT</Text>
-          <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-            <TouchableOpacity style={styles.profileMenuItem} onPress={onViewAccount}>
-              <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Account Details</Text>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
           </View>
-
-          <TouchableOpacity
-            style={[styles.profileSignOutBtn, { backgroundColor: themeColors.surface, borderColor: themeColors.error + '55' }]}
-            onPress={() => {
-              Alert.alert(
-                'Sign out?',
-                'You\'ll need to sign back in to see your plan and progress.',
-                [
-                  { text: 'Cancel', style: 'cancel' },
-                  { text: 'Sign out', style: 'destructive', onPress: onSignOut },
-                ],
-              );
-            }}>
-            <Text style={[styles.profileSignOutText, { color: themeColors.error }]}>Sign Out</Text>
-          </TouchableOpacity>
         </ScrollView>
         );
       })()}</ErrorBoundary>)}
@@ -7433,32 +7320,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         onSelect={async (next) => {
           const target = swapExerciseState;
           if (!target) return;
-          // Mutate the in-memory plan: match by focus, swap the exercise
-          // at the given index for the picked candidate. Persist the
-          // updated plan back to AsyncStorage so edits survive reload.
+          const patch = (prev: any) => ({
+            ...prev,
+            name: next.name,
+            equipment: next.equipment ?? prev.equipment,
+            muscles_targeted: [next.primary_muscle, ...(next.secondary_muscles ?? [])].filter(Boolean),
+            primary_muscle: next.primary_muscle,
+            image_url: next.image_url ?? prev.image_url,
+          });
           try {
+            // Primary path: planWeek is the source of truth for the DayCard
+            // render. Match by day_date (stable, unique) instead of focus
+            // (can duplicate across the week — e.g. two Push days).
+            if (planWeek?.days?.length) {
+              const pw = JSON.parse(JSON.stringify(planWeek));
+              const dayIdx = pw.days.findIndex((d: any) => d.day_date === target.dayKey);
+              if (dayIdx >= 0) {
+                const exs = pw.days[dayIdx]?.workout?.exercises;
+                if (Array.isArray(exs) && target.exerciseIndex < exs.length) {
+                  exs[target.exerciseIndex] = patch(exs[target.exerciseIndex]);
+                  setPlanWeek(pw);
+                  planWeekRef.current = pw;
+                }
+              }
+            }
+            // Legacy fallback: workoutPlan (used when planWeek is null)
             const raw = await AsyncStorage.getItem('aiWorkoutPlan');
             if (raw) {
               const plan = JSON.parse(raw);
               if (plan && Array.isArray(plan.days)) {
-                const dayIdx = plan.days.findIndex(
-                  (d: any) => d?.focus === target.workout.focus,
-                );
+                const dayIdx = plan.days.findIndex((d: any) => d?.focus === target.workout.focus);
                 if (dayIdx >= 0 && Array.isArray(plan.days[dayIdx]?.exercises)) {
                   const exs = plan.days[dayIdx].exercises;
-                  if (target.exerciseIndex >= 0 && target.exerciseIndex < exs.length) {
-                    const prev = exs[target.exerciseIndex];
-                    exs[target.exerciseIndex] = {
-                      ...prev,
-                      name: next.name,
-                      equipment: next.equipment ?? prev.equipment,
-                      muscles_targeted: [
-                        next.primary_muscle,
-                        ...(next.secondary_muscles ?? []),
-                      ].filter(Boolean),
-                      primary_muscle: next.primary_muscle,
-                      image_url: next.image_url ?? prev.image_url,
-                    };
+                  if (target.exerciseIndex < exs.length) {
+                    exs[target.exerciseIndex] = patch(exs[target.exerciseIndex]);
                     await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(plan));
                     setWorkoutPlan(plan);
                   }
@@ -9316,6 +9211,235 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       {/* ShareWorkoutModal removed — will re-enable with social feed */}
 
+      {/* Gear tracker */}
+      <Modal
+        visible={showGearScreen}
+        animationType="slide"
+        onRequestClose={() => setShowGearScreen(false)}>
+        {showGearScreen && authToken && (
+          <GearScreen
+            authToken={authToken}
+            themeName={userProfile.themePreference}
+            onBack={() => setShowGearScreen(false)}
+          />
+        )}
+      </Modal>
+
+      {/* Settings — Theme, Reminders, Feedback & Device, Account */}
+      <Modal
+        visible={showSettings}
+        animationType="slide"
+        onRequestClose={() => setShowSettings(false)}>
+        {showSettings && userProfile && (() => {
+          type ThemeEntry = { key: import('../types').AppThemeName; label: string; swatch: string; mode: 'dark' | 'light' };
+          const allThemes: ThemeEntry[] = [
+            // Dark themes
+            { key: 'midnight',  label: 'Midnight',   swatch: '#15C7B8', mode: 'dark' },
+            { key: 'ocean',     label: 'Ocean',      swatch: '#00CCE8', mode: 'dark' },
+            { key: 'amethyst',  label: 'Amethyst',   swatch: '#9838F8', mode: 'dark' },
+            { key: 'ember',     label: 'Ember',      swatch: '#FF6018', mode: 'dark' },
+            { key: 'wine',      label: 'Wine',       swatch: '#C82848', mode: 'dark' },
+            { key: 'obsidian',  label: 'Black Gold', swatch: '#C09428', mode: 'dark' },
+            { key: 'scarlet',   label: 'Scarlet',    swatch: '#FF2020', mode: 'dark' },
+            { key: 'blossom',   label: 'Blossom',    swatch: '#FF1890', mode: 'dark' },
+            { key: 'void',      label: 'Void',       swatch: '#4C9EFF', mode: 'dark' },
+            { key: 'dusk',      label: 'Dusk',       swatch: '#E8A878', mode: 'dark' },
+            { key: 'lavender',  label: 'Lavender',   swatch: '#B898E0', mode: 'dark' },
+            { key: 'aurora',    label: 'Aurora',     swatch: '#40E8A0', mode: 'dark' },
+            { key: 'slate',     label: 'Slate',      swatch: '#F07848', mode: 'dark' },
+            { key: 'ash',       label: 'Ash',        swatch: '#48A8FF', mode: 'dark' },
+            { key: 'cosmos',    label: 'Cosmos',     swatch: '#FF8C30', mode: 'dark' },
+            { key: 'cinder',    label: 'Cinder',     swatch: '#FF2898', mode: 'dark' },
+            { key: 'smoke',     label: 'Smoke',      swatch: '#A0D820', mode: 'dark' },
+            { key: 'maroon',    label: 'Maroon',     swatch: '#20D8E8', mode: 'dark' },
+            // Light themes
+            { key: 'sunrise',   label: 'Sunrise',    swatch: '#F28C28', mode: 'light' },
+            { key: 'parchment', label: 'Parchment',  swatch: '#7C4F2A', mode: 'light' },
+            { key: 'linen',     label: 'Linen',      swatch: '#6A8030', mode: 'light' },
+            { key: 'mint',      label: 'Mint',       swatch: '#0E8078', mode: 'light' },
+            { key: 'butter',    label: 'Butter',     swatch: '#C07608', mode: 'light' },
+            { key: 'seaglass',  label: 'Seaglass',   swatch: '#B5202A', mode: 'light' },
+            { key: 'lilac',     label: 'Lilac',      swatch: '#6B3AA8', mode: 'light' },
+            { key: 'sky',       label: 'Sky',        swatch: '#0E7AB8', mode: 'light' },
+            { key: 'rose',      label: 'Rose',       swatch: '#C04870', mode: 'light' },
+          ];
+          const visibleThemes = showAllThemes ? allThemes : allThemes.slice(0, 8);
+          const darkThemes = visibleThemes.filter(t => t.mode === 'dark');
+          const lightThemes = visibleThemes.filter(t => t.mode === 'light');
+          const currentTheme = userProfile.themePreference ?? 'midnight';
+          return (
+            <View style={{ flex: 1, backgroundColor: themeColors.background }}>
+              {/* Header */}
+              <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingTop: insets.top + 12, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: themeColors.border }}>
+                <TouchableOpacity onPress={() => setShowSettings(false)} style={{ marginRight: 12 }}>
+                  <Ionicons name="chevron-back" size={24} color={themeColors.textPrimary} />
+                </TouchableOpacity>
+                <Text style={{ fontSize: 20, fontWeight: '700', color: themeColors.textPrimary, flex: 1 }}>Settings</Text>
+              </View>
+              <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 32 }}>
+
+                {/* Theme picker */}
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginBottom: 0 }]}>THEME</Text>
+                  <TouchableOpacity onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setShowAllThemes(!showAllThemes); }} activeOpacity={0.7}>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary }}>{showAllThemes ? 'Show less' : 'Show more'}</Text>
+                  </TouchableOpacity>
+                </View>
+                {([
+                  { label: 'Dark', items: darkThemes, icon: 'moon-outline' as const },
+                  ...(lightThemes.length > 0 ? [{ label: 'Light', items: lightThemes, icon: 'sunny-outline' as const }] : []),
+                ] as const).map(group => (
+                  <View key={group.label}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 6, marginTop: group.label === 'Light' ? 10 : 0 }}>
+                      <Ionicons name={group.icon} size={12} color={themeColors.textMuted} />
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5 }}>{group.label.toUpperCase()}</Text>
+                    </View>
+                    <View style={styles.profileThemeGrid}>
+                      {group.items.map(t => {
+                        const isActive = currentTheme === t.key;
+                        return (
+                          <TouchableOpacity
+                            key={t.key}
+                            style={[
+                              styles.profileThemeTile,
+                              { backgroundColor: themeColors.surface, borderColor: isActive ? t.swatch : themeColors.border, borderWidth: isActive ? 2 : 1 },
+                            ]}
+                            onPress={() => onProfileUpdate?.({ themePreference: t.key } as any, true)}
+                            activeOpacity={0.8}>
+                            <View style={[styles.profileThemeSwatch, { backgroundColor: t.swatch }]} />
+                            <Text style={[styles.profileThemeLabel, { color: themeColors.textPrimary }]}>{t.label}</Text>
+                            {isActive && <Ionicons name="checkmark-circle" size={14} color={t.swatch} style={{ position: 'absolute', top: 4, right: 4 }} />}
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ))}
+
+                {/* Workout Reminders */}
+                <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>REMINDERS</Text>
+                <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+                  <View style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Workout Reminders</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Daily notification on training days</Text>
+                    </View>
+                    <Switch
+                      value={reminderEnabled}
+                      onValueChange={async (v) => {
+                        setReminderEnabled(v);
+                        const { saveReminderSettings } = await import('../utils/workoutReminders');
+                        await saveReminderSettings({ enabled: v, hour: 8, minute: 0 });
+                      }}
+                      trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
+                      thumbColor={reminderEnabled ? themeColors.primary : themeColors.textMuted}
+                    />
+                  </View>
+                </View>
+
+                {/* Feedback & Device */}
+                <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>FEEDBACK & DEVICE</Text>
+                <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+                  {([
+                    { key: 'hapticsEnabled' as const, label: 'Haptic Feedback', desc: 'Vibrate on taps and actions' },
+                    { key: 'soundsEnabled' as const, label: 'Sounds', desc: 'Play tone when rest timer ends (in-app, mixes with music)' },
+                    { key: 'restNotificationSoundEnabled' as const, label: 'Background Alert Sound', desc: 'Sound on the rest-end notification when the app is closed. iOS briefly ducks music — leave OFF if you listen to Spotify mid-workout.' },
+                    { key: 'vibrationEnabled' as const, label: 'Vibration', desc: 'Vibrate on rest timer and alerts' },
+                  ]).map(opt => (
+                    <View key={opt.key} style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
+                      <View style={{ flex: 1, paddingRight: 10 }}>
+                        <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>{opt.label}</Text>
+                        <Text style={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 15 }}>{opt.desc}</Text>
+                      </View>
+                      <Switch
+                        value={feedbackSettings[opt.key]}
+                        onValueChange={async (v) => {
+                          const { saveSettings } = await import('../utils/feedback');
+                          const updated = await saveSettings({ [opt.key]: v });
+                          setFeedbackSettings(updated);
+                        }}
+                        trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
+                        thumbColor={feedbackSettings[opt.key] ? themeColors.primary : themeColors.textMuted}
+                      />
+                    </View>
+                  ))}
+                  {/* Rest timer sound picker */}
+                  <View style={[styles.profileMenuItem, { flexDirection: 'column', alignItems: 'flex-start', gap: 10 }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Rest Timer Sound</Text>
+                        <Text style={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 15 }}>
+                          Tap to preview. Selected plays when your rest ends.
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+                      {(['chime', 'beep', 'ping', 'double'] as const).map((snd) => {
+                        const active = (feedbackSettings.restTimerSound ?? 'chime') === snd;
+                        const labels: Record<string, string> = { chime: 'Chime', beep: 'Beep', ping: 'Ping', double: 'Double' };
+                        return (
+                          <TouchableOpacity
+                            key={snd}
+                            activeOpacity={0.75}
+                            onPress={async () => {
+                              const { saveSettings, playRestTimerDone } = await import('../utils/feedback');
+                              const updated = await saveSettings({ restTimerSound: snd });
+                              setFeedbackSettings(updated);
+                              playRestTimerDone();
+                            }}
+                            style={{
+                              flexDirection: 'row', alignItems: 'center', gap: 5,
+                              paddingHorizontal: 12, paddingVertical: 7,
+                              borderRadius: 20, borderWidth: 1.5,
+                              borderColor: active ? themeColors.primary : themeColors.border,
+                              backgroundColor: active ? themeColors.primary + '18' : 'transparent',
+                            }}
+                          >
+                            <Ionicons
+                              name={active ? 'radio-button-on' : 'radio-button-off'}
+                              size={14}
+                              color={active ? themeColors.primary : themeColors.textMuted}
+                            />
+                            <Text style={{ fontSize: 13, fontWeight: active ? '700' : '400', color: active ? themeColors.primary : themeColors.textSecondary }}>
+                              {labels[snd]}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+                  <AppleHealthToggleRow themeColors={themeColors} userAge={userProfile.physicalStats?.age ?? null} />
+                </View>
+
+                {/* Account + Sign out */}
+                <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>ACCOUNT</Text>
+                <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+                  <TouchableOpacity style={styles.profileMenuItem} onPress={onViewAccount}>
+                    <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Account Details</Text>
+                    <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <TouchableOpacity
+                  style={[styles.profileSignOutBtn, { backgroundColor: themeColors.surface, borderColor: themeColors.error + '55' }]}
+                  onPress={() => {
+                    Alert.alert(
+                      'Sign out?',
+                      'You\'ll need to sign back in to see your plan and progress.',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        { text: 'Sign out', style: 'destructive', onPress: onSignOut },
+                      ],
+                    );
+                  }}>
+                  <Text style={[styles.profileSignOutText, { color: themeColors.error }]}>Sign Out</Text>
+                </TouchableOpacity>
+              </ScrollView>
+            </View>
+          );
+        })()}
+      </Modal>
+
       {/* Weekly check-in — auto-popup every 7 days */}
       <Modal visible={showWeeklyCheckin} transparent animationType="slide" onRequestClose={() => setShowWeeklyCheckin(false)}>
         <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
@@ -9879,12 +10003,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           onPress={() => setActiveTab('progress')}
         />
         <BottomTabButton
-          label="Profile"
-          iconName="person-outline"
-          active={activeTab === 'profile'}
+          label="You"
+          iconName="person-circle-outline"
+          active={activeTab === 'you'}
           tint={themeColors.primary}
           mutedColor={themeColors.textMuted}
-          onPress={() => setActiveTab('profile')}
+          onPress={() => setActiveTab('you')}
         />
       </View>
     </LinearGradient>

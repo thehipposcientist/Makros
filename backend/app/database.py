@@ -716,6 +716,35 @@ def _ensure_user_equipment_profiles_table() -> None:
         print(f"[migration] user_equipment_profiles table failed (non-fatal): {e}")
 
 
+def _ensure_gear_items_table() -> None:
+    """Create gear_items if it doesn't exist (idempotent)."""
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS gear_items (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES "user"(id),
+                    name VARCHAR NOT NULL DEFAULT '',
+                    gear_type VARCHAR NOT NULL DEFAULT 'other',
+                    purchase_date DATE,
+                    starting_miles FLOAT NOT NULL DEFAULT 0.0,
+                    accumulated_miles FLOAT NOT NULL DEFAULT 0.0,
+                    accumulated_sessions INTEGER NOT NULL DEFAULT 0,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    retirement_threshold_miles FLOAT,
+                    auto_track_keywords JSONB NOT NULL DEFAULT '[]',
+                    notes TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_gear_items_user_id ON gear_items(user_id)"
+            ))
+    except Exception as e:
+        print(f"[migration] gear_items table failed (non-fatal): {e}")
+
+
 def _ensure_weekly_checkin_body_columns() -> None:
     """Add body_fat_pct / bp_systolic / bp_diastolic to weekly_checkins
     if they don't exist yet. All optional — `None` for any user who
@@ -953,7 +982,7 @@ def _backfill_plan_weeks() -> None:
 
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
-    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, PlanWeek, PlanDay, UserEquipmentProfile
+    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, PlanWeek, PlanDay, UserEquipmentProfile, GearItem
 
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
@@ -978,6 +1007,7 @@ def create_db_and_tables():
     _ensure_weekly_checkin_body_columns()
     _ensure_weekly_checkin_measurements_columns()
     _ensure_recovery_activities_table()
+    _ensure_gear_items_table()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()

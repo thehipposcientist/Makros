@@ -761,6 +761,82 @@ class UserEquipmentProfile(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# ─── Gear tracking ───────────────────────────────────────────────────────────
+#
+# Users register physical gear (running shoes, bike, jump rope…) and the
+# app accumulates miles/sessions automatically from logged workouts.
+# Retirement recommendations fire when accumulated use approaches the
+# threshold for that gear type.
+
+# Default retirement thresholds (miles). None = track sessions only.
+GEAR_RETIREMENT_DEFAULTS: dict[str, float | None] = {
+    "running_shoe":   400.0,
+    "trail_shoe":     350.0,
+    "cycling_shoe":   None,   # track sessions, not miles
+    "bike":           None,
+    "bike_tire":      2000.0,
+    "bike_chain":     1500.0,
+    "treadmill_belt": 3000.0,
+    "jump_rope":      None,   # track sessions
+    "other":          None,
+}
+
+class GearItem(SQLModel, table=True):
+    __tablename__ = "gear_items"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    # Display name — user-supplied: "Brooks Ghost 14", "IC6 Spin Bike", etc.
+    name: str = Field(default="")
+    # Type slug drives default thresholds + auto-accumulation matching.
+    gear_type: str = Field(default="other")
+    purchase_date: date | None = Field(default=None)
+    # Miles already on the gear when the user registered it (so the
+    # retirement bar starts accurate even for used gear).
+    starting_miles: float = Field(default=0.0)
+    # Miles added by the app from logged workout sets (actual_distance).
+    accumulated_miles: float = Field(default=0.0)
+    # Session count regardless of whether distance was captured.
+    accumulated_sessions: int = Field(default=0)
+    is_active: bool = Field(default=True)
+    # Override the type default. Null means "no mile-based threshold".
+    retirement_threshold_miles: float | None = Field(default=None)
+    # Activity keywords that trigger auto-accumulation (lowercase).
+    # e.g. ["treadmill", "run", "incline walk"] for running shoes.
+    auto_track_keywords: list = Field(default_factory=list, sa_column=Column(JSON))
+    notes: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class GearItemCreate(SQLModel):
+    name: str
+    gear_type: str = "other"
+    purchase_date: date | None = None
+    starting_miles: float = 0.0
+    retirement_threshold_miles: float | None = None
+    auto_track_keywords: list[str] = []
+    notes: str | None = None
+
+
+class GearItemRead(SQLModel):
+    id: int
+    name: str
+    gear_type: str
+    purchase_date: date | None
+    starting_miles: float
+    accumulated_miles: float
+    accumulated_sessions: int
+    is_active: bool
+    retirement_threshold_miles: float | None
+    auto_track_keywords: list[str]
+    notes: str | None
+    created_at: datetime
+    # Computed fields populated by the router
+    total_miles: float = 0.0
+    pct_used: float | None = None        # 0–1+; None when no mile threshold
+    recommendation: str | None = None   # human-readable status
+
+
 # ─── Goal options (seeded reference data) ─────────────────────────────────────
 
 class GoalOption(SQLModel, table=True):

@@ -26,7 +26,7 @@ import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary
 import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow, getWorkoutHrSummary, getLatestHeartRate } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, createSocialPost, type WorkoutPostSummary } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, suggestExercisesForWorkout, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, createSocialPost, type WorkoutPostSummary } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
@@ -197,7 +197,7 @@ function AnimatedBarFill({ pct, color, delay = 0 }: { pct: number; color: string
   );
 }
 
-const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|carry|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/i;
+const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|\bwalk\b|walking|carry|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/i;
 const TIMED_REPS_RE = /^\d+\s*-?\s*\d*\s*s(ec|econds?)?$/i;
 // `isBodyweightOnly` name-regex was replaced by the richer
 // `shouldHideWeight(ex)` predicate in `utils/exerciseDisplay.ts`,
@@ -229,7 +229,7 @@ function isLongCardioExercise(name: string, targetReps?: string | number, opts?:
 
   // Regex fallback for old cached plans without structured fields
   const lowered = (name || '').toLowerCase();
-  if (/treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|jogging|running|cycling|swimming|zone ?2|tempo|steady state|long run|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/.test(lowered)) {
+  if (/treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|jogging|running|cycling|swimming|zone ?2|tempo|steady state|long run|\bwalk\b|walking|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/.test(lowered)) {
     return true;
   }
   // If the target is expressed in minutes and is ≥ 3, treat as long.
@@ -287,14 +287,30 @@ function getTimedExerciseTip(name: string, targetReps?: string | number, loggedS
   if (/hiit|interval|sprint/.test(n)) {
     return 'Max effort during work intervals. Fully recover during rest — heart rate should drop before the next round.';
   }
-  // Boxing, kickboxing, yoga, stretching, mobility — no useful metric to recommend
+  // Yoga / mobility flows
+  if (/yoga|vinyasa|yin|mobility.?flow|sun.?salutation|warrior|pigeon|lizard|downward.?dog|stretching/.test(n)) {
+    if (setNum === 1) return 'Move with your breath — inhale to lengthen, exhale to deepen. No bouncing.';
+    return 'Stay in poses where you feel a productive stretch, not pain. Quality over depth.';
+  }
+  // Boxing / kickboxing
+  if (/boxing|kickboxing|sparring|bag.?work|shadow.?box/.test(n)) {
+    return 'Stay light on your feet. Throw combinations, not single shots.';
+  }
   return null;
 }
 
 type MetricField = { key: string; label: string; placeholder: string; keyboard: 'decimal-pad' | 'number-pad' | 'default' };
 
-function getTimedMetricsFields(name: string): MetricField[] | null {
+function getTimedMetricsFields(name: string, cardioGuidance?: any): MetricField[] | null {
   const n = (name || '').toLowerCase();
+  // Incline walk — speed + incline are the primary metrics
+  if (/incline.?walk|incline.*tread|\bwalk\b/.test(n)) {
+    return [
+      { key: 'speed', label: 'Speed (mph)', placeholder: 'e.g. 3.5', keyboard: 'decimal-pad' },
+      { key: 'incline', label: 'Incline %', placeholder: 'e.g. 6', keyboard: 'decimal-pad' },
+      { key: 'distance', label: 'Distance (mi)', placeholder: 'e.g. 1.5', keyboard: 'decimal-pad' },
+    ];
+  }
   if (/treadmill|running|jogging|run\b/.test(n)) {
     return [
       { key: 'pace', label: 'Avg Pace', placeholder: 'e.g. 8:30 /mi', keyboard: 'default' },
@@ -309,7 +325,15 @@ function getTimedMetricsFields(name: string): MetricField[] | null {
       { key: 'spm', label: 'Strokes/min', placeholder: 'e.g. 24', keyboard: 'number-pad' },
     ];
   }
-  if (/bike|cycling|ride|peloton/.test(n)) {
+  if (/bike|cycling|ride|peloton|spin/.test(n)) {
+    // If equipment has watts capability (IC6, smart bike), show watts + RPM
+    if (cardioGuidance?.watts_range || cardioGuidance?.rpm_range) {
+      return [
+        { key: 'watts', label: 'Avg Watts', placeholder: 'e.g. 175', keyboard: 'number-pad' },
+        { key: 'cadence', label: 'Cadence (rpm)', placeholder: 'e.g. 85', keyboard: 'number-pad' },
+        { key: 'output', label: 'Output (kJ)', placeholder: 'e.g. 350', keyboard: 'number-pad' },
+      ];
+    }
     return [
       { key: 'distance', label: 'Distance (mi)', placeholder: 'e.g. 12.5', keyboard: 'decimal-pad' },
       { key: 'cadence', label: 'Avg Cadence', placeholder: 'e.g. 85 rpm', keyboard: 'number-pad' },
@@ -742,6 +766,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const restStartAtRef = useRef<number>(0);
   const restTotalSecondsRef = useRef<number>(0);
   const restExerciseNameRef = useRef<string | null>(null);
+  // Timestamp (ms) when the rest timer hit 0 — used to detect "still hasn't
+  // logged a set" idle state and show a nudge after threshold.
+  const restEndedAtRef = useRef<number>(0);
+  const [postRestIdleSecs, setPostRestIdleSecs] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [liveHR, setLiveHR] = useState<number | null>(null);
 
@@ -760,6 +788,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       interval = setInterval(poll, 6000);
     })();
     return () => { active = false; if (interval) clearInterval(interval); };
+  }, []);
+
+  // Post-rest idle counter — ticks every 5s while restEndedAtRef is set.
+  // Cleared when a new set is logged or a new rest timer starts.
+  useEffect(() => {
+    const tick = setInterval(() => {
+      if (restEndedAtRef.current > 0) {
+        setPostRestIdleSecs(Math.floor((Date.now() - restEndedAtRef.current) / 1000));
+      }
+    }, 5000);
+    return () => clearInterval(tick);
   }, []);
 
   const [exercises, setExercisesRaw] = useState<SessionExercise[]>(() => {
@@ -981,7 +1020,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     let cancelled = false;
     (async () => {
       try {
-        const lastSets = await getLastSetsForExercise(ex.name).catch(() => [] as CompletedSet[]);
+        const lastSets = (await getLastSetsForExercise(ex.name).catch(() => null)) ?? [];
         const plannedSets = Array.from({ length: getTargetSetCount(ex.targetSets) }, (_, n) => ({
           setNumber: n + 1,
           setType: 'working',
@@ -1580,15 +1619,54 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       Alert.alert('Invalid values', 'Enter a valid weight and reps.');
       return;
     }
-    setExercises(prev => prev.map((ex, i) => {
-      if (i !== editSetExIdx) return ex;
-      const updatedSets = ex.sets.map((s, si) =>
-        si === editSetIdx ? { ...s, weightLbs: w, reps: r } : s
-      );
-      return { ...ex, sets: updatedSets };
+    // Compute updatedSets synchronously so we can pass them to the rec call
+    // before setExercises has flushed.
+    const ex = exercises[editSetExIdx];
+    const updatedSets = ex?.sets.map((s, si) =>
+      si === editSetIdx ? { ...s, weightLbs: w, reps: r } : s
+    ) ?? [];
+    setExercises(prev => prev.map((e, i) => {
+      if (i !== editSetExIdx) return e;
+      return { ...e, sets: updatedSets };
     }));
     setEditSetVisible(false);
-  }, [editSetExIdx, editSetIdx, editSetWeight, editSetReps]);
+    // Re-run recommendation with the edited set values so the next-set
+    // suggestion reflects the actual load the user just logged.
+    if (authToken && ex && updatedSets.length > 0 && !shouldHideWeight({ name: ex.name, equipment: ex.equipment, reps: ex.targetReps })) {
+      const targetSetCount = getTargetSetCount(ex.targetSets);
+      const extras = extraSetCounts[editSetExIdx] ?? 0;
+      const removed = removedSetCounts[editSetExIdx] ?? 0;
+      const effectiveTotal = Math.max(targetSetCount + extras - removed, updatedSets.length);
+      if (updatedSets.length < effectiveTotal) {
+        setAiLoadingIdx(editSetExIdx);
+        getExerciseBests(ex.name).catch(() => null).then(bests => {
+          getWeightRecommendation(authToken, ex.name, goal, updatedSets, updatedSets.length + 1, {
+            targetSets: ex.targetSets,
+            targetReps: ex.targetReps,
+            progressionPace: 'moderate',
+            experienceLevel: 'intermediate',
+            recoveryLevel: 'normal',
+            phase: 'accumulation',
+            workoutFocus: workout.focus,
+            weekNumber: 1,
+            incrementLbs: (ex.equipment ?? '').toLowerCase().includes('dumbbell') ? 2.5 : 5,
+            allTimeBestWeightLbs: bests?.allTime?.weightLbs,
+            allTimeBestReps: bests?.allTime?.reps,
+            lastSessionBestWeightLbs: bests?.lastSession?.weightLbs,
+            lastSessionBestReps: bests?.lastSession?.reps,
+            plannedTargetWeightLbs: ex.targetWeightLbs ?? undefined,
+            exerciseSlug: ex.slug ?? undefined,
+            equipment: ex.equipment,
+            primaryMuscle: ex.primaryMuscle ?? undefined,
+          }).then(rec => {
+            const tip = `Set ${updatedSets.length + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
+            setExercises(prev => prev.map((e, idx) => idx === editSetExIdx ? { ...e, aiRecommendation: tip } : e));
+            setAiLoadingIdx(null);
+          }).catch(() => setAiLoadingIdx(null));
+        });
+      }
+    }
+  }, [editSetExIdx, editSetIdx, editSetWeight, editSetReps, exercises, authToken, goal, workout.focus, extraSetCounts, removedSetCounts]);
 
   // Log a specific set slot inline (no modal).
   // `overrideDuration` bypasses the state read for timed exercises —
@@ -1687,6 +1765,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     updatedSets[setSlot] = newSet;
     // Remove any trailing undefined slots
     const cleanSets = updatedSets.filter(Boolean);
+
+    // Set was logged — clear the post-rest idle tracker.
+    restEndedAtRef.current = 0;
+    setPostRestIdleSecs(0);
 
     const updatedExercises = exercises.map((e, i) => i === exIdx ? { ...e, sets: cleanSets } : e);
     setExercises(updatedExercises);
@@ -1811,8 +1893,41 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
   }, [setInputs, exercises, authToken, goal, workout.focus, startRestTimer, rescheduleRestNotifications, clearRestState, extraSetCounts, removedSetCounts]);
 
+  const loadWorkoutSuggestions = useCallback(async () => {
+    if (!authToken) return;
+    setAiExerciseLoading(true);
+    try {
+      let equipment: string[] | undefined;
+      let injuries: string[] | undefined;
+      try {
+        const raw = await AsyncStorage.getItem('userProfile');
+        if (raw) {
+          const prof = JSON.parse(raw);
+          equipment = prof.equipment;
+          const inj = prof.injuryEntries ?? [];
+          injuries = inj
+            .filter((i: any) => i.status !== 'resolved')
+            .map((i: any) => i.bodyPart || i.description);
+        }
+      } catch {}
+      const res = await suggestExercisesForWorkout(authToken, {
+        workout_focus: workout.focus,
+        current_exercises: exercises.map(e => e.name),
+        equipment,
+        injuries,
+      });
+      setAiExerciseResults(res.results ?? []);
+    } catch {
+      // Suggestions are non-critical — fail silently, user can still search
+    } finally {
+      setAiExerciseLoading(false);
+    }
+  }, [authToken, workout.focus, exercises]);
+
   const openAddExerciseModal = useCallback(async () => {
     setAddExerciseModalVisible(true);
+    setAiExerciseResults([]);
+    loadWorkoutSuggestions();
     if (exerciseLibrary.length > 0) return;
     setExerciseLibraryLoading(true);
     try {
@@ -2010,6 +2125,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     restStartAtRef.current = Date.now();
     restTotalSecondsRef.current = seconds;
     restExerciseNameRef.current = exerciseName;
+    restEndedAtRef.current = 0;
+    setPostRestIdleSecs(0);
 
     // Keep the iOS background audio session alive so the rest countdown
     // continues ticking even when the user switches to another app.
@@ -2067,6 +2184,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       if (remaining === 0) {
         if (restTimerRef.current) clearInterval(restTimerRef.current);
         restTimerRef.current = null;
+        restEndedAtRef.current = Date.now();
+        setPostRestIdleSecs(0);
         AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
         import('../utils/feedback').then(f => {
           // Stop the silent keepalive loop before playing the chime so
@@ -2905,9 +3024,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
     try {
       const active = exercises[activeExIdx];
+      // Mirror the live exercises state into the workout context so the
+      // coach sees swapped exercises, not the original plan snapshot.
+      const liveWorkout = {
+        ...workout,
+        exercises: exercises.map(ex => ({
+          name: ex.name,
+          sets: ex.targetSets,
+          reps: ex.targetReps,
+          equipment: ex.equipment,
+          muscles_targeted: ex.muscles_targeted,
+        })),
+      };
       const resp = await askWorkoutQuestion(authToken, {
         question: effectiveQ,
-        workout,
+        workout: liveWorkout,
         activeExerciseName: active?.name,
         currentSetNumber: (active?.sets?.length ?? 0) + 1,
         loggedSets: active?.sets ?? [],
@@ -3310,6 +3441,34 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
       )}
 
+      {/* Post-rest idle nudge — shown when rest finished >45s ago without
+          a new set logged. HR hint layers on top when HealthKit data is live. */}
+      {postRestIdleSecs >= 45 && restRemaining === 0 && restEndedAtRef.current > 0 && (
+        <View style={{
+          marginHorizontal: 16, marginBottom: 8, borderRadius: 10,
+          backgroundColor: workoutPalette.soft, borderWidth: 1, borderColor: workoutPalette.strong + '88',
+          paddingHorizontal: 14, paddingVertical: 10,
+          flexDirection: 'row', alignItems: 'center', gap: 10,
+        }}>
+          <Ionicons name="timer-outline" size={18} color={workoutPalette.strong} />
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontSize: 13, fontWeight: '700', color: workoutPalette.text }}>
+              Ready when you are
+            </Text>
+            <Text style={{ fontSize: 11, color: workoutPalette.text, opacity: 0.75, marginTop: 1 }}>
+              {Math.floor(postRestIdleSecs / 60) > 0
+                ? `${Math.floor(postRestIdleSecs / 60)}m ${postRestIdleSecs % 60}s since rest ended`
+                : `${postRestIdleSecs}s since rest ended`}
+              {liveHR !== null && liveHR < 90
+                ? ' · HR looks low — push hard this set'
+                : liveHR !== null && liveHR > 130
+                  ? ' · HR still elevated — take another 20s'
+                  : ''}
+            </Text>
+          </View>
+        </View>
+      )}
+
       {/* Exercise list */}
       <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled" onScrollBeginDrag={Keyboard.dismiss}>
         {/* Warm-up collapsed header — scrolls with exercises */}
@@ -3647,13 +3806,42 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </View>
                   )}
 
-                  {/* AI tip block removed from the exercise card — the
-                      same `ex.aiRecommendation` is now surfaced inside
-                      the rest-timer modal so the user only sees it
-                      between sets when it's actionable, instead of
-                      duplicated here. The state + fetch logic stays
-                      intact (aiLoadingIdx / aiErrorIdx / aiRecommendation)
-                      so the rest timer can keep reading it. */}
+                  {/* Cardio guidance strip — shows equipment-specific targets
+                      (watts range, rpm, speed+incline) when the planner
+                      built a capability-aware prescription for this exercise. */}
+                  {(() => {
+                    const cg = (ex as any).cardioGuidance;
+                    if (!cg) return null;
+                    const chips: { label: string; value: string }[] = [];
+                    if (cg.watts_range)      chips.push({ label: 'Watts', value: cg.watts_range });
+                    if (cg.rpm_range)        chips.push({ label: 'RPM', value: cg.rpm_range });
+                    if (cg.speed_range)      chips.push({ label: 'Speed', value: cg.speed_range });
+                    if (cg.incline_range)    chips.push({ label: 'Incline', value: cg.incline_range });
+                    if (cg.pace_per_500m)    chips.push({ label: '/500m', value: cg.pace_per_500m });
+                    if (cg.stroke_rate)      chips.push({ label: 'SPM', value: cg.stroke_rate });
+                    if (cg.hr_range)         chips.push({ label: 'HR', value: cg.hr_range });
+                    if (chips.length === 0 && cg.rpe_range) chips.push({ label: 'RPE', value: cg.rpe_range });
+                    if (chips.length === 0) return null;
+                    return (
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, paddingHorizontal: 2, marginBottom: 10 }}>
+                        {chips.map(chip => (
+                          <View key={chip.label} style={{ backgroundColor: workoutPalette.soft, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8 }}>
+                            <Text style={{ fontSize: 10, fontWeight: '700', color: workoutPalette.strong, letterSpacing: 0.3 }}>
+                              {chip.label}
+                            </Text>
+                            <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.textPrimary }}>
+                              {chip.value}
+                            </Text>
+                          </View>
+                        ))}
+                        {cg.intensity_cue ? (
+                          <Text style={{ fontSize: 11, color: themeColors.textMuted, alignSelf: 'center', flex: 1 }}>
+                            {cg.intensity_cue}
+                          </Text>
+                        ) : null}
+                      </View>
+                    );
+                  })()}
 
                   {/* ── Inline set rows ── */}
                   {(() => {
@@ -3785,7 +3973,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               )}
                               {/* Optional metrics input — shown when done, exercise-type-specific */}
                               {allDone && (() => {
-                                const metrics = getTimedMetricsFields(ex.name);
+                                const metrics = getTimedMetricsFields(ex.name, (ex as any).cardioGuidance);
                                 if (!metrics) return null;
                                 return (
                                   <View style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 12, marginTop: 10, gap: 8, borderWidth: 1, borderColor: themeColors.border }}>
@@ -4314,16 +4502,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
       </Modal>
 
-      {/* Post-Workout Summary Modal — Step 1: Summary / Step 2: Feedback */}
-      <Modal visible={summaryVisible} transparent animationType="slide" onRequestClose={() => {
-        if (summaryStep === 'confirmation') { dismissSummaryModal(); return; }
-        handleSubmitFeedback(true);
-      }}>
+      {/* Post-Workout Summary Modal */}
+      <Modal visible={summaryVisible} transparent animationType="slide" onRequestClose={dismissSummaryModal}>
         <View style={styles.summaryBackdrop}>
           <ScrollView contentContainerStyle={styles.summaryScroll} keyboardShouldPersistTaps="handled">
 
-            {summaryStep === 'summary' ? (
-              /* ── Step 1: Shareable Workout Summary Card ────────────────────── */
+            {/* ── Shareable Workout Summary Card ────────────────────── */}
               <View style={styles.summaryModal}>
                 <ViewShot ref={summaryCardRef} options={{ format: 'png', quality: 1 }}>
                   <View style={styles.shareCard}>
@@ -4627,182 +4811,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       {postingToFeed ? 'Sharing…' : '👥 Friends'}
                     </Text>
                   </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.summaryFeedbackBtn, { flex: 2 }]}
-                    onPress={() => setSummaryStep('feedback')}
-                    activeOpacity={0.85}>
-                    <Text style={styles.summaryFeedbackBtnText}>How Did It Feel?  <Ionicons name="arrow-forward" size={14} /></Text>
-                  </TouchableOpacity>
                 </View>
-                <TouchableOpacity onPress={() => handleSubmitFeedback(true)} style={styles.summarySkipBtn}>
-                  <Text style={styles.summarySkipText}>Skip & Close</Text>
+                <TouchableOpacity onPress={dismissSummaryModal} style={styles.summarySkipBtn}>
+                  <Text style={styles.summarySkipText}>Close</Text>
                 </TouchableOpacity>
               </View>
-
-            ) : (
-              /* ── Step 2: Feedback Form ───────────────────────────────────────── */
-              <View style={styles.summaryModal}>
-                {feedbackSubmitting ? (
-                  /* Submitting / result state */
-                  <View style={styles.feedbackSubmittingBlock}>
-                    {feedbackResult ? (
-                      <>
-                        <Ionicons name="checkmark-circle" size={24} color={themeColors.success ?? '#22C55E'} />
-                        <Text style={styles.feedbackResultTitle}>Plan Updated</Text>
-                        <Text style={styles.feedbackResultText}>{feedbackResult}</Text>
-                      </>
-                    ) : (
-                      <>
-                        <ActivityIndicator size="large" color={themeColors.primary} />
-                        <Text style={styles.feedbackSubmittingText}>Updating your plan based on feedback…</Text>
-                      </>
-                    )}
-                  </View>
-                ) : (
-                  <>
-                    <View style={styles.summaryHeaderBlock}>
-                      <Text style={styles.summaryTitle}>How Did It Go?</Text>
-                      <Text style={styles.summarySubtitle}>Your answer helps the AI trainer tune upcoming workouts</Text>
-                    </View>
-
-                    {/* Overall feeling */}
-                    <View style={styles.feedbackGroup}>
-                      <Text style={styles.feedbackGroupLabel}>Overall feeling</Text>
-                      <View style={styles.fbFormRow}>
-                        {([
-                          { value: 'rough', label: 'Rough' },
-                          { value: 'okay',  label: 'Okay' },
-                          { value: 'good',  label: 'Good' },
-                          { value: 'great', label: 'Great' },
-                        ] as const).map(opt => (
-                          <TouchableOpacity
-                            key={opt.value}
-                            style={[styles.fbFormChip, feedbackFeeling === opt.value && styles.fbFormChipActive]}
-                            onPress={() => setFeedbackFeeling(opt.value)}
-                            activeOpacity={0.8}>
-                            <Text style={[styles.fbFormChipText, feedbackFeeling === opt.value && styles.fbFormChipTextActive]}>
-                              {opt.label}
-                            </Text>
-                          </TouchableOpacity>
-                        ))}
-                      </View>
-                    </View>
-
-                    {/* Perceived intensity */}
-                    <View style={styles.feedbackGroup}>
-                      <Text style={styles.feedbackGroupLabel}>Intensity</Text>
-                      <View style={styles.fbFormRow}>
-                        {([
-                          { value: 1, label: 'Too Easy' },
-                          { value: 2, label: 'Easy' },
-                          { value: 3, label: 'Just Right' },
-                          { value: 4, label: 'Hard' },
-                          { value: 5, label: 'Too Hard' },
-                        ] as const).map(opt => (
-                          <TouchableOpacity
-                            key={opt.value}
-                            style={[styles.feedbackIntensityChip, feedbackIntensity === opt.value && styles.fbFormChipActive]}
-                            onPress={() => setFeedbackIntensity(opt.value)}
-                            activeOpacity={0.8}>
-                            <Text style={[styles.fbFormChipText, feedbackIntensity === opt.value && styles.fbFormChipTextActive]}>
-                              {opt.label}
-                            </Text>
-                          </TouchableOpacity>
-                        ))}
-                      </View>
-                    </View>
-
-                    {/* Soreness */}
-                    <View style={styles.feedbackGroup}>
-                      <Text style={styles.feedbackGroupLabel}>Any soreness? <Text style={styles.feedbackOptional}>(optional)</Text></Text>
-                      <View style={styles.feedbackSorenessGrid}>
-                        {['Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Glutes', 'Core', 'Knees', 'Lower Back'].map(area => {
-                          const active = feedbackSoreness.includes(area);
-                          return (
-                            <TouchableOpacity
-                              key={area}
-                              style={[styles.feedbackSorenessChip, active && styles.feedbackSorenessChipActive]}
-                              onPress={() => setFeedbackSoreness(prev =>
-                                active ? prev.filter(a => a !== area) : [...prev, area]
-                              )}
-                              activeOpacity={0.8}>
-                              <Text style={[styles.feedbackSorenessText, active && styles.feedbackSorenessTextActive]}>{area}</Text>
-                            </TouchableOpacity>
-                          );
-                        })}
-                      </View>
-                    </View>
-
-                    {/* Notes */}
-                    <View style={styles.feedbackGroup}>
-                      <Text style={styles.feedbackGroupLabel}>Notes <Text style={styles.feedbackOptional}>(optional)</Text></Text>
-                      <TextInput
-                        value={feedbackNotes}
-                        onChangeText={setFeedbackNotes}
-                        placeholder="e.g. left shoulder felt tight, energy was low..."
-                        placeholderTextColor={themeColors.textMuted}
-                        style={styles.feedbackNotesInput}
-                        multiline
-                        numberOfLines={3}
-                      />
-                    </View>
-
-                    {/* Submit */}
-                    <TouchableOpacity
-                      style={[styles.summaryFeedbackBtn, (!feedbackFeeling && !feedbackIntensity) && { opacity: 0.5 }]}
-                      onPress={() => handleSubmitFeedback(false)}
-                      disabled={!feedbackFeeling && !feedbackIntensity || feedbackSubmitting}
-                      activeOpacity={0.85}>
-                      <Text style={styles.summaryFeedbackBtnText}>
-                        {feedbackSubmitting ? 'Submitting…' : 'Submit & Let AI Adjust Plan'}
-                      </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={() => handleSubmitFeedback(true)} style={styles.summarySkipBtn}>
-                      <Text style={styles.summarySkipText}>Skip</Text>
-                    </TouchableOpacity>
-                  </>
-                )}
-              </View>
-            )}
-
-            {/* ── Step 3: Confirmation ────────────────────────────────────────
-                Stays on screen after the user taps Submit so they can
-                actually read the result. Previously the modal auto-
-                closed in the `finally` block of handleSubmitFeedback,
-                which made the feedback feel like it went nowhere. */}
-            {summaryStep === 'confirmation' && (
-              <View style={styles.summaryFeedback}>
-                <Text style={[styles.summaryFeedbackTitle, { textAlign: 'center' }]}>Feedback received</Text>
-                <Text style={{ fontSize: 14, color: themeColors.textSecondary, lineHeight: 21, marginTop: 10, marginBottom: 18, textAlign: 'center' }}>
-                  {feedbackResult || 'Your feedback has been saved.'}
-                </Text>
-                <View style={{ gap: 6, marginBottom: 24 }}>
-                  {feedbackFeeling && (
-                    <Text style={{ fontSize: 12, color: themeColors.textMuted, textAlign: 'center' }}>
-                      Feeling: <Text style={{ color: themeColors.textPrimary, fontWeight: '700' }}>{feedbackFeeling}</Text>
-                    </Text>
-                  )}
-                  {feedbackIntensity && (
-                    <Text style={{ fontSize: 12, color: themeColors.textMuted, textAlign: 'center' }}>
-                      Intensity: <Text style={{ color: themeColors.textPrimary, fontWeight: '700' }}>{feedbackIntensity}/5</Text>
-                    </Text>
-                  )}
-                  {feedbackSoreness.length > 0 && (
-                    <Text style={{ fontSize: 12, color: themeColors.textMuted, textAlign: 'center' }}>
-                      Soreness: <Text style={{ color: themeColors.textPrimary, fontWeight: '700' }}>{feedbackSoreness.join(', ')}</Text>
-                    </Text>
-                  )}
-                </View>
-                <View style={{ gap: 10 }}>
-                  <TouchableOpacity
-                    style={styles.summaryFeedbackBtn}
-                    onPress={dismissSummaryModal}
-                    activeOpacity={0.85}>
-                    <Text style={styles.summaryFeedbackBtnText}>Done</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            )}
 
           </ScrollView>
         </View>
@@ -4965,7 +4978,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               <SearchInput
                 containerStyle={{ flex: 1 }}
                 value={exerciseSearch}
-                onChangeText={(t) => { setExerciseSearch(t); if (!t) setAiExerciseResults([]); }}
+                onChangeText={(t) => { setExerciseSearch(t); if (!t) { setAiExerciseResults([]); loadWorkoutSuggestions(); } }}
                 placeholder="Search by name, muscle, or equipment…"
                 placeholderTextColor={themeColors.textMuted}
                 style={styles.addExerciseSearch}
@@ -4988,11 +5001,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               <ActivityIndicator size="small" color={themeColors.primary} style={{ marginTop: 12 }} />
             ) : (
               <ScrollView contentContainerStyle={styles.addExerciseList} keyboardShouldPersistTaps="handled">
-                {/* AI results section — structured exercise suggestions from
-                    the LLM. Each has Add (→ workout) and Save (→ library). */}
+                {/* Auto-suggestions or manual AI search results */}
+                {aiExerciseLoading && aiExerciseResults.length === 0 && (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                    <ActivityIndicator size="small" color={workoutPalette.strong} />
+                    <Text style={{ fontSize: 12, color: themeColors.textMuted }}>
+                      Finding exercises for your {workout.focus} session…
+                    </Text>
+                  </View>
+                )}
                 {aiExerciseResults.length > 0 && (
                   <View style={{ marginBottom: 14 }}>
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>Suggestions</Text>
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+                      {exerciseSearch.trim() ? 'Results' : `Fits Your ${workout.focus} Workout`}
+                    </Text>
                     {aiExerciseResults.map((ex, i) => (
                       <View key={`ai-${ex.name}-${i}`} style={[styles.addExerciseItem, { flexDirection: 'column', alignItems: 'stretch', borderColor: workoutPalette.strong + '66', borderWidth: 1.5 }]}>
                         <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>

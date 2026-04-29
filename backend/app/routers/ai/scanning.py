@@ -80,6 +80,7 @@ from app.models import User
 from .router import router
 from .models import (
     FoodPhotoRequest, ScanFoodsRequest, FoodNutritionSearchRequest, ExerciseSearchRequest,
+    WorkoutSuggestRequest,
     SupplementLookupRequest, SupplementPhotoRequest, FormPhotoRequest, BodyScanRequest,
     MealInstructionsRequest, ParseMealTextRequest,
 )
@@ -1045,6 +1046,96 @@ def exercise_ai_search(
         return {"results": results}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Exercise search failed: {str(e)}")
+
+
+@router.post("/exercise-suggest")
+def exercise_suggest(
+    body: WorkoutSuggestRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Return 10 exercise suggestions that fit the user's current live workout.
+    AI-only — takes structured workout context instead of a free-text query so
+    results are always complementary to what they're already doing."""
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured")
+
+    done_line = (
+        f"Exercises already in this session: {', '.join(body.current_exercises[:20])}"
+        if body.current_exercises
+        else "No exercises logged yet — suggest a full complementary set."
+    )
+    equip_line = (
+        f"Available equipment: {', '.join(body.equipment)}"
+        if body.equipment
+        else "Equipment: unknown — prefer common gym / bodyweight options"
+    )
+    injury_line = (
+        f"Injuries to avoid: {', '.join(body.injuries)}. Do NOT suggest exercises that stress these areas."
+        if body.injuries
+        else ""
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an expert strength and conditioning coach. "
+                "Return exercises as valid JSON only — no prose, no markdown."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"The user is in the middle of a {body.workout_focus} workout.\n"
+                f"{done_line}\n"
+                f"{equip_line}\n"
+                f"{injury_line}\n\n"
+                "Suggest exactly 10 exercises that:\n"
+                "- Complement and complete this session (same muscle groups, compatible stimulus)\n"
+                "- Include a smart mix: 3-4 compound movements, 4-5 isolation/accessory, 1-2 finishers\n"
+                "- Avoid duplicating exercises already listed above\n"
+                "- Are ordered from highest to lowest priority for this session\n\n"
+                "Return JSON with this exact schema:\n"
+                '{"results": [{\n'
+                '  "name": "exercise name",\n'
+                '  "primary_muscle": "chest|back|shoulders|biceps|triceps|quads|hamstrings|glutes|calves|core|full_body",\n'
+                '  "equipment": "barbell|dumbbell|machine|cable|bodyweight|kettlebell|band|other",\n'
+                '  "sets": 3,\n'
+                '  "reps": "8-12",\n'
+                '  "rest_seconds": 90,\n'
+                '  "why": "1 sentence on why this fits the current session",\n'
+                '  "form_cues": ["cue 1", "cue 2"]\n'
+                "}]}"
+            ),
+        },
+    ]
+
+    client = OpenAI(api_key=api_key)
+    try:
+        kwargs = _build_chat_kwargs(model_meal_parsing(), messages, max_tokens=1200, timeout_secs=25)
+        resp = _chat_create(client, **kwargs)
+        data = json.loads(resp.choices[0].message.content or '{"results": []}')
+        results = data if isinstance(data, list) else data.get("results", [])
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            name = r.get("name") or ""
+            if not r.get("video_id"):
+                r["video_id"] = _video_id_for_wger_name(name)
+            if "is_compound" not in r:
+                r["is_compound"] = _is_compound_from_wger({"name": name, "muscles": [r.get("primary_muscle") or ""]})
+            pm = (r.get("primary_muscle") or "").lower()
+            if pm in {"abs", "obliques"}:
+                r["primary_muscle"] = "core"
+            eq = (r.get("equipment") or "").lower().strip()
+            if not eq or eq in {"none", "no equipment", "bodyweight"}:
+                r["equipment"] = "bodyweight"
+            r.setdefault("source", "ai")
+        print(f"[exercise-suggest] {len(results)} suggestions for '{body.workout_focus}'")
+        return {"results": results[:10]}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Exercise suggest failed: {str(e)}")
 
 
 @router.post("/meal-instructions")

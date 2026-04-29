@@ -143,15 +143,19 @@ deploy-backend:
 	@echo ""
 	@echo "Done. Run 'make smoke-prod' in a minute to verify."
 
-# ── Deploy: iOS (local Xcode build + auto-submit to TestFlight) ───────────────
+# ── Deploy: iOS (local Xcode build + submit to TestFlight) ────────────────────
 # Builds on this machine — no EAS cloud build credits consumed.
 # Requires Xcode + valid Apple certs/provisioning in your keychain.
+# --auto-submit is not supported with --local, so submit runs separately.
 deploy-ios:
 	@echo ""
-	@echo "Building iOS locally + submitting to TestFlight..."
+	@echo "Building iOS locally..."
 	@echo "(~15-25 min depending on machine. No EAS build credits used.)"
 	@echo ""
-	@eas build --platform ios --profile production --local --auto-submit
+	@eas build --platform ios --profile production --local --non-interactive
+	@echo ""
+	@echo "Build finished. Submitting latest to TestFlight..."
+	@eas submit --platform ios --latest --non-interactive
 
 # Fresh local iOS build — clears EAS's cached entitlements / provisioning.
 # Use when entitlements changed (HealthKit, Push, etc.) or app.json
@@ -162,7 +166,10 @@ deploy-ios-clean:
 	@echo "Building iOS locally with --clear-cache (fresh entitlements)..."
 	@echo "(~20-30 min. Use after any entitlement / provisioning change.)"
 	@echo ""
-	@eas build --platform ios --profile production --local --auto-submit --clear-cache
+	@eas build --platform ios --profile production --local --non-interactive --clear-cache
+	@echo ""
+	@echo "Build finished. Submitting latest to TestFlight..."
+	@eas submit --platform ios --latest --non-interactive
 	@echo ""
 	@echo "Done. Check App Store Connect -> TestFlight tab for processing status."
 

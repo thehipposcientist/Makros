@@ -281,6 +281,26 @@ export interface Exercise {
   /** Session-over-session progression verdict when the plan is
    *  regenerated from history ('increase_load' | 'hold_load' | 'reduce_load'). */
   progressionAction?: 'increase_load' | 'hold_load' | 'reduce_load' | 'keep_reps' | 'add_rep' | null;
+  /** Equipment-specific cardio prescription from the planner — present on
+   *  cardio exercises when the user has a UserEquipmentProfile with
+   *  capabilities (watts/rpm for IC6, speed+incline for treadmill, etc.). */
+  cardioGuidance?: {
+    duration_min?: number;
+    is_intervals?: boolean;
+    watts_range?: string;
+    rpm_range?: string;
+    speed_range?: string;
+    incline_range?: string;
+    hr_zone?: string;
+    hr_range?: string;
+    pace_per_500m?: string;
+    stroke_rate?: string;
+    rpe_range?: string;
+    intensity_cue?: string;
+    interval_sets?: number;
+    work_seconds?: number;
+    rest_seconds?: number;
+  } | null;
 }
 
 export interface WorkoutDay {
