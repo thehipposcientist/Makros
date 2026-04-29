@@ -436,6 +436,11 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const [scannedFoods, setScannedFoods] = useState<{ name: string; selected: boolean }[]>([]);
   const [customFoodInput, setCustomFoodInput] = useState('');
 
+  // Allergies / dietary restrictions — plumbed through to UserProfile.allergies
+  // and read by the meal-planner so suggested meals filter these out. Stored
+  // as lowercase canonical category slugs ("dairy", "nuts", etc.).
+  const [allergies, setAllergies] = useState<string[]>([]);
+
   // Step 7 — Supplements
   const [supplementsAvailable, setSupplementsAvailable] = useState<string[]>([]);
   const [showFoodScanModal, setShowFoodScanModal] = useState(false);
@@ -615,6 +620,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       equipment:              selectedEquipment,
       equipmentSettings:      normalizeStrengthEquipmentSettings(equipmentSettings, selectedEquipment),
       foodsAvailable,
+      allergies: allergies.length > 0 ? allergies : undefined,
       supplementsAvailable: supplementsAvailable.length > 0 ? supplementsAvailable : undefined,
       customFoods: [],
       mealRoutine:         mealRoutine.trim()         || undefined,
@@ -1596,6 +1602,68 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         Pick a preset or select individual foods. You can change everything later from settings.
         {foodsAvailable.length > 0 ? `  ·  ${foodsAvailable.length} selected` : ''}
       </Text>
+
+      {/* Allergies & restrictions — collected before food selection so the
+          AI meal planner and barcode/scan flows can filter these out from
+          the start. Tap-to-toggle category chips; matches the canonical
+          allergen slugs the backend already understands. */}
+      <View style={{ marginBottom: 18 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <Ionicons name="warning-outline" size={14} color={colors.warning ?? '#F59E0B'} />
+          <Text style={[styles.sectionHeading, { marginBottom: 0, marginTop: 0 }]}>
+            Allergies & restrictions
+          </Text>
+        </View>
+        <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 10 }}>
+          Tap any that apply. Meal suggestions and food scans will avoid these.
+        </Text>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+          {[
+            { key: 'dairy',     label: 'Dairy' },
+            { key: 'gluten',    label: 'Gluten' },
+            { key: 'nuts',      label: 'Nuts' },
+            { key: 'peanuts',   label: 'Peanuts' },
+            { key: 'shellfish', label: 'Shellfish' },
+            { key: 'fish',      label: 'Fish' },
+            { key: 'eggs',      label: 'Eggs' },
+            { key: 'soy',       label: 'Soy' },
+            { key: 'sesame',    label: 'Sesame' },
+            { key: 'pork',      label: 'Pork' },
+            { key: 'beef',      label: 'Beef' },
+            { key: 'alcohol',   label: 'Alcohol' },
+          ].map((a) => {
+            const active = allergies.includes(a.key);
+            return (
+              <TouchableOpacity
+                key={a.key}
+                onPress={() => {
+                  setAllergies((prev) =>
+                    prev.includes(a.key) ? prev.filter((x) => x !== a.key) : [...prev, a.key],
+                  );
+                }}
+                style={{
+                  paddingHorizontal: 12,
+                  paddingVertical: 7,
+                  borderRadius: 16,
+                  borderWidth: 1,
+                  borderColor: active ? (colors.warning ?? '#F59E0B') : colors.border,
+                  backgroundColor: active ? (colors.warning ?? '#F59E0B') + '22' : colors.surface,
+                }}
+              >
+                <Text
+                  style={{
+                    fontSize: 12,
+                    fontWeight: '700',
+                    color: active ? (colors.warning ?? '#F59E0B') : colors.textSecondary,
+                  }}
+                >
+                  {a.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
 
       {/* Photo scan — top, prominent */}
       <View style={styles.scanSection}>

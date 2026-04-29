@@ -1015,6 +1015,13 @@ export default function Index() {
       Promise.race([p, new Promise<void>(r => setTimeout(r, ms))]);
     if (authToken) {
       await raceTimeout(pushUserStateToBackend(authToken).catch(() => {}), 2000);
+      // Bump server-side token_version so this token (and every other
+      // device's token) is invalidated. Best-effort with a short timeout
+      // so a flaky network can't strand the user on the auth screen.
+      try {
+        const { logout } = await import('../src/services/api');
+        await raceTimeout(logout(authToken).catch(() => {}), 1500);
+      } catch { /* api module optional */ }
     }
     try {
       const { clearWatchData } = await import('../src/utils/watchSync');

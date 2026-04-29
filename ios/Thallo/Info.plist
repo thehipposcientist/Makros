@@ -54,17 +54,17 @@
       <true/>
     </dict>
     <key>NSCameraUsageDescription</key>
-    <string>Thallo uses the camera to scan food barcodes for nutrition tracking.</string>
+    <string>Thallo uses the camera to scan food barcodes, take food photos for nutrition tracking, and capture photos of your gear (running shoes, bikes) for AI mileage estimates.</string>
     <key>NSFaceIDUsageDescription</key>
-    <string>Allow $(PRODUCT_NAME) to use Face ID</string>
+    <string>Thallo uses Face ID to unlock the app quickly so you don't have to retype your password every session.</string>
     <key>NSHealthShareUsageDescription</key>
     <string>Thallo reads your sleep, resting heart rate, heart rate variability, steps, workouts, weight, and active energy from Apple Health so you can see readiness, recovery, and progress trends in the app.</string>
     <key>NSHealthUpdateUsageDescription</key>
     <string>Thallo writes your completed workouts to Apple Health so they appear alongside your other activity.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Allow $(PRODUCT_NAME) to access your microphone</string>
+    <string>Thallo uses the microphone for speech-to-meal voice entry — speak what you ate and we'll log it without typing.</string>
     <key>NSPhotoLibraryUsageDescription</key>
-    <string>Allow $(PRODUCT_NAME) to access your photos</string>
+    <string>Thallo accesses your photo library to attach gear photos for AI mileage tracking and to add food photos to logged meals.</string>
     <key>NSSupportsLiveActivities</key>
     <true/>
     <key>NSSupportsLiveActivitiesFrequentUpdates</key>

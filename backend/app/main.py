@@ -341,6 +341,55 @@ def _startup_backfill_gut_health():
     threading.Thread(target=_worker, daemon=True, name="backfill-gut-health").start()
 
 
+def _purge_expired_soft_deletes():
+    """Hard-delete user accounts that have been soft-deleted longer than
+    the retention window. Runs as a daemon thread on startup; idempotent
+    (no-op when nothing is past the window).
+
+    Retention defaults to 30 days. Override via `ACCOUNT_HARD_DELETE_DAYS`.
+    Set `ACCOUNT_HARD_DELETE_ENABLED=0` to disable while debugging."""
+    import os, threading
+    if os.getenv("ACCOUNT_HARD_DELETE_ENABLED", "1") != "1":
+        logger.info("hard_delete_disabled", extra={"reason": "ACCOUNT_HARD_DELETE_ENABLED=0"})
+        return
+    retention_days = int(os.getenv("ACCOUNT_HARD_DELETE_DAYS", "30"))
+
+    def _worker():
+        try:
+            from datetime import datetime, timedelta, timezone
+            from sqlmodel import Session, select
+            from app.database import engine
+            from app.models import User
+            cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+            with Session(engine) as db:
+                stale = db.exec(
+                    select(User)
+                    .where(User.is_active == False)
+                    .where(User.account_deleted_at != None)
+                    .where(User.account_deleted_at < cutoff)
+                ).all()
+                if not stale:
+                    logger.info("hard_delete_noop", extra={"retention_days": retention_days})
+                    return
+                deleted = 0
+                for u in stale:
+                    try:
+                        db.delete(u)
+                        deleted += 1
+                    except Exception:
+                        logger.exception("hard_delete_row_failed", extra={"user_id": u.id})
+                if deleted:
+                    db.commit()
+                logger.info("hard_delete_done", extra={
+                    "deleted": deleted,
+                    "retention_days": retention_days,
+                })
+        except Exception:
+            logger.exception("hard_delete_failed")
+
+    threading.Thread(target=_worker, daemon=True, name="hard-delete-soft-deleted").start()
+
+
 @app.on_event("startup")
 def on_startup():
     logger.info("app_startup", extra={"version": app.version})
@@ -350,6 +399,7 @@ def on_startup():
     _startup_enrich_exercise_images()
     _startup_backfill_muscle_fatigue()
     _startup_backfill_gut_health()
+    _purge_expired_soft_deletes()
     logger.info("app_startup_complete")
 
 

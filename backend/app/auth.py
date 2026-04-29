@@ -38,9 +38,20 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
-def create_access_token(user_id: int, expires_delta: timedelta | None = None) -> str:
+def create_access_token(
+    user_id: int,
+    *,
+    token_version: int = 0,
+    expires_delta: timedelta | None = None,
+) -> str:
+    """Issue a JWT for `user_id`. Always embed the user's current
+    `token_version` as the `tv` claim so we can revoke every existing
+    token by bumping `User.token_version` (logout, password change,
+    password reset). Older tokens whose `tv` is below the user's current
+    version are rejected by `get_current_user`.
+    """
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    payload = {"sub": str(user_id), "exp": expire}
+    payload = {"sub": str(user_id), "exp": expire, "tv": int(token_version)}
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -57,10 +68,17 @@ def get_current_user(
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = int(payload.get("sub"))
+        # `tv` was added 2026-04-29. Treat missing claim as 0 so every
+        # JWT issued before this rollout still validates against the
+        # default `User.token_version=0`. Once the user logs out / changes
+        # password, any old tokens get rejected on next request.
+        token_version = int(payload.get("tv", 0))
     except (JWTError, TypeError, ValueError):
         raise credentials_exception
 
     user = session.get(User, user_id)
     if not user or not user.is_active:
+        raise credentials_exception
+    if token_version < int(user.token_version or 0):
         raise credentials_exception
     return user

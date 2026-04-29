@@ -36,6 +36,11 @@ class User(SQLModel, table=True):
     password_reset_token_hash: str | None = Field(default=None)
     password_reset_expires_at: datetime | None = Field(default=None)
     account_deleted_at: datetime | None = Field(default=None)
+    # Bumped on logout, password change, and password reset. Encoded as
+    # `tv` in JWTs; `get_current_user` rejects tokens whose `tv` is below
+    # the user's current value. Lets us invalidate every existing token
+    # for an account without flushing the JWT signing key globally.
+    token_version: int = Field(default=0)
 
 
 # ─── User profile / stats ─────────────────────────────────────────────────────
@@ -1363,6 +1368,27 @@ class Friendship(SQLModel, table=True):
     blocked_by: int | None = Field(default=None, foreign_key="user.id")
     requested_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     accepted_at: datetime | None = Field(default=None)
+
+
+class UserReport(SQLModel, table=True):
+    """A user-reported abuse / safety / spam complaint about another user.
+
+    App Review and basic platform safety require a visible "Report" affordance
+    on any social surface. We store reports in their own table (not a flag
+    on Friendship) so non-friends can be reported and so a single review
+    queue can drive moderation. No auto-action is taken — operators read
+    the table and decide.
+    """
+    __tablename__ = "user_reports"
+    id: int | None = Field(default=None, primary_key=True)
+    reporter_id: int = Field(foreign_key="user.id", index=True)
+    reported_user_id: int = Field(foreign_key="user.id", index=True)
+    # spam | harassment | impersonation | inappropriate_content | other
+    reason: str = Field(default="other")
+    note: str | None = Field(default=None)
+    # open | reviewed | dismissed | actioned
+    status: str = Field(default="open", index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class WeeklyDigestCache(SQLModel, table=True):

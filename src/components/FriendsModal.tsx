@@ -17,11 +17,13 @@ import { getTheme, radius, spacing } from '../constants/theme';
 import type { AppThemeName } from '../types';
 import {
   acceptFriend,
+  blockFriend,
   getSocialDigest,
   getSocialMe,
   listFriends,
   rejectFriend,
   removeFriend,
+  reportUser,
   requestFriend,
   searchUsers,
   updateSocialMe,
@@ -206,6 +208,82 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
       );
     },
     [authToken, refresh],
+  );
+
+  const onBlock = useCallback(
+    (friend: SocialFriend) => {
+      Alert.alert(
+        `Block ${friend.display_name ?? friend.username}?`,
+        "They won't be able to send you friend requests or see your activity. You also won't see theirs. You can unblock from settings.",
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Block',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                await blockFriend(authToken, friend.friendship_id);
+                await refresh();
+              } catch (e: any) {
+                Alert.alert('Could not block', e?.message ?? 'Try again');
+              }
+            },
+          },
+        ],
+      );
+    },
+    [authToken, refresh],
+  );
+
+  const onReport = useCallback(
+    (friend: SocialFriend) => {
+      // App Review requires a Report affordance on every social surface.
+      // Reasons map to the backend `_VALID_REPORT_REASONS` set.
+      Alert.alert(
+        `Report ${friend.display_name ?? friend.username}`,
+        'Pick the reason. A safety reviewer will look at this.',
+        [
+          { text: 'Spam',                      onPress: () => submitReport(friend, 'spam') },
+          { text: 'Harassment',                onPress: () => submitReport(friend, 'harassment') },
+          { text: 'Impersonation',             onPress: () => submitReport(friend, 'impersonation') },
+          { text: 'Inappropriate content',     onPress: () => submitReport(friend, 'inappropriate_content') },
+          { text: 'Other',                     onPress: () => submitReport(friend, 'other') },
+          { text: 'Cancel', style: 'cancel' },
+        ],
+      );
+    },
+    [authToken],
+  );
+
+  const submitReport = useCallback(
+    async (
+      friend: SocialFriend,
+      reason: 'spam' | 'harassment' | 'impersonation' | 'inappropriate_content' | 'other',
+    ) => {
+      try {
+        await reportUser(authToken, friend.user_id, reason);
+        Alert.alert('Report submitted', 'Thank you. A reviewer will follow up if action is needed.');
+      } catch (e: any) {
+        Alert.alert('Could not submit report', e?.message ?? 'Try again');
+      }
+    },
+    [authToken],
+  );
+
+  const onFriendOptions = useCallback(
+    (friend: SocialFriend) => {
+      Alert.alert(
+        friend.display_name ?? friend.username,
+        undefined,
+        [
+          { text: 'Remove friend', style: 'destructive', onPress: () => onRemove(friend) },
+          { text: 'Block',         style: 'destructive', onPress: () => onBlock(friend) },
+          { text: 'Report',        onPress: () => onReport(friend) },
+          { text: 'Cancel',        style: 'cancel' },
+        ],
+      );
+    },
+    [onRemove, onBlock, onReport],
   );
 
   const onTurnOnSharing = useCallback(async () => {
@@ -410,7 +488,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                           onViewFriend(f.user_id, f.display_name ?? f.username, digestFriend);
                         }
                       }}
-                      onLongPress={() => onRemove(f)}
+                      onLongPress={() => onFriendOptions(f)}
                     >
                       <View style={styles.avatar}>
                         <Text style={styles.avatarText}>

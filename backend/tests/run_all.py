@@ -68,6 +68,8 @@ _TEST_MODULES = (
     "tests.test_plan_week_midweek_regen",
     # Goal change: no PlanWeek/PlanDay mutation, snapshot fields, review override.
     "tests.test_plan_week_goal_change",
+    # Auth: DEV_EMAIL_TOKENS gating — dev tokens must not leak in prod.
+    "tests.test_auth_dev_token_isolation",
     # PlanWeekCheckin: status, gate, idempotency, skip, recap.
     "tests.test_plan_week_checkin",
     # Change Day Type — conflict detection + smart adjust reconciliation.

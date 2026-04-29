@@ -1474,10 +1474,38 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     return () => clearInterval(interval);
   }, []);
 
-  // Set up notifications immediately so lock screen alerts work from the first rest
+  // Set up notifications immediately so lock screen alerts work from the
+  // first rest. If the user previously denied notifications, the OS
+  // suppresses the system permission prompt — we then show a one-time,
+  // dismissable alert explaining what they're missing (rest-timer Live
+  // Activity, lock-screen alert when rest ends). The dismissal is
+  // remembered in AsyncStorage so the alert never repeats.
   useEffect(() => {
-    configureWorkoutNotifications().catch(() => undefined);
-    ensureWorkoutNotificationPermission().catch(() => undefined);
+    let cancelled = false;
+    (async () => {
+      try {
+        await configureWorkoutNotifications();
+        const granted = await ensureWorkoutNotificationPermission();
+        if (cancelled || granted) return;
+        const dismissedKey = 'liveActivityNotifAlertDismissed_v1';
+        const dismissed = await AsyncStorage.getItem(dismissedKey).catch(() => null);
+        if (dismissed === '1') return;
+        Alert.alert(
+          'Lock-screen timer unavailable',
+          "Notifications are off, so your rest timer won't show on the Lock Screen or Dynamic Island, and you won't hear an alert when rest ends. Enable notifications in Settings to turn this on.",
+          [
+            { text: 'Not now', style: 'cancel', onPress: () => {
+              AsyncStorage.setItem(dismissedKey, '1').catch(() => {});
+            }},
+            { text: 'Open Settings', onPress: () => {
+              AsyncStorage.setItem(dismissedKey, '1').catch(() => {});
+              import('react-native').then(({ Linking }) => Linking.openSettings()).catch(() => {});
+            }},
+          ],
+        );
+      } catch { /* notif unavailable — silently degrade */ }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   // Cleanup on unmount

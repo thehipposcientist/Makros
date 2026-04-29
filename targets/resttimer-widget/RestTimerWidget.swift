@@ -109,29 +109,39 @@ private struct TimerCircle: View {
     let state: RestTimerAttributes.ContentState
     let accent: Color
 
-    var body: some View {
-        TimelineView(.periodic(from: Date(), by: 1)) { timeline in
-            let remaining = remainingSeconds(endDateMs: state.endDateMs, at: timeline.date)
-            let progress = timerProgress(state: state, remainingSeconds: remaining)
+    private var startDate: Date { Date(timeIntervalSince1970: state.startedAtMs / 1000.0) }
+    private var endDate: Date { Date(timeIntervalSince1970: state.endDateMs / 1000.0) }
 
-            ZStack {
-                Circle()
-                    .stroke(accent.opacity(0.22), lineWidth: 5)
-                Circle()
-                    .trim(from: 0, to: progress)
-                    .stroke(accent, style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .animation(.linear(duration: 0.95), value: progress)
-                Text(formatRemaining(remaining))
-                    .font(.system(size: 18, weight: .heavy, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(accent)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-                    .frame(width: 48, height: 24, alignment: .center)
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(accent.opacity(0.22), lineWidth: 5)
+            // ProgressView(timerInterval:) auto-animates in Live Activities
+            // without burning the widget's refresh budget. .circular renders
+            // a system ring; we tint it to match the theme.
+            ProgressView(timerInterval: startDate...endDate, countsDown: true) {
+                EmptyView()
+            } currentValueLabel: {
+                EmptyView()
             }
-            .frame(width: 68, height: 68, alignment: .center)
+            .progressViewStyle(.circular)
+            .tint(accent)
+            .frame(width: 68, height: 68)
+            // Text(timerInterval:countsDown:) is the ONLY pattern that ticks
+            // reliably on the lock screen — TimelineView(.periodic) gets
+            // throttled to ~1/min by ActivityKit when the app is
+            // backgrounded, which is why the previous version showed a
+            // frozen number.
+            Text(timerInterval: startDate...endDate, countsDown: true)
+                .font(.system(size: 18, weight: .heavy, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(accent)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .frame(width: 48, height: 24, alignment: .center)
+                .multilineTextAlignment(.center)
         }
+        .frame(width: 68, height: 68, alignment: .center)
     }
 }
 
@@ -167,15 +177,17 @@ private struct RestAdjustControls: View {
 }
 
 // Renders a live-ticking countdown without requiring per-second pushes.
+// Uses Text(timerInterval:countsDown:) — the only Live-Activity-safe
+// pattern for ticking text. TimelineView(.periodic) gets refresh-budgeted
+// by ActivityKit and visibly stalls when the app is backgrounded.
 private struct TimerText: View {
     let endDateMs: Double
     let accent: Color
 
     var body: some View {
-        TimelineView(.periodic(from: Date(), by: 1)) { timeline in
-            Text(formatRemaining(remainingSeconds(endDateMs: endDateMs, at: timeline.date)))
-                .foregroundStyle(accent)
-        }
+        let end = Date(timeIntervalSince1970: endDateMs / 1000.0)
+        Text(timerInterval: Date()...end, countsDown: true)
+            .foregroundStyle(accent)
     }
 }
 

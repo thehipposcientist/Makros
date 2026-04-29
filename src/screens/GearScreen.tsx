@@ -94,6 +94,20 @@ function gearTypeInfo(type: string) {
   return GEAR_TYPES.find(g => g.value === type) ?? GEAR_TYPES[GEAR_TYPES.length - 1];
 }
 
+// Gear types whose wear is meaningfully measured in miles (cardio shoes,
+// bikes, drivetrain, treadmill belts). Everything else — lifting accessories,
+// recovery tools, boxing gloves, yoga mats — is session-tracked. UI hides
+// mileage controls + stats for session-only gear so they don't read as
+// "0.0 total mi."
+const MILE_TRACKED_TYPES = new Set([
+  'running_shoe', 'trail_shoe',
+  'bike', 'bike_tire', 'bike_chain',
+  'treadmill_belt',
+]);
+function isMileTracked(gearType: string): boolean {
+  return MILE_TRACKED_TYPES.has(gearType);
+}
+
 // ─── Mileage progress bar ─────────────────────────────────────────────────────
 
 function MileageBar({ pct, color }: { pct: number | null; color: string }) {
@@ -163,10 +177,12 @@ function GearCard({
       )}
 
       <View style={styles.statsRow}>
-        <View style={styles.stat}>
-          <Text style={[styles.statValue, { color: tc.textPrimary }]}>{item.total_miles.toFixed(1)}</Text>
-          <Text style={[styles.statLabel, { color: tc.textSecondary }]}>total mi</Text>
-        </View>
+        {isMileTracked(item.gear_type) && (
+          <View style={styles.stat}>
+            <Text style={[styles.statValue, { color: tc.textPrimary }]}>{item.total_miles.toFixed(1)}</Text>
+            <Text style={[styles.statLabel, { color: tc.textSecondary }]}>total mi</Text>
+          </View>
+        )}
         <View style={styles.stat}>
           <Text style={[styles.statValue, { color: tc.textPrimary }]}>{item.accumulated_sessions}</Text>
           <Text style={[styles.statLabel, { color: tc.textSecondary }]}>sessions</Text>
@@ -179,7 +195,7 @@ function GearCard({
         ) : null}
       </View>
 
-      <MileageBar pct={item.pct_used} color={color} />
+      {isMileTracked(item.gear_type) && <MileageBar pct={item.pct_used} color={color} />}
 
       {item.recommendation ? (
         <Text style={[styles.recommendation, { color: item.pct_used !== null && item.pct_used >= 0.85 ? color : tc.textSecondary }]}>
@@ -272,6 +288,7 @@ function GearFormModal({
           allowsEditing: true,
           aspect: [4, 3],
           mediaTypes: ImagePicker.MediaTypeOptions.Images,
+          exif: false,
         });
         if (result.canceled || !result.assets?.[0]?.base64) return;
         setPhotos(prev => [...prev, `data:image/jpeg;base64,${result.assets[0].base64}`]);
@@ -288,6 +305,7 @@ function GearFormModal({
         base64: true,
         allowsEditing: true,
         aspect: [4, 3],
+        exif: false,
       });
       if (result.canceled || !result.assets?.[0]?.base64) return;
       setPhotos(prev => [...prev, `data:image/jpeg;base64,${result.assets[0].base64}`]);
@@ -466,25 +484,32 @@ function GearFormModal({
             ))}
           </ScrollView>
 
-          <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>MILES ALREADY ON IT</Text>
-          <TextInput
-            style={[styles.input, { backgroundColor: tc.surface, color: tc.textPrimary, borderColor: tc.border }]}
-            value={startingMiles}
-            onChangeText={setStartingMiles}
-            keyboardType="decimal-pad"
-            placeholder="0"
-            placeholderTextColor={tc.textMuted}
-          />
+          {/* Mileage fields — only relevant for cardio shoes / bikes / etc.
+              Session-only gear (boxing gloves, lifting belts, yoga mats) hides
+              these to keep the form focused. */}
+          {isMileTracked(gearType) && (
+            <>
+              <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>MILES ALREADY ON IT</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: tc.surface, color: tc.textPrimary, borderColor: tc.border }]}
+                value={startingMiles}
+                onChangeText={setStartingMiles}
+                keyboardType="decimal-pad"
+                placeholder="0"
+                placeholderTextColor={tc.textMuted}
+              />
 
-          <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>RETIREMENT THRESHOLD (miles)</Text>
-          <TextInput
-            style={[styles.input, { backgroundColor: tc.surface, color: tc.textPrimary, borderColor: tc.border }]}
-            value={threshold}
-            onChangeText={setThreshold}
-            keyboardType="decimal-pad"
-            placeholder="Leave blank to use default"
-            placeholderTextColor={tc.textMuted}
-          />
+              <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>RETIREMENT THRESHOLD (miles)</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: tc.surface, color: tc.textPrimary, borderColor: tc.border }]}
+                value={threshold}
+                onChangeText={setThreshold}
+                keyboardType="decimal-pad"
+                placeholder="Leave blank to use default"
+                placeholderTextColor={tc.textMuted}
+              />
+            </>
+          )}
 
           <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>AUTO-TRACK KEYWORDS (comma separated)</Text>
           <TextInput
@@ -526,37 +551,67 @@ function LogMilesModal({
   visible: boolean;
   gear: GearItem | null;
   tc: ReturnType<typeof getTheme>['colors'];
-  onLog: (miles: number) => void;
+  onLog: (miles: number, sessions: number) => void;
   onCancel: () => void;
 }) {
+  const sessionOnly = gear ? !isMileTracked(gear.gear_type) : false;
   const [miles, setMiles] = useState('');
+  const [sessions, setSessions] = useState('1');
 
   useEffect(() => {
-    if (visible) setMiles('');
+    if (visible) {
+      setMiles('');
+      setSessions('1');
+    }
   }, [visible]);
 
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={onCancel}>
       <View style={styles.logOverlay}>
         <View style={[styles.logBox, { backgroundColor: tc.surface }]}>
-          <Text style={[styles.logTitle, { color: tc.textPrimary }]}>Log Miles</Text>
+          <Text style={[styles.logTitle, { color: tc.textPrimary }]}>
+            {sessionOnly ? 'Log Session' : 'Log Miles'}
+          </Text>
           <Text style={[styles.logSubtitle, { color: tc.textSecondary }]}>{gear?.name}</Text>
-          <TextInput
-            style={[styles.logInput, { backgroundColor: tc.background, color: tc.textPrimary, borderColor: tc.border }]}
-            value={miles}
-            onChangeText={setMiles}
-            keyboardType="decimal-pad"
-            placeholder="0.0"
-            placeholderTextColor={tc.textMuted}
-            autoFocus
-          />
-          <Text style={[styles.hint, { color: tc.textMuted, textAlign: 'center', marginBottom: 16 }]}>miles to add</Text>
+          {sessionOnly ? (
+            <>
+              <TextInput
+                style={[styles.logInput, { backgroundColor: tc.background, color: tc.textPrimary, borderColor: tc.border }]}
+                value={sessions}
+                onChangeText={setSessions}
+                keyboardType="number-pad"
+                placeholder="1"
+                placeholderTextColor={tc.textMuted}
+                autoFocus
+              />
+              <Text style={[styles.hint, { color: tc.textMuted, textAlign: 'center', marginBottom: 16 }]}>sessions to add</Text>
+            </>
+          ) : (
+            <>
+              <TextInput
+                style={[styles.logInput, { backgroundColor: tc.background, color: tc.textPrimary, borderColor: tc.border }]}
+                value={miles}
+                onChangeText={setMiles}
+                keyboardType="decimal-pad"
+                placeholder="0.0"
+                placeholderTextColor={tc.textMuted}
+                autoFocus
+              />
+              <Text style={[styles.hint, { color: tc.textMuted, textAlign: 'center', marginBottom: 16 }]}>miles to add</Text>
+            </>
+          )}
           <View style={styles.logButtons}>
             <TouchableOpacity onPress={onCancel} style={[styles.logBtn, { borderColor: tc.border }]}>
               <Text style={{ color: tc.textSecondary }}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              onPress={() => onLog(parseFloat(miles) || 0)}
+              onPress={() => {
+                if (sessionOnly) {
+                  onLog(0, Math.max(1, parseInt(sessions, 10) || 1));
+                } else {
+                  onLog(parseFloat(miles) || 0, 1);
+                }
+              }}
               style={[styles.logBtn, { backgroundColor: tc.primary, borderColor: tc.primary }]}
             >
               <Text style={{ color: '#fff', fontWeight: '700' }}>Add</Text>
@@ -614,10 +669,10 @@ export default function GearScreen({ authToken, themeName = 'slate', onBack }: P
     }
   };
 
-  const handleLogMiles = async (miles: number) => {
+  const handleLogMiles = async (miles: number, sessions: number) => {
     if (!logTarget) return;
     try {
-      const updated = await logGearMiles(authToken, logTarget.id, miles);
+      const updated = await logGearMiles(authToken, logTarget.id, miles, sessions);
       setGear(prev => prev.map(g => (g.id === updated.id ? updated : g)));
     } catch {
       Alert.alert('Error', 'Could not log miles. Try again.');

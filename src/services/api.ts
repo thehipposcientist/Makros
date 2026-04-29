@@ -10,14 +10,34 @@ export function getApiBaseUrl(): string {
   return getBaseUrl();
 }
 
+// Hard-stop list for placeholder values that must never reach a real
+// build. If any of these slip through `app.json.extra.apiBaseUrl` we
+// throw at first network call so the misconfiguration is obvious in
+// device logs instead of producing mysterious "network error" toasts.
+const PLACEHOLDER_API_HOSTS = [
+  'your-production-api.com',
+  'example.com',
+  'localhost',  // production builds should never point at localhost
+];
+
+function isPlaceholderApiUrl(url: string): boolean {
+  return PLACEHOLDER_API_HOSTS.some(p => url.includes(p));
+}
+
 function getBaseUrl(): string {
   // Production / TestFlight build: read from app config extras. Set this
   // via `app.json` → `expo.extra.apiBaseUrl` (or via EAS build secrets).
-  // Fall back to the legacy placeholder so a misconfigured build is obvious
-  // rather than silently hitting a dev machine.
   const configured = (Constants.expoConfig?.extra as { apiBaseUrl?: string } | undefined)?.apiBaseUrl;
   if (!__DEV__) {
-    return configured || 'https://your-production-api.com';
+    if (!configured || isPlaceholderApiUrl(configured)) {
+      // Hard fail with a loud, distinctive error. Easier to spot in
+      // crash reports than a silent 502 loop.
+      throw new Error(
+        '[Thallo] Production API URL is missing or set to a placeholder. ' +
+        'Set expo.extra.apiBaseUrl in app.json or via EAS build secrets.',
+      );
+    }
+    return configured;
   }
   // Dev: ignore the prod URL baked into app.json — that's for release builds.
   // To point the dev client at a remote backend, set EXPO_PUBLIC_API_URL.
@@ -120,6 +140,52 @@ export async function login(email: string, password: string): Promise<{ access_t
   return request('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
+  });
+}
+
+/** Authenticated password change. Backend bumps `token_version` so every
+ *  other existing JWT for this account is invalidated. The new token in
+ *  the response is the only one that will continue to authenticate. */
+export async function changePassword(
+  token: string,
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ access_token: string }> {
+  return request('/auth/change-password', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+}
+
+/** Server-side logout. Bumps `token_version` so all existing JWTs for
+ *  the account stop validating. Idempotent — safe to call even if the
+ *  token is already expired. The frontend still clears local token
+ *  storage on its own; this just kills any device's sessions. */
+export async function logout(token: string): Promise<{ status: string; message: string }> {
+  return request('/auth/logout', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** Stamp fresh acceptance timestamps + versions for all four legal
+ *  sections. Used by the LegalDisclosureModal when `LEGAL_VERSION` was
+ *  bumped after the user already signed up. */
+export async function acceptLegal(
+  token: string,
+  legalVersion: string,
+): Promise<unknown> {
+  return request('/auth/accept-legal', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      legal_version: legalVersion,
+      accepted_terms: true,
+      accepted_privacy: true,
+      accepted_health_disclaimer: true,
+      accepted_ai_disclaimer: true,
+    }),
   });
 }
 
@@ -3736,6 +3802,25 @@ export async function blockFriend(token: string, friendshipId: number): Promise<
   await request(`/social/friends/${friendshipId}/block`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export type ReportUserReason = 'spam' | 'harassment' | 'impersonation' | 'inappropriate_content' | 'other';
+
+/** File a safety report on another user. Stored server-side as `open`
+ *  for human moderation — no auto-action. The reporter's id is on the
+ *  record so the same person can't spam-report. App Review requires a
+ *  visible Report affordance on every social surface. */
+export async function reportUser(
+  token: string,
+  userId: number,
+  reason: ReportUserReason,
+  note?: string,
+): Promise<{ ok: boolean; report_id: number }> {
+  return request('/social/report-user', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ user_id: userId, reason, note: note ?? null }),
   });
 }
 

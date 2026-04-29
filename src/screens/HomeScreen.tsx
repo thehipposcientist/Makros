@@ -9266,14 +9266,42 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     onPress={async () => {
                       const snapshot = unloggedPrompt;
                       if (!snapshot) return;
-                      // Mark chosen meals as eaten — reuses handleToggleMeal
-                      // which also auto-logs to backend history + snapshots
-                      // the meal for survival across plan regen.
-                      for (const it of snapshot.items) {
-                        if (snapshot.chosen[it.mealType]) {
-                          await handleToggleMeal(snapshot.date, it.mealType);
+                      // Batched save — calling handleToggleMeal in a loop
+                      // captured stale `checkedMealsByDate` between iterations,
+                      // so each call overwrote the previous state update and
+                      // only the LAST chosen meal stuck. Build the full merged
+                      // checks map once, then save it in a single pass.
+                      const chosenItems = snapshot.items.filter(it => snapshot.chosen[it.mealType]);
+                      const current = checkedMealsByDate[snapshot.date] ?? {};
+                      const next: Record<string, boolean> = { ...current };
+                      for (const it of chosenItems) next[it.mealType] = true;
+
+                      setCheckedMealsByDate(prev => ({ ...prev, [snapshot.date]: next }));
+                      await saveMealChecks(snapshot.date, next);
+                      await persistDayState(snapshot.date, { meal_checks: next });
+
+                      // Snapshot each chosen meal + log to backend history.
+                      // Independent of the checks update, so a per-meal failure
+                      // here doesn't lose the check state.
+                      const plan = nutritionPlansByDate[snapshot.date];
+                      for (const it of chosenItems) {
+                        const idx = it.mealType.startsWith('meal_') ? parseInt(it.mealType.slice(5), 10) : -1;
+                        const meal = idx >= 0 ? (plan?.meals ?? [])[idx] : undefined;
+                        if (!meal) continue;
+                        const isRoutineBacked = !!(meal as any)._routineId;
+                        if (!isRoutineBacked) {
+                          await savePreservedMeal(snapshot.date, it.mealType, meal).catch(() => {});
+                        }
+                        if (authToken) {
+                          logMealChecked(authToken, {
+                            meal_date: snapshot.date,
+                            meal_type: it.mealType,
+                            meal: meal as Record<string, any>,
+                            source: 'plan_check',
+                          }).catch(err => console.log('[logMealChecked] background save failed:', err.message));
                         }
                       }
+
                       await AsyncStorage.setItem(`unloggedMealsPromptShown_${snapshot.date}`, '1').catch(() => {});
                       setUnloggedPrompt(null);
                     }}>

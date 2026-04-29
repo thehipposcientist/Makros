@@ -177,7 +177,7 @@ def login(body: LoginRequest, request: Request, session: Session = Depends(get_s
         logger.warning("auth_login_disabled", extra={"user_id": user.id, "email": body.email, "ip": ip})
         raise HTTPException(status_code=403, detail="Account disabled")
 
-    token = create_access_token(user.id)
+    token = create_access_token(user.id, token_version=user.token_version)
     set_request_context(user_id=user.id)
     logger.info("auth_login_ok", extra={"user_id": user.id, "email": body.email, "ip": ip})
     return Token(access_token=token)
@@ -223,7 +223,7 @@ class EmailTokenConfirmBody(BaseModel):
 
 
 @router.post("/email-verification/request")
-@limiter.limit("5/hour")
+@limiter.limit("3/hour")
 def request_email_verification(
     body: EmailTokenRequestBody,
     request: Request,
@@ -293,7 +293,7 @@ class RecoveryQuestionSetBody(BaseModel):
 
 
 @router.get("/recovery-question")
-@limiter.limit("20/hour")
+@limiter.limit("10/hour")
 def get_recovery_question(
     request: Request,
     email: str = Query(..., description="Account email"),
@@ -367,10 +367,11 @@ def reset_password(
         raise generic
 
     user.hashed_password = hash_password(body.new_password)
+    user.token_version = int(user.token_version or 0) + 1
     session.add(user)
     session.commit()
 
-    token = create_access_token(user.id)
+    token = create_access_token(user.id, token_version=user.token_version)
     set_request_context(user_id=user.id)
     logger.info("auth_reset_ok", extra={"user_id": user.id, "email": body.email, "ip": ip})
     return Token(access_token=token)
@@ -442,10 +443,117 @@ def confirm_password_reset_email(
     user.hashed_password = hash_password(body.new_password)
     user.password_reset_token_hash = None
     user.password_reset_expires_at = None
+    user.token_version = int(user.token_version or 0) + 1
     session.add(user)
     session.commit()
 
-    access_token = create_access_token(user.id)
+    access_token = create_access_token(user.id, token_version=user.token_version)
     set_request_context(user_id=user.id)
     logger.info("auth_password_reset_email_ok", extra={"user_id": user.id, "email": email})
     return Token(access_token=access_token)
+
+
+# ── Authenticated password change ────────────────────────────────────────────
+# Lets a logged-in user rotate their password without going through the full
+# reset flow (which terminates session + asks for security question / email
+# token). Required `current_password` so a stolen device session can't silently
+# rotate the password and lock out the real user. Bumps `token_version` so
+# every other device with an existing JWT is forced to re-login on next call.
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@router.post("/change-password", response_model=Token)
+@limiter.limit("10/hour")
+def change_password(
+    body: PasswordChangeRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    ip = _client_ip(request)
+    if not verify_password(body.current_password, current_user.hashed_password):
+        logger.warning("auth_change_password_failed", extra={"user_id": current_user.id, "ip": ip})
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    _validate_password(body.new_password)
+    if verify_password(body.new_password, current_user.hashed_password):
+        raise HTTPException(status_code=422, detail="New password must be different from the current password")
+
+    current_user.hashed_password = hash_password(body.new_password)
+    current_user.token_version = int(current_user.token_version or 0) + 1
+    session.add(current_user)
+    session.commit()
+    session.refresh(current_user)
+    # Issue a fresh token at the new version so the client doesn't get
+    # immediately logged out by its own change.
+    new_token = create_access_token(current_user.id, token_version=current_user.token_version)
+    logger.info("auth_change_password_ok", extra={"user_id": current_user.id, "ip": ip})
+    return Token(access_token=new_token)
+
+
+# ── Session revocation / logout ──────────────────────────────────────────────
+# Bumps `token_version`, which invalidates every existing JWT for this user.
+# Idempotent. Useful for the user-visible "log out" affordance and for
+# "log out everywhere" recovery flows. Each subsequent login mints a token at
+# the new version.
+
+@router.post("/logout")
+def logout(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    current_user.token_version = int(current_user.token_version or 0) + 1
+    session.add(current_user)
+    session.commit()
+    logger.info("auth_logout", extra={"user_id": current_user.id})
+    return {"status": "ok", "message": "Signed out everywhere."}
+
+
+# ── Re-accept legal versions ─────────────────────────────────────────────────
+# Frontend compares the user's per-section accepted_version against the
+# active LEGAL_VERSION constant. When they differ (a section's body was
+# updated), the LegalDisclosureModal is presented again and POSTs here to
+# stamp fresh acceptance timestamps + versions. The original signup
+# acceptance is not erased — only the current fields are re-stamped.
+
+class AcceptLegalRequest(BaseModel):
+    legal_version: str
+    accepted_terms: bool = True
+    accepted_privacy: bool = True
+    accepted_health_disclaimer: bool = True
+    accepted_ai_disclaimer: bool = True
+
+
+@router.post("/accept-legal", response_model=UserRead)
+def accept_legal(
+    body: AcceptLegalRequest,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    if not (
+        body.accepted_terms
+        and body.accepted_privacy
+        and body.accepted_health_disclaimer
+        and body.accepted_ai_disclaimer
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="All four sections must be accepted to use Thallo.",
+        )
+    version = (body.legal_version or "").strip() or LEGAL_VERSION
+    now = datetime.now(timezone.utc)
+    current_user.terms_accepted_at = now
+    current_user.terms_version = version
+    current_user.privacy_accepted_at = now
+    current_user.privacy_version = version
+    current_user.health_disclaimer_accepted_at = now
+    current_user.health_disclaimer_version = version
+    current_user.ai_disclaimer_accepted_at = now
+    current_user.ai_disclaimer_version = version
+    session.add(current_user)
+    session.commit()
+    session.refresh(current_user)
+    logger.info("auth_legal_re_accepted", extra={"user_id": current_user.id, "version": version})
+    return _user_read(current_user)

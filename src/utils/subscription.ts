@@ -68,7 +68,12 @@ const FEATURE_LABEL: Record<ProFeature, string> = {
 };
 
 export function tierOf(profile: UserProfile | null | undefined): Tier {
-  return profile?.subscriptionTier ?? 'pro';
+  // Default to 'free' when the field is missing. Defaulting to 'pro'
+  // would briefly unlock paid features for any user whose profile fetch
+  // hasn't resolved yet — unsafe once StoreKit/RevenueCat is wired and
+  // the backend is the entitlement authority. The dev tier toggle in
+  // settings still flips this freely during development.
+  return profile?.subscriptionTier ?? 'free';
 }
 
 export function isPro(profile: UserProfile | null | undefined): boolean {

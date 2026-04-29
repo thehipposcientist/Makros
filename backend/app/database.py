@@ -1026,6 +1026,41 @@ def _ensure_user_name_columns() -> None:
         print(f"[migration] user name columns failed (non-fatal): {e}")
 
 
+def _ensure_user_reports_table() -> None:
+    """Create the user_reports table if absent and add the indexes that
+    SQLModel.metadata.create_all doesn't emit by default."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_user_reports_status "
+                "ON user_reports(status)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_user_reports_reported_user "
+                "ON user_reports(reported_user_id)"
+            ))
+    except Exception as e:
+        print(f"[migration] user_reports indexes failed (non-fatal): {e}")
+
+
+def _ensure_user_token_version_column() -> None:
+    """Add token_version to the user table. Existing rows get 0 so any
+    JWTs already issued (with no `tv` claim) still validate against the
+    default. Bumped on logout / password change / password reset so a
+    stolen-token window is bounded by the next of those events."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0'
+            ))
+    except Exception as e:
+        print(f"[migration] user token_version column failed (non-fatal): {e}")
+
+
 def _ensure_user_trust_account_columns() -> None:
     """Add launch-readiness account/legal columns to the user table.
 
@@ -1149,24 +1184,59 @@ def create_db_and_tables():
     _ensure_recovery_activities_table()
     _ensure_gear_items_table()
     _ensure_gear_items_photos_column()
-    _backfill_exercise_video_ids()
-    _autoscrape_missing_video_ids()
-    _backfill_custom_food_micronutrients()
-    _backfill_mealitem_food_ids()
-    _recompute_recent_daily_metrics()
-    _seed_supplement_ingredients()
     _ensure_user_name_columns()
     _ensure_user_trust_account_columns()
+    _ensure_user_token_version_column()
+    _ensure_user_reports_table()
     _ensure_plan_week_tables()
     _ensure_plan_week_snapshot_columns()
     _ensure_plan_week_checkins_table()
-    _backfill_plan_weeks()
+
+    # ─── Heavy backfills ─────────────────────────────────────────────────
+    # Each of these scans a full table, recomputes derived data, or hits an
+    # external API. They are idempotent, but doing all of them serially on
+    # every container restart adds 5–30s to cold starts.
+    #
+    # `STARTUP_BACKFILLS_ENABLED=0` skips them entirely — useful for fast
+    # iteration during local dev when you know nothing has changed. Default
+    # is "1" so production keeps current behavior.
+    import os as _os
+    import time as _time
+    if _os.getenv("STARTUP_BACKFILLS_ENABLED", "1") == "1":
+        for fn in (
+            _backfill_exercise_video_ids,
+            _autoscrape_missing_video_ids,  # already daemonized internally
+            _backfill_custom_food_micronutrients,
+            _backfill_mealitem_food_ids,
+            _recompute_recent_daily_metrics,
+            _seed_supplement_ingredients,
+            _backfill_plan_weeks,
+        ):
+            t0 = _time.time()
+            try:
+                fn()
+            except Exception as e:
+                print(f"[migration] {fn.__name__} failed (non-fatal): {e}")
+            elapsed = (_time.time() - t0) * 1000
+            if elapsed > 250:
+                print(f"[migration] {fn.__name__} took {elapsed:.0f}ms")
+    else:
+        print("[migration] STARTUP_BACKFILLS_ENABLED=0 — skipping backfills")
+
     from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
-    with Session(engine) as session:
-        seed_equipment(session)   # must run before exercises (FK dependency)
-        seed_exercises(session)
-        seed_foods(session)
-        seed_goals(session)
+    if _os.getenv("STARTUP_SEEDS_ENABLED", "1") == "1":
+        with Session(engine) as session:
+            for seed_fn in (seed_equipment, seed_exercises, seed_foods, seed_goals):
+                t0 = _time.time()
+                try:
+                    seed_fn(session)
+                except Exception as e:
+                    print(f"[seed] {seed_fn.__name__} failed (non-fatal): {e}")
+                elapsed = (_time.time() - t0) * 1000
+                if elapsed > 250:
+                    print(f"[seed] {seed_fn.__name__} took {elapsed:.0f}ms")
+    else:
+        print("[seed] STARTUP_SEEDS_ENABLED=0 — skipping seed inserts")
 
 
 def get_session():

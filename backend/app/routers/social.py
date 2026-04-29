@@ -15,7 +15,7 @@ from app.auth import get_current_user
 from app.database import get_session
 from sqlalchemy import func as sa_func
 from app.models import (
-    User, UserSocialProfile, Friendship, WeeklyDigestCache, UserGoal,
+    User, UserSocialProfile, Friendship, UserReport, WeeklyDigestCache, UserGoal,
     ActivityFeedItem, FeedLike,
 )
 from app.services.social.digest import compute_digest, week_start_for, _accepted_friend_ids
@@ -377,6 +377,45 @@ def block_friend(
     _invalidate_digest(db, fs.user_a_id, fs.user_b_id)
     db.commit()
     return {"ok": True}
+
+
+# ─── Reporting ───────────────────────────────────────────────────────────────
+# Required by App Review for any social surface. Stores the report in
+# `user_reports` with status='open' so operators can review through the
+# admin queue. We do not auto-action — moderation is human-reviewed.
+
+class ReportUserBody(BaseModel):
+    user_id: int
+    reason: str = "other"  # spam | harassment | impersonation | inappropriate_content | other
+    note: str | None = None
+
+
+_VALID_REPORT_REASONS = {"spam", "harassment", "impersonation", "inappropriate_content", "other"}
+
+
+@router.post("/report-user")
+def report_user(
+    body: ReportUserBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    if body.user_id == current_user.id:
+        raise HTTPException(400, "cannot report yourself")
+    target = db.exec(select(User).where(User.id == body.user_id)).first()
+    if not target:
+        raise HTTPException(404, "user not found")
+    reason = body.reason if body.reason in _VALID_REPORT_REASONS else "other"
+    note = (body.note or "").strip()[:500] or None
+    rep = UserReport(
+        reporter_id=current_user.id,
+        reported_user_id=body.user_id,
+        reason=reason,
+        note=note,
+    )
+    db.add(rep)
+    db.commit()
+    db.refresh(rep)
+    return {"ok": True, "report_id": rep.id}
 
 
 # ─── Search ──────────────────────────────────────────────────────────────────
