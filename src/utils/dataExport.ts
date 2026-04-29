@@ -136,3 +136,9 @@ export async function exportWeightHistory(): Promise<void> {
   }
   await shareFile('thallo_weight.csv', rows.join('\n'), 'text/csv');
 }
+
+export async function exportAccountDataJson(data: unknown, username?: string): Promise<void> {
+  const safeName = (username || 'account').replace(/[^a-z0-9_-]+/gi, '_').toLowerCase();
+  const date = new Date().toISOString().slice(0, 10);
+  await shareFile(`thallo_${safeName}_${date}_account_export.json`, JSON.stringify(data, null, 2), 'application/json');
+}

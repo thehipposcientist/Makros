@@ -436,7 +436,7 @@ def change_day_type(
 
     # Check day protection.
     status = day_statuses[day_index] if day_index < len(day_statuses) else "pending"
-    if status in ("completed", "started"):
+    if status in ("completed", "started", "locked", "skipped"):
         return ChangeResult(
             mode=mode,
             conflicts=[Conflict(

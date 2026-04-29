@@ -4,7 +4,7 @@ import { configureExpandAnimation } from '../utils/layoutAnim';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
-import BodyHeatMap, { HeatMuscleKey, HeatRecoveryMap } from './BodyHeatMap';
+import BodyHeatMap, { HeatRecoveryMap } from './BodyHeatMap';
 import FadeInView from './FadeInView';
 
 /**
@@ -73,6 +73,20 @@ export interface RecoveryCardData {
   } | null;
 }
 
+const RECOVERY_NUMBER_ROWS: Array<{ key: string; label: string }> = [
+  { key: 'chest', label: 'Chest' },
+  { key: 'back', label: 'Back' },
+  { key: 'shoulders', label: 'Shoulders' },
+  { key: 'biceps', label: 'Biceps' },
+  { key: 'triceps', label: 'Triceps' },
+  { key: 'core', label: 'Core' },
+  { key: 'quads', label: 'Quads' },
+  { key: 'hamstrings', label: 'Hamstrings' },
+  { key: 'glutes', label: 'Glutes' },
+  { key: 'calves', label: 'Calves' },
+  { key: 'cardio', label: 'Cardio' },
+];
+
 interface Props {
   data: RecoveryCardData | null;
   themeName?: AppThemeName;
@@ -96,6 +110,7 @@ interface Props {
 export default function RecoveryCard({ data, themeName, defaultExpanded, compact }: Props) {
   const tc = getTheme(themeName).colors;
   const [expanded, setExpanded] = useState(!!defaultExpanded);
+  const [numbersExpanded, setNumbersExpanded] = useState(false);
 
   if (!data) return null;
 
@@ -112,10 +127,26 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
   const titleSize = compact ? 13 : 17;
   const titleWeight: '700' | '800' = compact ? '700' : '800';
 
-  // Per-muscle map drives the heat map fill colors below. The numeric
-  // list that used to render under the figure was removed — the visual
-  // alone is enough.
+  // Per-muscle map drives the heat map fill colors and the optional
+  // exact-number panel below the figure.
   const fatigueMap = data.muscleFatigue ?? {};
+  const recoveryFor = (muscle: string): number =>
+    Math.max(0, Math.min(100, 100 - Math.round((fatigueMap[muscle] ?? 0) * 100)));
+  const recoveryColor = (recovery: number): string =>
+    recovery >= 80 ? tc.primary :
+    recovery >= 60 ? tc.success :
+    recovery >= 40 ? tc.warning :
+    tc.error;
+  const recoveryRows = [
+    ...RECOVERY_NUMBER_ROWS,
+    ...Object.keys(fatigueMap)
+      .filter(key => !RECOVERY_NUMBER_ROWS.some(row => row.key === key) && key !== 'systemic')
+      .sort()
+      .map(key => ({
+        key,
+        label: key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+      })),
+  ];
 
   return (
     <TouchableOpacity
@@ -168,29 +199,91 @@ export default function RecoveryCard({ data, themeName, defaultExpanded, compact
             // Map backend muscle fatigue (chest/back/... as 0-1) onto the heat
             // map's muscle keys (front + back). "back" projects onto both
             // upper_back and lats since backend doesn't split them.
-            const toRecovery = (muscle: string): number =>
-              Math.max(0, Math.min(100, 100 - Math.round((fatigueMap[muscle] ?? 0) * 100)));
             const heatRecovery: HeatRecoveryMap = {
-              chest:      toRecovery('chest'),
-              shoulders:  toRecovery('shoulders'),
-              biceps:     toRecovery('biceps'),
-              triceps:    toRecovery('triceps'),
-              abs:        toRecovery('core'),
-              quads:      toRecovery('quads'),
-              hamstrings: toRecovery('hamstrings'),
-              glutes:     toRecovery('glutes'),
-              calves:     toRecovery('calves'),
-              upper_back: toRecovery('back'),
-              lats:       toRecovery('back'),
+              chest:      recoveryFor('chest'),
+              shoulders:  recoveryFor('shoulders'),
+              biceps:     recoveryFor('biceps'),
+              triceps:    recoveryFor('triceps'),
+              abs:        recoveryFor('core'),
+              quads:      recoveryFor('quads'),
+              hamstrings: recoveryFor('hamstrings'),
+              glutes:     recoveryFor('glutes'),
+              calves:     recoveryFor('calves'),
+              upper_back: recoveryFor('back'),
+              lats:       recoveryFor('back'),
             };
             return <BodyHeatMap recovery={heatRecovery} themeName={themeName} height={240} />;
           })()}
 
-          {/* Per-muscle percentage list removed — the heat map above
-              already conveys recovery state visually via color, and the
-              numeric grid added redundant noise without new information.
-              The animated bar helper is kept exported for consumers
-              that still want a bar surface elsewhere. */}
+          <TouchableOpacity
+            activeOpacity={0.78}
+            onPress={() => {
+              configureExpandAnimation(260);
+              setNumbersExpanded(v => !v);
+            }}
+            style={{
+              marginTop: 10,
+              paddingHorizontal: 12,
+              paddingVertical: 10,
+              borderRadius: radius.md,
+              borderWidth: 1,
+              borderColor: tc.border,
+              backgroundColor: tc.surfaceRaised,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 10,
+            }}>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textPrimary }}>
+                Recovery numbers
+              </Text>
+              <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 1 }}>
+                Exact percentages for each muscle group
+              </Text>
+            </View>
+            <Ionicons name={numbersExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
+          </TouchableOpacity>
+
+          {numbersExpanded && (
+            <FadeInView delay={0} duration={220} slideDistance={6}>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+                {recoveryRows.map(row => {
+                  const recovery = recoveryFor(row.key);
+                  const color = recoveryColor(recovery);
+                  return (
+                    <View
+                      key={row.key}
+                      style={{
+                        width: '48%',
+                        minWidth: 132,
+                        flexGrow: 1,
+                        backgroundColor: tc.surface,
+                        borderRadius: radius.md,
+                        borderWidth: 1,
+                        borderColor: tc.border,
+                        paddingHorizontal: 10,
+                        paddingVertical: 9,
+                        gap: 6,
+                      }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+                        <Text style={{ flex: 1, fontSize: 11, fontWeight: '800', color: tc.textSecondary }} numberOfLines={1}>
+                          {row.label}
+                        </Text>
+                        <Text style={{ fontSize: 15, fontWeight: '900', color, fontVariant: ['tabular-nums'] }}>
+                          {recovery}%
+                        </Text>
+                      </View>
+                      <View style={{ height: 4, borderRadius: 2, backgroundColor: tc.border, overflow: 'hidden' }}>
+                        <View style={{ width: `${recovery}%`, height: '100%', borderRadius: 2, backgroundColor: color }} />
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            </FadeInView>
+          )}
+
           {false && <AnimatedRecoveryBar recovery={0} color={tc.primary} borderColor={tc.border} delay={0} />}
           {/* Overall Load / systemic bar removed per request — the per-muscle
               bars above cover the useful signal. Users found the aggregate

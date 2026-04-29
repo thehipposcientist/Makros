@@ -94,7 +94,18 @@ def test_01_register():
     global _token, _user_id
     r = _http.post(
         f"{BASE_URL}/auth/register",
-        json={"email": EMAIL, "username": USERNAME, "password": PASSWORD},
+        json={
+            "email": EMAIL,
+            "username": USERNAME,
+            "password": PASSWORD,
+            "first_name": "Smoke",
+            "last_name": "Tester",
+            "accepted_terms": True,
+            "accepted_privacy": True,
+            "accepted_health_disclaimer": True,
+            "accepted_ai_disclaimer": True,
+            "legal_version": "2026-04-29",
+        },
         timeout=10,
     )
     body = _check(r, 201, "POST /auth/register")
@@ -118,10 +129,17 @@ def test_02_register_rejects_weak_password():
             "email": f"weak_{_RUN_ID}@test.thallo",
             "username": f"weak_{_RUN_ID}",
             "password": "short",
+            "first_name": "Weak",
+            "last_name": "Tester",
+            "accepted_terms": True,
+            "accepted_privacy": True,
+            "accepted_health_disclaimer": True,
+            "accepted_ai_disclaimer": True,
+            "legal_version": "2026-04-29",
         },
         timeout=10,
     )
-    # Pydantic min_length 10 fires first and returns 422.
+    # Pydantic/router password validation returns 422 before account creation.
     assert r.status_code == 422, f"weak password should 422, got {r.status_code}"
 
 
@@ -237,9 +255,10 @@ def test_13_profile_export_round_trip():
     body = _check(r, 200, "GET /profile/export")
     assert body.get("user", {}).get("email") == EMAIL
     assert "hashed_password" not in body.get("user", {}), "export leaks password hash"
-    assert isinstance(body.get("workout_completions"), list)
+    completions = body.get("workouts", {}).get("completions")
+    assert isinstance(completions, list)
     # Our test_08 workout should appear.
-    assert len(body["workout_completions"]) >= 1, "expected workout in export"
+    assert len(completions) >= 1, "expected workout in export"
 
 
 def test_14_security_headers_present():
@@ -249,30 +268,14 @@ def test_14_security_headers_present():
     assert r.headers.get("X-Request-ID"), "X-Request-ID header missing"
 
 
-def test_15_dev_reset_password_gated():
-    # Dev Docker env sets DEV_PASSWORD_RESET=1 so this path should work.
-    # We still want to assert the env-gate works when the var is missing —
-    # that's a prod-config check, not something we can toggle mid-test.
-    # Instead, verify the endpoint at least accepts a valid request here.
+def test_15_password_reset_email_request_is_generic():
     r = _http.post(
-        f"{BASE_URL}/auth/reset-password",
-        json={"email": EMAIL, "new_password": "NewSmokePass99"},
+        f"{BASE_URL}/auth/password-reset/request",
+        json={"email": EMAIL},
         timeout=10,
     )
-    # Status can be 200 (gate on, reset) or 404 (gate off, endpoint hidden).
-    assert r.status_code in (200, 404), (
-        f"reset-password should be 200 or 404, got {r.status_code}"
-    )
-    if r.status_code == 200:
-        # Re-login with new password so downstream cleanup still works.
-        r2 = _http.post(
-            f"{BASE_URL}/auth/login",
-            json={"email": EMAIL, "password": "NewSmokePass99"},
-            timeout=10,
-        )
-        body = _check(r2, 200, "POST /auth/login after reset")
-        global _token
-        _token = body["access_token"]
+    body = _check(r, 200, "POST /auth/password-reset/request")
+    assert body.get("status") == "ok"
 
 
 def test_16_e1rm_returns_null_for_unknown_exercise():
@@ -365,7 +368,7 @@ _ALL_CASES = [
     test_12_meals_defaults_to_30_day_window,
     test_13_profile_export_round_trip,
     test_14_security_headers_present,
-    test_15_dev_reset_password_gated,
+    test_15_password_reset_email_request_is_generic,
     test_16_e1rm_returns_null_for_unknown_exercise,
     test_17_e1rm_history_returns_empty_for_unknown,
     test_18_e1rm_for_logged_exercise,

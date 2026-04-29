@@ -323,6 +323,132 @@ def test_fat_loss_and_muscle_gain_have_different_rep_schemes() -> None:
     _ok(f"{len(fl_reps ^ mg_reps)} rep-prescription differences")
 
 
+def test_all_supported_goals_generate_deterministically_across_day_counts() -> None:
+    """Every supported goal (plus hidden legacy goals) must generate a
+    stable 1-7 day week, with every emitted archetype allowed by that
+    goal's declarative profile."""
+    print("\n[test] all goal profiles generate deterministic 1-7 day weeks")
+    from app.services.workout.archetypes import DayArchetype
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.goals import supported_goal_ids
+    from app.services.workout.planner import PlannerInputs, generate_workout_plan
+    from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
+
+    goals = list(supported_goal_ids()) + ["general_health", "flexibility", "stress_relief"]
+    full_eq = tuple(e["slug"] for e in SEED_EQUIPMENT) + ("bodyweight",)
+
+    def _signature(plan: dict) -> tuple:
+        return tuple(
+            (
+                day.get("focus"),
+                day.get("category"),
+                day.get("archetype"),
+                tuple((ex.get("name"), ex.get("sets"), ex.get("reps")) for ex in day.get("exercises", [])),
+            )
+            for day in plan["workout_plan"]["days"]
+        )
+
+    checked = 0
+    for goal in goals:
+        profile = goal_profile_for(goal, experience="intermediate", days_per_week=5)
+        for days_per_week in range(1, 8):
+            inputs = PlannerInputs(
+                goal=goal,
+                days_per_week=days_per_week,
+                experience="intermediate",
+                equipment_slugs=full_eq,
+                rng_seed=37,
+            )
+            a = generate_workout_plan(inputs, SEED_EXERCISES)
+            b = generate_workout_plan(inputs, SEED_EXERCISES)
+            day_rows = a["workout_plan"]["days"]
+            assert len(day_rows) == days_per_week, f"{goal} {days_per_week}d length={len(day_rows)}"
+            assert _signature(a) == _signature(b), f"{goal} {days_per_week}d generated non-deterministically"
+            for day in day_rows:
+                assert day.get("exercises"), f"{goal} {days_per_week}d empty day: {day}"
+                archetype = DayArchetype(day["archetype"])
+                assert archetype in profile.allowed_archetypes, (
+                    f"{goal} emitted disallowed archetype {archetype.value}; "
+                    f"allowed={[a.value for a in profile.allowed_archetypes]}"
+                )
+            checked += 1
+    _ok(f"{checked} goal/day-count combinations deterministic and profile-bounded")
+
+
+def test_five_day_goal_recipe_contracts() -> None:
+    """Five days/week is the most revealing shape for goal intent:
+    there is enough room for strength, cardio, mobility, or hybrid
+    work to show up if the profile claims it."""
+    print("\n[test] five-day goal recipe contracts match intent")
+    from collections import Counter
+
+    from app.services.workout.planner import PlannerInputs, generate_workout_plan
+    from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
+
+    full_eq = tuple(e["slug"] for e in SEED_EQUIPMENT) + ("bodyweight",)
+
+    def _plan(goal: str) -> dict:
+        return generate_workout_plan(
+            PlannerInputs(
+                goal=goal,
+                days_per_week=5,
+                experience="intermediate",
+                equipment_slugs=full_eq,
+                rng_seed=17,
+            ),
+            SEED_EXERCISES,
+        )["workout_plan"]
+
+    def _counts(plan: dict) -> Counter:
+        return Counter(day.get("category") for day in plan["days"])
+
+    def _has_cardio_component(plan: dict) -> bool:
+        for day in plan["days"]:
+            if day.get("category") in {"cond", "hybrid"}:
+                return True
+            if "plus_cardio" in str(day.get("archetype") or ""):
+                return True
+            for ex in day.get("exercises", []):
+                if str(ex.get("prescriptionType") or "").startswith("cardio_"):
+                    return True
+        return False
+
+    endurance = _counts(_plan("endurance"))
+    assert endurance["cond"] == 4 and endurance["lift"] == 1, endurance
+
+    hyrox = _counts(_plan("hyrox"))
+    assert hyrox["cond"] >= 3 and hyrox["hybrid"] >= 1 and hyrox["lift"] >= 1, hyrox
+
+    athletic = _counts(_plan("athletic_performance"))
+    assert athletic["cond"] >= 1 and athletic["hybrid"] >= 1 and athletic["lift"] >= 1, athletic
+
+    for goal in ("maintain", "general_health"):
+        counts = _counts(_plan(goal))
+        assert counts["lift"] >= 1 and counts["cond"] >= 1 and counts["mobility"] >= 1, (goal, counts)
+
+    strength = _plan("strength")
+    strength_counts = _counts(strength)
+    assert strength_counts["lift"] == 5, strength_counts
+    assert any(
+        "heavy" in str(day.get("archetype") or "") or "strength" in str(day.get("archetype") or "")
+        for day in strength["days"]
+    ), [day.get("archetype") for day in strength["days"]]
+
+    muscle_gain = _counts(_plan("muscle_gain"))
+    assert muscle_gain["lift"] == 5, muscle_gain
+
+    for goal in ("fat_loss", "toning", "body_recomp"):
+        assert _has_cardio_component(_plan(goal)), f"{goal} has no cardio component"
+
+    flexibility = _counts(_plan("flexibility"))
+    assert flexibility["mobility"] >= 2, flexibility
+
+    stress = _counts(_plan("stress_relief"))
+    assert stress["recovery"] >= 2 and stress["cond"] >= 1, stress
+
+    _ok("endurance, hyrox, athletic, maintain, strength, hypertrophy, fat-loss, mobility, recovery contracts hold")
+
+
 # ─── Runner ──────────────────────────────────────────────────────────────────
 
 
@@ -339,6 +465,8 @@ def _run_all() -> int:
         test_athletic_plan_mixes_strength_and_conditioning,
         test_toning_alias_plan_matches_fat_loss_plan,
         test_fat_loss_and_muscle_gain_have_different_rep_schemes,
+        test_all_supported_goals_generate_deterministically_across_day_counts,
+        test_five_day_goal_recipe_contracts,
     ]
     failed = 0
     for t in tests:

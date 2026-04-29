@@ -1621,8 +1621,8 @@ GLUTES = [
         "is_unilateral": True,
         "description": "Quadruped glute isolation — bodyweight, dumbbell behind the knee, or resistance band looped above the knee",
         "equipment": [
-            {"slug": "dumbbell", "role": "optional", "required": False},
-            {"slug": "resistance_band", "role": "optional", "required": False},
+            {"slug": "dumbbells", "role": "optional", "required": False},
+            {"slug": "resistance_bands", "role": "optional", "required": False},
         ],
     },
     {
@@ -6055,7 +6055,7 @@ _NEW_2026_04_29 = [
         "substitution_group": "horizontal_press_dumbbell",
         "description": "Dumbbell chest press lying on a stability ball — adds core stabilization demand",
         "equipment": [
-            {"slug": "dumbbell", "role": "primary", "required": True},
+            {"slug": "dumbbells", "role": "primary", "required": True},
             {"slug": "swiss_ball", "role": "support", "required": True},
         ],
     },

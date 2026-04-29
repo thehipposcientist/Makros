@@ -1004,6 +1004,37 @@ def _ensure_user_name_columns() -> None:
         print(f"[migration] user name columns failed (non-fatal): {e}")
 
 
+def _ensure_user_trust_account_columns() -> None:
+    """Add launch-readiness account/legal columns to the user table.
+
+    These are nullable so existing pilot users migrate cleanly; new signup
+    enforces acceptance in the auth router before writing timestamps.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            for col_sql in (
+                "terms_accepted_at TIMESTAMPTZ",
+                "terms_version VARCHAR",
+                "privacy_accepted_at TIMESTAMPTZ",
+                "privacy_version VARCHAR",
+                "health_disclaimer_accepted_at TIMESTAMPTZ",
+                "health_disclaimer_version VARCHAR",
+                "ai_disclaimer_accepted_at TIMESTAMPTZ",
+                "ai_disclaimer_version VARCHAR",
+                "email_verified_at TIMESTAMPTZ",
+                "email_verification_token_hash VARCHAR",
+                "email_verification_expires_at TIMESTAMPTZ",
+                "password_reset_token_hash VARCHAR",
+                "password_reset_expires_at TIMESTAMPTZ",
+                "account_deleted_at TIMESTAMPTZ",
+            ):
+                conn.execute(text(f'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS {col_sql}'))
+    except Exception as e:
+        print(f"[migration] user trust/account columns failed (non-fatal): {e}")
+
+
 def _ensure_plan_week_snapshot_columns() -> None:
     """Add goal_pace + session_minutes to plan_weeks.
 
@@ -1102,6 +1133,7 @@ def create_db_and_tables():
     _recompute_recent_daily_metrics()
     _seed_supplement_ingredients()
     _ensure_user_name_columns()
+    _ensure_user_trust_account_columns()
     _ensure_plan_week_tables()
     _ensure_plan_week_snapshot_columns()
     _ensure_plan_week_checkins_table()

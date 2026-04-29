@@ -425,6 +425,161 @@ def test_recomp_squat_slot_picks_loaded_over_bodyweight() -> None:
     _ok(f"recomp squat slot → {pick['name']}")
 
 
+def _fake_exercise(
+    *,
+    slug: str,
+    name: str,
+    movement_pattern: str,
+    primary_muscle: str,
+    equipment_bucket: str,
+    equipment_slug: str | None,
+    is_compound: bool = True,
+) -> dict:
+    equipment = []
+    if equipment_slug:
+        equipment.append({
+            "slug": equipment_slug,
+            "role": "primary",
+            "required": True,
+        })
+    return {
+        "slug": slug,
+        "name": name,
+        "exercise_type": "strength",
+        "movement_pattern": movement_pattern,
+        "primary_muscle": primary_muscle,
+        "secondary_muscles": [],
+        "equipment_bucket": equipment_bucket,
+        "equipment": equipment,
+        "difficulty": "intermediate",
+        "is_compound": is_compound,
+        "is_machine": equipment_bucket == "machine",
+        "substitution_group": slug,
+    }
+
+
+def test_primary_selection_hierarchy_loaded_beats_preferred_bodyweight() -> None:
+    """Lift-focused goals use a hard hierarchy for primary/secondary
+    slots: any eligible loaded candidate beats bodyweight, even when
+    the bodyweight option is user-preferred."""
+    print("\n[test] primary hierarchy: loaded beats preferred bodyweight")
+    from app.services.workout.planner import Slot, pick_for_slot
+
+    slot = Slot("Primary Press", "horizontal_press", "chest", "primary")
+    loaded = _fake_exercise(
+        slug="loaded_press", name="Loaded Press",
+        movement_pattern="horizontal_press", primary_muscle="chest",
+        equipment_bucket="barbell", equipment_slug="barbell",
+    )
+    bodyweight = _fake_exercise(
+        slug="push_up", name="Push Up",
+        movement_pattern="horizontal_press", primary_muscle="chest",
+        equipment_bucket="bodyweight", equipment_slug=None,
+    )
+    inputs = PlannerInputs(
+        goal="muscle_gain", days_per_week=4, experience="intermediate",
+        equipment_slugs=("barbell",), preferred_exercises=("Push Up",),
+        rng_seed=13,
+    )
+    pick = pick_for_slot([bodyweight, loaded], slot, inputs, set(), set())
+    assert pick is loaded, f"expected loaded hierarchy winner, got {pick and pick.get('name')}"
+    _ok("loaded primary won despite preferred bodyweight")
+
+
+def test_primary_selection_hierarchy_bodyweight_fallback_when_no_loaded() -> None:
+    """The loaded-first hierarchy must still fall back cleanly for
+    users with no eligible equipment."""
+    print("\n[test] primary hierarchy: bodyweight fallback when loaded unavailable")
+    from app.services.workout.planner import Slot, pick_for_slot
+
+    slot = Slot("Primary Press", "horizontal_press", "chest", "primary")
+    loaded = _fake_exercise(
+        slug="loaded_press", name="Loaded Press",
+        movement_pattern="horizontal_press", primary_muscle="chest",
+        equipment_bucket="barbell", equipment_slug="barbell",
+    )
+    bodyweight = _fake_exercise(
+        slug="push_up", name="Push Up",
+        movement_pattern="horizontal_press", primary_muscle="chest",
+        equipment_bucket="bodyweight", equipment_slug=None,
+    )
+    inputs = PlannerInputs(
+        goal="muscle_gain", days_per_week=4, experience="intermediate",
+        equipment_slugs=(), rng_seed=13,
+    )
+    pick = pick_for_slot([loaded, bodyweight], slot, inputs, set(), set())
+    assert pick is bodyweight, f"expected bodyweight fallback, got {pick and pick.get('name')}"
+    _ok("bodyweight primary chosen only after loaded pool emptied")
+
+
+def test_primary_load_tier_prefers_barbell_over_dumbbell() -> None:
+    """Inside the loaded pool, the hierarchy should still prefer the
+    strongest loading tool for primary slots: barbell > dumbbell."""
+    print("\n[test] primary hierarchy: barbell beats dumbbell")
+    from app.services.workout.planner import Slot, pick_for_slot
+
+    slot = Slot("Primary Press", "horizontal_press", "chest", "primary")
+    barbell = _fake_exercise(
+        slug="barbell_press", name="Barbell Press",
+        movement_pattern="horizontal_press", primary_muscle="chest",
+        equipment_bucket="barbell", equipment_slug="barbell",
+    )
+    dumbbell = _fake_exercise(
+        slug="dumbbell_press", name="Dumbbell Press",
+        movement_pattern="horizontal_press", primary_muscle="chest",
+        equipment_bucket="dumbbells", equipment_slug="dumbbells",
+    )
+    inputs = PlannerInputs(
+        goal="strength", days_per_week=4, experience="intermediate",
+        equipment_slugs=("barbell", "dumbbells"), rng_seed=21,
+    )
+    pick = pick_for_slot([dumbbell, barbell], slot, inputs, set(), set())
+    assert pick is barbell, f"expected barbell tier winner, got {pick and pick.get('name')}"
+    _ok("barbell primary won inside loaded pool")
+
+
+def test_focus_family_filter_blocks_wrong_family_strength_slot() -> None:
+    """Day focus family is a hard filter above scoring. A push day
+    primary cannot pick a back-primary exercise even if movement pattern
+    and equipment otherwise match."""
+    print("\n[test] focus-family hierarchy blocks wrong-family candidates")
+    from app.services.workout.planner import Slot, filter_candidates
+
+    slot = Slot("Primary Press", "horizontal_press", "chest", "primary")
+    chest = _fake_exercise(
+        slug="chest_press", name="Chest Press",
+        movement_pattern="horizontal_press", primary_muscle="chest",
+        equipment_bucket="barbell", equipment_slug="barbell",
+    )
+    back = _fake_exercise(
+        slug="back_press_bug", name="Back Press Bug",
+        movement_pattern="horizontal_press", primary_muscle="back",
+        equipment_bucket="barbell", equipment_slug="barbell",
+    )
+    candidates = filter_candidates(
+        [back, chest], slot, {"barbell"}, set(),
+        day_focus_family="push",
+    )
+    assert candidates == [chest], f"wrong-family candidate survived: {candidates}"
+    _ok("push day kept chest candidate and rejected back-primary candidate")
+
+
+def test_score_jitter_uses_stable_slug_digest() -> None:
+    """The deterministic planner cannot use Python's process-randomized
+    hash() for tie jitter. The slug seed is pinned to sha256 so identical
+    inputs remain stable across backend restarts."""
+    print("\n[test] deterministic jitter uses stable sha256 slug seed")
+    import hashlib
+    from app.services.workout.planner import _stable_slug_seed
+
+    slug = "barbell_bench_press"
+    expected = int.from_bytes(hashlib.sha256(slug.encode("utf-8")).digest()[:8], "big")
+    assert _stable_slug_seed(slug) == expected
+    assert _stable_slug_seed(slug) == _stable_slug_seed(slug)
+    assert _stable_slug_seed(slug) != _stable_slug_seed("dumbbell_bench_press")
+    _ok("stable slug seed pinned to sha256 digest")
+
+
 def test_minimal_equipment_user_still_gets_bodyweight_fallback() -> None:
     """Empty-equipment user should still get bodyweight picks where
     appropriate (the tier-split shouldn't break the fallback path)."""
@@ -1112,6 +1267,11 @@ if __name__ == "__main__":
         # Loaded-vs-bodyweight selection for lift-focused goals
         test_recomp_with_gym_no_bodyweight_in_primary_or_secondary,
         test_recomp_squat_slot_picks_loaded_over_bodyweight,
+        test_primary_selection_hierarchy_loaded_beats_preferred_bodyweight,
+        test_primary_selection_hierarchy_bodyweight_fallback_when_no_loaded,
+        test_primary_load_tier_prefers_barbell_over_dumbbell,
+        test_focus_family_filter_blocks_wrong_family_strength_slot,
+        test_score_jitter_uses_stable_slug_digest,
         test_minimal_equipment_user_still_gets_bodyweight_fallback,
         test_general_health_does_not_get_load_penalty,
         test_equipment_label_for_loaded_movement_with_optional_required_flag,

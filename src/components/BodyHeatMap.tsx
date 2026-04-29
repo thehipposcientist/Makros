@@ -180,8 +180,9 @@ export default function BodyHeatMap({
     return 'Severely fatigued';
   };
 
-  const strokeColor = tc.textMuted;
-  const strokeW = 1;
+  const strokeColor = blend(tc.textMuted, tc.background, 0.38);
+  const bodyLineColor = blend(tc.textMuted, tc.background, 0.22);
+  const strokeW = 0.85;
 
   const regions = side === 'front' ? FRONT_MUSCLES : BACK_MUSCLES;
 
@@ -283,87 +284,88 @@ export default function BodyHeatMap({
         >
           <Svg width={height * (200 / 360)} height={height} viewBox="0 0 200 360">
             <Defs>
-              {/* Soft radial vignette behind the figure — gives the
-                  silhouette a faint depth halo without needing a
-                  shadow filter (which react-native-svg supports
-                  unevenly across platforms). */}
               <RadialGradient id="bodyGlow" cx="50%" cy="50%" r="55%">
-                <Stop offset="0%" stopColor={tc.primary} stopOpacity="0.08" />
+                <Stop offset="0%" stopColor={tc.primary} stopOpacity="0.13" />
                 <Stop offset="100%" stopColor={tc.primary} stopOpacity="0" />
               </RadialGradient>
-              {/* Body fill: subtle vertical sheen so the torso reads as
-                  3D rather than flat. Uses theme surfaceRaised at the
-                  edges, surface at the center spine for a hint of light. */}
+              <RadialGradient id="floorGlow" cx="50%" cy="50%" r="55%">
+                <Stop offset="0%" stopColor="#000000" stopOpacity="0.16" />
+                <Stop offset="100%" stopColor="#000000" stopOpacity="0" />
+              </RadialGradient>
               <LinearGradient id="bodyFill" x1="0" y1="0" x2="0" y2="1">
-                <Stop offset="0%" stopColor={tc.surfaceRaised} stopOpacity="1" />
-                <Stop offset="50%" stopColor={tc.surface} stopOpacity="1" />
-                <Stop offset="100%" stopColor={tc.surfaceRaised} stopOpacity="1" />
+                <Stop offset="0%" stopColor={blend(tc.surfaceRaised, tc.primary, 0.08)} stopOpacity="1" />
+                <Stop offset="48%" stopColor={tc.surface} stopOpacity="1" />
+                <Stop offset="100%" stopColor={blend(tc.surfaceRaised, tc.background, 0.2)} stopOpacity="1" />
               </LinearGradient>
             </Defs>
 
-            {/* Halo */}
             <Ellipse cx="100" cy="180" rx="90" ry="170" fill="url(#bodyGlow)" />
+            <Ellipse cx="100" cy="333" rx="48" ry="12" fill="url(#floorGlow)" />
 
-            {/* Drop-shadow proxy: same body silhouette, offset 3px down,
-                tinted dark, blurred via low opacity. Cheap, looks fine. */}
-            <Ellipse cx="100" cy="36" rx="23" ry="25" fill="#000" opacity={0.10} />
             <Path
-              d="M58 73 Q58 63 72 65 Q100 61 128 65 Q142 63 142 73 Q144 123 140 173 Q128 203 122 255 Q122 313 116 333 L84 333 Q78 313 78 255 Q72 203 60 173 Q56 123 58 73 Z"
+              d="M58 75 Q58 63 72 65 Q100 60 128 65 Q142 63 142 75 Q145 123 141 173 Q129 203 123 254 Q124 312 117 333 L83 333 Q76 312 77 254 Q71 203 59 173 Q55 123 58 75 Z"
               fill="#000"
-              opacity={0.10}
+              opacity={0.12}
             />
 
-            {/* Head — slightly more rounded, soft fill with a hairline */}
             <Ellipse cx="100" cy="34" rx="22" ry="24" fill="url(#bodyFill)" stroke={strokeColor} strokeWidth={strokeW} />
-            {/* Hairline / face hint — only on FRONT view so the head
-                reads as a person rather than an egg. Two small dots for
-                eyes (very subtle, low-contrast) and a hint of a hairline. */}
             {side === 'front' && (
               <>
-                <Path d="M82 26 Q100 18 118 26" stroke={strokeColor} strokeWidth={strokeW} fill="none" opacity={0.55} />
-                <Circle cx="92" cy="34" r="1.4" fill={strokeColor} opacity={0.7} />
-                <Circle cx="108" cy="34" r="1.4" fill={strokeColor} opacity={0.7} />
+                <Path d="M82 27 Q100 18 118 27" stroke={bodyLineColor} strokeWidth={strokeW} fill="none" opacity={0.58} />
+                <Circle cx="92" cy="34" r="1.35" fill={bodyLineColor} opacity={0.72} />
+                <Circle cx="108" cy="34" r="1.35" fill={bodyLineColor} opacity={0.72} />
               </>
             )}
 
-            {/* Neck */}
-            <Path d="M92 56 L108 56 L108 66 L92 66 Z" fill={tc.surfaceRaised} stroke={strokeColor} strokeWidth={strokeW} />
+            <Path d="M92 56 L108 56 L110 67 L90 67 Z" fill={blend(tc.surfaceRaised, tc.primary, 0.05)} stroke={strokeColor} strokeWidth={strokeW} />
 
-            {/* Torso outline (base layer under muscles so gaps still read as body) */}
             <Path
-              d="M58 70 Q58 60 72 62 Q100 58 128 62 Q142 60 142 70 Q144 120 140 170 Q128 200 122 252 Q122 310 116 330 L84 330 Q78 310 78 252 Q72 200 60 170 Q56 120 58 70 Z"
+              d="M58 70 Q58 59 72 62 Q100 57 128 62 Q142 59 142 70 Q145 120 141 170 Q129 201 123 252 Q124 309 116 330 L84 330 Q76 309 77 252 Q71 201 59 170 Q55 120 58 70 Z"
               fill="url(#bodyFill)"
               stroke={strokeColor}
               strokeWidth={strokeW}
             />
+            <Path d="M73 78 Q100 69 127 78" stroke={bodyLineColor} strokeWidth={0.8} fill="none" opacity={0.42} />
+            <Path d="M100 76 L100 172" stroke={bodyLineColor} strokeWidth={0.75} fill="none" opacity={side === 'front' ? 0.18 : 0.34} />
+            <Path d="M78 174 Q100 184 122 174" stroke={bodyLineColor} strokeWidth={0.8} fill="none" opacity={0.35} />
+            <Path d="M88 252 Q100 258 112 252" stroke={bodyLineColor} strokeWidth={0.8} fill="none" opacity={0.22} />
 
-            {/* Muscles */}
             <G>
               {regions.map(m => {
                 const d = paths[m];
                 if (!d) return null;
                 const isSel = selected === m;
+                const muscleFill = fillFor(m);
+                const muscleStroke = blend(muscleFill, tc.background, 0.45);
                 if (isSel) {
                   return (
-                    <AnimatedPath
-                      key={m}
-                      d={d}
-                      fill={fillFor(m)}
-                      stroke={tc.textPrimary}
-                      strokeWidth={2}
-                      opacity={pulse}
-                      onPress={() => setSelected(m)}
-                    />
+                    <G key={m}>
+                      <Path
+                        d={d}
+                        fill={muscleFill}
+                        stroke={muscleFill}
+                        strokeWidth={6}
+                        opacity={0.2}
+                      />
+                      <AnimatedPath
+                        d={d}
+                        fill={muscleFill}
+                        stroke={blend(tc.textPrimary, muscleFill, 0.22)}
+                        strokeWidth={1.7}
+                        opacity={pulse}
+                        onPress={() => setSelected(m)}
+                      />
+                    </G>
                   );
                 }
                 return (
                   <Path
                     key={m}
                     d={d}
-                    fill={fillFor(m)}
-                    stroke={strokeColor}
+                    fill={muscleFill}
+                    stroke={muscleStroke}
                     strokeWidth={strokeW}
-                    opacity={0.92}
+                    opacity={0.9}
                     onPress={() => setSelected(m)}
                   />
                 );
@@ -393,7 +395,8 @@ export default function BodyHeatMap({
               const pct = Math.round(recoveryFor(selected));
               return (
                 <G>
-                  <Ellipse cx={p.x} cy={p.y} rx="22" ry="11" fill={tc.surface} stroke={fillFor(selected)} strokeWidth={1.5} />
+                  <Ellipse cx={p.x} cy={p.y + 1} rx="24" ry="12" fill="#000" opacity={0.14} />
+                  <Ellipse cx={p.x} cy={p.y} rx="23" ry="11.5" fill={tc.surfaceRaised} stroke={fillFor(selected)} strokeWidth={1.4} />
                   <SvgText
                     x={p.x}
                     y={p.y + 4}

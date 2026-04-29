@@ -29,6 +29,38 @@ import { getTheme } from '../constants/theme';
 
 export { WatchBridge };
 
+const WATCH_SYNC_STATUS_KEY = 'watch_sync_status_v1';
+
+export type WatchSyncSnapshot = {
+  surface: string;
+  ok: boolean;
+  atMs: number;
+  reachable: boolean;
+  paired: boolean;
+  detail?: string;
+};
+
+async function recordWatchSync(surface: string, ok: boolean, detail?: string): Promise<void> {
+  const snapshot: WatchSyncSnapshot = {
+    surface,
+    ok,
+    detail,
+    atMs: Date.now(),
+    reachable: WatchBridge.isAvailable() ? WatchBridge.isReachable() : false,
+    paired: WatchBridge.isAvailable() ? WatchBridge.isPaired() : false,
+  };
+  try { await AsyncStorage.setItem(WATCH_SYNC_STATUS_KEY, JSON.stringify(snapshot)); } catch {}
+}
+
+export async function getWatchSyncSnapshot(): Promise<WatchSyncSnapshot | null> {
+  try {
+    const raw = await AsyncStorage.getItem(WATCH_SYNC_STATUS_KEY);
+    return raw ? JSON.parse(raw) as WatchSyncSnapshot : null;
+  } catch {
+    return null;
+  }
+}
+
 function localDateISO(date: Date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
@@ -186,22 +218,32 @@ export async function pushWorkoutToWatch(
   const userId = await stampBridgeUserId(opts.userId);
   const payload = buildWatchWorkoutPayload(day, { ...opts, userId });
   if (!payload) return false;
-  if (!canPush()) { wsLog('pushWorkoutToWatch skipped — bridge unavailable'); return false; }
+  if (!canPush()) {
+    wsLog('pushWorkoutToWatch skipped — bridge unavailable');
+    await recordWatchSync('workout', false, 'bridge_unavailable');
+    return false;
+  }
   wsLog('pushWorkoutToWatch', { status: opts.status, focus: payload.focus, userId: userId?.slice(0, 4) });
-  return WatchBridge.syncWorkout(payload);
+  const ok = await WatchBridge.syncWorkout(payload);
+  await recordWatchSync('workout', !!ok, opts.status);
+  return ok;
 }
 
 export async function pushThemeToWatch(themeName: AppThemeName | undefined) {
   const palette = buildWatchPalette(themeName);
-  if (!canPush()) return false;
+  if (!canPush()) { await recordWatchSync('theme', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
-  return WatchBridge.syncTheme(palette);
+  const ok = await WatchBridge.syncTheme(palette);
+  await recordWatchSync('theme', !!ok);
+  return ok;
 }
 
 export async function pushProgressToWatch(progress: WatchProgress) {
-  if (!canPush()) return false;
+  if (!canPush()) { await recordWatchSync('progress', false, 'bridge_unavailable'); return false; }
   wsLog('pushProgressToWatch', progress);
-  return WatchBridge.updateProgress(progress);
+  const ok = await WatchBridge.updateProgress(progress);
+  await recordWatchSync('progress', !!ok);
+  return ok;
 }
 
 /** Push today's meals (targets + actual + per-meal check state +
@@ -213,7 +255,7 @@ export async function pushMealsToWatch(
   score?: number | null,
 ): Promise<boolean> {
   if (!plan) return false;
-  if (!canPush()) return false;
+  if (!canPush()) { await recordWatchSync('meals', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
 
   const targets = plan.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
@@ -261,7 +303,9 @@ export async function pushMealsToWatch(
     meals: items,
     syncedAtMs: Date.now(),
   };
-  return WatchBridge.syncMeals(payload);
+  const ok = await WatchBridge.syncMeals(payload);
+  await recordWatchSync('meals', !!ok, `${items.length} meals`);
+  return ok;
 }
 
 /** Push sleep score + last-night summary to the watch. Drives the
@@ -279,7 +323,7 @@ export async function pushSleepToWatch(opts: {
   label?: string | null;
   summary?: string | null;
 }): Promise<boolean> {
-  if (!canPush()) return false;
+  if (!canPush()) { await recordWatchSync('sleep', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
   const payload: WatchSleepPayload = {
     score: opts.score ?? null,
@@ -294,7 +338,9 @@ export async function pushSleepToWatch(opts: {
     syncedAtMs: Date.now(),
   };
   wsLog('pushSleepToWatch', { score: payload.score, hours: payload.hoursLastNight });
-  return WatchBridge.syncSleep(payload);
+  const ok = await WatchBridge.syncSleep(payload);
+  await recordWatchSync('sleep', !!ok);
+  return ok;
 }
 
 /** Push readiness drill-down data — score + label + per-factor
@@ -314,7 +360,7 @@ export async function pushReadinessToWatch(opts: {
   factors?: WatchReadinessFactor[];
   syncedAtMs?: number;
 }): Promise<boolean> {
-  if (!canPush()) return false;
+  if (!canPush()) { await recordWatchSync('readiness', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
   const payload: WatchReadinessPayload = {
     score: opts.score ?? null,
@@ -324,7 +370,9 @@ export async function pushReadinessToWatch(opts: {
     syncedAtMs: opts.syncedAtMs ?? Date.now(),
   };
   wsLog('pushReadinessToWatch', { score: payload.score });
-  return WatchBridge.syncReadiness(payload);
+  const ok = await WatchBridge.syncReadiness(payload);
+  await recordWatchSync('readiness', !!ok);
+  return ok;
 }
 
 /** Push body-weight summary so the watch's Weight tab can render
@@ -336,7 +384,7 @@ export async function pushWeightToWatch(opts: {
   emaLbs?: number | null;
   slopeLbsPerWeek?: number | null;
 }): Promise<boolean> {
-  if (!canPush()) return false;
+  if (!canPush()) { await recordWatchSync('weight', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
   const payload: WatchWeightPayload = {
     latestLbs: opts.latestLbs ?? null,
@@ -346,7 +394,9 @@ export async function pushWeightToWatch(opts: {
     syncedAtMs: Date.now(),
   };
   wsLog('pushWeightToWatch', { latest: payload.latestLbs });
-  return WatchBridge.syncWeight(payload);
+  const ok = await WatchBridge.syncWeight(payload);
+  await recordWatchSync('weight', !!ok);
+  return ok;
 }
 
 /** Wipe the watch's local store on sign-out / user-switch. Pushes
@@ -409,7 +459,7 @@ export async function pushSupplementsToWatch(
   }>,
   dateISO?: string,
 ): Promise<boolean> {
-  if (!canPush()) return false;
+  if (!canPush()) { await recordWatchSync('supplements', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
   const payload: WatchSupplementsPayload = {
     dateISO: dateISO || localDateISO(),
@@ -424,7 +474,9 @@ export async function pushSupplementsToWatch(
     syncedAtMs: Date.now(),
   };
   wsLog('pushSupplementsToWatch', { count: items.length });
-  return WatchBridge.syncSupplements(payload);
+  const ok = await WatchBridge.syncSupplements(payload);
+  await recordWatchSync('supplements', !!ok, `${items.length} items`);
+  return ok;
 }
 
 /** Subscribe to commands the user taps on the watch. Returns an

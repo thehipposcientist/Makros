@@ -3056,7 +3056,7 @@ def generate_weekly_recipe(
     # (endurance = every day cardio, maintain/recovery = mostly low-stress).
     # Suppress the residual-adjacency warning for these — their design
     # calls for consecutive same-family days.
-    _INTENTIONAL_SAME_FAMILY_MODES = {"endurance", "maintain", "recovery"}
+    _INTENTIONAL_SAME_FAMILY_MODES = {"endurance", "maintain", "mobility", "recovery"}
     # Modes where full_body adjacency IS a violation (unless the user
     # actually picked a Full Body split — then every day is full_body
     # by design). For PPL/UL/PPL_UL on lifting/strength/etc., two
@@ -3065,6 +3065,7 @@ def generate_weekly_recipe(
     from .day_templates import SPLIT_FULL_BODY as _SPLIT_FB_WARN
     _fb_violates = (
         mode in ("lifting", "strength", "lifting_plus_cardio", "athletic", "hyrox")
+        and bool(lifting_split)
         and lifting_split != _SPLIT_FB_WARN
     )
     if mode not in _INTENTIONAL_SAME_FAMILY_MODES:
@@ -3394,12 +3395,6 @@ def _enforce_strict_split_composition(
     if diff_total <= 1:
         return recipe
 
-    logger.warning(
-        f"[weekly_recipe] STRICT-SPLIT VIOLATION: split={lifting_split} "
-        f"days={days} n_lifts={n_lifts} expected={expected} actual={actual} "
-        f"diff_total={diff_total} recipe={[a.value for a in recipe]}"
-    )
-
     # If user explicitly chose the split, rebuild lift slots from the
     # canonical `_lifting_recipe`. Preserve non-lift positions AND
     # preserve PLUS_CARDIO COUNT — the original recipe may have had
@@ -3409,6 +3404,12 @@ def _enforce_strict_split_composition(
     # body_recomp/fat_loss/strength PPL/UL recipes.
     if not user_chose_split:
         return recipe
+
+    logger.warning(
+        f"[weekly_recipe] STRICT-SPLIT VIOLATION: split={lifting_split} "
+        f"days={days} n_lifts={n_lifts} expected={expected} actual={actual} "
+        f"diff_total={diff_total} recipe={[a.value for a in recipe]}"
+    )
 
     canonical = _lifting_recipe(profile, lifting_split, n_lifts, priority_region=priority_region)
     if len(canonical) != n_lifts:

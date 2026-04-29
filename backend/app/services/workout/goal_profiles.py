@@ -78,7 +78,7 @@ class GoalProfile:
 
 # ── Profile table ───────────────────────────────────────────────────
 # One entry per canonical planner bucket. User-facing aliases
-# (toning → fat_loss, maintain → body_recomp) are handled by `goals.py`
+# (toning → fat_loss, maintain → general_health) are handled by `goals.py`
 # BEFORE we arrive here, so this table only needs the canonical keys.
 _PROFILE_TABLE: dict[str, GoalProfile] = {
     "muscle_gain": GoalProfile(

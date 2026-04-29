@@ -574,7 +574,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const remainingLbs = targetWeight != null ? Math.abs(currentWeight - targetWeight) : null;
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, noHeader && styles.inlineContainer]}>
       {/* Top "← Back / Progress" header is hidden when rendered inline
           as a bottom-tab — the bottom nav handles navigation. */}
       {!noHeader && (
@@ -1129,7 +1129,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           )}
         </ScrollView>
       ) : tab === 'prs' ? (
-        <ScrollView contentContainerStyle={styles.content} style={{ backgroundColor: tc.background }}>
+        <ScrollView contentContainerStyle={styles.content} style={!noHeader ? { backgroundColor: tc.background } : undefined}>
           {(insights || guardrails.length > 0 || coachMemory.length > 0) && (
             <View style={styles.insightsCard}>
               <Text style={styles.insightsTitle}>Coach Insights</Text>
@@ -3523,6 +3523,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
 function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.background },
+  inlineContainer: { backgroundColor: 'transparent' },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingTop: 56, paddingBottom: 16,

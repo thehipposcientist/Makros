@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated, Easing } from 'react-native';
+import { View, Text, Modal, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated, Easing, Linking } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -273,7 +273,7 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
   }
 }
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification } from '../src/services/api';
 import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday } from '../src/utils/mealTracker';
 import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
 import AuthScreen from '../src/screens/AuthScreen';
@@ -285,7 +285,9 @@ import ProgressScreen from '../src/screens/ProgressScreen';
 import SupplementsScreen from '../src/screens/SupplementsScreen';
 import RecoveryQuestionModal from '../src/components/RecoveryQuestionModal';
 import TutorialOverlay from '../src/components/TutorialOverlay';
+import LegalDisclosureModal from '../src/components/LegalDisclosureModal';
 import { colors, getTheme, radius } from '../src/constants/theme';
+import { LEGAL_VERSION, SUPPORT_EMAIL } from '../src/constants/legal';
 import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, todayKey, isAppleHealthEnabled, setAppleHealthEnabled } from '../src/utils/workoutHistory';
 import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
 
@@ -1750,7 +1752,7 @@ function SplashLoadingScreen() {
         color: '#8A90A0', fontSize: 15, fontWeight: '500', textAlign: 'center',
         letterSpacing: 0.2, marginBottom: 48, opacity: fadeAnim,
       }}>
-        Your AI personal trainer and nutritionist.
+        Personalized training, nutrition, and AI coaching.
       </Animated.Text>
 
       {/* Spinner — clean rotating arc */}
@@ -1795,23 +1797,58 @@ function AccountInfoModal({
   const tc = getTheme(profile.themePreference).colors;
   const c = tc; // alias for the new Developer-logs block below
   const am = createAmStyles(tc);
-  const [accountData, setAccountData] = useState<{ email: string; username: string } | null>(null);
+  const [accountData, setAccountData] = useState<{
+    email: string;
+    username: string;
+    firstName?: string | null;
+    lastName?: string | null;
+    emailVerified?: boolean;
+    legalAccepted?: boolean;
+  } | null>(null);
   const [loading, setLoading]         = useState(true);
   const [healthEnabled, setHealthEnabled] = useState(false);
   const [hasRecoveryQuestion, setHasRecoveryQuestion] = useState(false);
   const [showRecoveryModal, setShowRecoveryModal] = useState(false);
   const [showTierInfo, setShowTierInfo] = useState(false);
+  const [showLegal, setShowLegal] = useState(false);
+  const [accountBusy, setAccountBusy] = useState<string | null>(null);
+  const [watchStatus, setWatchStatus] = useState<string>('No sync recorded yet');
   const showHealthToggle = Platform.OS === 'ios';
 
   useEffect(() => {
     getMe(token)
       .then((data: any) => {
-        setAccountData({ email: data.email, username: data.username });
+        setAccountData({
+          email: data.email,
+          username: data.username,
+          firstName: data.first_name ?? null,
+          lastName: data.last_name ?? null,
+          emailVerified: !!data.email_verified,
+          legalAccepted: !!data.legal_accepted,
+        });
         setHasRecoveryQuestion(!!data.has_recovery_question);
       })
       .catch(() => setAccountData(null))
       .finally(() => setLoading(false));
     isAppleHealthEnabled().then(setHealthEnabled);
+    import('../src/utils/watchSync')
+      .then(async ({ getWatchSyncSnapshot, WatchBridge }) => {
+        const snap = await getWatchSyncSnapshot();
+        const availability = !WatchBridge.isAvailable()
+          ? 'bridge unavailable'
+          : WatchBridge.isReachable()
+            ? 'reachable'
+            : WatchBridge.isPaired()
+              ? 'paired, waiting'
+              : 'not paired';
+        if (!snap) {
+          setWatchStatus(`No sync recorded yet (${availability})`);
+          return;
+        }
+        const ageMin = Math.max(0, Math.round((Date.now() - snap.atMs) / 60000));
+        setWatchStatus(`${snap.ok ? 'Last sync ok' : 'Last sync failed'}: ${snap.surface}, ${ageMin}m ago (${availability})`);
+      })
+      .catch(() => setWatchStatus('Watch status unavailable'));
   }, [token]);
 
   const Row = ({ label, value }: { label: string; value: string }) => (
@@ -1820,6 +1857,91 @@ function AccountInfoModal({
       <Text style={am.rowValue}>{value}</Text>
     </View>
   );
+
+  const ActionRow = ({
+    label, desc, onPress, tone = 'default', busy = false,
+  }: {
+    label: string;
+    desc: string;
+    onPress: () => void;
+    tone?: 'default' | 'danger';
+    busy?: boolean;
+  }) => (
+    <TouchableOpacity
+      style={[am.securityRow, tone === 'danger' && { borderColor: tc.error + '66', backgroundColor: tc.error + '12' }]}
+      onPress={onPress}
+      disabled={busy}
+      activeOpacity={0.8}
+    >
+      <View style={{ flex: 1 }}>
+        <Text style={[am.securityLabel, tone === 'danger' && { color: tc.error }]}>{label}</Text>
+        <Text style={am.securityDesc}>{desc}</Text>
+      </View>
+      {busy ? <ActivityIndicator color={tc.primary} size="small" /> : <Text style={am.chevron}>›</Text>}
+    </TouchableOpacity>
+  );
+
+  const handleSupport = () => {
+    const subject = encodeURIComponent('Thallo support');
+    Linking.openURL(`mailto:${SUPPORT_EMAIL}?subject=${subject}`).catch(() => {
+      Alert.alert('Support', `Email ${SUPPORT_EMAIL} for help with your account, Watch sync, HealthKit, or app data.`);
+    });
+  };
+
+  const handleExportData = async () => {
+    setAccountBusy('export');
+    try {
+      const data = await exportAccountData(token);
+      const { exportAccountDataJson } = await import('../src/utils/dataExport');
+      await exportAccountDataJson(data, accountData?.username);
+    } catch (e: any) {
+      Alert.alert('Export failed', e?.message ?? 'Could not export account data.');
+    } finally {
+      setAccountBusy(null);
+    }
+  };
+
+  const handleRequestEmailVerification = async () => {
+    if (!accountData?.email) return;
+    setAccountBusy('verify');
+    try {
+      await requestEmailVerification(accountData.email);
+      Alert.alert(
+        'Verification requested',
+        'The verification token flow is ready. Add an email provider to send the link automatically.',
+      );
+    } catch (e: any) {
+      Alert.alert('Could not request verification', e?.message ?? 'Try again later.');
+    } finally {
+      setAccountBusy(null);
+    }
+  };
+
+  const handleDeleteAccount = () => {
+    Alert.alert(
+      'Delete account?',
+      'This disables your login and anonymizes your account identifiers. Export your data first if you want a copy.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete account',
+          style: 'destructive',
+          onPress: async () => {
+            setAccountBusy('delete');
+            try {
+              await deleteAccount(token);
+              onClose();
+              onSignOut();
+            } catch (e: any) {
+              Alert.alert('Delete failed', e?.message ?? 'Could not delete account.');
+            } finally {
+              setAccountBusy(null);
+            }
+          },
+        },
+      ],
+    );
+  };
 
   return (
     <Modal visible animationType="slide" transparent onRequestClose={onClose}>
@@ -1835,8 +1957,13 @@ function AccountInfoModal({
             <View style={am.infoSection}>
               {accountData ? (
                 <>
+                  {(accountData.firstName || accountData.lastName) && (
+                    <Row label="Name" value={`${accountData.firstName ?? ''} ${accountData.lastName ?? ''}`.trim()} />
+                  )}
                   <Row label="Email"    value={accountData.email} />
                   <Row label="Username" value={accountData.username} />
+                  <Row label="Email Status" value={accountData.emailVerified ? 'Verified' : 'Not verified'} />
+                  <Row label="Legal Version" value={accountData.legalAccepted ? LEGAL_VERSION : 'Needs review'} />
                 </>
               ) : (
                 <Text style={am.errorText}>Could not load account info</Text>
@@ -1869,6 +1996,54 @@ function AccountInfoModal({
             visible={showRecoveryModal}
             authToken={token}
             onDone={() => { setShowRecoveryModal(false); setHasRecoveryQuestion(true); }}
+          />
+
+          <ActionRow
+            label="Legal & Safety"
+            desc="Review Terms, Privacy, Health Disclaimer, and AI Disclosure."
+            onPress={() => setShowLegal(true)}
+          />
+
+          {accountData && !accountData.emailVerified && (
+            <ActionRow
+              label="Verify Email"
+              desc="Creates a verification token. Add email delivery to send links automatically."
+              onPress={handleRequestEmailVerification}
+              busy={accountBusy === 'verify'}
+            />
+          )}
+
+          <ActionRow
+            label="Help & Support"
+            desc={`Email ${SUPPORT_EMAIL} for account, Watch, HealthKit, or data help.`}
+            onPress={handleSupport}
+          />
+
+          <ActionRow
+            label="Apple Watch Sync"
+            desc={watchStatus}
+            onPress={() => Alert.alert('Apple Watch Sync', watchStatus)}
+          />
+
+          <ActionRow
+            label="Export Account Data"
+            desc="Share a JSON export of your account, workouts, meals, health, and settings."
+            onPress={handleExportData}
+            busy={accountBusy === 'export'}
+          />
+
+          <ActionRow
+            label="Delete Account"
+            desc="Disable login and anonymize account identifiers."
+            onPress={handleDeleteAccount}
+            tone="danger"
+            busy={accountBusy === 'delete'}
+          />
+
+          <LegalDisclosureModal
+            visible={showLegal}
+            onClose={() => setShowLegal(false)}
+            themeColors={tc as any}
           />
 
           {/* Pro vs Free feature comparison modal */}
@@ -1943,7 +2118,7 @@ function AccountInfoModal({
                       Everything in Free, plus:
                     </Text>
                     {[
-                      ['barbell-outline',     'Personalized AI workout plans'],
+                      ['barbell-outline',     'Personalized training plans'],
                       ['swap-horizontal-outline', 'Rebuild your week when you switch a day'],
                       ['restaurant-outline',  'AI-generated meal plans'],
                       ['chatbubble-outline',  'AI coach for training + nutrition questions'],
@@ -2034,8 +2209,8 @@ function AccountInfoModal({
             </View>
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
               {(profile.subscriptionTier ?? 'pro') === 'free'
-                ? 'Free: basic workout + meal logging. Upgrade for AI plans, coaching, insights, and analytics.'
-                : 'Pro: personalized AI plans, coaching, nutrition insights, recovery tracking, and full analytics.'}
+                ? 'Free: basic workout + meal logging. Upgrade for guided plans, coaching, insights, and analytics.'
+                : 'Pro: personalized training plans, coaching, nutrition insights, recovery tracking, and full analytics.'}
             </Text>
           </View>
 

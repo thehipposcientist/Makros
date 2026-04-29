@@ -22,6 +22,24 @@ Do these before a broad beta or paid launch:
 9. Split and lazy-load the largest screens, especially `HomeScreen` and `ActiveWorkoutScreen`.
 10. Fix user-facing copy that says "AI workout plans" because workout planning must remain deterministic.
 
+## Implementation Status
+
+Implemented in the 2026-04-29 non-payment pass:
+
+- Signup now collects first name and last name.
+- Signup now requires acceptance of Terms, Privacy Policy, Health Disclaimer, and AI Disclosure.
+- Backend stores legal acceptance timestamps and versions.
+- Password validation copy now matches the backend rule: at least eight characters and a number.
+- Account settings now expose Legal/Safety, support contact, full account export, account deletion, email verification request, and Watch sync status.
+- Backend now has full account JSON export and soft-delete/anonymization endpoints.
+- Email verification and email-token password reset endpoints are scaffolded, but automatic email delivery still needs an email provider.
+- Watch sync writes a local last-sync status snapshot so Account can show whether the last push succeeded or failed.
+- User-facing copy was adjusted away from "AI workout plans" toward personalized training plus AI coaching.
+
+Deferred by owner decision:
+
+- StoreKit, RevenueCat, restore purchases, billing management, entitlement verification, and production subscription gating.
+
 ## What I Confirmed In The Codebase
 
 - Backend `User` already has `first_name` and `last_name`, but `UserCreate`, `UserRead`, `/auth/register`, and frontend `register()` do not include them.

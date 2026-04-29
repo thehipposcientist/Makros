@@ -24,16 +24,108 @@ export interface ExerciseLibraryItem {
   is_custom?: boolean;
 }
 
-function equipmentClass(eq?: string | null): string {
-  const s = (eq ?? '').toLowerCase();
-  if (s.includes('barbell')) return 'barbell';
+function normalizedEquipmentKeys(raw?: string | null): string[] {
+  const s = (raw ?? '').toLowerCase().replace(/[_-]+/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return [];
+  const compact = s.replace(/\s+/g, '');
+  const keys = new Set([s, compact]);
+  const aliases: Record<string, string[]> = {
+    db: ['dumbbell', 'dumbbells'],
+    dumbbell: ['dumbbells'],
+    dumbbells: ['dumbbell'],
+    kb: ['kettlebell'],
+    band: ['bands', 'resistance band', 'resistance bands', 'resistance bands tube', 'resistance_bands'],
+    bands: ['band', 'resistance band', 'resistance bands', 'resistance bands tube', 'resistance_bands'],
+    resistanceband: ['band', 'bands', 'resistance bands', 'resistance bands tube', 'resistance_bands'],
+    resistancebands: ['band', 'bands', 'resistance band', 'resistance bands tube', 'resistance_bands'],
+    resistancebandstube: ['band', 'bands', 'resistance band', 'resistance bands', 'resistance_bands'],
+    pullupbar: ['pull up bar', 'pull-up bar', 'pull_up_bar'],
+    pullup: ['pull up bar', 'pull-up bar', 'pull_up_bar'],
+    ezbar: ['ez curl bar', 'ez_curl_bar'],
+    ezcurlbar: ['ez bar', 'ez_curl_bar'],
+    stabilityball: ['swiss ball', 'swiss stability ball', 'swiss_ball'],
+    swissball: ['stability ball', 'swiss stability ball', 'swiss_ball'],
+    rower: ['rowing machine', 'rowing_machine'],
+    rowingmachine: ['rower', 'rowing_machine'],
+    bike: ['stationary bike', 'stationary_bike'],
+    stationarybike: ['bike', 'stationary_bike'],
+    machine: [
+      'machines',
+      'selectorized machine',
+      'selectorized machines',
+      'leverage machine',
+      'leverage machines',
+      'leverage_machines',
+    ],
+    machines: ['machine'],
+    gym: ['machine', 'machines', 'barbell', 'dumbbells', 'cable machine'],
+    fullgym: ['machine', 'machines', 'barbell', 'dumbbells', 'cable machine'],
+  };
+  for (const alias of aliases[s] ?? aliases[compact] ?? []) {
+    const normalized = alias.toLowerCase().replace(/[_-]+/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!normalized) continue;
+    keys.add(normalized);
+    keys.add(normalized.replace(/\s+/g, ''));
+  }
+  return [...keys];
+}
+
+function ownedEquipmentKeySet(ownedEquipment: string[] | undefined): Set<string> {
+  const owned = new Set<string>();
+  for (const item of ownedEquipment ?? []) {
+    for (const key of normalizedEquipmentKeys(item)) owned.add(key);
+  }
+  for (const key of normalizedEquipmentKeys('bodyweight')) owned.add(key);
+  for (const key of normalizedEquipmentKeys('none')) owned.add(key);
+  return owned;
+}
+
+function equipmentMatchesOwned(raw: string | null | undefined, owned: Set<string>): boolean {
+  const keys = normalizedEquipmentKeys(raw);
+  return keys.length > 0 && keys.some(k => owned.has(k));
+}
+
+export function exerciseEquipmentLabel(ex: ExerciseLibraryItem): string | null {
+  const gear = ex.gear ?? [];
+  if (gear.length > 0) {
+    const required = gear.filter(g => g.required !== false);
+    const display = (required.length > 0 ? required : gear)
+      .map(g => g.name || g.slug)
+      .filter(Boolean);
+    if (display.length > 0) return display.join(', ');
+  }
+  return ex.equipment ?? null;
+}
+
+function equipmentClass(ex: ExerciseLibraryItem): string {
+  const s = (exerciseEquipmentLabel(ex) ?? '').toLowerCase().replace(/[_-]+/g, ' ');
+  if (s.includes('barbell') || s.includes('smith')) return 'barbell';
   if (s.includes('dumbbell') || s.includes('db')) return 'dumbbell';
   if (s.includes('kettlebell') || s.includes('kb')) return 'kettlebell';
   if (s.includes('cable')) return 'cable';
   if (s.includes('machine') || s.includes('selectorized')) return 'machine';
-  if (s.includes('band')) return 'band';
+  if (s.includes('band') || s.includes('resistance')) return 'band';
   if (s.includes('bodyweight') || s === 'none' || s === 'bw') return 'bodyweight';
   return 'other';
+}
+
+export function isExerciseUsableWithEquipment(
+  ex: ExerciseLibraryItem,
+  ownedEquipment: string[] | undefined,
+): boolean {
+  const owned = ownedEquipmentKeySet(ownedEquipment);
+  if (ex.gear && ex.gear.length > 0) {
+    const required = ex.gear.filter(g => g.required !== false);
+    if (required.length === 0) return true;
+    return required.every(g =>
+      equipmentMatchesOwned(g.slug, owned) || equipmentMatchesOwned(g.name, owned),
+    );
+  }
+  const eq = ex.equipment ?? '';
+  const keys = normalizedEquipmentKeys(eq);
+  if (keys.length === 0) return true;
+  if (keys.some(k => k.includes('bodyweight') || k === 'none' || k === 'bw')) return true;
+  return keys.some(k => owned.has(k));
 }
 
 /** Score how well `cand` substitutes for `base`. Matches ActiveWorkoutScreen
@@ -53,8 +145,8 @@ export function scoreSwapCandidate(base: ExerciseLibraryItem, cand: ExerciseLibr
   const bpat = (base.movement_pattern ?? '').toLowerCase();
   const cpat = (cand.movement_pattern ?? '').toLowerCase();
   if (bpat && bpat === cpat) score += 6;
-  const be = equipmentClass(base.equipment);
-  const ce = equipmentClass(cand.equipment);
+  const be = equipmentClass(base);
+  const ce = equipmentClass(cand);
   if (be === ce) score += 4;
   else if (
     (be === 'barbell' && ce === 'dumbbell') ||
@@ -81,22 +173,10 @@ export function rankSwapCandidates(
   ownedEquipment: string[] | undefined,
   limit = 12,
 ): SwapCandidate[] {
-  const owned = new Set((ownedEquipment ?? []).map(e => e.toLowerCase()));
-  owned.add('bodyweight');
-  owned.add('none');
   const ranked: Array<{ ex: ExerciseLibraryItem; score: number }> = [];
   for (const ex of library) {
     if (ex.name === base.name) continue;
-    // Equipment filter: prefer concrete gear list, fall back to legacy bucket.
-    if (ex.gear && ex.gear.length > 0) {
-      const required = ex.gear.filter(g => g.required !== false);
-      if (required.length > 0 && !required.every(g =>
-        owned.has(g.slug?.toLowerCase() ?? '') || owned.has(g.name?.toLowerCase() ?? ''),
-      )) continue;
-    } else {
-      const eq = (ex.equipment ?? '').toLowerCase();
-      if (eq && !owned.has(eq) && !eq.includes('bodyweight')) continue;
-    }
+    if (!isExerciseUsableWithEquipment(ex, ownedEquipment)) continue;
     const score = scoreSwapCandidate(base, ex);
     if (score > 0) ranked.push({ ex, score });
   }

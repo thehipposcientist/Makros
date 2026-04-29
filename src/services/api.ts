@@ -85,10 +85,34 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
   throw lastError ?? new Error('Request failed');
 }
 
-export async function register(email: string, username: string, password: string) {
+export async function register(
+  email: string,
+  username: string,
+  password: string,
+  opts?: {
+    firstName?: string;
+    lastName?: string;
+    legalVersion?: string;
+    acceptedTerms?: boolean;
+    acceptedPrivacy?: boolean;
+    acceptedHealthDisclaimer?: boolean;
+    acceptedAiDisclaimer?: boolean;
+  },
+) {
   return request('/auth/register', {
     method: 'POST',
-    body: JSON.stringify({ email, username, password }),
+    body: JSON.stringify({
+      email,
+      username,
+      password,
+      first_name: opts?.firstName,
+      last_name: opts?.lastName,
+      accepted_terms: opts?.acceptedTerms ?? true,
+      accepted_privacy: opts?.acceptedPrivacy ?? true,
+      accepted_health_disclaimer: opts?.acceptedHealthDisclaimer ?? true,
+      accepted_ai_disclaimer: opts?.acceptedAiDisclaimer ?? true,
+      legal_version: opts?.legalVersion,
+    }),
   });
 }
 
@@ -103,6 +127,34 @@ export async function resetPassword(email: string, answer: string, newPassword: 
   return request('/auth/reset-password', {
     method: 'POST',
     body: JSON.stringify({ email, answer, new_password: newPassword }),
+  });
+}
+
+export async function requestPasswordResetEmail(email: string): Promise<{ status: string; message: string; dev_token?: string }> {
+  return request('/auth/password-reset/request', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  });
+}
+
+export async function confirmPasswordResetEmail(email: string, token: string, newPassword: string): Promise<{ access_token: string }> {
+  return request('/auth/password-reset/confirm', {
+    method: 'POST',
+    body: JSON.stringify({ email, token, new_password: newPassword }),
+  });
+}
+
+export async function requestEmailVerification(email: string): Promise<{ status: string; message: string; dev_token?: string }> {
+  return request('/auth/email-verification/request', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  });
+}
+
+export async function confirmEmailVerification(email: string, token: string) {
+  return request('/auth/email-verification/confirm', {
+    method: 'POST',
+    body: JSON.stringify({ email, token }),
   });
 }
 
@@ -944,6 +996,19 @@ export async function updateBirthdate(token: string, birthdate: string): Promise
   });
 }
 
+export async function exportAccountData(token: string): Promise<any> {
+  return request('/profile/export', {
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, true);
+}
+
+export async function deleteAccount(token: string): Promise<{ status: string }> {
+  return request('/profile/account', {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, false);
+}
+
 // ============================================================================
 // Meta API Endpoints — Reference Data (Foods, Equipment, Goals, Paces)
 // ============================================================================
@@ -976,31 +1041,60 @@ export async function getGoals() {
 // any time the shape or required fields change.
 const EXERCISE_LIBRARY_CACHE_KEY = 'exercise_library_cache_v3';
 const EXERCISE_LIBRARY_TTL_MS = 24 * 60 * 60 * 1000;
+let exerciseLibraryMemoryCache: { ts: number; rows: any[] } | null = null;
+let exerciseLibraryInflight: Promise<any[]> | null = null;
 
 export async function getExercises(params?: { muscle?: string; equipment?: string; forceRefresh?: boolean }) {
   // Only the "all exercises" path (no filters) is cached — filter queries
   // are rare and would create too many cache keys.
   const unfiltered = !params?.muscle && !params?.equipment;
   if (unfiltered && !params?.forceRefresh) {
-    try {
-      const raw = await AsyncStorage.getItem(EXERCISE_LIBRARY_CACHE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed?.ts && Date.now() - parsed.ts < EXERCISE_LIBRARY_TTL_MS && Array.isArray(parsed.rows)) {
-          return parsed.rows as any[];
+    if (
+      exerciseLibraryMemoryCache?.ts
+      && Date.now() - exerciseLibraryMemoryCache.ts < EXERCISE_LIBRARY_TTL_MS
+    ) {
+      return exerciseLibraryMemoryCache.rows;
+    }
+    if (exerciseLibraryInflight) return exerciseLibraryInflight;
+
+    exerciseLibraryInflight = (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(EXERCISE_LIBRARY_CACHE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed?.ts && Date.now() - parsed.ts < EXERCISE_LIBRARY_TTL_MS && Array.isArray(parsed.rows)) {
+            exerciseLibraryMemoryCache = { ts: parsed.ts, rows: parsed.rows };
+            return parsed.rows as any[];
+          }
         }
-      }
-    } catch {}
+      } catch {}
+
+      const rows = await request<any[]>('/meta/exercises');
+      const ts = Date.now();
+      exerciseLibraryMemoryCache = { ts, rows };
+      try { await AsyncStorage.setItem(EXERCISE_LIBRARY_CACHE_KEY, JSON.stringify({ ts, rows })); } catch {}
+      return rows;
+    })();
+
+    try {
+      return await exerciseLibraryInflight;
+    } finally {
+      exerciseLibraryInflight = null;
+    }
   }
 
   const qp = new URLSearchParams();
   if (params?.muscle) qp.set('muscle', params.muscle);
   if (params?.equipment) qp.set('equipment', params.equipment);
   const suffix = qp.toString() ? `?${qp.toString()}` : '';
-  const rows = await request<any[]>(`/meta/exercises${suffix}`);
+  const load = request<any[]>(`/meta/exercises${suffix}`);
+
+  const rows = await load;
 
   if (unfiltered) {
-    try { await AsyncStorage.setItem(EXERCISE_LIBRARY_CACHE_KEY, JSON.stringify({ ts: Date.now(), rows })); } catch {}
+    const ts = Date.now();
+    exerciseLibraryMemoryCache = { ts, rows };
+    try { await AsyncStorage.setItem(EXERCISE_LIBRARY_CACHE_KEY, JSON.stringify({ ts, rows })); } catch {}
   }
   return rows;
 }
@@ -1518,6 +1612,7 @@ export type AIExerciseResult = {
   video_id?: string | null;
   is_compound?: boolean;
   secondary_muscles?: string[];
+  movement_pattern?: string | null;
 };
 
 /** Resolve an exercise name to a YouTube video ID for the top form
@@ -3214,6 +3309,18 @@ export async function startNewPlanWeek(token: string, force: boolean = false): P
   });
 }
 
+export async function patchPlanDayWorkout(
+  token: string,
+  dayDate: string,
+  workoutJson: any,
+): Promise<PlanDayResponse> {
+  return request<PlanDayResponse>(`/plans/days/${encodeURIComponent(dayDate)}/workout`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workout_json: workoutJson }),
+  });
+}
+
 export interface AutoRenewPlanWeekResponse {
   plan_week: PlanWeekResponse | null;
   review_headline: string;
@@ -3817,4 +3924,3 @@ export async function identifyGear(token: string, images: string[]): Promise<Gea
     body: JSON.stringify({ images }),
   });
 }
-

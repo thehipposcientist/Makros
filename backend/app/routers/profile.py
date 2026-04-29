@@ -1,5 +1,7 @@
+import secrets
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
+from sqlalchemy import or_
 from sqlmodel import Session, select
 from datetime import datetime, timezone, date, timedelta
 
@@ -11,8 +13,12 @@ from app.models import (
     CoachMemory, UserCoachingState, WorkoutCompletion, UserState,
     WeightEntry, UserEquipmentProfile,
     UserEquipmentProfileCreate, UserEquipmentProfileRead,
+    WorkoutSession, WorkoutExercise, ExerciseSet, Meal, MealItem, BodyScan,
+    SavedMeal, SleepLog, DailyHealthSnapshot, UserSupplementStack,
+    SupplementLog, UserSocialProfile, Friendship, ActivityFeedItem,
+    FeedLike, PlanWeek, PlanDay, AIDecision, GearItem,
 )
-from app.auth import get_current_user
+from app.auth import get_current_user, hash_password
 
 
 class NutritionScoreResponse(BaseModel):
@@ -47,6 +53,14 @@ class UserStateBody(BaseModel):
         if len(json.dumps(v)) > 1_000_000:  # 1MB hard cap
             raise ValueError('State blob too large (max 1MB)')
         return v
+
+
+def _dump_model(row):
+    return row.model_dump(mode="json")
+
+
+def _dump_rows(rows):
+    return [_dump_model(row) for row in rows]
 
 router = APIRouter(prefix="/profile", tags=["profile"])
 
@@ -317,6 +331,145 @@ def update_name(
     session.add(current_user)
     session.commit()
     return {"first_name": current_user.first_name, "last_name": current_user.last_name}
+
+
+@router.get("/export")
+def export_account_data(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Return a JSON account export for the signed-in user.
+
+    This intentionally includes the user's own account, health, workout,
+    nutrition, supplement, and social metadata, but excludes password hashes
+    and friends' private data.
+    """
+    uid = current_user.id
+    if uid is None:
+        raise HTTPException(status_code=401, detail="Invalid user")
+
+    workout_sessions = session.exec(select(WorkoutSession).where(WorkoutSession.user_id == uid)).all()
+    workout_session_ids = [w.id for w in workout_sessions if w.id is not None]
+    workout_exercises = (
+        session.exec(select(WorkoutExercise).where(WorkoutExercise.session_id.in_(workout_session_ids))).all()
+        if workout_session_ids else []
+    )
+    workout_exercise_ids = [e.id for e in workout_exercises if e.id is not None]
+    exercise_sets = (
+        session.exec(select(ExerciseSet).where(ExerciseSet.workout_exercise_id.in_(workout_exercise_ids))).all()
+        if workout_exercise_ids else []
+    )
+
+    meals = session.exec(select(Meal).where(Meal.user_id == uid)).all()
+    meal_ids = [m.id for m in meals if m.id is not None]
+    meal_items = (
+        session.exec(select(MealItem).where(MealItem.meal_id.in_(meal_ids))).all()
+        if meal_ids else []
+    )
+
+    return {
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "user": {
+            "id": current_user.id,
+            "email": current_user.email,
+            "username": current_user.username,
+            "first_name": current_user.first_name,
+            "last_name": current_user.last_name,
+            "is_active": current_user.is_active,
+            "created_at": current_user.created_at.isoformat(),
+            "email_verified_at": current_user.email_verified_at.isoformat() if current_user.email_verified_at else None,
+            "terms_accepted_at": current_user.terms_accepted_at.isoformat() if current_user.terms_accepted_at else None,
+            "terms_version": current_user.terms_version,
+            "privacy_accepted_at": current_user.privacy_accepted_at.isoformat() if current_user.privacy_accepted_at else None,
+            "privacy_version": current_user.privacy_version,
+            "health_disclaimer_accepted_at": current_user.health_disclaimer_accepted_at.isoformat() if current_user.health_disclaimer_accepted_at else None,
+            "health_disclaimer_version": current_user.health_disclaimer_version,
+            "ai_disclaimer_accepted_at": current_user.ai_disclaimer_accepted_at.isoformat() if current_user.ai_disclaimer_accepted_at else None,
+            "ai_disclaimer_version": current_user.ai_disclaimer_version,
+        },
+        "profile": _dump_rows(session.exec(select(UserProfile).where(UserProfile.user_id == uid)).all()),
+        "goals": _dump_rows(session.exec(select(UserGoal).where(UserGoal.user_id == uid)).all()),
+        "preferences": _dump_rows(session.exec(select(UserPreferences).where(UserPreferences.user_id == uid)).all()),
+        "state": _dump_rows(session.exec(select(UserState).where(UserState.user_id == uid)).all()),
+        "plan_weeks": _dump_rows(session.exec(select(PlanWeek).where(PlanWeek.user_id == uid)).all()),
+        "plan_days": _dump_rows(session.exec(select(PlanDay).where(PlanDay.user_id == uid)).all()),
+        "day_states": _dump_rows(session.exec(select(UserDayState).where(UserDayState.user_id == uid)).all()),
+        "workouts": {
+            "sessions": _dump_rows(workout_sessions),
+            "exercises": _dump_rows(workout_exercises),
+            "sets": _dump_rows(exercise_sets),
+            "completions": _dump_rows(session.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == uid)).all()),
+        },
+        "nutrition": {
+            "meals": _dump_rows(meals),
+            "meal_items": _dump_rows(meal_items),
+            "saved_meals": _dump_rows(session.exec(select(SavedMeal).where(SavedMeal.user_id == uid)).all()),
+        },
+        "body": {
+            "weight_entries": _dump_rows(session.exec(select(WeightEntry).where(WeightEntry.user_id == uid)).all()),
+            "body_scans": _dump_rows(session.exec(select(BodyScan).where(BodyScan.user_id == uid)).all()),
+        },
+        "health": {
+            "sleep_logs": _dump_rows(session.exec(select(SleepLog).where(SleepLog.user_id == uid)).all()),
+            "daily_health_snapshots": _dump_rows(session.exec(select(DailyHealthSnapshot).where(DailyHealthSnapshot.user_id == uid)).all()),
+        },
+        "supplements": {
+            "stack": _dump_rows(session.exec(select(UserSupplementStack).where(UserSupplementStack.user_id == uid)).all()),
+            "logs": _dump_rows(session.exec(select(SupplementLog).where(SupplementLog.user_id == uid)).all()),
+        },
+        "coaching": {
+            "state": _dump_rows(session.exec(select(UserCoachingState).where(UserCoachingState.user_id == uid)).all()),
+            "memory": _dump_rows(session.exec(select(CoachMemory).where(CoachMemory.user_id == uid)).all()),
+            "ai_decisions": _dump_rows(session.exec(select(AIDecision).where(AIDecision.user_id == uid)).all()),
+            "weekly_checkins": _dump_rows(session.exec(select(WeeklyCheckIn).where(WeeklyCheckIn.user_id == uid)).all()),
+        },
+        "equipment": _dump_rows(session.exec(select(UserEquipmentProfile).where(UserEquipmentProfile.user_id == uid)).all()),
+        "gear": _dump_rows(session.exec(select(GearItem).where(GearItem.user_id == uid)).all()),
+        "social": {
+            "profile": _dump_rows(session.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == uid)).all()),
+            "friendships": _dump_rows(session.exec(select(Friendship).where(or_(Friendship.user_a_id == uid, Friendship.user_b_id == uid))).all()),
+            "activity_feed_items": _dump_rows(session.exec(select(ActivityFeedItem).where(ActivityFeedItem.user_id == uid)).all()),
+            "feed_likes": _dump_rows(session.exec(select(FeedLike).where(FeedLike.user_id == uid)).all()),
+        },
+    }
+
+
+@router.delete("/account")
+def delete_account(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Soft-delete the signed-in account and anonymize login identifiers."""
+    uid = current_user.id
+    if uid is None:
+        raise HTTPException(status_code=401, detail="Invalid user")
+
+    now = datetime.now(timezone.utc)
+    suffix = f"{uid}-{int(now.timestamp())}"
+    current_user.is_active = False
+    current_user.account_deleted_at = now
+    current_user.email = f"deleted+{suffix}@deleted.thallo.local"
+    current_user.username = f"deleted_user_{suffix}"
+    current_user.first_name = None
+    current_user.last_name = None
+    current_user.hashed_password = hash_password(secrets.token_urlsafe(32))
+    current_user.recovery_question = None
+    current_user.recovery_answer_hash = None
+    current_user.email_verification_token_hash = None
+    current_user.email_verification_expires_at = None
+    current_user.password_reset_token_hash = None
+    current_user.password_reset_expires_at = None
+
+    social = session.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == uid)).first()
+    if social:
+        social.display_name = "Deleted user"
+        social.share_activity_enabled = False
+        social.updated_at = now
+        session.add(social)
+
+    session.add(current_user)
+    session.commit()
+    return {"status": "deleted", "deleted_user_id": uid}
 
 
 @router.get("/day-state/{day_key}")

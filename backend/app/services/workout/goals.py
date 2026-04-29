@@ -8,8 +8,8 @@ backed by tests.
 
 Supported set after this pass (see `supported_goal_ids`):
     fat_loss, muscle_gain, body_recomp, strength, endurance,
-    athletic_performance, toning (alias → fat_loss),
-    maintain (alias → body_recomp).
+    athletic_performance, hyrox, toning (alias → fat_loss),
+    maintain (alias → general_health).
 
 Dropped from the exposed set:
     flexibility, stress_relief — these require a mobility / low-
@@ -22,7 +22,7 @@ Aliases
 -------
 An alias goal shares the same planner bucket as its canonical target.
 `toning` normalizes to `fat_loss`, `maintain` normalizes to
-`body_recomp`. The UI can still show them as distinct labels; the
+`general_health`. The UI can still show them as distinct labels; the
 planner treats them identically at the code level. This is the honest
 middle-ground between "hide them" and "pretend they're different".
 """

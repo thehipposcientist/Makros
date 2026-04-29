@@ -1,4 +1,7 @@
+import os
 import re
+import secrets
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
@@ -12,6 +15,8 @@ from app.auth import hash_password, verify_password, create_access_token, get_cu
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = get_logger("app.auth")
+LEGAL_VERSION = "2026-04-29"
+TOKEN_TTL_MINUTES = 30
 
 
 def _user_read(user: User) -> UserRead:
@@ -19,9 +24,22 @@ def _user_read(user: User) -> UserRead:
         id=user.id,
         email=user.email,
         username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
         is_active=user.is_active,
         created_at=user.created_at,
         has_recovery_question=bool(user.recovery_question and user.recovery_answer_hash),
+        email_verified=bool(user.email_verified_at),
+        legal_accepted=bool(
+            user.terms_accepted_at
+            and user.privacy_accepted_at
+            and user.health_disclaimer_accepted_at
+            and user.ai_disclaimer_accepted_at
+        ),
+        terms_version=user.terms_version,
+        privacy_version=user.privacy_version,
+        health_disclaimer_version=user.health_disclaimer_version,
+        ai_disclaimer_version=user.ai_disclaimer_version,
     )
 
 
@@ -57,31 +75,89 @@ def _validate_password(pwd: str) -> None:
         raise HTTPException(status_code=422, detail="Password must include at least one number")
 
 
+def _validate_name(label: str, value: str | None) -> str:
+    cleaned = (value or "").strip()
+    if len(cleaned) < 1:
+        raise HTTPException(status_code=422, detail=f"{label} is required")
+    if len(cleaned) > 80:
+        raise HTTPException(status_code=422, detail=f"{label} is too long")
+    return cleaned
+
+
+def _require_legal_acceptance(body: UserCreate) -> None:
+    if not (
+        body.accepted_terms
+        and body.accepted_privacy
+        and body.accepted_health_disclaimer
+        and body.accepted_ai_disclaimer
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Terms, Privacy Policy, health disclaimer, and AI disclaimer must be accepted",
+        )
+
+
+def _new_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def _token_expiry() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(minutes=TOKEN_TTL_MINUTES)
+
+
+def _is_expired(ts: datetime | None) -> bool:
+    if ts is None:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts < datetime.now(timezone.utc)
+
+
 @router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 @limiter.limit("30/hour;100/day")
 def register(body: UserCreate, request: Request, session: Session = Depends(get_session)):
-    _validate_email(body.email)
+    email = body.email.strip().lower()
+    username = body.username.strip()
+    first_name = _validate_name("First name", body.first_name)
+    last_name = _validate_name("Last name", body.last_name)
+    _validate_email(email)
     _validate_password(body.password)
+    _require_legal_acceptance(body)
     ip = _client_ip(request)
     # Check email not taken
-    if session.exec(select(User).where(User.email == body.email)).first():
-        logger.info("auth_register_rejected", extra={"email": body.email, "ip": ip, "reason": "email_taken"})
+    if session.exec(select(User).where(User.email == email)).first():
+        logger.info("auth_register_rejected", extra={"email": email, "ip": ip, "reason": "email_taken"})
         raise HTTPException(status_code=400, detail="Email already registered")
     # Check username not taken
-    if session.exec(select(User).where(User.username == body.username)).first():
-        logger.info("auth_register_rejected", extra={"email": body.email, "ip": ip, "reason": "username_taken"})
+    if session.exec(select(User).where(User.username == username)).first():
+        logger.info("auth_register_rejected", extra={"email": email, "ip": ip, "reason": "username_taken"})
         raise HTTPException(status_code=400, detail="Username already taken")
 
+    now = datetime.now(timezone.utc)
+    email_token = _new_token()
+    legal_version = (body.legal_version or LEGAL_VERSION).strip() or LEGAL_VERSION
     user = User(
-        email=body.email,
-        username=body.username,
+        email=email,
+        username=username,
         hashed_password=hash_password(body.password),
+        first_name=first_name,
+        last_name=last_name,
+        terms_accepted_at=now,
+        terms_version=legal_version,
+        privacy_accepted_at=now,
+        privacy_version=legal_version,
+        health_disclaimer_accepted_at=now,
+        health_disclaimer_version=legal_version,
+        ai_disclaimer_accepted_at=now,
+        ai_disclaimer_version=legal_version,
+        email_verification_token_hash=hash_password(email_token),
+        email_verification_expires_at=_token_expiry(),
     )
     session.add(user)
     session.commit()
     session.refresh(user)
     set_request_context(user_id=user.id)
-    logger.info("auth_register_ok", extra={"user_id": user.id, "email": body.email, "ip": ip})
+    logger.info("auth_register_ok", extra={"user_id": user.id, "email": email, "ip": ip})
     return _user_read(user)
 
 
@@ -129,11 +205,81 @@ def update_email(
     if session.exec(select(User).where(User.email == new_email)).first():
         raise HTTPException(status_code=400, detail="Email already registered")
     current_user.email = new_email
+    current_user.email_verified_at = None
     session.add(current_user)
     session.commit()
     session.refresh(current_user)
     logger.info("auth_email_updated", extra={"user_id": current_user.id, "new_email": new_email})
     return _user_read(current_user)
+
+
+class EmailTokenRequestBody(BaseModel):
+    email: str
+
+
+class EmailTokenConfirmBody(BaseModel):
+    email: str
+    token: str
+
+
+@router.post("/email-verification/request")
+@limiter.limit("5/hour")
+def request_email_verification(
+    body: EmailTokenRequestBody,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    """Create an email-verification token.
+
+    Delivery is intentionally generic here so account existence is not
+    leaked. When an email provider is configured later, this is the place to
+    send the token or magic link. In local/dev, set DEV_EMAIL_TOKENS=1 to get
+    the token in the response for manual testing.
+    """
+    email = body.email.strip().lower()
+    ip = _client_ip(request)
+    user = session.exec(select(User).where(User.email == email)).first()
+    dev_token: str | None = None
+    if user and user.is_active:
+        token = _new_token()
+        user.email_verification_token_hash = hash_password(token)
+        user.email_verification_expires_at = _token_expiry()
+        session.add(user)
+        session.commit()
+        dev_token = token
+        logger.info("auth_email_verification_requested", extra={"user_id": user.id, "email": email, "ip": ip})
+    response = {"status": "ok", "message": "If that email belongs to an account, a verification link will be sent."}
+    if os.getenv("DEV_EMAIL_TOKENS") == "1" and dev_token:
+        response["dev_token"] = dev_token
+    return response
+
+
+@router.post("/email-verification/confirm", response_model=UserRead)
+@limiter.limit("10/hour")
+def confirm_email_verification(
+    body: EmailTokenConfirmBody,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    email = body.email.strip().lower()
+    token = body.token.strip()
+    user = session.exec(select(User).where(User.email == email)).first()
+    generic = HTTPException(status_code=401, detail="Verification link is invalid or expired")
+    if not user or not user.email_verification_token_hash:
+        raise generic
+    if _is_expired(user.email_verification_expires_at):
+        raise generic
+    if not verify_password(token, user.email_verification_token_hash):
+        logger.warning("auth_email_verification_failed", extra={"email": email, "ip": _client_ip(request)})
+        raise generic
+    user.email_verified_at = datetime.now(timezone.utc)
+    user.email_verification_token_hash = None
+    user.email_verification_expires_at = None
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    logger.info("auth_email_verified", extra={"user_id": user.id, "email": email})
+    return _user_read(user)
 
 
 # ── Recovery question flow ───────────────────────────────────────────────────
@@ -228,3 +374,78 @@ def reset_password(
     set_request_context(user_id=user.id)
     logger.info("auth_reset_ok", extra={"user_id": user.id, "email": body.email, "ip": ip})
     return Token(access_token=token)
+
+
+class PasswordResetEmailRequest(BaseModel):
+    email: str
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    email: str
+    token: str
+    new_password: str
+
+
+@router.post("/password-reset/request")
+@limiter.limit("5/hour")
+def request_password_reset_email(
+    body: PasswordResetEmailRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    """Start email-token password reset.
+
+    This avoids relying on security questions once email delivery is wired.
+    For now it safely stores a short-lived token and returns a generic
+    response. Set DEV_EMAIL_TOKENS=1 locally to see the token in the response.
+    """
+    email = body.email.strip().lower()
+    ip = _client_ip(request)
+    user = session.exec(select(User).where(User.email == email)).first()
+    dev_token: str | None = None
+    if user and user.is_active:
+        token = _new_token()
+        user.password_reset_token_hash = hash_password(token)
+        user.password_reset_expires_at = _token_expiry()
+        session.add(user)
+        session.commit()
+        dev_token = token
+        logger.info("auth_password_reset_email_requested", extra={"user_id": user.id, "email": email, "ip": ip})
+    response = {"status": "ok", "message": "If that email belongs to an account, a reset link will be sent."}
+    if os.getenv("DEV_EMAIL_TOKENS") == "1" and dev_token:
+        response["dev_token"] = dev_token
+    return response
+
+
+@router.post("/password-reset/confirm", response_model=Token)
+@limiter.limit("10/hour")
+def confirm_password_reset_email(
+    body: PasswordResetConfirmRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    _validate_password(body.new_password)
+    email = body.email.strip().lower()
+    token = body.token.strip()
+    user = session.exec(select(User).where(User.email == email)).first()
+    generic = HTTPException(status_code=401, detail="Reset link is invalid or expired")
+    if not user or not user.password_reset_token_hash:
+        raise generic
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Account disabled")
+    if _is_expired(user.password_reset_expires_at):
+        raise generic
+    if not verify_password(token, user.password_reset_token_hash):
+        logger.warning("auth_password_reset_email_failed", extra={"email": email, "ip": _client_ip(request)})
+        raise generic
+
+    user.hashed_password = hash_password(body.new_password)
+    user.password_reset_token_hash = None
+    user.password_reset_expires_at = None
+    session.add(user)
+    session.commit()
+
+    access_token = create_access_token(user.id)
+    set_request_context(user_id=user.id)
+    logger.info("auth_password_reset_email_ok", extra={"user_id": user.id, "email": email})
+    return Token(access_token=access_token)

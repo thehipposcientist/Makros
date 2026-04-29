@@ -219,6 +219,40 @@ def test_started_day_cannot_be_changed():
     assert_eq(result.proposed_days[1]["focus"], "Pull", "day1 still Pull")
 
 
+def test_locked_target_day_cannot_be_changed():
+    """A manually locked PlanDay is immutable even when it is the target."""
+    print("[change_day_type] locked target day protection")
+    from app.services.workout.change_day_type import change_day_type
+
+    days = _make_days("Push", "Pull", "Legs")
+    statuses = _statuses("pending", "locked", "pending")
+    result = change_day_type(
+        days, day_index=1, new_focus="Legs",
+        day_statuses=statuses, mode="smart", split="ppl",
+    )
+    assert_eq(len(result.changed_indices), 0, "no changes")
+    assert_eq(result.proposed_days[1]["focus"], "Pull", "locked target unchanged")
+    assert_true(len(result.conflicts) > 0, "conflict returned")
+    assert_in("locked", result.conflicts[0].message, "message mentions locked")
+
+
+def test_skipped_target_day_cannot_be_changed():
+    """Skipped days are historical outcomes, not future editable slots."""
+    print("[change_day_type] skipped target day protection")
+    from app.services.workout.change_day_type import change_day_type
+
+    days = _make_days("Push", "Pull", "Legs")
+    statuses = _statuses("pending", "skipped", "pending")
+    result = change_day_type(
+        days, day_index=1, new_focus="Legs",
+        day_statuses=statuses, mode="smart", split="ppl",
+    )
+    assert_eq(len(result.changed_indices), 0, "no changes")
+    assert_eq(result.proposed_days[1]["focus"], "Pull", "skipped target unchanged")
+    assert_true(len(result.conflicts) > 0, "conflict returned")
+    assert_in("skipped", result.conflicts[0].message, "message mentions skipped")
+
+
 # ── Test: locked/skipped days stay frozen in smart mode ──────────────
 
 def test_locked_days_frozen_in_smart_mode():
@@ -459,8 +493,9 @@ def test_smart_adjust_upper_lower():
 # ── Test: smart adjust preserves non-lifting days ────────────────────
 
 def test_smart_adjust_preserves_rest_days():
-    """Smart adjust doesn't overwrite rest days that aren't free slots."""
-    print("[change_day_type] smart adjust preserves rest days")
+    """Smart adjust may move a recovery break, but it should preserve
+    the non-lifting break count while reconciling the split."""
+    print("[change_day_type] smart adjust preserves recovery break count")
     from app.services.workout.change_day_type import change_day_type
 
     days = _make_days("Push", "Pull", "Legs", "Recovery", "Push")
@@ -470,6 +505,11 @@ def test_smart_adjust_preserves_rest_days():
         day_statuses=statuses, mode="smart", split="ppl",
     )
     assert_eq(result.proposed_days[0]["focus"], "Pull", "day0 changed")
+    breaks = [
+        d for d in result.proposed_days
+        if d["focus"].lower() in ("recovery", "mobility")
+    ]
+    assert_eq(len(breaks), 1, "one recovery/mobility break preserved")
 
 
 # ── Test: 7-day plan with lots of completed days ─────────────────────
@@ -533,6 +573,8 @@ def test_ppl_ul_smart_adjust_preserves_all_families():
     assert_in("pull", families, "pull present")
     assert_in("push", families, "push present")
     assert_in("legs", families, "legs present")
+    assert_in("upper", families, "upper present")
+    assert_in("lower", families, "lower present")
 
 
 def test_ppl_ul_mid_week_change():
@@ -596,6 +638,8 @@ cases = [
     test_change_recovery_to_lift,
     test_completed_day_cannot_be_changed,
     test_started_day_cannot_be_changed,
+    test_locked_target_day_cannot_be_changed,
+    test_skipped_target_day_cannot_be_changed,
     test_locked_days_frozen_in_smart_mode,
     test_smart_adjust_only_modifies_remaining_days,
     test_no_recovery_streak_detection,

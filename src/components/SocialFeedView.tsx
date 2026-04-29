@@ -57,6 +57,7 @@ interface Props {
   shareEnabled?: boolean;
   myActivity?: { sessions: number; streak: number } | null;
   myDisplayName?: string;
+  bottomPadding?: number;
 }
 
 // One bounded fetch — no pagination by design. The view is an "is
@@ -89,7 +90,7 @@ function formatDuration(sec: number | undefined | null): string {
 
 export default function SocialFeedView({
   authToken, themeName, onViewAuthor, refreshKey, maxItems,
-  shareEnabled, myActivity, myDisplayName,
+  shareEnabled, myActivity, myDisplayName, bottomPadding = 8,
 }: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
@@ -407,7 +408,7 @@ export default function SocialFeedView({
       data={displayItems}
       keyExtractor={keyExtractor}
       renderItem={renderItem}
-      contentContainerStyle={styles.listContent}
+      contentContainerStyle={[styles.listContent, { paddingBottom: bottomPadding }]}
       ListHeaderComponent={myActivityHeader}
       refreshControl={
         <RefreshControl

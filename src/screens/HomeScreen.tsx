@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue } from 'react';
 import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager } from 'react-native';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -48,6 +48,7 @@ import IncompleteDayBanner from '../components/IncompleteDayBanner';
 import AdaptiveMacroCard from '../components/AdaptiveMacroCard';
 import SavedMealsSection from '../components/SavedMealsSection';
 import PlanSwapExerciseModal from '../components/PlanSwapExerciseModal';
+import { exerciseEquipmentLabel } from '../utils/swapScoring';
 import ExerciseVideoCard from '../components/ExerciseVideoCard';
 import { exerciseThumbSmall, primeThumbnailIndex } from '../utils/exerciseThumb';
 import { configureExpandAnimation } from '../utils/layoutAnim';
@@ -160,6 +161,7 @@ interface ExerciseLibraryItem {
   primary_muscle?: string;
   secondary_muscles?: string[];
   equipment?: string;
+  gear?: Array<{ slug: string; name: string; category?: string; required?: boolean }>;
   is_compound?: boolean;
   image_url?: string | null;
   video_id?: string | null;
@@ -1150,18 +1152,28 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // and never disappears no matter which tab is active.
   const [activeTab, setActiveTabRaw]      = useState<'friends' | 'workout' | 'meals' | 'progress' | 'you'>('workout');
   const progressFade = useRef(new Animated.Value(0)).current;
+  const bottomNavFloat = useRef(new Animated.Value(1)).current;
   const setActiveTab = useCallback((tab: typeof activeTab) => {
+    if (tab === activeTab) return;
+    bottomNavFloat.setValue(0);
+    Animated.spring(bottomNavFloat, {
+      toValue: 1,
+      friction: 7,
+      tension: 150,
+      useNativeDriver: true,
+    }).start();
     setActiveTabRaw(tab);
     if (tab === 'progress') {
       progressFade.setValue(0);
       Animated.timing(progressFade, { toValue: 1, duration: 300, useNativeDriver: true }).start();
     }
     AsyncStorage.setItem('lastActiveTab', tab).catch(() => {});
-  }, []);
+  }, [activeTab, bottomNavFloat, progressFade]);
   // Sub-tab inside each main tab.
   // Workouts: plan | exercises | muscles | equipment
   // Meals:    plan | foods     | supplements | macros
   const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'library' | 'exercises' | 'muscles' | 'equipment' | 'history'>('plan');
+  const renderedWorkoutSubTab = useDeferredValue(workoutSubTab);
   const [workoutHistoryList, setWorkoutHistoryList] = useState<WorkoutSession[]>([]);
   const [workoutHistorySummaries, setWorkoutHistorySummaries] = useState<any[]>([]);
   const [expandedWorkoutHistoryId, setExpandedWorkoutHistoryId] = useState<string | null>(null);
@@ -1315,6 +1327,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [suppAiNotFound, setSuppAiNotFound] = useState(false);
   const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
   const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
+  const exerciseLibraryRef = useRef<ExerciseLibraryItem[]>([]);
+  const exerciseLibraryLoadPromiseRef = useRef<Promise<ExerciseLibraryItem[]> | null>(null);
+  const ensureExerciseLibraryRef = useRef<(() => Promise<ExerciseLibraryItem[]>) | null>(null);
   const [selectedExercise, setSelectedExercise] = useState<ExerciseLibraryItem | null>(null);
   const [selectedMuscle, setSelectedMuscle] = useState<MuscleEntry | null>(null);
   const [muscleRegionFilter, setMuscleRegionFilter] = useState<string>('all');
@@ -1649,7 +1664,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // Warm the exercise library in the background so plan-view + active-
     // workout thumbnails have the name→video_id index populated even
     // for users who never visit the Library sub-tab.
-    ensureExerciseLibrary().catch(() => {});
+    ensureExerciseLibraryRef.current?.().catch(() => {});
     // Weekly check-in prompt is now handled by WeeklyCheckinCard in ProgressScreen (backend-backed).
     // NOTE: `meta.allFoods.length` was previously in this dep array but caused
     // `loadPlans` to re-fire whenever the parent re-rendered (e.g. when a menu
@@ -1694,8 +1709,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     if (activeTab !== 'workout') return;
     if (workoutSubTab !== 'library') return;
     if (!showExerciseLibrary) setShowExerciseLibrary(true);
-    ensureExerciseLibrary().catch(() => {});
-  }, [activeTab, workoutSubTab, showExerciseLibrary, ensureExerciseLibrary]);
+    ensureExerciseLibraryRef.current?.().catch(() => {});
+  }, [activeTab, workoutSubTab, showExerciseLibrary]);
 
   // Next-day unlogged-meals prompt. Fires once per calendar day when
   // yesterday had a plan with unchecked meals and the user hasn't dismissed
@@ -3515,55 +3530,68 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   };
 
   // Pure library-fetch, no side effects on modal visibility. Shared
-  // between openExerciseLibrary (Library sub-tab) and the plan-view
+  // between the Library sub-tab and the plan-view
   // swap flow (warmed lazily when the user taps Swap). Returns the
   // loaded list so callers that need it synchronously (e.g. Info
   // button looking up the tapped exercise) don't have to wait for
   // state to propagate through React.
-  const ensureExerciseLibrary = useCallback(async (): Promise<ExerciseLibraryItem[]> => {
-    if (exerciseLibrary.length > 0) return exerciseLibrary;
-    setExerciseLibraryLoading(true);
-    try {
-      const rows = await getExercises();
-      const customs = (userProfile?.customExercises ?? []).map(ce => ({
+  const customExerciseLibraryItems = useCallback(() => (
+    (userProfile?.customExercises ?? []).map(ce => ({
         id: ce.id as any,
         name: ce.name,
         primary_muscle: ce.primary_muscle,
-        secondary_muscles: [] as string[],
+        secondary_muscles: (ce.secondary_muscles ?? []) as string[],
         equipment: ce.equipment,
+        movement_pattern: ce.movement_pattern ?? null,
+        image_url: ce.image_url ?? null,
+        video_id: ce.video_id ?? null,
+        is_compound: ce.is_compound ?? null,
         description: ce.description ?? '',
         is_custom: true,
-      })) as unknown as ExerciseLibraryItem[];
-      const combined = [...customs, ...rows];
-      setExerciseLibrary(combined);
-      // Prime the shared name/slug → video_id index so stale
-      // WorkoutPlan snapshots (generated before video_id existed on
-      // build_planner_exercise) can still render thumbnails via
-      // name/slug lookup. Means users don't need a forced plan regen
-      // to see previews.
-      primeThumbnailIndex(combined as any);
-      return combined;
-    } catch {
-      const customs = (userProfile?.customExercises ?? []).map(ce => ({
-        id: ce.id as any,
-        name: ce.name,
-        primary_muscle: ce.primary_muscle,
-        secondary_muscles: [] as string[],
-        equipment: ce.equipment,
-        description: ce.description ?? '',
-        is_custom: true,
-      })) as unknown as ExerciseLibraryItem[];
-      setExerciseLibrary(customs);
-      return customs;
-    } finally {
-      setExerciseLibraryLoading(false);
-    }
-  }, [exerciseLibrary, userProfile?.customExercises]);
+      })) as unknown as ExerciseLibraryItem[]
+  ), [userProfile?.customExercises]);
 
-  const openExerciseLibrary = useCallback(async () => {
-    setShowExerciseLibrary(true);
-    await ensureExerciseLibrary();
+  const ensureExerciseLibrary = useCallback(async (): Promise<ExerciseLibraryItem[]> => {
+    const cached = exerciseLibraryRef.current;
+    if (cached.length > 0) return cached;
+    if (exerciseLibraryLoadPromiseRef.current) return exerciseLibraryLoadPromiseRef.current;
+
+    const loadPromise = (async () => {
+      if (exerciseLibraryRef.current.length === 0) setExerciseLibraryLoading(true);
+      const customs = customExerciseLibraryItems();
+      try {
+        const rows = await getExercises();
+        const combined = [...customs, ...rows];
+        exerciseLibraryRef.current = combined;
+        setExerciseLibrary(combined);
+        primeThumbnailIndex(combined as any);
+        return combined;
+      } catch {
+        exerciseLibraryRef.current = customs;
+        setExerciseLibrary(customs);
+        return customs;
+      } finally {
+        setExerciseLibraryLoading(false);
+        exerciseLibraryLoadPromiseRef.current = null;
+      }
+    })();
+
+    exerciseLibraryLoadPromiseRef.current = loadPromise;
+    return loadPromise;
+  }, [customExerciseLibraryItems]);
+  ensureExerciseLibraryRef.current = ensureExerciseLibrary;
+
+  useEffect(() => {
+    exerciseLibraryRef.current = exerciseLibrary;
+  }, [exerciseLibrary]);
+
+  useEffect(() => {
+    ensureExerciseLibraryRef.current = ensureExerciseLibrary;
   }, [ensureExerciseLibrary]);
+
+  useEffect(() => {
+    if (activeTab === 'workout') ensureExerciseLibraryRef.current?.().catch(() => {});
+  }, [activeTab]);
 
   /** Save an AI-search result into the user's custom exercise library so
    *  future local searches find it without another AI call. Persists via
@@ -3579,7 +3607,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       id: `custom_${Date.now()}`,
       name: ex.name,
       primary_muscle: ex.primary_muscle,
+      secondary_muscles: ex.secondary_muscles ?? [],
       equipment: ex.equipment,
+      movement_pattern: ex.movement_pattern ?? null,
+      image_url: ex.image_url ?? null,
+      video_id: ex.video_id ?? null,
+      is_compound: ex.is_compound ?? null,
       sets: ex.sets,
       reps: ex.reps,
       rest_seconds: ex.rest_seconds,
@@ -3589,19 +3622,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       createdAt: new Date().toISOString(),
     };
     const nextCustoms = [...existing, newItem];
-    // Optimistically add to the in-memory library so it shows up immediately.
-    setExerciseLibrary(prev => [
-      ({
-        id: newItem.id as any,
-        name: newItem.name,
-        primary_muscle: newItem.primary_muscle,
-        secondary_muscles: [] as string[],
-        equipment: newItem.equipment,
-        description: newItem.description ?? '',
-        is_custom: true,
-      }) as unknown as ExerciseLibraryItem,
-      ...prev,
-    ]);
+    const libraryItem = ({
+      id: newItem.id as any,
+      name: newItem.name,
+      primary_muscle: newItem.primary_muscle,
+      secondary_muscles: (newItem.secondary_muscles ?? []) as string[],
+      equipment: newItem.equipment,
+      movement_pattern: newItem.movement_pattern ?? null,
+      image_url: newItem.image_url ?? null,
+      video_id: newItem.video_id ?? null,
+      is_compound: newItem.is_compound ?? null,
+      description: newItem.description ?? '',
+      is_custom: true,
+    }) as unknown as ExerciseLibraryItem;
+    const nextLibrary = [libraryItem, ...exerciseLibraryRef.current];
+    exerciseLibraryRef.current = nextLibrary;
+    setExerciseLibrary(nextLibrary);
     // Persist via the parent's profile-update callback. `skipRegen: true`
     // so we don't trigger a plan regeneration just from saving an exercise.
     onProfileUpdate?.({ customExercises: nextCustoms } as any, true);
@@ -4965,10 +5001,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const isLightTheme = ['sunrise', 'parchment', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'sky', 'rose'].includes(userProfile.themePreference ?? 'slate');
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
 
-  // Subtle gradient: slightly lighter at top, fades to base background
+  // Dark themes keep the atmospheric wash; light themes stay clean so
+  // they don't get a muddy/dark gradient creeping in behind the UI.
   const gradientColors: [string, string, string] = isLightTheme
-    ? [themeColors.primary + '10', themeColors.surfaceRaised, themeColors.background]
+    ? [themeColors.background, themeColors.background, themeColors.background]
     : [themeColors.primary + '16', themeColors.surfaceRaised, themeColors.background];
+  const headerGradientColors: [string, string] = isLightTheme
+    ? [themeColors.surface, themeColors.surface]
+    : [themeColors.primary + '18', themeColors.surfaceRaised];
+  const bottomBarGradientColors: [string, string] = isLightTheme
+    ? [themeColors.surface + 'FA', themeColors.surface + 'F4']
+    : [themeColors.surfaceRaised + 'F4', themeColors.surface + 'EA'];
 
   return (
     <LinearGradient colors={gradientColors} style={styles.container} locations={[0, 0.4, 1]}>
@@ -4976,7 +5019,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       {/* Header — very subtle top-to-bottom primary wash */}
       <LinearGradient
-        colors={[themeColors.primary + '18', themeColors.surfaceRaised]}
+        colors={headerGradientColors}
         start={{ x: 0, y: 0 }}
         end={{ x: 0, y: 1 }}
         style={[styles.header, { paddingTop: insets.top + 10, borderBottomColor: themeColors.border }]}>
@@ -5111,9 +5154,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         <View style={[styles.fixedSubTabBar, { top: insets.top + 70, backgroundColor: themeColors.background, borderBottomColor: themeColors.border }]}>
           <View style={[styles.segmentedWrap, { backgroundColor: themeColors.background, borderColor: themeColors.border }]}>
             <SubTabBtn label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
-            <SubTabBtn label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); openExerciseLibrary(); }} />
+            <SubTabBtn label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); setShowExerciseLibrary(true); ensureExerciseLibrary().catch(() => {}); }} />
             <SubTabBtn label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
-            <SubTabBtn label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); loadWorkoutHistory().then(setWorkoutHistoryList).catch(() => {}); }} />
+            <SubTabBtn label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); requestAnimationFrame(() => { loadWorkoutHistory().then(setWorkoutHistoryList).catch(() => {}); }); }} />
           </View>
         </View>
       )}
@@ -5190,8 +5233,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 The wrapper sets a solid background so the remount
                 frame doesn't flash-through to the previous tab's
                 content or the edit screen's unstyled chrome. */}
-            {workoutSubTab === 'equipment' && (
-              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
+            {renderedWorkoutSubTab === 'equipment' && (
+              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 96, backgroundColor: themeColors.background }}>
                 <EditProfileScreen
                   authToken={authToken}
                   profile={userProfile}
@@ -5207,7 +5250,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {/* Workout history — ports the full Progress view (month
                 calendar, weekly strip + streak, Share/Log Activity,
                 session cards with per-set detail + summary card). */}
-            {workoutSubTab === 'history' && (() => {
+            {renderedWorkoutSubTab === 'history' && (() => {
               const history = workoutHistoryList;
               const summaries = workoutHistorySummaries;
               const todayDate = new Date();
@@ -5486,7 +5529,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {/* Birthday backfill nudge (existing users only — hides once
                 profile.birthdate is set or after user dismisses). Keeps
                 HR zones / calorie math accurate as users age. */}
-            {workoutSubTab === 'plan' && authToken && (
+            {renderedWorkoutSubTab === 'plan' && authToken && (
               <BirthdateBackfillCard
                 authToken={authToken}
                 existingBirthdate={userProfile.physicalStats?.birthdate ?? null}
@@ -5507,14 +5550,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             )}
 
             {/* Streak + daily motto */}
-            {workoutSubTab === 'plan' && authToken && (
+            {renderedWorkoutSubTab === 'plan' && authToken && (
               <StreakConsistencyWidget authToken={authToken} themeName={userProfile.themePreference} displayName={userProfile.firstName || username || undefined} />
             )}
 
             {/* Combined "Today's training readiness" — fuses Recovery (per-muscle
                 for today's focus) + Preparedness (sleep/HRV/nutrition/RHR).
                 Re-runs when today's focus changes (Switch Day picker). */}
-            {workoutSubTab === 'plan' && !isFreeTier && authToken && (() => {
+            {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (() => {
               const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
               // Find today by date — with the dated PlanWeek schedule,
               // today is no longer guaranteed to live at index 0.
@@ -5541,18 +5584,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             })()}
 
             {/* Menstrual cycle phase (auto-hides if no Apple Health data) */}
-            {workoutSubTab === 'plan' && authToken && (
+            {renderedWorkoutSubTab === 'plan' && authToken && (
               <CyclePhaseCard themeName={userProfile.themePreference} />
             )}
 
             {/* Weekly digest card — only renders Sunday / post-6pm (Feature 3) */}
-            {workoutSubTab === 'plan' && !isFreeTier && authToken && (
+            {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (
               <WeeklyDigestCard authToken={authToken} themeName={userProfile.themePreference} />
             )}
 
 
             {/* Active injuries banner */}
-            {workoutSubTab === 'plan' && (() => {
+            {renderedWorkoutSubTab === 'plan' && (() => {
               const active = (userProfile.injuryEntries ?? []).filter(i => i.status === 'active' || i.status === 'recovering');
               if (active.length === 0) return null;
               return (
@@ -5581,7 +5624,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             })()}
 
-            {workoutSubTab === 'plan' && showEmailBanner && (
+            {renderedWorkoutSubTab === 'plan' && showEmailBanner && (
               <View style={{ marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: themeColors.warning + '44' }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <Ionicons name="mail-outline" size={16} color={themeColors.warning} />
@@ -5606,7 +5649,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {/* Resume workout banner — shown when the user force-quit
                 mid-workout. Jumps straight back into ActiveWorkoutScreen
                 with all logged sets intact. */}
-            {workoutSubTab === 'plan' && resumeInfo && workoutPlan?.days?.[0] && (
+            {renderedWorkoutSubTab === 'plan' && resumeInfo && workoutPlan?.days?.[0] && (
               <TouchableOpacity
                 style={{
                   flexDirection: 'row', alignItems: 'center', gap: 10,
@@ -5666,7 +5709,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 sets on today's workout for recovering muscles. Dismissable.
                 Only visible on the Plan sub-tab. Slides down from above +
                 fades in on mount so the context shift feels deliberate. */}
-            {workoutSubTab === 'plan' && fatigueNotice && (
+            {renderedWorkoutSubTab === 'plan' && fatigueNotice && (
               <FatigueNoticeBanner
                 message={fatigueNotice}
                 onDismiss={() => setFatigueNotice(null)}
@@ -5674,7 +5717,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             )}
 
 
-            {workoutSubTab === 'plan' && (() => {
+            {renderedWorkoutSubTab === 'plan' && (() => {
               const splitRaw = (userProfile.preferredSplit || '').toLowerCase();
               const collapseUpper = ['upper_lower', 'upper lower', 'full_body', 'full body'].some(kw => splitRaw.includes(kw))
                 || (!splitRaw && (workoutPlan?.days ?? []).some(d => {
@@ -6321,7 +6364,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 CRUD, Today check-offs, Recommendations driven by food
                 gaps. Replaces the old EditProfileScreen-based view. */}
             {mealsSubTab === 'supplements' && (
-              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
+              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 96, backgroundColor: themeColors.background }}>
                 <SupplementStackScreen
                   authToken={authToken!}
                   themeName={userProfile.themePreference}
@@ -6330,7 +6373,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             )}
 
             {(mealsSubTab !== 'plan' && mealsSubTab !== 'history' && mealsSubTab !== 'supplements') && (
-              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 70, backgroundColor: themeColors.background }}>
+              <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 96, backgroundColor: themeColors.background }}>
                 {mealsSubTab === 'foods' && (
                   <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
                     <TouchableOpacity
@@ -6982,9 +7025,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {/* ── Social tab — Friends + Weekly Digest ──────── */}
       {activeTab === 'friends' && (
         <ErrorBoundary>
-        <FadeInView key={viewingFriend ? `friend-${viewingFriend.user_id}` : 'social-home'} duration={280} slideDistance={10} style={{ flex: 1, marginBottom: 70, backgroundColor: themeColors.background }}>
+        <FadeInView key={viewingFriend ? `friend-${viewingFriend.user_id}` : 'social-home'} duration={280} slideDistance={10} style={{ flex: 1 }}>
           {viewingFriend ? (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 24 }}>
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 136 }}>
               <TouchableOpacity
                 onPress={() => setViewingFriend(null)}
                 style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 16 }}
@@ -7249,7 +7292,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       )}
 
       {/* ── Progress tab — kept mounted to avoid white flash on tab switch */}
-      <Animated.View style={{ flex: 1, paddingBottom: 88, display: activeTab === 'progress' ? 'flex' : 'none', opacity: progressFade }}>
+      <Animated.View style={{ flex: 1, display: activeTab === 'progress' ? 'flex' : 'none', opacity: progressFade }}>
         <ErrorBoundary>
           <ProgressScreen
             authToken={authToken}
@@ -7386,15 +7429,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         onSelect={async (next) => {
           const target = swapExerciseState;
           if (!target) return;
+          const nextEquipment = exerciseEquipmentLabel(next) ?? next.equipment ?? null;
           const patch = (prev: any) => ({
             ...prev,
             name: next.name,
-            equipment: next.equipment ?? prev.equipment,
+            equipment: nextEquipment ?? prev.equipment,
             muscles_targeted: [next.primary_muscle, ...(next.secondary_muscles ?? [])].filter(Boolean),
             primary_muscle: next.primary_muscle,
+            video_id: next.video_id ?? prev.video_id,
             image_url: next.image_url ?? prev.image_url,
+            _slug: next.slug ?? prev._slug,
+            _primary_muscle: next.primary_muscle ?? prev._primary_muscle,
+            _secondary_muscles: next.secondary_muscles ?? prev._secondary_muscles,
           });
           try {
+            let patchedActiveWeek = false;
             // Primary path: planWeek is the source of truth for the DayCard
             // render. Match by day_date (stable, unique) instead of focus
             // (can duplicate across the week — e.g. two Push days).
@@ -7405,13 +7454,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const exs = pw.days[dayIdx]?.workout?.exercises;
                 if (Array.isArray(exs) && target.exerciseIndex < exs.length) {
                   exs[target.exerciseIndex] = patch(exs[target.exerciseIndex]);
+                  if (authToken) {
+                    try {
+                      const { patchPlanDayWorkout } = await import('../services/api');
+                      const savedDay = await patchPlanDayWorkout(authToken, target.dayKey, pw.days[dayIdx].workout);
+                      pw.days[dayIdx] = savedDay;
+                    } catch (e) {
+                      console.warn('[plan-swap] backend patch failed:', e);
+                      Alert.alert('Swap not saved', 'Could not update this plan day right now. Please try again.');
+                      return;
+                    }
+                  }
                   setPlanWeek(pw);
                   planWeekRef.current = pw;
+                  patchedActiveWeek = true;
                 }
               }
             }
             // Legacy fallback: workoutPlan (used when planWeek is null)
-            const raw = await AsyncStorage.getItem('aiWorkoutPlan');
+            const raw = patchedActiveWeek ? null : await AsyncStorage.getItem('aiWorkoutPlan');
             if (raw) {
               const plan = JSON.parse(raw);
               if (plan && Array.isArray(plan.days)) {
@@ -7799,7 +7860,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           muscles) shows via `libraryActiveTab`, which my sub-tab buttons
           already set. Only a thin back header appears when the user
           drills into a specific exercise or muscle detail. */}
-      {showExerciseLibrary && (
+      {showExerciseLibrary && renderedWorkoutSubTab === 'library' && (
         <View style={[styles.libraryInlineWrap, { top: insets.top + 70 + 52, backgroundColor: themeColors.background }]}>
           <View style={[styles.librarySheet, { backgroundColor: themeColors.surface }]}>
 
@@ -9955,49 +10016,76 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {/* ── Bottom tab bar ────────────────────────────────────────────────
           Five top-level destinations. Each tab simply sets `activeTab`
           and the screen body re-renders the matching content block. */}
-      <View style={[styles.bottomBar, { backgroundColor: themeColors.surface, borderTopColor: themeColors.border }]}>
-        <BottomTabButton
-          label="Social"
-          iconName="people-outline"
-          active={activeTab === 'friends'}
-          tint={themeColors.primary}
-          mutedColor={themeColors.textMuted}
-          onPress={() => setActiveTab('friends')}
-          badge={pendingFriendCount > 0 ? pendingFriendCount : undefined}
-        />
-        <BottomTabButton
-          label="Workouts"
-          iconName="barbell-outline"
-          active={activeTab === 'workout'}
-          tint={workoutPalette.strong}
-          mutedColor={themeColors.textMuted}
-          onPress={() => setActiveTab('workout')}
-        />
-        <BottomTabButton
-          label="Meals"
-          iconName="nutrition-outline"
-          active={activeTab === 'meals'}
-          tint={mealPalette.strong}
-          mutedColor={themeColors.textMuted}
-          onPress={() => setActiveTab('meals')}
-        />
-        <BottomTabButton
-          label="Progress"
-          iconName="trending-up-outline"
-          active={activeTab === 'progress'}
-          tint={themeColors.primary}
-          mutedColor={themeColors.textMuted}
-          onPress={() => setActiveTab('progress')}
-        />
-        <BottomTabButton
-          label="You"
-          iconName="person-circle-outline"
-          active={activeTab === 'you'}
-          tint={themeColors.primary}
-          mutedColor={themeColors.textMuted}
-          onPress={() => setActiveTab('you')}
-        />
-      </View>
+      <Animated.View
+        pointerEvents="box-none"
+        style={[
+          styles.bottomBarShell,
+          {
+            bottom: Math.max(insets.bottom, 10),
+            shadowColor: isLightTheme ? themeColors.border : '#000',
+            shadowOpacity: isLightTheme ? 0.08 : 0.22,
+            transform: [
+              {
+                translateY: bottomNavFloat.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [6, 0],
+                }),
+              },
+              {
+                scale: bottomNavFloat.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0.985, 1],
+                }),
+              },
+            ],
+          },
+        ]}>
+        <LinearGradient
+          colors={bottomBarGradientColors}
+          style={[styles.bottomBar, { borderColor: themeColors.border + 'B8' }]}>
+          <BottomTabButton
+            label="Social"
+            iconName="people-outline"
+            active={activeTab === 'friends'}
+            tint={themeColors.primary}
+            mutedColor={themeColors.textMuted}
+            onPress={() => setActiveTab('friends')}
+            badge={pendingFriendCount > 0 ? pendingFriendCount : undefined}
+          />
+          <BottomTabButton
+            label="Workouts"
+            iconName="barbell-outline"
+            active={activeTab === 'workout'}
+            tint={workoutPalette.strong}
+            mutedColor={themeColors.textMuted}
+            onPress={() => setActiveTab('workout')}
+          />
+          <BottomTabButton
+            label="Meals"
+            iconName="nutrition-outline"
+            active={activeTab === 'meals'}
+            tint={mealPalette.strong}
+            mutedColor={themeColors.textMuted}
+            onPress={() => setActiveTab('meals')}
+          />
+          <BottomTabButton
+            label="Progress"
+            iconName="trending-up-outline"
+            active={activeTab === 'progress'}
+            tint={themeColors.primary}
+            mutedColor={themeColors.textMuted}
+            onPress={() => setActiveTab('progress')}
+          />
+          <BottomTabButton
+            label="You"
+            iconName="person-circle-outline"
+            active={activeTab === 'you'}
+            tint={themeColors.primary}
+            mutedColor={themeColors.textMuted}
+            onPress={() => setActiveTab('you')}
+          />
+        </LinearGradient>
+      </Animated.View>
     </LinearGradient>
   );
 }
@@ -10010,31 +10098,49 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
   mutedColor: string;
   onPress: () => void;
 }) {
+  const pressLock = useRef(false);
+  const triggerPress = () => {
+    if (pressLock.current) return;
+    pressLock.current = true;
+    onPress();
+    setTimeout(() => { pressLock.current = false; }, 1000);
+  };
   return (
-    <PressableScale
-      onPress={onPress}
-      hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-      style={{
+    <View style={{ flex: 1 }}>
+      <Pressable
+        onPressIn={triggerPress}
+        onPress={triggerPress}
+        hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+        accessibilityRole="tab"
+        accessibilityLabel={`${label} tab`}
+        accessibilityState={{ selected: active }}
+        style={({ pressed }) => ({
+          width: '100%',
+          minHeight: 40,
+          transform: [{ scale: pressed ? 0.985 : 1 }],
+        })}>
+        <View style={{
         flex: 1,
         paddingVertical: 8,
         paddingHorizontal: 8,
         borderRadius: 999,
-        backgroundColor: active ? tint + '18' : 'transparent',
+        backgroundColor: active ? tint + '24' : 'transparent',
         borderWidth: active ? 1 : 0,
-        borderColor: active ? tint + '32' : 'transparent',
+        borderColor: active ? tint + '55' : 'transparent',
         alignItems: 'center',
         justifyContent: 'center',
-      }}
-      scaleDown={0.985}>
-      <Text style={{
-        ...typography.label,
-        fontWeight: active ? '700' : '500',
-        color: active ? tint : mutedColor,
-        opacity: active ? 1 : 0.55,
-      }} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
-        {label}
-      </Text>
-    </PressableScale>
+        }}>
+          <Text style={{
+            ...typography.label,
+            fontWeight: active ? '800' : '600',
+            color: active ? tint : mutedColor,
+            opacity: active ? 1 : 0.68,
+          }} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
+            {label}
+          </Text>
+        </View>
+      </Pressable>
+    </View>
   );
 }
 
@@ -10050,65 +10156,128 @@ function BottomTabButton({
   onPress: () => void;
   badge?: number;
 }) {
+  const activeAnim = useRef(new Animated.Value(active ? 1 : 0)).current;
+
+  useEffect(() => {
+    Animated.spring(activeAnim, {
+      toValue: active ? 1 : 0,
+      friction: 8,
+      tension: 160,
+      useNativeDriver: true,
+    }).start();
+  }, [active, activeAnim]);
+
+  const iconLift = activeAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, -2],
+  });
+  const iconScale = activeAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [1, 1.08],
+  });
+  const dotScale = activeAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.35, 1],
+  });
+
   return (
-    <PressableScale
-      style={btStyles.btn}
-      onPress={() => { import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {}); onPress(); }}
-      scaleDown={0.97}
-      hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-      accessibilityRole="tab"
-      accessibilityLabel={`${label} tab`}
-      accessibilityState={{ selected: active }}>
-      <View style={[btStyles.inner, { backgroundColor: active ? tint + '14' : 'transparent' }]}>
-        <View style={[btStyles.activeIndicator, { backgroundColor: active ? tint : 'transparent', opacity: active ? 1 : 0 }]} />
-        <View style={{ position: 'relative' }}>
-          <Ionicons
-            name={(active ? iconName.replace('-outline', '') : iconName) as any}
-            size={22}
-            color={active ? tint : mutedColor}
-            style={{ opacity: active ? 1 : 0.5 }}
-          />
-          {badge != null && badge > 0 && (
-            <View style={{ position: 'absolute', top: -4, right: -8, backgroundColor: tint, borderRadius: 999, minWidth: 14, height: 14, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 }}>
-              <Text style={{ fontSize: 9, fontWeight: '800', color: '#000' }}>{badge}</Text>
-            </View>
-          )}
-        </View>
-        <Text style={[btStyles.label, { color: active ? tint : mutedColor, opacity: active ? 1 : 0.55 }]} numberOfLines={1}>
-          {label.toUpperCase()}
-        </Text>
-      </View>
-    </PressableScale>
+    <View style={btStyles.slot}>
+      <PressableScale
+        style={btStyles.btn}
+        onPress={() => {
+          if (!active) import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+          onPress();
+        }}
+        scaleDown={0.97}
+        hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+        accessibilityRole="tab"
+        accessibilityLabel={`${label} tab`}
+        accessibilityState={{ selected: active }}>
+        <Animated.View style={[
+          btStyles.inner,
+          active && {
+            backgroundColor: tint + '18',
+            borderColor: tint + '42',
+          },
+          {
+            transform: [
+              { translateY: iconLift },
+              { scale: activeAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 1.03] }) },
+            ],
+          },
+        ]}>
+          <View style={{ position: 'relative' }}>
+            <Animated.View style={[
+              btStyles.iconWrap,
+              active && { backgroundColor: tint + '18' },
+              { transform: [{ scale: iconScale }] },
+            ]}>
+              <Ionicons
+                name={(active ? iconName.replace('-outline', '') : iconName) as any}
+                size={active ? 20 : 21}
+                color={active ? tint : mutedColor}
+                style={{ opacity: active ? 1 : 0.68 }}
+              />
+            </Animated.View>
+            {badge != null && badge > 0 && (
+              <View style={{ position: 'absolute', top: -4, right: -8, backgroundColor: tint, borderRadius: 999, minWidth: 15, height: 15, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 }}>
+                <Text style={{ fontSize: 9, fontWeight: '800', color: '#000' }}>{badge}</Text>
+              </View>
+            )}
+          </View>
+          <Animated.View style={[
+            btStyles.activeDot,
+            {
+              backgroundColor: tint,
+              opacity: activeAnim,
+              transform: [{ scale: dotScale }],
+            },
+          ]} />
+        </Animated.View>
+      </PressableScale>
+    </View>
   );
 }
 
 const btStyles = StyleSheet.create({
-  btn: {
+  slot: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingTop: 6,
-    paddingBottom: 2,
+    minWidth: 0,
+  },
+  btn: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 0,
     position: 'relative',
   },
   inner: {
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
-    minWidth: 64,
-    paddingHorizontal: 8,
-    paddingVertical: 8,
-    borderRadius: 18,
+    width: 48,
+    height: 48,
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: 'transparent',
   },
-  activeIndicator: {
-    position: 'absolute',
-    top: 2,
-    width: 22,
-    height: 3,
-    borderRadius: 1,
+  iconWrap: {
+    width: 34,
+    height: 30,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  activeDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
   },
   icon:  { fontSize: 22 },
-  label: { ...typography.micro, fontWeight: '700' },
 });
 
 // ── FocusLabelCrossfade ─────────────────────────────────────────────────────
@@ -10825,22 +10994,32 @@ const styles = StyleSheet.create({
   },
   chatPlanUpdateText: { fontSize: 13, fontWeight: '600' },
 
-  // Bottom tab bar — pinned to the screen bottom, sits above safe area.
-  // Add ~88px of padding to scrollContent so the last card isn't hidden
-  // behind it. Has a solid surface background so the gradient screen
-  // body doesn't bleed through.
-  bottomBar: {
+  // Bottom tab bar — split shell/inner pill so the shadow floats above
+  // content instead of looking like a full-width slab behind the dock.
+  bottomBarShell: {
     position: 'absolute',
-    left: 12,
-    right: 12,
-    bottom: 10,
+    left: 14,
+    right: 14,
+    bottom: 0,
+    height: 64,
+    borderRadius: 32,
+    shadowColor: '#000',
+    shadowOpacity: 0.22,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 18,
+    zIndex: 50,
+  },
+  bottomBar: {
+    flex: 1,
     flexDirection: 'row',
-    paddingTop: 4,
-    paddingBottom: 18,
-    paddingHorizontal: 6,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 28,
-    ...elevations.floating,
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    paddingHorizontal: 8,
+    paddingVertical: 7,
+    borderRadius: 32,
+    borderWidth: 1,
+    overflow: 'hidden',
   },
 
   // Placeholder content for the goals/progress/profile tabs until they
@@ -10869,12 +11048,14 @@ const styles = StyleSheet.create({
   // stay beneath it.
   fixedSubTabBar: {
     position: 'absolute',
-    left: 12,
-    right: 12,
+    left: 0,
+    right: 0,
     minHeight: 56,
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 0,
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
     zIndex: 6,
   },
   // Pill segmented control. Full-radius capsule container; active
@@ -10882,6 +11063,8 @@ const styles = StyleSheet.create({
   // the selection reads as a glow instead of a block.
   segmentedWrap: {
     flex: 1,
+    width: '100%',
+    maxWidth: '100%',
     flexDirection: 'row',
     alignItems: 'stretch',
     padding: 4,
@@ -10915,7 +11098,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 88,      // above the bottom tab bar
+    bottom: 104,     // above the bottom tab bar
     zIndex: 4,
   },
 

@@ -141,6 +141,9 @@ _TEST_MODULES = (
     "tests.test_nutrition_review",
     # Density trimming + prescription dispatch + core programmer.
     "tests.test_density_and_prescriptions",
+    # Exercise seed/import equipment contracts — planner and swaps both
+    # depend on canonical equipment slugs.
+    "tests.test_exercise_seed_equipment",
     # Session-duration slot injection — bonus isolations at 75/90 min,
     # PLUS_CARDIO/non-lift exclusions, density interaction, integration.
     "tests.test_session_duration_slots",

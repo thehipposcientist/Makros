@@ -123,7 +123,12 @@ export interface CustomExerciseItem {
   id: string;                    // locally generated UUID-ish
   name: string;
   primary_muscle: string;        // matches the Exercise library muscle strings
+  secondary_muscles?: string[];
   equipment: string;             // free-form to match the library's equipment tokens
+  movement_pattern?: string | null;
+  is_compound?: boolean | null;
+  image_url?: string | null;
+  video_id?: string | null;
   sets?: number;
   reps?: string;
   rest_seconds?: number;
@@ -641,6 +646,7 @@ export interface SessionExercise {
   sets: CompletedSet[];
   aiRecommendation?: string;
   image_url?: string;
+  video_id?: string | null;
   /** Anchor target weight emitted by the deterministic planner (already
    *  history-aware). Forwarded to the weight-recommendation endpoint as
    *  `plannedTargetWeightLbs` so recs stay grounded in the session plan. */

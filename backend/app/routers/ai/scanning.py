@@ -770,17 +770,17 @@ _WGER_EQUIPMENT_MAP: dict[str, str] = {
     "barbell":         "barbell",
     "dumbbell":        "dumbbells",
     "kettlebell":      "kettlebell",
-    "bench":           "bench",
-    "incline bench":   "bench",
-    "pull-up bar":     "pullup_bar",
-    "ez-curl bar":     "ez_bar",
-    "swiss ball":      "stability_ball",
+    "bench":           "flat_bench",
+    "incline bench":   "adjustable_bench",
+    "pull-up bar":     "pull_up_bar",
+    "ez-curl bar":     "ez_curl_bar",
+    "swiss ball":      "swiss_ball",
     "ab wheel":        "ab_wheel",
     "cable":           "cable_machine",
-    "bands":           "bands",
-    "resistance band": "bands",
-    "machine":         "machine",
-    "trx":             "trx",
+    "bands":           "resistance_bands",
+    "resistance band": "resistance_bands",
+    "machine":         "leverage_machines",
+    "trx":             "suspension_trainer",
 }
 
 
@@ -895,6 +895,41 @@ def _is_compound_from_wger(w: dict) -> bool:
     ))
 
 
+def _movement_pattern_from_import(name: str, primary_muscle: str | None = None) -> str | None:
+    """Best-effort movement pattern for imported wger/AI exercises.
+
+    Seeded exercises remain the authority; this only gives client-side
+    swap scoring enough structure for user-saved imports.
+    """
+    n = (name or "").lower()
+    pm = (primary_muscle or "").lower()
+    if re.search(r"\b(run|jog|bike|cycle|rower|rowing|elliptical|stair|swim|rope|sprint|walk)\b", n):
+        return "cardio"
+    if re.search(r"\b(mobility|stretch|yoga|flow)\b", n):
+        return "mobility"
+    if re.search(r"\b(plank|dead bug|hollow|rollout|pallof|crunch|sit[-\s]?up|leg raise|mountain climber)\b", n):
+        return "anti_extension" if "plank" in n or "dead bug" in n or "rollout" in n else "isolation"
+    if re.search(r"\b(squat|leg press|hack squat|wall sit)\b", n):
+        return "squat"
+    if re.search(r"\b(deadlift|rdl|good morning|hip thrust|glute bridge|swing|pull through)\b", n):
+        return "hinge"
+    if re.search(r"\b(lunge|split squat|step[-\s]?up)\b", n):
+        return "lunge"
+    if re.search(r"\b(bench|chest press|push[-\s]?up|dip|fly|crossover)\b", n):
+        return "horizontal_press" if not re.search(r"\b(fly|crossover)\b", n) else "isolation"
+    if re.search(r"\b(overhead press|shoulder press|military press|pike press)\b", n):
+        return "vertical_press"
+    if re.search(r"\b(row|face pull)\b", n):
+        return "horizontal_pull"
+    if re.search(r"\b(pull[-\s]?up|chin[-\s]?up|pulldown|lat pull)\b", n):
+        return "vertical_pull"
+    if re.search(r"\b(curl|extension|raise|kickback|pressdown|pushdown|calf)\b", n):
+        return "isolation"
+    if pm == "core":
+        return "anti_extension"
+    return None
+
+
 @router.post("/exercise-search")
 def exercise_ai_search(
     body: ExerciseSearchRequest,
@@ -940,6 +975,7 @@ def exercise_ai_search(
                     # if anything close lives in our curated map.
                     "video_id": _video_id_for_wger_name(w["name"]),
                     "is_compound": _is_compound_from_wger(w),
+                    "movement_pattern": _movement_pattern_from_import(w["name"], primary_muscle),
                     "source": "wger",
                 })
             print(f"[exercise-search] wger hit: {len(mapped)} results for '{body.query}'")
@@ -1033,6 +1069,11 @@ def exercise_ai_search(
                     "name": name,
                     "muscles": [r.get("primary_muscle") or ""],
                 })
+            if not r.get("movement_pattern"):
+                r["movement_pattern"] = _movement_pattern_from_import(
+                    name,
+                    r.get("primary_muscle"),
+                )
             # AI sometimes emits "abs" / "obliques" — coerce to canonical "core".
             pm = (r.get("primary_muscle") or "").lower()
             if pm in {"abs", "obliques"}:
@@ -1104,6 +1145,7 @@ def exercise_suggest(
                 '  "sets": 3,\n'
                 '  "reps": "8-12",\n'
                 '  "rest_seconds": 90,\n'
+                '  "movement_pattern": "squat|hinge|horizontal_press|vertical_press|horizontal_pull|vertical_pull|lunge|isolation|cardio|mobility",\n'
                 '  "why": "1 sentence on why this fits the current session",\n'
                 '  "form_cues": ["cue 1", "cue 2"]\n'
                 "}]}"
@@ -1125,6 +1167,11 @@ def exercise_suggest(
                 r["video_id"] = _video_id_for_wger_name(name)
             if "is_compound" not in r:
                 r["is_compound"] = _is_compound_from_wger({"name": name, "muscles": [r.get("primary_muscle") or ""]})
+            if not r.get("movement_pattern"):
+                r["movement_pattern"] = _movement_pattern_from_import(
+                    name,
+                    r.get("primary_muscle"),
+                )
             pm = (r.get("primary_muscle") or "").lower()
             if pm in {"abs", "obliques"}:
                 r["primary_muscle"] = "core"

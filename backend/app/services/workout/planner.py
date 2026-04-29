@@ -45,6 +45,7 @@ What stays AI in the plan pipeline:
 from __future__ import annotations
 
 import logging
+import hashlib
 import random
 
 logger = logging.getLogger(__name__)
@@ -476,6 +477,11 @@ def _exercise_load_tier(exercise: dict) -> int:
     return best
 
 
+def _stable_slug_seed(slug: str) -> int:
+    digest = hashlib.sha256((slug or "").encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big")
+
+
 def score_candidate(
     exercise: dict,
     slot: Slot,
@@ -703,7 +709,7 @@ def score_candidate(
     # candidates don't always pick the alphabetically-first one. Seeded
     # by the user so the same user gets the same plan on repeat
     # generations when nothing else has changed.
-    rng = random.Random(inputs.rng_seed + hash(exercise.get("slug", "")))
+    rng = random.Random(inputs.rng_seed + _stable_slug_seed(exercise.get("slug", "")))
     score += rng.random() * 0.1
 
     return score
@@ -1935,6 +1941,12 @@ def validate_plan(
         for ex in day.get("exercises", []):
             role = ex.get("_role", "isolation")
             pm = ex.get("_primary_muscle", "")
+            training_type = str(ex.get("_training_type") or "").lower()
+            prescription_type = str(ex.get("prescriptionType") or "").lower()
+            if training_type in {"cardio", "conditioning"} or prescription_type.startswith("cardio_"):
+                continue
+            if pm == "full_body" and str(arch_str).startswith("hybrid_"):
+                continue
             if role in ("primary", "secondary") and pm and pm not in allowed:
                 logger.warning(
                     f"[validate_plan] WARNING: keeping wrong-family "

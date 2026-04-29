@@ -11,7 +11,7 @@
 //   - Basic workout history (sets, reps, duration)
 //
 // PRO — full coaching, deeper insights, best results:
-//   - AI workout plan generation + day regeneration
+//   - Personalized workout plan generation + day regeneration
 //   - AI meal plans + food photo scanning
 //   - AI coach chat (trainer + nutritionist)
 //   - Smart starting-weight recommendations
@@ -48,7 +48,7 @@ export type ProFeature =
   | 'progress_charts';
 
 const FEATURE_LABEL: Record<ProFeature, string> = {
-  ai_plan_generation:       'AI workout plans',
+  ai_plan_generation:       'Personalized training plans',
   ai_day_regenerate:        'Rebuild your week',
   ai_meal_plan:             'AI meal plans',
   ai_coach:                 'AI coach chat',

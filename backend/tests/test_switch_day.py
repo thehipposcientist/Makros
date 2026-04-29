@@ -371,6 +371,43 @@ def test_cumulative_pins_preserve_ppl_cycle():
         f"family counts broken: push={push} pull={pull} legs={legs}"
 
 
+def test_existing_pins_prevent_canonical_rebuild_clobber() -> None:
+    """When the caller tracks prior pins, canonical rebuild must not
+    overwrite them. It should fall back to a local swap that honors the
+    new pin while preserving earlier pinned positions."""
+    days = _days("Push", "Pull", "Legs", "Push", "Pull", "Legs")
+    d = decide_pin(
+        days,
+        pin_day_index=1,
+        pin_focus="Legs",
+        preferred_split="ppl",
+        existing_pins={0: "Push"},
+    )
+    assert d.action == "swap", f"expected swap to preserve prior pin, got {d.action}"
+    apply_swap(days, d)
+    assert _focuses(days)[0] == "Push", f"prior pin clobbered: {_focuses(days)}"
+    assert _focuses(days)[1] == "Legs", f"new pin not honored: {_focuses(days)}"
+
+
+def test_existing_pins_exclude_prior_pin_as_swap_partner() -> None:
+    """A later pin cannot steal the content from an earlier pinned day,
+    even when that earlier day is the closest matching focus."""
+    days = _days("Push", "Pull", "Legs", "Push", "Pull", "Legs")
+    d = decide_pin(
+        days,
+        pin_day_index=2,
+        pin_focus="Push",
+        preferred_split="ppl",
+        prefer_swap=True,
+        existing_pins={0: "Push"},
+    )
+    assert d.action == "swap"
+    assert d.swap_with_idx == 3, f"should skip pinned day0 and use day3, got {d.swap_with_idx}"
+    apply_swap(days, d)
+    assert _focuses(days)[0] == "Push", f"prior pin clobbered: {_focuses(days)}"
+    assert _focuses(days)[2] == "Push", f"new pin not honored: {_focuses(days)}"
+
+
 def test_user_scenario_back_to_back_legs_after_swap():
     """User's reported bug from real backend logs:
     Recipe: ['Pull', 'Legs', 'Push + Cardio', 'Push', 'Pull', 'Legs', 'Mobility']

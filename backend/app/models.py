@@ -22,6 +22,20 @@ class User(SQLModel, table=True):
     recovery_answer_hash: str | None = Field(default=None)
     first_name: str | None = Field(default=None)
     last_name: str | None = Field(default=None)
+    terms_accepted_at: datetime | None = Field(default=None)
+    terms_version: str | None = Field(default=None)
+    privacy_accepted_at: datetime | None = Field(default=None)
+    privacy_version: str | None = Field(default=None)
+    health_disclaimer_accepted_at: datetime | None = Field(default=None)
+    health_disclaimer_version: str | None = Field(default=None)
+    ai_disclaimer_accepted_at: datetime | None = Field(default=None)
+    ai_disclaimer_version: str | None = Field(default=None)
+    email_verified_at: datetime | None = Field(default=None)
+    email_verification_token_hash: str | None = Field(default=None)
+    email_verification_expires_at: datetime | None = Field(default=None)
+    password_reset_token_hash: str | None = Field(default=None)
+    password_reset_expires_at: datetime | None = Field(default=None)
+    account_deleted_at: datetime | None = Field(default=None)
 
 
 # ─── User profile / stats ─────────────────────────────────────────────────────
@@ -1368,17 +1382,32 @@ class FeedLike(SQLModel, table=True):
 class UserCreate(SQLModel):
     email: str
     username: str
+    first_name: str | None = Field(default=None)
+    last_name: str | None = Field(default=None)
     # Pydantic-level floor. Router `_validate_password` enforces the full
     # policy (must include a digit) on top of this check.
     password: str = Field(min_length=8)
+    accepted_terms: bool = Field(default=False)
+    accepted_privacy: bool = Field(default=False)
+    accepted_health_disclaimer: bool = Field(default=False)
+    accepted_ai_disclaimer: bool = Field(default=False)
+    legal_version: str | None = Field(default=None)
 
 class UserRead(SQLModel):
     id: int
     email: str
     username: str
+    first_name: str | None = None
+    last_name: str | None = None
     is_active: bool
     created_at: datetime
     has_recovery_question: bool = False
+    email_verified: bool = False
+    legal_accepted: bool = False
+    terms_version: str | None = None
+    privacy_version: str | None = None
+    health_disclaimer_version: str | None = None
+    ai_disclaimer_version: str | None = None
 
 class LoginRequest(SQLModel):
     email: str

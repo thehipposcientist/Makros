@@ -11,7 +11,7 @@ import { View, Text, Modal, TouchableOpacity, ScrollView, Platform } from 'react
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
-import { rankSwapCandidates, ExerciseLibraryItem } from '../utils/swapScoring';
+import { exerciseEquipmentLabel, rankSwapCandidates, ExerciseLibraryItem } from '../utils/swapScoring';
 
 interface Props {
   visible: boolean;
@@ -117,7 +117,7 @@ export default function PlanSwapExerciseModal({
                     {c.name}
                   </Text>
                   <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }} numberOfLines={1}>
-                    {c.primary_muscle}{c.equipment ? ` · ${c.equipment}` : ''}
+                    {c.primary_muscle}{exerciseEquipmentLabel(c) ? ` · ${exerciseEquipmentLabel(c)}` : ''}
                   </Text>
                 </View>
                 <View style={{ alignItems: 'flex-end' }}>

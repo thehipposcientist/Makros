@@ -2,11 +2,13 @@ import { useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
-  Platform, Image, Dimensions, Alert,
+  Platform, Image, Dimensions,
 } from 'react-native';
 import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestion } from '../services/api';
 import { colors, radius } from '../constants/theme';
 import FadeInView from '../components/FadeInView';
+import LegalDisclosureModal from '../components/LegalDisclosureModal';
+import { LEGAL_VERSION, legalAcceptanceLabel } from '../constants/legal';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const logo = require('../../assets/images/thallo-logo-white.png');
@@ -20,6 +22,8 @@ interface AuthScreenProps {
 export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   // Reset flow is two-step: 'reset_email' (enter email + fetch question) → 'reset_answer' (answer + new password)
   const [mode, setMode] = useState<'login' | 'signup' | 'reset_email' | 'reset_answer'>('login');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -33,6 +37,8 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [signupRecoveryAnswer, setSignupRecoveryAnswer] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [acceptedLegal, setAcceptedLegal] = useState(false);
+  const [showLegal, setShowLegal] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -40,6 +46,9 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const emailValid = EMAIL_RE.test(email.trim());
   const signupDisabled = mode === 'signup' && emailTouched && !emailValid;
 
+  const firstNameRef       = useRef<TextInput>(null);
+  const lastNameRef        = useRef<TextInput>(null);
+  const emailRef           = useRef<TextInput>(null);
   const usernameRef        = useRef<TextInput>(null);
   const passwordRef        = useRef<TextInput>(null);
   const confirmPasswordRef = useRef<TextInput>(null);
@@ -65,7 +74,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       setLoading(true);
       try {
         const { question } = await getRecoveryQuestion(email.trim());
-        setRecoveryQuestion(question);
+        setRecoveryQuestionText(question);
         setMode('reset_answer');
       } catch (e: any) {
         // Surface the backend's generic message — matches failed-answer case.
@@ -80,6 +89,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     if (mode === 'reset_answer') {
       if (!recoveryAnswer.trim()) { setError('Enter your answer'); return; }
       if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
+      if (!/\d/.test(password)) { setError('Password must include at least one number'); return; }
       if (password !== confirmPassword) { setError('Passwords do not match'); return; }
       setLoading(true);
       try {
@@ -100,9 +110,13 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     }
     if (mode === 'signup') {
       if (!EMAIL_RE.test(email.trim())) { setError('Enter a valid email address'); return; }
+      if (!firstName.trim()) { setError('First name is required'); return; }
+      if (!lastName.trim()) { setError('Last name is required'); return; }
       if (!username.trim()) { setError('Username is required'); return; }
       if (password !== confirmPassword) { setError('Passwords do not match'); return; }
       if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
+      if (!/\d/.test(password)) { setError('Password must include at least one number'); return; }
+      if (!acceptedLegal) { setError('Please accept the Terms, Privacy Policy, Health Disclaimer, and AI Disclosure'); return; }
       if (!signupRecoveryAnswer.trim() || signupRecoveryAnswer.trim().length < 2) {
         setError("Please answer your security question — you'll need it to reset your password");
         return;
@@ -111,7 +125,17 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     setLoading(true);
     try {
       const isNewUser = mode === 'signup';
-      if (isNewUser) await register(email.trim(), username.trim(), password);
+      if (isNewUser) {
+        await register(email.trim(), username.trim(), password, {
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          acceptedTerms: acceptedLegal,
+          acceptedPrivacy: acceptedLegal,
+          acceptedHealthDisclaimer: acceptedLegal,
+          acceptedAiDisclaimer: acceptedLegal,
+          legalVersion: LEGAL_VERSION,
+        });
+      }
       const { access_token } = await login(email.trim(), password);
       // Set the recovery question/answer right after signup so password
       // reset works without a separate profile trip. Non-blocking — a
@@ -148,9 +172,9 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
         {/* Logo */}
         <View style={styles.logoContainer}>
           <Image source={logo} style={styles.logo} resizeMode="contain" />
-          <Text style={styles.tagline}>Your AI personal trainer and nutritionist.</Text>
+          <Text style={styles.tagline}>Personalized training, nutrition, and AI coaching.</Text>
           <View style={styles.featureRow}>
-            {(['Custom workout plans', 'Personalised nutrition', 'AI coaching that adapts'] as const).map(f => (
+            {(['Personalized training plans', 'Nutrition support', 'AI coaching that adapts'] as const).map(f => (
               <View key={f} style={styles.featureChip}>
                 <Text style={styles.featureChipText}>{f}</Text>
               </View>
@@ -179,10 +203,42 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             </TouchableOpacity>
           </View>
 
+          {mode === 'signup' && (
+            <View style={{ flexDirection: 'row', gap: 10 }}>
+              <TextInput
+                ref={firstNameRef}
+                style={[styles.input, { flex: 1 }]}
+                placeholder="First name"
+                placeholderTextColor={colors.textMuted}
+                value={firstName}
+                onChangeText={setFirstName}
+                autoCapitalize="words"
+                autoCorrect={false}
+                returnKeyType="next"
+                onSubmitEditing={() => lastNameRef.current?.focus()}
+                blurOnSubmit={false}
+              />
+              <TextInput
+                ref={lastNameRef}
+                style={[styles.input, { flex: 1 }]}
+                placeholder="Last name"
+                placeholderTextColor={colors.textMuted}
+                value={lastName}
+                onChangeText={setLastName}
+                autoCapitalize="words"
+                autoCorrect={false}
+                returnKeyType="next"
+                onSubmitEditing={() => emailRef.current?.focus()}
+                blurOnSubmit={false}
+              />
+            </View>
+          )}
+
           {/* Email — hidden in reset_answer since the question is shown instead */}
           {mode !== 'reset_answer' && (
             <>
               <TextInput
+                ref={emailRef}
                 style={[styles.input, signupDisabled && styles.inputError]}
                 placeholder="Email"
                 placeholderTextColor={colors.textMuted}
@@ -341,6 +397,25 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             </>
           )}
 
+          {mode === 'signup' && (
+            <View style={styles.legalBox}>
+              <TouchableOpacity
+                activeOpacity={0.75}
+                style={styles.legalRow}
+                onPress={() => setAcceptedLegal(v => !v)}
+              >
+                <View style={[styles.checkbox, acceptedLegal && styles.checkboxChecked]}>
+                  {acceptedLegal ? <Text style={styles.checkboxMark}>✓</Text> : null}
+                </View>
+                <Text style={styles.legalText}>{legalAcceptanceLabel()}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => setShowLegal(true)} style={styles.legalLinkBtn}>
+                <Text style={styles.legalLink}>Read Terms, Privacy, Health, and AI disclosures</Text>
+              </TouchableOpacity>
+              <Text style={styles.passwordHint}>Password must be at least 8 characters and include a number.</Text>
+            </View>
+          )}
+
           {error ? (
             <FadeInView duration={220} slideDistance={6}>
               <Text style={styles.error}>{error}</Text>
@@ -384,6 +459,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
 
         <View style={{ height: 40 }} />
       </ScrollView>
+      <LegalDisclosureModal visible={showLegal} onClose={() => setShowLegal(false)} />
     </KeyboardAvoidingView>
   );
 }
@@ -445,6 +521,34 @@ const styles = StyleSheet.create({
   inputError: { borderColor: colors.error },
   inlineError: { fontSize: 12, color: colors.error, marginTop: -4 },
   error: { fontSize: 14, color: colors.error, textAlign: 'center' },
+  legalBox: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    padding: 12,
+    gap: 8,
+  },
+  legalRow: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
+  checkbox: {
+    width: 22,
+    height: 22,
+    borderRadius: 6,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 1,
+  },
+  checkboxChecked: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  checkboxMark: { color: colors.background, fontSize: 14, fontWeight: '900', lineHeight: 18 },
+  legalText: { flex: 1, fontSize: 12, color: colors.textSecondary, lineHeight: 17 },
+  legalLinkBtn: { alignSelf: 'flex-start', paddingVertical: 2 },
+  legalLink: { fontSize: 12, color: colors.primary, fontWeight: '700' },
+  passwordHint: { fontSize: 11, color: colors.textMuted, lineHeight: 15 },
 
   submitButton: {
     backgroundColor: colors.primary, borderRadius: radius.md,

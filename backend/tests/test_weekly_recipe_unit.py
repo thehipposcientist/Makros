@@ -183,6 +183,55 @@ def test_inject_hybrid_cardio_never_promotes_legs():
     _ok("no legs archetype promoted to PLUS_CARDIO")
 
 
+def test_inject_hybrid_cardio_prefers_non_heavy_carriers() -> None:
+    """PLUS_CARDIO erases heavy/volume suffixes, so cardio promotion
+    should land on non-heavy lift days whenever possible."""
+    print("\n[test] _inject_hybrid_cardio: prefer non-heavy cardio carriers")
+    from app.services.workout.weekly_recipe import _inject_hybrid_cardio
+
+    profile = goal_profile_for("muscle_gain", "intermediate", 5, 60)
+    recipe = [
+        DayArchetype.LIFT_UPPER_HEAVY,
+        DayArchetype.LIFT_LOWER_HEAVY,
+        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+        DayArchetype.LIFT_UPPER_HYPERTROPHY,
+    ]
+    promoted = _inject_hybrid_cardio(recipe, profile=profile, days_per_week=5)
+    assert promoted[0] == DayArchetype.LIFT_UPPER_HEAVY, (
+        f"heavy upper should not be promoted while hypertrophy upper exists: "
+        f"{[a.value for a in promoted]}"
+    )
+    assert promoted[2] == DayArchetype.LIFT_UPPER_PLUS_CARDIO, (
+        f"expected first non-heavy upper to carry cardio, got {[a.value for a in promoted]}"
+    )
+    _ok("non-heavy upper carried PLUS_CARDIO before heavy upper")
+
+
+def test_inject_hybrid_cardio_falls_back_to_heavy_when_required() -> None:
+    """The hierarchy is preference, not a hard failure: if every
+    cardio-compatible lift is heavy, promotion still happens so the
+    weekly cardio contract is met."""
+    print("\n[test] _inject_hybrid_cardio: heavy fallback when no safer carrier")
+    from app.services.workout.weekly_recipe import _inject_hybrid_cardio
+
+    profile = goal_profile_for("muscle_gain", "intermediate", 5, 60)
+    recipe = [
+        DayArchetype.LIFT_UPPER_HEAVY,
+        DayArchetype.LIFT_LOWER_HEAVY,
+        DayArchetype.LIFT_LOWER_HEAVY,
+        DayArchetype.LIFT_LOWER_HEAVY,
+        DayArchetype.LIFT_LOWER_HEAVY,
+    ]
+    promoted = _inject_hybrid_cardio(recipe, profile=profile, days_per_week=5)
+    plus_count = sum(1 for a in promoted if "plus_cardio" in a.value)
+    assert plus_count == 1, f"expected fallback promotion, got {[a.value for a in promoted]}"
+    assert promoted[0] == DayArchetype.LIFT_UPPER_PLUS_CARDIO, (
+        f"only cardio-compatible heavy lift should carry fallback cardio, got {promoted[0].value}"
+    )
+    _ok("heavy upper promoted only when no non-heavy carrier exists")
+
+
 # ─── _repair_adjacent_duplicates tests ──────────────────────────────────────
 
 def test_repair_eliminates_back_to_back_same_family():
@@ -303,6 +352,8 @@ cases = [
     test_inject_hybrid_cardio_muscle_gain_5d,
     test_inject_hybrid_cardio_general_health_4d,
     test_inject_hybrid_cardio_never_promotes_legs,
+    test_inject_hybrid_cardio_prefers_non_heavy_carriers,
+    test_inject_hybrid_cardio_falls_back_to_heavy_when_required,
     test_repair_eliminates_back_to_back_same_family,
     test_repair_preserves_day_count,
     test_endurance_recipe_has_strength_maintenance,

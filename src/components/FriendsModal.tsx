@@ -293,6 +293,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
         <SocialFeedView
           authToken={authToken}
           themeName={themeName}
+          bottomPadding={inline ? 116 : 8}
           refreshKey={feedRefreshKey}
           shareEnabled={me?.share_activity_enabled ?? false}
           myActivity={digest?.you ?? null}
@@ -317,7 +318,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
               <ActivityIndicator color={colors.primary} />
             </View>
           ) : (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 8, paddingBottom: 24 }}>
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 8, paddingBottom: inline ? 128 : 24 }}>
               {/* This week card */}
               <View style={styles.card}>
                 <Text style={styles.cardLabel}>THIS WEEK</Text>
@@ -545,7 +546,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
   );
 
   if (inline) {
-    return <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: spacing.sm }}>{content}</View>;
+    return <View style={{ flex: 1, paddingTop: spacing.sm }}>{content}</View>;
   }
 
   return (

@@ -11,7 +11,6 @@ import AnimatedNumber from '../components/AnimatedNumber';
 import PRCelebrationModal from '../components/PRCelebrationModal';
 // ShareWorkoutModal hidden — will re-enable with social feed
 // import ShareWorkoutModal from '../components/ShareWorkoutModal';
-import Svg, { Circle } from 'react-native-svg';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -21,12 +20,13 @@ import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
+import { LinearGradient } from 'expo-linear-gradient';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests } from '../utils/workoutHistory';
 import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow, getWorkoutHrSummary, getLatestHeartRate } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, suggestExercisesForWorkout, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, createSocialPost, type WorkoutPostSummary } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, createSocialPost, type WorkoutPostSummary } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
@@ -43,6 +43,7 @@ import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNot
 import { humanizeToken } from '../utils/exerciseGuide';
 import { shouldHideWeight, shouldHideReps, formatDurationTarget } from '../utils/exerciseDisplay';
 import { startRestActivity, updateRestActivity, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
+import { isExerciseUsableWithEquipment, MAX_SWAP_SCORE, scoreSwapCandidate } from '../utils/swapScoring';
 
 /** Parse the top (ceiling) of a target rep string. Handles ranges like
  *  "8-12", AMRAP markers like "12+", singletons like "6", and junk.
@@ -102,58 +103,6 @@ interface ExerciseLibraryItem {
   is_compound?: boolean;
   movement_pattern?: string | null;
   description?: string;
-}
-
-// ─── Swap ranking ────────────────────────────────────────────────────────────
-// Groups equipment strings into broad classes so a "barbell row" ranks close
-// to a "t-bar row" but far from a "resistance band row".
-function _equipmentClass(raw?: string | null): string {
-  const s = (raw ?? '').toLowerCase();
-  if (!s) return 'other';
-  if (s.includes('barbell') || s.includes('smith')) return 'barbell';
-  if (s.includes('dumbbell') || s.includes('kettlebell')) return 'dumbbell';
-  if (s.includes('machine') || s.includes('cable') || s.includes('leg_press') || s.includes('leg press')) return 'machine';
-  if (s.includes('band') || s.includes('resistance')) return 'band';
-  if (s.includes('bodyweight') || s === 'none' || s === 'bw') return 'bodyweight';
-  return 'other';
-}
-
-/** Score how well `cand` substitutes for `base`. Higher = better match.
- *  Scoring weights:
- *    primary == primary: +12
- *    primary matches base.secondary or vice versa: +6
- *    any secondary overlap: +3
- *    same compound-vs-isolation bucket: +5
- *    same movement_pattern: +6
- *    same equipment class: +4 (close class: +2)
- *  Zero or negative means unsuitable; we drop those. */
-function _scoreSwapCandidate(base: ExerciseLibraryItem, cand: ExerciseLibraryItem): number {
-  let score = 0;
-  const bp = (base.primary_muscle ?? '').toLowerCase();
-  const cp = (cand.primary_muscle ?? '').toLowerCase();
-  const bs = (base.secondary_muscles ?? []).map(m => m.toLowerCase());
-  const cs = (cand.secondary_muscles ?? []).map(m => m.toLowerCase());
-  if (!bp || !cp) return -1;
-  if (bp === cp) score += 12;
-  else if (bs.includes(cp) || cs.includes(bp)) score += 6;
-  else if (bs.some(m => cs.includes(m))) score += 3;
-  else return -1; // no muscle overlap at all — not a swap
-  if (base.is_compound === cand.is_compound) score += 5;
-  const bpat = (base.movement_pattern ?? '').toLowerCase();
-  const cpat = (cand.movement_pattern ?? '').toLowerCase();
-  if (bpat && bpat === cpat) score += 6;
-  const be = _equipmentClass(base.equipment);
-  const ce = _equipmentClass(cand.equipment);
-  if (be === ce) score += 4;
-  else if (
-    (be === 'barbell' && ce === 'dumbbell') ||
-    (be === 'dumbbell' && ce === 'barbell') ||
-    (be === 'machine' && (ce === 'barbell' || ce === 'dumbbell')) ||
-    ((be === 'barbell' || be === 'dumbbell') && ce === 'machine')
-  ) {
-    score += 2;
-  }
-  return score;
 }
 
 interface ActiveWorkoutScreenProps {
@@ -1410,7 +1359,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         setPostingToFeed(true);
         const summary: WorkoutPostSummary = {
           focus: workout.focus ?? 'Workout',
-          duration_seconds: Math.round(((Date.now() - (startTime ?? Date.now())) / 1000)),
+          duration_seconds: Math.round((Date.now() - (startTime.current ?? Date.now())) / 1000),
           date: dateKey(new Date()),
           exercises: exercises.map(e => ({
             name: e.name,
@@ -1915,78 +1864,53 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, [setInputs, exercises, authToken, goal, workout.focus, extraSetCounts, removedSetCounts]);
   handleLogSetInlineRef.current = handleLogSetInline;
 
-  const loadWorkoutSuggestions = useCallback(async () => {
-    if (!authToken) return;
-    setAiExerciseLoading(true);
-    try {
-      let equipment: string[] | undefined;
-      let injuries: string[] | undefined;
-      try {
-        const raw = await AsyncStorage.getItem('userProfile');
-        if (raw) {
-          const prof = JSON.parse(raw);
-          equipment = prof.equipment;
-          const inj = prof.injuryEntries ?? [];
-          injuries = inj
-            .filter((i: any) => i.status !== 'resolved')
-            .map((i: any) => i.bodyPart || i.description);
-        }
-      } catch {}
-      const res = await suggestExercisesForWorkout(authToken, {
-        workout_focus: workout.focus,
-        current_exercises: exercises.map(e => e.name),
-        equipment,
-        injuries,
-      });
-      setAiExerciseResults(res.results ?? []);
-    } catch {
-      // Suggestions are non-critical — fail silently, user can still search
-    } finally {
-      setAiExerciseLoading(false);
-    }
-  }, [authToken, workout.focus, exercises]);
-
   const openAddExerciseModal = useCallback(async () => {
     setAddExerciseModalVisible(true);
     setAiExerciseResults([]);
-    loadWorkoutSuggestions();
+    setAiExerciseLoading(false);
     if (exerciseLibrary.length > 0) return;
     setExerciseLibraryLoading(true);
+    let customs: ExerciseLibraryItem[] = [];
+    try {
+      const raw = await AsyncStorage.getItem('userProfile');
+      if (raw) {
+        const prof = JSON.parse(raw);
+        customs = ((prof.customExercises ?? []) as any[]).map(ce => ({
+          id: ce.id,
+          name: ce.name,
+          primary_muscle: ce.primary_muscle,
+          secondary_muscles: ce.secondary_muscles ?? [],
+          equipment: ce.equipment,
+          movement_pattern: ce.movement_pattern ?? null,
+          image_url: ce.image_url ?? null,
+          video_id: ce.video_id ?? null,
+          is_compound: ce.is_compound ?? null,
+          description: ce.description ?? '',
+          is_custom: true,
+        })) as unknown as ExerciseLibraryItem[];
+      }
+    } catch {}
+    const timedActivities: ExerciseLibraryItem[] = [
+      { name: 'Boxing', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Kickboxing', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Shadow Boxing', equipment: 'bodyweight', primary_muscle: 'shoulders' },
+      { name: 'Bag Work', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Yoga', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Vinyasa Yoga', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Stretching', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Mobility Flow', equipment: 'bodyweight', primary_muscle: 'full_body' },
+    ];
     try {
       const rows = await getExercises();
-      // Merge AI-saved custom exercises from userProfile so they show up in
-      // the search alongside the seeded backend library.
-      let customs: ExerciseLibraryItem[] = [];
-      try {
-        const raw = await AsyncStorage.getItem('userProfile');
-        if (raw) {
-          const prof = JSON.parse(raw);
-          customs = ((prof.customExercises ?? []) as any[]).map(ce => ({
-            id: ce.id,
-            name: ce.name,
-            primary_muscle: ce.primary_muscle,
-            secondary_muscles: [],
-            equipment: ce.equipment,
-            description: ce.description ?? '',
-            is_custom: true,
-          })) as unknown as ExerciseLibraryItem[];
-        }
-      } catch {}
-      const timedActivities: ExerciseLibraryItem[] = [
-        { name: 'Boxing', equipment: 'bodyweight', primary_muscle: 'full_body' },
-        { name: 'Kickboxing', equipment: 'bodyweight', primary_muscle: 'full_body' },
-        { name: 'Shadow Boxing', equipment: 'bodyweight', primary_muscle: 'shoulders' },
-        { name: 'Bag Work', equipment: 'bodyweight', primary_muscle: 'full_body' },
-        { name: 'Yoga', equipment: 'bodyweight', primary_muscle: 'full_body' },
-        { name: 'Vinyasa Yoga', equipment: 'bodyweight', primary_muscle: 'full_body' },
-        { name: 'Stretching', equipment: 'bodyweight', primary_muscle: 'full_body' },
-        { name: 'Mobility Flow', equipment: 'bodyweight', primary_muscle: 'full_body' },
-      ];
       const existingNames = new Set([...customs, ...rows].map(e => e.name.toLowerCase()));
       const newTimed = timedActivities.filter(t => !existingNames.has(t.name.toLowerCase()));
       setExerciseLibrary([...customs, ...newTimed, ...rows]);
     } catch {
-      setExerciseLibrary([]);
+      const existingNames = new Set(customs.map(e => e.name.toLowerCase()));
+      setExerciseLibrary([
+        ...customs,
+        ...timedActivities.filter(t => !existingNames.has(t.name.toLowerCase())),
+      ]);
     } finally {
       setExerciseLibraryLoading(false);
     }
@@ -2037,11 +1961,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setAiExerciseResults([]);
   }, [swapTargetIdx]);
 
-  /** Run an AI exercise search using the currently-typed query. Respects the
-   *  user's equipment + active injuries so the results are directly usable. */
+  /** Explicit fallback search for adding exercises that aren't in the local
+   *  library. Swap stays local/ranked so it remains instant mid-workout. */
   const handleAiExerciseSearch = useCallback(async () => {
     const q = exerciseSearch.trim();
-    if (!q || !authToken) return;
+    if (!q || !authToken || swapTargetIdx != null) return;
     setAiExerciseLoading(true);
     try {
       // Pull minimal context from AsyncStorage — ActiveWorkoutScreen doesn't
@@ -2074,7 +1998,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } finally {
       setAiExerciseLoading(false);
     }
-  }, [exerciseSearch, authToken]);
+  }, [exerciseSearch, authToken, swapTargetIdx, exerciseLibrary]);
 
   /** Add an AI search result directly to the current workout. Converts the
    *  AI shape into the same `ExerciseLibraryItem` shape `handleAddExercise`
@@ -2095,6 +2019,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       video_id: ex.video_id ?? undefined,
       image_url: ex.image_url ?? undefined,
       is_compound: ex.is_compound ?? undefined,
+      movement_pattern: ex.movement_pattern ?? undefined,
     } as unknown as ExerciseLibraryItem);
   }, [handleAddExercise]);
 
@@ -2130,6 +2055,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           video_id: ex.video_id ?? null,
           image_url: ex.image_url ?? null,
           is_compound: ex.is_compound ?? null,
+          movement_pattern: ex.movement_pattern ?? null,
           source: ex.source ?? 'ai',
           createdAt: new Date().toISOString(),
         },
@@ -3020,6 +2946,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   };
 
   const completedCount = exercises.filter(e => e.sets.length >= getTargetSetCount(e.targetSets)).length;
+  const totalLoggedSets = exercises.reduce((total, ex) => total + ex.sets.length, 0);
+  const totalPlannedSets = exercises.reduce((total, ex) => total + getTargetSetCount(ex.targetSets), 0);
+  const setCompletionPct = totalPlannedSets > 0
+    ? Math.min(100, Math.round((Math.min(totalLoggedSets, totalPlannedSets) / totalPlannedSets) * 100))
+    : 0;
+  const summaryDurationSeconds = finishedSession?.durationSeconds ?? elapsed;
+  const summarySetCount = finishedSession
+    ? finishedSession.exercises.reduce((total, ex) => total + ex.sets.length, 0)
+    : totalLoggedSets;
+  const summaryRepCount = finishedSession
+    ? finishedSession.exercises.reduce(
+        (total, ex) => total + ex.sets.reduce((setTotal, set) => setTotal + (Number(set.reps) || 0), 0),
+        0,
+      )
+    : exercises.reduce(
+        (total, ex) => total + ex.sets.reduce((setTotal, set) => setTotal + (Number(set.reps) || 0), 0),
+        0,
+      );
 
   const handleAskWorkoutCoach = useCallback(async () => {
     const q = coachInput.trim();
@@ -3231,36 +3175,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
   }, [activeExIdx, authToken, coachInput, exercises]);
 
-  // Max raw score from _scoreSwapCandidate: 12 primary + 5 compound +
-  // 6 movement_pattern + 4 equipment = 27. Clamping to 100 scale so the
-  // overlap meter reads as a natural percentage.
-  const MAX_SWAP_SCORE = 27;
   const filteredExerciseLibrary: Array<ExerciseLibraryItem & { _overlap?: number }> = (() => {
     if (swapTargetIdx != null) {
       const targetName = exercises[swapTargetIdx]?.name;
       const base = targetName ? exerciseLibrary.find(li => li.name === targetName) : undefined;
       const q = exerciseSearch.trim().toLowerCase();
-      // Equipment filter: check the concrete gear list first (slug or
-      // name match), fall back to legacy bucket. Bodyweight is always ok.
-      const owned = new Set(ownedEquipment.map(e => e.toLowerCase()));
-      owned.add('bodyweight');
-      owned.add('none');
-      const isUsable = (item: ExerciseLibraryItem): boolean => {
-        if (item.gear && item.gear.length > 0) {
-          const required = item.gear.filter((g: any) => g.required !== false);
-          if (required.length === 0) return true;
-          return required.every((g: any) =>
-            owned.has(g.slug?.toLowerCase?.() ?? '') || owned.has(g.name?.toLowerCase?.() ?? ''),
-          );
-        }
-        const eq = (item.equipment ?? '').toLowerCase();
-        if (!eq) return true;
-        if (eq.includes('bodyweight')) return true;
-        return owned.has(eq);
-      };
       if (!base) {
         return exerciseLibrary
-          .filter(isUsable)
+          .filter(item => isExerciseUsableWithEquipment(item, ownedEquipment))
           .filter(item => {
             if (!q) return true;
             return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
@@ -3273,9 +3195,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const scored: Array<{ item: ExerciseLibraryItem; score: number }> = [];
       for (const item of exerciseLibrary) {
         if (item.name === targetName) continue;
-        if (!isUsable(item)) continue;
+        if (!isExerciseUsableWithEquipment(item, ownedEquipment)) continue;
         if (q && ![item.name, item.primary_muscle ?? '', item.equipment ?? ''].join(' ').toLowerCase().includes(q)) continue;
-        const s = _scoreSwapCandidate(base, item);
+        const s = scoreSwapCandidate(base, item);
         if (s <= 0) continue;
         scored.push({ item, score: s });
       }
@@ -3287,19 +3209,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
     // Add-exercise branch (no swap target). Same equipment gate so
     // unreachable exercises stay hidden.
-    const owned = new Set(ownedEquipment.map(e => e.toLowerCase()));
-    owned.add('bodyweight');
-    owned.add('none');
     return exerciseLibrary.filter(item => {
-      if (item.gear && item.gear.length > 0) {
-        const required = item.gear.filter((g: any) => g.required !== false);
-        if (required.length > 0 && !required.every((g: any) =>
-          owned.has(g.slug?.toLowerCase?.() ?? '') || owned.has(g.name?.toLowerCase?.() ?? ''),
-        )) return false;
-      } else {
-        const eq = (item.equipment ?? '').toLowerCase();
-        if (eq && !eq.includes('bodyweight') && !owned.has(eq)) return false;
-      }
+      if (!isExerciseUsableWithEquipment(item, ownedEquipment)) return false;
       const q = exerciseSearch.trim().toLowerCase();
       if (!q) return true;
       return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
@@ -3309,36 +3220,109 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     });
   })();
 
+  const confirmCancelWorkout = useCallback(() => {
+    Alert.alert(
+      'Cancel Workout',
+      'Your progress will be lost.',
+      [
+        { text: 'Keep Going', style: 'cancel' },
+        {
+          text: 'Cancel',
+          style: 'destructive',
+          onPress: () => {
+            clearRestState();
+            AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
+            AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
+            AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
+            AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
+            import('../utils/watchSync')
+              .then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(workout as any, {
+                dateISO: dateKey(new Date()),
+                status: 'skipped',
+                sessionId: watchSessionId.current,
+              }).catch(() => {}))
+              .catch(() => {});
+            onCancel();
+          },
+        },
+      ],
+    );
+  }, [clearRestState, onCancel, workout]);
+
   return (
     <View style={[styles.container, { backgroundColor: themeColors.background }] }>
 
       {/* Header */}
       <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.focusLabel}>{workout.focus}</Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-            <Text style={styles.timer}>{formatTime(elapsed)}</Text>
-            {liveHR != null && liveHR > 0 && (
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: themeColors.error + '18', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 }}>
-                <Text style={{ fontSize: 12, color: themeColors.error }}>♥</Text>
-                <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.error }}>{liveHR}</Text>
+        <LinearGradient
+          colors={[themeColors.surfaceRaised, themeColors.surface]}
+          style={styles.headerCard}>
+          <View style={styles.headerFocusRow}>
+            <View style={styles.headerTitleBlock}>
+              <Text style={styles.focusLabel} numberOfLines={1}>{workout.focus}</Text>
+              <Text style={styles.headerMetaText} numberOfLines={1}>
+                {totalLoggedSets}/{totalPlannedSets} sets logged
+                {liveHR != null && liveHR > 0 ? `  ·  ${liveHR} bpm` : ''}
+              </Text>
+            </View>
+            <View style={styles.headerActionRow}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={confirmCancelWorkout}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.coachBtn, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }]}
+                onPress={() => setCoachModalVisible(true)}>
+                <Text style={[styles.coachBtnText, { color: workoutPalette.text }]}>Coach</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+          <View style={styles.headerMetricRow}>
+            <View style={styles.headerMetricTile}>
+              <Text style={styles.headerMetricLabel}>Workout</Text>
+              <Text style={[styles.headerMetricValue, { color: workoutPalette.strong }]}>{formatTime(elapsed)}</Text>
+            </View>
+            {restRemaining > 0 ? (
+              <View style={[styles.headerMetricTile, styles.headerRestTile, { borderColor: workoutPalette.strong + '55', backgroundColor: workoutPalette.soft }]}>
+                <Text style={[styles.headerMetricLabel, { color: workoutPalette.text }]}>Rest</Text>
+                <Text style={[styles.headerMetricValue, { color: restRemaining <= 10 ? themeColors.warning : workoutPalette.strong }]}>
+                  {formatTime(restRemaining)}
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.headerMetricTile}>
+                <Text style={styles.headerMetricLabel}>Next</Text>
+                <Text style={styles.headerMetricValue}>{completedCount}/{exercises.length}</Text>
               </View>
             )}
+            <View style={styles.headerMetricTile}>
+              <Text style={styles.headerMetricLabel}>Done</Text>
+              <Text style={styles.headerMetricValue}>{setCompletionPct}%</Text>
+            </View>
           </View>
-        </View>
-        <View style={styles.headerRight}>
-          <Text style={styles.progressText}>{completedCount}/{exercises.length}</Text>
-          <Text style={styles.progressSub}>done</Text>
-        </View>
-        <TouchableOpacity style={styles.cancelBtn} onPress={() => Alert.alert(
-          'Cancel Workout', 'Your progress will be lost.',
-          [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { clearRestState(); AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {}); AsyncStorage.removeItem('activeWatchSessionId').catch(() => {}); import('../utils/watchSync').then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(workout as any, { dateISO: dateKey(new Date()), status: 'skipped', sessionId: watchSessionId.current }).catch(() => {})).catch(() => {}); onCancel(); } }]
-        )}>
-          <Text style={styles.cancelBtnText}>X</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.coachBtn} onPress={() => setCoachModalVisible(true)}>
-          <Text style={styles.coachBtnText}>Ask Coach</Text>
-        </TouchableOpacity>
+          {restRemaining > 0 && (
+            <View style={[styles.headerRestPanel, { borderColor: workoutPalette.strong + '33' }]}>
+              <View style={styles.headerRestCopy}>
+                {restForExercise ? <Text style={styles.headerRestExercise} numberOfLines={1}>{restForExercise}</Text> : null}
+                {restNextTarget ? <Text style={[styles.headerRestTarget, { color: workoutPalette.strong }]} numberOfLines={1}>{restNextTarget}</Text> : null}
+                {restCue ? <Text style={styles.headerRestCue} numberOfLines={2}>{restCue}</Text> : null}
+              </View>
+              <View style={styles.headerRestActions}>
+                <TouchableOpacity style={styles.headerRestBtn} onPress={() => adjustActiveRestRemaining(15)}>
+                  <Text style={styles.headerRestBtnText}>+15</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.headerRestBtn} onPress={() => adjustActiveRestRemaining(-15)}>
+                  <Text style={styles.headerRestBtnText}>-15</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.headerRestBtn, { backgroundColor: workoutPalette.strong, borderColor: workoutPalette.strong }]} onPress={clearRestState}>
+                  <Text style={[styles.headerRestBtnText, { color: themeColors.background }]}>Skip</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={[styles.headerRestBtn, styles.headerRestCancelBtn]} onPress={confirmCancelWorkout}>
+                  <Text style={[styles.headerRestBtnText, { color: themeColors.error }]}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+        </LinearGradient>
       </View>
 
       {/* Warm-up card.
@@ -3390,84 +3374,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             </View>
           )}
         </TouchableOpacity>
-      )}
-
-      {restRemaining > 0 && (
-        <View style={[styles.restBanner, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }, restRemaining <= 10 && styles.restBannerUrgent]}>
-          {/* Left: circular countdown ring with big numeric time inside.
-              Ring fills as the timer counts DOWN (progress = elapsed /
-              total), so the user sees how much rest they've burned. The
-              strokeDashoffset is computed per render off `restRemaining`
-              — the state already ticks every second, so no Animated.Value
-              is needed here. */}
-          <View style={styles.restBannerLeft}>
-            {(() => {
-              const size = 88;
-              const strokeWidth = 6;
-              const r = (size - strokeWidth) / 2;
-              const circumference = 2 * Math.PI * r;
-              const total = Math.max(1, restDurationSeconds.current || restRemaining);
-              const progress = Math.max(0, Math.min(1, 1 - (restRemaining / total)));
-              const ringColor = restRemaining <= 10 ? themeColors.warning : workoutPalette.strong;
-              return (
-                <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
-                  <Svg width={size} height={size} style={{ position: 'absolute' }}>
-                    <Circle
-                      cx={size / 2}
-                      cy={size / 2}
-                      r={r}
-                      stroke={workoutPalette.strong + '22'}
-                      strokeWidth={strokeWidth}
-                      fill="none"
-                    />
-                    <Circle
-                      cx={size / 2}
-                      cy={size / 2}
-                      r={r}
-                      stroke={ringColor}
-                      strokeWidth={strokeWidth}
-                      strokeLinecap="round"
-                      fill="none"
-                      strokeDasharray={`${circumference} ${circumference}`}
-                      strokeDashoffset={circumference * (1 - progress)}
-                      transform={`rotate(-90 ${size / 2} ${size / 2})`}
-                    />
-                  </Svg>
-                  <Text style={[styles.restBannerLabel, { color: workoutPalette.text, marginTop: -4 }]}>REST</Text>
-                  <Text style={[
-                    styles.restBannerTime,
-                    { color: workoutPalette.text, fontSize: 22, lineHeight: 26 },
-                    restRemaining <= 10 && styles.restBannerTimeUrgent,
-                  ]}>
-                    {formatTime(restRemaining)}
-                  </Text>
-                </View>
-              );
-            })()}
-          </View>
-          {/* Center: next set info + AI recommendation */}
-          <View style={styles.restBannerCenter}>
-            {restForExercise ? <Text style={styles.restExerciseText} numberOfLines={1}>{restForExercise}</Text> : null}
-            {restNextTarget ? (
-              <View style={{ backgroundColor: workoutPalette.strong + '22', borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, marginVertical: 2 }}>
-                <Text style={{ fontSize: 14, color: workoutPalette.strong, fontWeight: '900' }} numberOfLines={2}>{restNextTarget}</Text>
-              </View>
-            ) : null}
-            {restCue ? <Text style={{ fontSize: 12, color: workoutPalette.text, fontWeight: '600', lineHeight: 16 }}>{restCue}</Text> : null}
-          </View>
-          {/* Right: adjust + skip */}
-          <View style={styles.restBannerActions}>
-            <TouchableOpacity style={styles.restBannerBtn} onPress={() => adjustActiveRestRemaining(15)}>
-              <Text style={styles.restBannerBtnText}>+15s</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.restBannerBtn} onPress={() => adjustActiveRestRemaining(-15)}>
-              <Text style={styles.restBannerBtnText}>−15s</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={[styles.restBannerBtn, styles.restBannerBtnPrimary, { backgroundColor: workoutPalette.strong }]} onPress={clearRestState}>
-              <Text style={styles.restBannerBtnPrimaryText}>Skip</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
       )}
 
       {/* Post-rest idle nudge — shown when rest finished >45s ago without
@@ -3554,9 +3460,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               }, null)
             : null;
           const restLabel       = `${Math.max(15, ex.targetRestSeconds || 60)}s rest`;
-
           return (
-            <View key={i} style={[styles.exerciseCard, isDone && styles.exerciseCardDone, isActive && styles.exerciseCardActive]}>
+            <View
+              key={i}
+              style={[
+                styles.exerciseCard,
+                isDone && styles.exerciseCardDone,
+                isActive && styles.exerciseCardActive,
+                isActive && {
+                  borderColor: workoutPalette.strong,
+                  shadowColor: workoutPalette.strong,
+                },
+              ]}>
+              {isActive && (
+                <View
+                  pointerEvents="none"
+                  style={[styles.exerciseActiveRail, { backgroundColor: workoutPalette.strong }]}
+                />
+              )}
 
               {/* ── Header row: tap to expand/collapse ── */}
               <TouchableOpacity
@@ -3601,14 +3522,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text
                     style={[styles.exerciseName, isDone && styles.exerciseNameDone]}
-                    numberOfLines={isActive ? 2 : 1}
+                    numberOfLines={isActive ? 3 : 1}
                     ellipsizeMode="tail"
                   >
                     {ex.name}
                   </Text>
                   <Text
                     style={styles.exerciseMeta}
-                    numberOfLines={1}
+                    numberOfLines={isActive ? 2 : 1}
                     ellipsizeMode="tail"
                   >
                     {targetSetCount} × {ex.targetReps}  ·  {restLabel}
@@ -3657,94 +3578,88 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </Text>
                   </View>
                 )}
-                {/* Swap — replace with a similar exercise (same muscle) */}
-                {!isDone && (
-                  <TouchableOpacity
-                    style={{ padding: 6, marginLeft: 2 }}
-                    onPress={() => {
-                      setSwapTargetIdx(i);
-                      setExerciseSearch('');
-                      setAiExerciseResults([]);
-                      openAddExerciseModal();
-                    }}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Swap ${ex.name} for a similar exercise`}>
-                    <Ionicons name="swap-horizontal" size={16} color={themeColors.textMuted} />
-                  </TouchableOpacity>
-                )}
-                {/* Timer — AMRAP/EMOM/Tabata */}
-                {(() => {
-                  const tMode = detectTimerMode(ex.targetReps, (ex as any).set_type);
-                  if (!tMode || isDone) return null;
-                  return (
-                    <TouchableOpacity
-                      style={{ padding: 6, marginLeft: 2 }}
-                      onPress={() => {
-                        setTimerMode(tMode);
-                        setTimerExerciseIdx(i);
-                        setTimerModalVisible(true);
-                        import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-                      }}
-                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Start ${tMode.toUpperCase()} timer`}>
-                      <Ionicons name="timer-outline" size={16} color={themeColors.primary} />
-                    </TouchableOpacity>
-                  );
-                })()}
-                {/* Dislike — exclude from future plans */}
-                {onDislikeExercise && !isDone && (
-                  <TouchableOpacity
-                    style={{ padding: 6, marginLeft: 2 }}
-                    onPress={() => {
-                      Alert.alert(
-                        'Don\'t like this exercise?',
-                        `"${ex.name}" will be excluded from future workout plans. You can undo this in Settings.`,
-                        [
-                          { text: 'Cancel', style: 'cancel' },
-                          { text: 'Exclude', style: 'destructive', onPress: () => {
-                            onDislikeExercise(ex.name);
-                            handleRemoveExercise(i);
-                          }},
-                        ],
-                      );
-                    }}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                    <Ionicons name="thumbs-down-outline" size={16} color={themeColors.textMuted} />
-                  </TouchableOpacity>
-                )}
-                {/* Reorder — move exercise up/down */}
-                {isActive && i > 0 && (
-                  <TouchableOpacity
-                    style={{ padding: 5, marginLeft: 2 }}
-                    onPress={() => handleReorderExercise(i, 'up')}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    accessibilityRole="button"
-                    accessibilityLabel="Move exercise up">
-                    <Ionicons name="arrow-up" size={14} color={themeColors.textMuted} />
-                  </TouchableOpacity>
-                )}
-                {isActive && i < exercises.length - 1 && (
-                  <TouchableOpacity
-                    style={{ padding: 5, marginLeft: 0 }}
-                    onPress={() => handleReorderExercise(i, 'down')}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    accessibilityRole="button"
-                    accessibilityLabel="Move exercise down">
-                    <Ionicons name="arrow-down" size={14} color={themeColors.textMuted} />
-                  </TouchableOpacity>
-                )}
-                {/* Small red remove button — only when more than one exercise */}
-                {exercises.length > 1 && (
-                  <TouchableOpacity
-                    style={styles.removeBtn}
-                    onPress={() => handleRemoveExercise(i)}
-                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                    <Text style={styles.removeBtnText}>−</Text>
-                  </TouchableOpacity>
-                )}
               </TouchableOpacity>
+
+              {isActive && (
+                <View style={styles.exerciseToolbar}>
+                  {!isDone && (
+                    <TouchableOpacity
+                      style={styles.exerciseToolbarBtn}
+                      onPress={() => {
+                        setSwapTargetIdx(i);
+                        setExerciseSearch('');
+                        setAiExerciseResults([]);
+                        openAddExerciseModal();
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Swap ${ex.name} for a similar exercise`}>
+                      <Ionicons name="swap-horizontal" size={14} color={themeColors.textSecondary} />
+                      <Text style={styles.exerciseToolbarText}>Swap</Text>
+                    </TouchableOpacity>
+                  )}
+                  {(() => {
+                    const tMode = detectTimerMode(ex.targetReps, (ex as any).set_type);
+                    if (!tMode || isDone) return null;
+                    return (
+                      <TouchableOpacity
+                        style={styles.exerciseToolbarBtn}
+                        onPress={() => {
+                          setTimerMode(tMode);
+                          setTimerExerciseIdx(i);
+                          setTimerModalVisible(true);
+                          import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                        }}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Start ${tMode.toUpperCase()} timer`}>
+                        <Ionicons name="timer-outline" size={14} color={themeColors.primary} />
+                        <Text style={[styles.exerciseToolbarText, { color: themeColors.primary }]}>Timer</Text>
+                      </TouchableOpacity>
+                    );
+                  })()}
+                  {onDislikeExercise && !isDone && (
+                    <TouchableOpacity
+                      style={styles.exerciseToolbarBtn}
+                      onPress={() => {
+                        Alert.alert(
+                          'Don\'t like this exercise?',
+                          `"${ex.name}" will be excluded from future workout plans. You can undo this in Settings.`,
+                          [
+                            { text: 'Cancel', style: 'cancel' },
+                            { text: 'Exclude', style: 'destructive', onPress: () => {
+                              onDislikeExercise(ex.name);
+                              handleRemoveExercise(i);
+                            }},
+                          ],
+                        );
+                      }}>
+                      <Ionicons name="thumbs-down-outline" size={14} color={themeColors.textSecondary} />
+                      <Text style={styles.exerciseToolbarText}>Hide</Text>
+                    </TouchableOpacity>
+                  )}
+                  {i > 0 && (
+                    <TouchableOpacity style={styles.exerciseToolbarBtn} onPress={() => handleReorderExercise(i, 'up')} accessibilityRole="button" accessibilityLabel="Move exercise up">
+                      <Ionicons name="arrow-up" size={14} color={themeColors.textSecondary} />
+                      <Text style={styles.exerciseToolbarText}>Up</Text>
+                    </TouchableOpacity>
+                  )}
+                  {i < exercises.length - 1 && (
+                    <TouchableOpacity style={styles.exerciseToolbarBtn} onPress={() => handleReorderExercise(i, 'down')} accessibilityRole="button" accessibilityLabel="Move exercise down">
+                      <Ionicons name="arrow-down" size={14} color={themeColors.textSecondary} />
+                      <Text style={styles.exerciseToolbarText}>Down</Text>
+                    </TouchableOpacity>
+                  )}
+                  {exercises.length > 1 && (
+                    <TouchableOpacity
+                      style={[styles.exerciseToolbarBtn, styles.exerciseToolbarDanger]}
+                      onPress={() => handleRemoveExercise(i)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Remove ${ex.name}`}>
+                      <Ionicons name="remove-circle-outline" size={14} color={themeColors.error} />
+                      <Text style={[styles.exerciseToolbarText, { color: themeColors.error }]}>Remove</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
 
               {isActive && (
                 <View style={styles.exerciseDetail}>
@@ -4306,7 +4221,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               <Text style={styles.addExerciseBtnText}>+ Add Exercise</Text>
             </TouchableOpacity>
             <PressableScale
-              style={[styles.finishBtn, completedCount === 0 && styles.finishBtnDisabled]}
+              style={[
+                styles.finishBtn,
+                completedCount > 0 && {
+                  backgroundColor: workoutPalette.strong,
+                  borderColor: workoutPalette.strong,
+                  shadowColor: workoutPalette.strong,
+                },
+                completedCount === 0 && styles.finishBtnDisabled,
+              ]}
               disabled={completedCount === 0}
               accessibilityRole="button"
               accessibilityLabel="Finish workout"
@@ -4318,7 +4241,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
                 setFinishModalVisible(true);
               }}>
-              <Text style={styles.finishBtnText}><Ionicons name="checkmark-circle" size={16} color="#fff" />  Finish Workout</Text>
+              <Text style={[styles.finishBtnText, completedCount === 0 && styles.finishBtnTextDisabled]}>
+                <Ionicons
+                  name="checkmark-circle"
+                  size={16}
+                  color={completedCount > 0 ? themeColors.background : themeColors.textMuted}
+                />{' '}
+                Finish Workout
+              </Text>
             </PressableScale>
           </>
         )}
@@ -4516,18 +4446,37 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       {/* Confirm Finish Modal */}
       <Modal visible={finishModalVisible} transparent animationType="fade" onRequestClose={() => setFinishModalVisible(false)}>
         <View style={styles.finishBackdrop}>
-          <View style={styles.finishModal}>
+          <FadeInView style={styles.finishModal} duration={260} slideDistance={10}>
+            <View style={[styles.finishIconWrap, { backgroundColor: workoutPalette.soft }]}>
+              <Ionicons name="flag" size={26} color={workoutPalette.strong} />
+            </View>
             <Text style={styles.finishModalTitle}>Finish Workout?</Text>
             <Text style={styles.finishModalBody}>
-              {formatTime(elapsed)}  |  {completedCount}/{exercises.length} exercises done
+              Save this session and open your shareable recap.
             </Text>
+            <View style={styles.finishModalStats}>
+              <View style={styles.finishModalStat}>
+                <Text style={styles.finishModalStatValue}>{formatTime(elapsed)}</Text>
+                <Text style={styles.finishModalStatLabel}>Time</Text>
+              </View>
+              <View style={styles.finishModalDivider} />
+              <View style={styles.finishModalStat}>
+                <Text style={styles.finishModalStatValue}>{completedCount}/{exercises.length}</Text>
+                <Text style={styles.finishModalStatLabel}>Exercises</Text>
+              </View>
+              <View style={styles.finishModalDivider} />
+              <View style={styles.finishModalStat}>
+                <Text style={styles.finishModalStatValue}>{totalLoggedSets}</Text>
+                <Text style={styles.finishModalStatLabel}>Sets</Text>
+              </View>
+            </View>
             <TouchableOpacity style={styles.finishConfirmBtn} onPress={handleFinish}>
               <Text style={styles.finishConfirmText}>Save and Finish</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={() => setFinishModalVisible(false)}>
               <Text style={styles.finishCancelText}>Keep Going</Text>
             </TouchableOpacity>
-          </View>
+          </FadeInView>
         </View>
       </Modal>
 
@@ -4537,65 +4486,89 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           <ScrollView contentContainerStyle={styles.summaryScroll} keyboardShouldPersistTaps="handled">
 
             {/* ── Shareable Workout Summary Card ────────────────────── */}
-              <View style={styles.summaryModal}>
+              <FadeInView style={styles.summaryModal} duration={360} slideDistance={18}>
                 <ViewShot ref={summaryCardRef} options={{ format: 'png', quality: 1 }}>
                   <View style={styles.shareCard}>
-                    {/* Gradient-like header band */}
-                    <View style={styles.shareCardHeader}>
-                      <Image
-                        source={themeColors.background === '#000000' || themeColors.background < '#444444' ? SHARE_LOGO_DARK : SHARE_LOGO_LIGHT}
-                        style={styles.shareCardLogo}
-                        resizeMode="contain"
-                      />
-                      <View style={styles.shareCardDateBadge}>
-                        <Text style={styles.shareCardDateText}>
-                          {(() => { const d = new Date(); return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`; })()}
-                        </Text>
+                    <LinearGradient
+                      colors={[themeColors.primary + '26', themeColors.surface]}
+                      style={styles.shareHero}>
+                      <View style={styles.shareCardHeader}>
+                        <Image
+                          source={themeColors.background === '#000000' || themeColors.background < '#444444' ? SHARE_LOGO_DARK : SHARE_LOGO_LIGHT}
+                          style={styles.shareCardLogo}
+                          resizeMode="contain"
+                        />
+                        <View style={styles.shareCardDateBadge}>
+                          <Text style={styles.shareCardDateText}>
+                            {(() => { const d = new Date(); return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`; })()}
+                          </Text>
+                        </View>
                       </View>
-                    </View>
-
-                    {/* Focus title */}
-                    <Text style={styles.shareCardFocus}>{workout.focus}</Text>
+                      <View style={styles.shareHeroBody}>
+                        <Text style={styles.shareKicker}>Workout Complete</Text>
+                        <Text style={styles.shareCardFocus} numberOfLines={2}>{workout.focus}</Text>
+                        <View style={styles.shareCompletionRow}>
+                          <Text style={styles.shareCompletionText}>{setCompletionPct}% complete</Text>
+                          <Text style={styles.shareCompletionText}>{summarySetCount} sets logged</Text>
+                        </View>
+                        <View style={styles.shareCompletionTrack}>
+                          <View
+                            style={[
+                              styles.shareCompletionFill,
+                              { width: `${setCompletionPct}%`, backgroundColor: workoutPalette.strong },
+                            ]}
+                          />
+                        </View>
+                      </View>
+                    </LinearGradient>
 
                     {/* Stats grid */}
                     <View style={styles.shareStatsGrid}>
                       <View style={styles.shareStatTile}>
                         <Ionicons name="time-outline" size={16} color={themeColors.textMuted} />
-                        <Text style={styles.shareStatValue}>{formatTime(finishedSession?.durationSeconds ?? elapsed)}</Text>
+                        <Text style={styles.shareStatValue}>{formatTime(summaryDurationSeconds)}</Text>
                         <Text style={styles.shareStatLabel}>Duration</Text>
                       </View>
                       <View style={styles.shareStatTile}>
-                        <Text style={styles.shareStatIcon}><Ionicons name="barbell" size={14} /></Text>
-                        <Text style={styles.shareStatValue}>{finishedSession?.exercises.reduce((t, e) => t + e.sets.length, 0) ?? 0}</Text>
+                        <Ionicons name="barbell" size={16} color={themeColors.textMuted} />
+                        <Text style={styles.shareStatValue}>{summarySetCount}</Text>
                         <Text style={styles.shareStatLabel}>Sets</Text>
                       </View>
                       <View style={styles.shareStatTile}>
-                        <Text style={styles.shareStatIcon}><Ionicons name="fitness" size={14} /></Text>
+                        <Ionicons name="fitness" size={16} color={themeColors.textMuted} />
                         <Text style={styles.shareStatValue}>{completedCount}/{exercises.length}</Text>
                         <Text style={styles.shareStatLabel}>Exercises</Text>
                       </View>
-                      {summaryData?.caloriesBurned ? (
+                      {summaryRepCount > 0 ? (
                         <View style={styles.shareStatTile}>
-                          <Text style={styles.shareStatIcon}><Ionicons name="flame" size={14} /></Text>
-                          <Text style={styles.shareStatValue}>~{summaryData.caloriesBurned}</Text>
-                          <Text style={styles.shareStatLabel}>Calories</Text>
-                        </View>
-                      ) : null}
-                      {summaryData?.hrAvg ? (
-                        <View style={styles.shareStatTile}>
-                          <Text style={styles.shareStatIcon}><Ionicons name="pulse" size={14} /></Text>
-                          <Text style={styles.shareStatValue}>{summaryData.hrAvg}</Text>
-                          <Text style={styles.shareStatLabel}>Avg HR</Text>
-                        </View>
-                      ) : null}
-                      {summaryData?.hrMax ? (
-                        <View style={styles.shareStatTile}>
-                          <Text style={styles.shareStatIcon}><Ionicons name="heart" size={14} /></Text>
-                          <Text style={styles.shareStatValue}>{summaryData.hrMax}</Text>
-                          <Text style={styles.shareStatLabel}>Max HR</Text>
+                          <Ionicons name="repeat-outline" size={16} color={themeColors.textMuted} />
+                          <Text style={styles.shareStatValue}>{summaryRepCount}</Text>
+                          <Text style={styles.shareStatLabel}>Reps</Text>
                         </View>
                       ) : null}
                     </View>
+                    {(summaryData?.caloriesBurned || summaryData?.hrAvg || summaryData?.hrMax) ? (
+                      <View style={styles.shareMiniMetrics}>
+                        {summaryData?.caloriesBurned ? (
+                          <View style={styles.shareMiniChip}>
+                            <Ionicons name="flame" size={12} color={themeColors.textMuted} />
+                            <Text style={styles.shareMiniChipText}>~{summaryData.caloriesBurned} cal</Text>
+                          </View>
+                        ) : null}
+                        {summaryData?.hrAvg ? (
+                          <View style={styles.shareMiniChip}>
+                            <Ionicons name="pulse" size={12} color={themeColors.textMuted} />
+                            <Text style={styles.shareMiniChipText}>{summaryData.hrAvg} avg HR</Text>
+                          </View>
+                        ) : null}
+                        {summaryData?.hrMax ? (
+                          <View style={styles.shareMiniChip}>
+                            <Ionicons name="heart" size={12} color={themeColors.textMuted} />
+                            <Text style={styles.shareMiniChipText}>{summaryData.hrMax} peak HR</Text>
+                          </View>
+                        ) : null}
+                      </View>
+                    ) : null}
                     {summaryData?.trainingScore != null && (() => {
                       const score = summaryData.trainingScore!;
                       const scoreColor = score >= 85 ? themeColors.success
@@ -4622,7 +4595,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               flexDirection: 'row', alignItems: 'center',
                               backgroundColor: themeColors.surfaceRaised ?? themeColors.surface,
                               borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10,
-                              marginTop: 8, marginBottom: 4, gap: 12,
+                              marginHorizontal: 14, marginTop: 8, marginBottom: 4, gap: 12,
                               borderWidth: 1, borderColor: themeColors.border,
                             }}
                           >
@@ -4655,7 +4628,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           {showTrainingDetails && (
                             <View style={{
                               backgroundColor: themeColors.surfaceRaised ?? themeColors.surface,
-                              borderRadius: 10, padding: 12, marginTop: -2, marginBottom: 6, gap: 8,
+                              borderRadius: 10, padding: 12, marginHorizontal: 14, marginTop: -2, marginBottom: 6, gap: 8,
                               borderWidth: 1, borderColor: themeColors.border,
                             }}>
                               <Text style={{ fontSize: 10, fontWeight: '800', color: themeColors.textMuted, letterSpacing: 0.5 }}>
@@ -4704,7 +4677,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     })()}
 
                     {summaryData?.hrZoneMinutes && summaryData.hrZoneMinutes.some(m => m > 0) ? (
-                      <View style={{ marginTop: 4, marginBottom: 6, paddingHorizontal: 2 }}>
+                      <View style={{ marginHorizontal: 14, marginTop: 4, marginBottom: 6, paddingHorizontal: 2 }}>
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
                           <Text style={{ fontSize: 9, fontWeight: '800', color: themeColors.textMuted, letterSpacing: 0.5 }}>
                             TIME IN ZONES
@@ -4823,7 +4796,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   </View>
                 ) : null}
 
-                {/* Share image + Share-to-friends + Feedback buttons.
+                <View style={styles.summaryPrivacyNote}>
+                  <Ionicons name="lock-closed-outline" size={12} color={themeColors.textMuted} />
+                  <Text style={styles.summaryPrivacyNoteText}>
+                    Friends posts only include workout stats. Calories, macros, and body weight stay private.
+                  </Text>
+                </View>
+
+                {/* Share image + Share-to-friends buttons.
                     "Share" exports an image; "Friends" sends the
                     structured workout summary to the friends Activity
                     digest (no kcal/macros/weight ever — privacy boundary). */}
@@ -4856,7 +4836,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 <TouchableOpacity onPress={dismissSummaryModal} style={styles.summarySkipBtn}>
                   <Text style={styles.summarySkipText}>Close</Text>
                 </TouchableOpacity>
-              </View>
+              </FadeInView>
 
           </ScrollView>
         </View>
@@ -5019,39 +4999,33 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               <SearchInput
                 containerStyle={{ flex: 1 }}
                 value={exerciseSearch}
-                onChangeText={(t) => { setExerciseSearch(t); if (!t) { setAiExerciseResults([]); loadWorkoutSuggestions(); } }}
+                onChangeText={(t) => {
+                  setExerciseSearch(t);
+                  setAiExerciseResults([]);
+                  setAiExerciseLoading(false);
+                }}
                 placeholder="Search by name, muscle, or equipment…"
                 placeholderTextColor={themeColors.textMuted}
                 style={styles.addExerciseSearch}
-                returnKeyType="search"
-                onSubmitEditing={handleAiExerciseSearch}
+                returnKeyType="done"
               />
-              {exerciseSearch.trim().length > 1 && (
-                <TouchableOpacity
-                  style={{ backgroundColor: workoutPalette.strong, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, opacity: aiExerciseLoading ? 0.6 : 1 }}
-                  onPress={handleAiExerciseSearch}
-                  disabled={aiExerciseLoading}>
-                  {aiExerciseLoading
-                    ? <ActivityIndicator size="small" color="#fff" />
-                    : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Find</Text>}
-                </TouchableOpacity>
-              )}
             </View>
 
             {exerciseLibraryLoading ? (
               <ActivityIndicator size="small" color={themeColors.primary} style={{ marginTop: 12 }} />
             ) : (
               <ScrollView contentContainerStyle={styles.addExerciseList} keyboardShouldPersistTaps="handled">
-                {/* Auto-suggestions or manual AI search results */}
-                {aiExerciseLoading && aiExerciseResults.length === 0 && (
+                {/* Explicit beyond-library search results. Swap mode stays
+                    local-only so replacement suggestions remain instant. */}
+                {swapTargetIdx == null && aiExerciseLoading && aiExerciseResults.length === 0 && (
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
                     <ActivityIndicator size="small" color={workoutPalette.strong} />
                     <Text style={{ fontSize: 12, color: themeColors.textMuted }}>
-                      Finding exercises for your {workout.focus} session…
+                      Searching beyond your saved exercise library…
                     </Text>
                   </View>
                 )}
-                {aiExerciseResults.length > 0 && (
+                {swapTargetIdx == null && aiExerciseResults.length > 0 && (
                   <View style={{ marginBottom: 14 }}>
                     <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
                       {exerciseSearch.trim() ? 'Results' : `Fits Your ${workout.focus} Workout`}
@@ -5100,12 +5074,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
                 {filteredExerciseLibrary.length === 0 ? (
                   <>
-                    <Text style={styles.coachEmpty}>Nothing in your library matches.</Text>
-                    {exerciseSearch.trim().length > 1 && aiExerciseResults.length === 0 && !aiExerciseLoading && (
+                    <Text style={styles.coachEmpty}>
+                      {swapTargetIdx != null
+                        ? 'No compatible swaps match your search.'
+                        : 'Nothing in your library matches.'}
+                    </Text>
+                    {swapTargetIdx == null && exerciseSearch.trim().length > 1 && aiExerciseResults.length === 0 && !aiExerciseLoading && (
                       <TouchableOpacity
                         style={{ marginTop: 10, alignSelf: 'center', paddingVertical: 12, paddingHorizontal: 18, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: workoutPalette.strong + '55', borderRadius: 10 }}
                         onPress={handleAiExerciseSearch}>
-                        <Text style={{ color: workoutPalette.strong, fontWeight: '700', fontSize: 13 }}>Search beyond your library →</Text>
+                        <Text style={{ color: workoutPalette.strong, fontWeight: '700', fontSize: 13 }}>Search beyond library</Text>
                       </TouchableOpacity>
                     )}
                   </>
@@ -5287,87 +5265,139 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   warmupCoachBtnText: { fontSize: 13, fontWeight: '700' },
   container: { flex: 1, backgroundColor: tc.background },
 
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingTop: 56, paddingBottom: 12, gap: 12 },
-  focusLabel:   { fontSize: 18, fontWeight: '700', color: tc.textPrimary, marginBottom: 2 },
-  timer:        { fontSize: 32, fontWeight: '800', color: tc.primary },
-  headerRight:  { alignItems: 'center' },
-  progressText: { fontSize: 22, fontWeight: '700', color: tc.textPrimary },
-  progressSub:  { fontSize: 11, color: tc.textSecondary },
-  cancelBtn:    { padding: 8, backgroundColor: tc.surface, borderRadius: radius.full, borderWidth: 1, borderColor: tc.border },
-  cancelBtnText:{ fontSize: 14, color: tc.textSecondary, fontWeight: '600' },
-  coachBtn: { paddingHorizontal: 10, paddingVertical: 8, backgroundColor: tc.surface, borderRadius: radius.md, borderWidth: 1, borderColor: tc.primary },
-  coachBtnText: { fontSize: 12, color: tc.primary, fontWeight: '700' },
-
-  // marginTop adds breathing room from the collapsed warmup pill
-  // above so the progress bar doesn't look like a hairline glued to
-  // the bottom of the pill ("weird line under the circle" bug).
-  progressBarTrack: { height: 3, backgroundColor: tc.border, marginHorizontal: 16, borderRadius: 2, marginTop: 12, marginBottom: 16 },
-  progressBarFill:  { height: 3, backgroundColor: tc.primary, borderRadius: 2 },
-
-  restBanner: {
-    marginHorizontal: 16,
-    marginBottom: 12,
-    backgroundColor: tc.primary + '18',
+  header: { paddingHorizontal: 16, paddingTop: 48, paddingBottom: 8 },
+  headerCard: {
     borderRadius: radius.lg,
-    borderWidth: 2,
-    borderColor: tc.primary,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingVertical: 9,
+    borderWidth: 1,
+    borderColor: tc.border,
+    shadowColor: tc.primary,
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 3,
+  },
+  headerFocusRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  headerTitleBlock: { flex: 1, minWidth: 0 },
+  focusLabel:   { fontSize: 14, fontWeight: '800', color: tc.textPrimary, marginBottom: 1 },
+  headerMetaText: { fontSize: 11, color: tc.textMuted, fontWeight: '700' },
+  headerActionRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },
+  cancelBtn:    { paddingHorizontal: 10, paddingVertical: 5, backgroundColor: tc.surface, borderRadius: radius.full, borderWidth: 1, borderColor: tc.border },
+  cancelBtnText:{ fontSize: 11, color: tc.textSecondary, fontWeight: '800' },
+  coachBtn: { paddingHorizontal: 10, paddingVertical: 5, backgroundColor: tc.surface, borderRadius: radius.full, borderWidth: 1, borderColor: tc.primary },
+  coachBtnText: { fontSize: 11, color: tc.primary, fontWeight: '800' },
+  headerMetricRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
+    marginTop: 8,
   },
-  restBannerUrgent: { borderColor: tc.warning, backgroundColor: tc.warning + '18' },
-  restBannerLeft: { alignItems: 'center', justifyContent: 'center', minWidth: 96 },
-  restBannerLabel: { fontSize: 9, fontWeight: '800', color: tc.primary, textTransform: 'uppercase', letterSpacing: 1 },
-  restBannerTime: { fontSize: 32, fontWeight: '900', color: tc.primary, lineHeight: 36 },
-  restBannerTimeUrgent: { color: tc.warning },
-  restBannerCenter: { flex: 1, gap: 2, minWidth: 0 },
-  restExerciseText: { fontSize: 11, color: tc.primary, fontWeight: '700' },
-  restTargetText: { fontSize: 13, color: tc.textPrimary, fontWeight: '700' },
-  restCueText: { fontSize: 11, color: tc.textSecondary, lineHeight: 16 },
-  restBannerActions: { flexDirection: 'column', gap: 5, alignItems: 'stretch' },
-  restBannerBtn: {
-    paddingVertical: 6,
+  headerMetricTile: {
+    flex: 1,
+    minHeight: 48,
     paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: radius.md,
+    backgroundColor: tc.background + '80',
+    borderWidth: 1,
+    borderColor: tc.border,
+    justifyContent: 'center',
+  },
+  headerRestTile: { borderWidth: 1.5 },
+  headerMetricLabel: { fontSize: 9, color: tc.textMuted, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 2 },
+  headerMetricValue: { fontSize: 18, color: tc.textPrimary, fontWeight: '900', fontVariant: ['tabular-nums'] as any, lineHeight: 21 },
+  headerRestPanel: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+  },
+  headerRestCopy: { minWidth: 0, marginBottom: 7 },
+  headerRestExercise: { fontSize: 10, color: tc.textMuted, fontWeight: '800' },
+  headerRestTarget: { fontSize: 12, fontWeight: '900', marginTop: 1 },
+  headerRestCue: { fontSize: 10, color: tc.textSecondary, lineHeight: 14, marginTop: 2 },
+  headerRestActions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
+  headerRestBtn: {
+    minWidth: 38,
+    paddingVertical: 7,
+    paddingHorizontal: 8,
     borderRadius: radius.full,
     borderWidth: 1,
     borderColor: tc.border,
     backgroundColor: tc.surface,
     alignItems: 'center',
   },
-  restBannerBtnText: { fontSize: 11, color: tc.textPrimary, fontWeight: '700' },
-  restBannerBtnPrimary: { borderColor: tc.primary, backgroundColor: tc.primary },
-  restBannerBtnPrimaryText: { fontSize: 11, color: tc.background, fontWeight: '700' },
+  headerRestCancelBtn: {
+    backgroundColor: tc.error + '10',
+    borderColor: tc.error + '30',
+  },
+  headerRestBtnText: { fontSize: 10, color: tc.textPrimary, fontWeight: '900' },
 
   scroll:        { flex: 1 },
   scrollContent: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 40 },
 
-  exerciseCard:       { backgroundColor: tc.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: tc.border, padding: 14, marginBottom: 10 },
-  exerciseCardDone:   { borderColor: tc.primary, opacity: 0.85 },
-  exerciseCardActive: { borderColor: tc.primary },
-
-  exerciseHeader:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  exerciseName:     { fontSize: 15, fontWeight: '600', color: tc.textPrimary, marginBottom: 2 },
+  exerciseCard: {
+    backgroundColor: tc.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: tc.border,
+    padding: 14,
+    marginBottom: 10,
+    position: 'relative',
+  },
+  exerciseCardDone:   { borderColor: tc.primary, backgroundColor: tc.primary + '08', opacity: 0.9 },
+  exerciseCardActive: {
+    borderColor: tc.primary,
+    backgroundColor: tc.surfaceRaised,
+    shadowOpacity: 0.12,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 3,
+  },
+  exerciseActiveRail: {
+    position: 'absolute',
+    left: 0,
+    top: 14,
+    bottom: 14,
+    width: 4,
+    borderTopRightRadius: 4,
+    borderBottomRightRadius: 4,
+  },
+  exerciseHeader:   { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  exerciseName:     { fontSize: 16, lineHeight: 20, fontWeight: '800', color: tc.textPrimary, marginBottom: 3 },
   exerciseNameDone: { color: tc.textSecondary, textDecorationLine: 'line-through' },
-  exerciseMeta:     { fontSize: 12, color: tc.textMuted },
+  exerciseMeta:     { fontSize: 12, lineHeight: 16, color: tc.textMuted },
 
-  setsBadge:        { backgroundColor: tc.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: tc.border },
+  setsBadge:        { backgroundColor: tc.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: tc.border, marginTop: 3 },
   setsBadgeDone:    { backgroundColor: tc.primary, borderColor: tc.primary },
   setsBadgeText:    { fontSize: 12, fontWeight: '700', color: tc.textSecondary },
   setsBadgeTextDone:{ color: tc.background },
 
-  // Small red remove button in the header
-  removeBtn: {
-    width: 26, height: 26,
-    borderRadius: 13,
-    backgroundColor: tc.error + '18',
-    borderWidth: 1,
-    borderColor: tc.error,
-    alignItems: 'center',
-    justifyContent: 'center',
+  exerciseToolbar: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: tc.border + '88',
   },
-  removeBtnText: { fontSize: 18, color: tc.error, fontWeight: '800', lineHeight: 22 },
+  exerciseToolbarBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: radius.full,
+    backgroundColor: tc.surface,
+    borderWidth: 1,
+    borderColor: tc.border,
+  },
+  exerciseToolbarDanger: {
+    backgroundColor: tc.error + '10',
+    borderColor: tc.error + '35',
+  },
+  exerciseToolbarText: { fontSize: 11, color: tc.textSecondary, fontWeight: '800' },
 
   exerciseDetail: { marginTop: 12, gap: 10 },
 
@@ -5429,7 +5459,7 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   inlineLoggedBadgePending: { backgroundColor: 'transparent' },
   inlineLoggedBadge: {
     width: 40, paddingVertical: 8, borderRadius: radius.sm,
-    backgroundColor: tc.primary + '20', alignItems: 'center',
+    backgroundColor: tc.primary, alignItems: 'center',
   },
   inlineLoggedBadgeText: { fontSize: 14, color: tc.primary, fontWeight: '800' },
   inlineDeleteBtn: {
@@ -5553,9 +5583,22 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   addSetBtn:    { borderWidth: 1, borderColor: tc.primary, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 6 },
   addSetBtnText:{ fontSize: 13, color: tc.primary, fontWeight: '600' },
 
-  finishBtn:         { backgroundColor: tc.surface, borderRadius: radius.md, paddingVertical: 16, alignItems: 'center', marginTop: 8, borderWidth: 1, borderColor: tc.primary },
-  finishBtnDisabled: { borderColor: tc.border, opacity: 0.5 },
-  finishBtnText:     { fontSize: 16, fontWeight: '700', color: tc.primary },
+  finishBtn: {
+    backgroundColor: tc.surface,
+    borderRadius: radius.lg,
+    paddingVertical: 16,
+    alignItems: 'center',
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: tc.primary,
+    shadowOpacity: 0.22,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 4,
+  },
+  finishBtnDisabled: { borderColor: tc.border, backgroundColor: tc.surfaceRaised, opacity: 0.55, shadowOpacity: 0, elevation: 0 },
+  finishBtnText:     { fontSize: 16, fontWeight: '900', color: tc.background },
+  finishBtnTextDisabled: { color: tc.textMuted },
 
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   logModal: {
@@ -5593,9 +5636,25 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   lastTimeFeedback: { fontSize: 12, color: tc.accent, fontWeight: '700' },
 
   finishBackdrop:    { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
-  finishModal:       { backgroundColor: tc.surface, borderRadius: radius.xl, padding: 28, alignItems: 'center', gap: 12, borderWidth: 1, borderColor: tc.border, width: '85%' },
+  finishModal:       { backgroundColor: tc.surface, borderRadius: radius.xl, padding: 24, alignItems: 'center', gap: 12, borderWidth: 1, borderColor: tc.border, width: '88%', shadowColor: tc.primary, shadowOpacity: 0.18, shadowRadius: 20, shadowOffset: { width: 0, height: 12 }, elevation: 6 },
+  finishIconWrap: { width: 58, height: 58, borderRadius: 29, alignItems: 'center', justifyContent: 'center', marginBottom: 2 },
   finishModalTitle:  { fontSize: 26, fontWeight: '800', color: tc.textPrimary },
-  finishModalBody:   { fontSize: 14, color: tc.textSecondary, textAlign: 'center' },
+  finishModalBody:   { fontSize: 14, color: tc.textSecondary, textAlign: 'center', lineHeight: 20 },
+  finishModalStats: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    backgroundColor: tc.surfaceRaised,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: tc.border,
+    paddingVertical: 12,
+    marginTop: 2,
+  },
+  finishModalStat: { flex: 1, alignItems: 'center', gap: 2 },
+  finishModalDivider: { width: 1, height: 30, backgroundColor: tc.border },
+  finishModalStatValue: { fontSize: 17, fontWeight: '900', color: tc.textPrimary },
+  finishModalStatLabel: { fontSize: 10, color: tc.textMuted, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.5 },
   finishConfirmBtn:  { backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 14, alignItems: 'center', width: '100%', marginTop: 8 },
   finishConfirmText: { color: tc.background, fontSize: 16, fontWeight: '700' },
   finishCancelText:  { fontSize: 14, color: tc.textMuted, marginTop: 4 },
@@ -5605,7 +5664,7 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     backgroundColor: tc.surface,
     borderTopLeftRadius: radius.xl,
     borderTopRightRadius: radius.xl,
-    padding: 24,
+    padding: 20,
     paddingBottom: 40,
     gap: 16,
     borderTopWidth: 1,
@@ -5655,6 +5714,18 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     marginTop: 4,
   },
   summaryFeedbackBtnText: { color: tc.background, fontSize: 15, fontWeight: '700' },
+  summaryPrivacyNote: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 7,
+    backgroundColor: tc.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: tc.border,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  summaryPrivacyNoteText: { flex: 1, fontSize: 11, color: tc.textMuted, lineHeight: 16, fontWeight: '600' },
   summarySkipBtn:    { alignItems: 'center', paddingVertical: 10 },
   summarySkipText:   { fontSize: 13, color: tc.textMuted },
 
@@ -5666,20 +5737,20 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     borderColor: tc.border,
     overflow: 'hidden',
   },
+  shareHero: {
+    paddingBottom: 16,
+  },
   shareCardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 8,
-    backgroundColor: tc.primary + '12',
-    borderBottomWidth: 1,
-    borderBottomColor: tc.border,
+    paddingTop: 12,
+    paddingBottom: 10,
   },
-  shareCardLogo: { width: 220, height: 50 },
+  shareCardLogo: { width: 150, height: 36 },
   shareCardDateBadge: {
-    backgroundColor: tc.surfaceRaised,
+    backgroundColor: tc.surface + 'CC',
     borderRadius: radius.full,
     paddingHorizontal: 10,
     paddingVertical: 4,
@@ -5687,42 +5758,87 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     borderColor: tc.border,
   },
   shareCardDateText: { fontSize: 11, fontWeight: '600', color: tc.textSecondary },
+  shareHeroBody: { paddingHorizontal: 16, paddingTop: 4 },
+  shareKicker: {
+    fontSize: 10,
+    fontWeight: '900',
+    color: tc.primary,
+    textTransform: 'uppercase',
+    letterSpacing: 1.2,
+    marginBottom: 5,
+  },
   shareCardFocus: {
-    fontSize: 20,
-    fontWeight: '800',
+    fontSize: 25,
+    fontWeight: '900',
     color: tc.textPrimary,
-    textAlign: 'center',
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 4,
+    letterSpacing: -0.6,
+    lineHeight: 30,
+  },
+  shareCompletionRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 14,
+    marginBottom: 7,
+  },
+  shareCompletionText: { fontSize: 11, color: tc.textSecondary, fontWeight: '800' },
+  shareCompletionTrack: {
+    height: 6,
+    borderRadius: radius.full,
+    backgroundColor: tc.border + '99',
+    overflow: 'hidden',
+  },
+  shareCompletionFill: {
+    height: 6,
+    borderRadius: radius.full,
   },
   shareStatsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    gap: 6,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: 8,
+    gap: 8,
   },
-  // Tighter stat tile — 3-up packing instead of 2-up so the summary
-  // doesn't push the training-score panel below the fold.
   shareStatTile: {
     flex: 1,
-    minWidth: '30%' as any,
+    minWidth: '44%' as any,
     backgroundColor: tc.surfaceRaised,
-    borderRadius: 8,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: tc.border,
-    paddingVertical: 7,
-    paddingHorizontal: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
     alignItems: 'center',
-    gap: 0,
+    gap: 3,
   },
   shareStatIcon:  { fontSize: 13, marginBottom: 1 },
-  shareStatValue: { fontSize: 16, fontWeight: '800', color: tc.textPrimary, lineHeight: 20 },
+  shareStatValue: { fontSize: 18, fontWeight: '900', color: tc.textPrimary, lineHeight: 22 },
   shareStatLabel: { fontSize: 9, fontWeight: '700', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 },
+  shareMiniMetrics: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingBottom: 8,
+  },
+  shareMiniChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: tc.background + '80',
+    borderRadius: radius.full,
+    borderWidth: 1,
+    borderColor: tc.border,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+  },
+  shareMiniChipText: { fontSize: 10, color: tc.textMuted, fontWeight: '800' },
   shareAchievements: {
     marginHorizontal: 14,
-    marginBottom: 6,
+    marginTop: 6,
+    marginBottom: 8,
     backgroundColor: tc.primary + '10',
     borderRadius: radius.md,
     padding: 12,
@@ -5746,6 +5862,10 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     marginBottom: 10,
     paddingHorizontal: 14,
     paddingVertical: 10,
+    backgroundColor: tc.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: tc.border,
   },
   shareMotivationText: {
     fontSize: 13,
@@ -5759,6 +5879,7 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     fontWeight: '700',
     color: tc.textMuted,
     textAlign: 'center',
+    paddingTop: 2,
     paddingBottom: 12,
     letterSpacing: 1.5,
     textTransform: 'uppercase',
