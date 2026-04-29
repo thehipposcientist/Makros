@@ -59,6 +59,7 @@ def _compute_fields(item: GearItem) -> GearItemRead:
         auto_track_keywords=item.auto_track_keywords or [],
         notes=item.notes,
         created_at=item.created_at,
+        photos=item.photos or [],
         total_miles=total,
         pct_used=round(pct, 4) if pct is not None else None,
         recommendation=recommendation,
@@ -94,6 +95,7 @@ def add_gear(
         starting_miles=body.starting_miles,
         retirement_threshold_miles=body.retirement_threshold_miles,
         auto_track_keywords=[kw.lower().strip() for kw in (body.auto_track_keywords or [])],
+        photos=body.photos or [],
         notes=body.notes,
     )
     db.add(item)
@@ -123,6 +125,7 @@ def update_gear(
     item.retirement_threshold_miles = body.retirement_threshold_miles
     item.auto_track_keywords = [kw.lower().strip() for kw in (body.auto_track_keywords or [])]
     item.notes = body.notes
+    item.photos = body.photos or []
     item.updated_at = datetime.now(timezone.utc)
     db.add(item)
     db.commit()
@@ -190,7 +193,7 @@ def log_miles(
 # ─── AI gear identification ──────────────────────────────────────────────────
 
 class GearIdentifyBody(BaseModel):
-    image_base64: str  # data URI or raw base64 JPEG/PNG
+    images: list[str]  # one or more data URIs / raw base64 JPEG/PNG
 
 class GearIdentifyResult(BaseModel):
     name: str
@@ -206,21 +209,22 @@ def identify_gear(
     body: GearIdentifyBody,
     current_user: User = Depends(get_current_user),
 ):
-    """Use GPT-4o vision to identify gear from a photo and estimate mileage."""
+    """Use GPT-4o vision to identify gear from one or more photos and estimate mileage."""
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=503, detail="AI identification unavailable")
+    if not body.images:
+        raise HTTPException(status_code=400, detail="At least one image required")
 
-    # Strip data URI prefix if present
-    img_data = body.image_base64
-    if "," in img_data:
-        img_data = img_data.split(",", 1)[1]
-
-    # Validate it's real base64
-    try:
-        base64.b64decode(img_data, validate=True)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid base64 image")
+    # Strip data URI prefix and validate each image
+    validated: list[str] = []
+    for raw in body.images[:4]:  # cap at 4 to control token cost
+        img_data = raw.split(",", 1)[1] if "," in raw else raw
+        try:
+            base64.b64decode(img_data, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid base64 image")
+        validated.append(img_data)
 
     import json
     from openai import OpenAI
@@ -228,16 +232,17 @@ def identify_gear(
     client = OpenAI(api_key=api_key)
 
     system = (
-        "You are a fitness gear expert. The user will show you a photo of their "
-        "athletic gear (running shoes, trail shoes, road bike, mountain bike, "
-        "gym shoes, weightlifting shoes, etc.). Identify it and estimate its "
-        "current mileage and remaining lifespan based on visible wear. "
+        "You are a fitness gear expert. The user will show you one or more photos of "
+        "the same piece of athletic gear (running shoes, trail shoes, road bike, "
+        "mountain bike, gym shoes, weightlifting shoes, etc.) from different angles. "
+        "Use all photos together to identify the item and estimate its current mileage "
+        "and remaining lifespan based on visible wear. "
         "Respond ONLY with a JSON object — no markdown, no commentary.\n"
         "JSON shape:\n"
         "{\n"
         '  "name": "Brand Model Name (e.g. Nike Pegasus 40)",\n'
-        '  "gear_type": one of ["running_shoe","trail_shoe","road_bike",'
-        '"mountain_bike","gym_shoe","weightlifting_shoe","other"],\n'
+        '  "gear_type": one of ["running_shoe","trail_shoe","cycling_shoe","bike",'
+        '"bike_tire","bike_chain","treadmill_belt","jump_rope","other"],\n'
         '  "estimated_miles": float or null (miles already on the gear based on wear),\n'
         '  "retirement_threshold_miles": float or null (expected total lifespan),\n'
         '  "confidence": "high"|"medium"|"low",\n'
@@ -245,23 +250,29 @@ def identify_gear(
         "}"
     )
 
+    photo_count = len(validated)
+    user_content: list[dict] = []
+    for img_data in validated:
+        user_content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{img_data}",
+                "detail": "low",
+            },
+        })
+    user_content.append({
+        "type": "text",
+        "text": (
+            f"These are {photo_count} photo(s) of the same gear item. "
+            "Identify it and estimate its mileage."
+        ),
+    })
+
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{img_data}",
-                            "detail": "low",
-                        },
-                    },
-                    {"type": "text", "text": "Identify this gear and estimate its mileage."},
-                ],
-            },
+            {"role": "user", "content": user_content},
         ],
         max_tokens=300,
     )

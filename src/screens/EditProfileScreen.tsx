@@ -447,7 +447,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   }, [profile.injuryEntries]);
   const [showAddInjury, setShowAddInjury] = useState(false);
   const [equipmentExpanded, setEquipmentExpanded] = useState(false);
-  const [foodsExpanded, setFoodsExpanded] = useState(false);
+  const [foodsExpanded, setFoodsExpanded] = useState(true);
   const [injuryDesc, setInjuryDesc]   = useState('');
   const [injuryBodyPart, setInjuryBodyPart] = useState('');
   const [foodSearch, setFoodSearch]   = useState('');
@@ -2703,6 +2703,234 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {mealplanTab === 'foods' && (
         <View style={styles.section}>
+
+          {/* ── Foods in Kitchen — PRIMARY, top of tab ─────────────── */}
+          <View style={{ marginBottom: 20 }}>
+            {/* Header row */}
+            <TouchableOpacity
+              style={{
+                flexDirection: 'row', alignItems: 'center', gap: 10,
+                marginBottom: foodsExpanded ? 12 : 0,
+              }}
+              onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setFoodsExpanded(p => !p); }}
+              activeOpacity={0.7}>
+              <View style={{
+                width: 34, height: 34, borderRadius: 10,
+                backgroundColor: tc.primary + '18',
+                alignItems: 'center', justifyContent: 'center',
+              }}>
+                <Ionicons name="nutrition-outline" size={18} color={tc.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>
+                  Your Kitchen
+                </Text>
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 1 }}>
+                  {(() => { const n = foods.filter(f => !f.startsWith('__supp__')).length; return n > 0 ? `${n} food${n !== 1 ? 's' : ''} selected` : 'Tap to pick your foods'; })()}
+                </Text>
+              </View>
+              {(() => { const n = foods.filter(f => !f.startsWith('__supp__')).length; return n > 0 ? (
+                <View style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, backgroundColor: tc.primary + '18', borderWidth: 1, borderColor: tc.primary + '40' }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.primary }}>{n}</Text>
+                </View>
+              ) : null; })()}
+              <Ionicons name={foodsExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
+            </TouchableOpacity>
+
+            {/* Add buttons — always visible so users can reach them even when list is collapsed */}
+            {foodsExpanded && (
+              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 10 }}>
+                <TouchableOpacity
+                  style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center', paddingVertical: 10 }]}
+                  onPress={() => handleAddScanPhotos('camera')} disabled={scanFoodsLoading}>
+                  <Ionicons name="camera-outline" size={15} color={tc.primary} />
+                  <Text style={[styles.sectionAddBtnText, { marginTop: 3 }]}>Camera</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center', paddingVertical: 10 }]}
+                  onPress={() => handleAddScanPhotos('library')} disabled={scanFoodsLoading}>
+                  <Ionicons name="images-outline" size={15} color={tc.primary} />
+                  <Text style={[styles.sectionAddBtnText, { marginTop: 3 }]}>Library</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center', paddingVertical: 10 }]}
+                  onPress={() => setAddFoodVisible(true)}>
+                  <Ionicons name="add-circle-outline" size={15} color={tc.primary} />
+                  <Text style={[styles.sectionAddBtnText, { marginTop: 3 }]}>Manual</Text>
+                </TouchableOpacity>
+                {authToken && (
+                  <TouchableOpacity
+                    style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 10, borderRadius: 10, backgroundColor: tc.primary, gap: 3 }}
+                    onPress={() => setBarcodeScanVisible(true)}>
+                    <Ionicons name="barcode-outline" size={15} color="#fff" />
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#fff', marginTop: 3 }}>Scan</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
+
+            <View style={{ display: foodsExpanded ? 'flex' : 'none' }}>
+            {pendingImages.length > 0 && (
+              <View style={{ gap: 6, marginBottom: 10 }}>
+                <TextInput
+                  style={styles.searchInput}
+                  value={scanContext}
+                  onChangeText={setScanContext}
+                  placeholder="Context (e.g. batch of 4, I eat 3 servings)"
+                  placeholderTextColor={tc.textMuted}
+                />
+                <TouchableOpacity
+                  style={[styles.sectionAddBtn, { alignItems: 'center', backgroundColor: tc.primary + '22', borderColor: tc.primary }]}
+                  onPress={handleScanFoods}
+                  disabled={scanFoodsLoading}>
+                  <Text style={[styles.sectionAddBtnText, { color: tc.primary, fontWeight: '700' }]}>
+                    {scanFoodsLoading ? 'Scanning…' : `Scan ${pendingImages.length} Photo${pendingImages.length > 1 ? 's' : ''}`}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => { setPendingImages([]); setScanContext(''); }}>
+                  <Text style={{ fontSize: 12, color: tc.textMuted, textAlign: 'center' }}>Clear photos</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+            {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
+              <>
+                <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+                  <SearchInput
+                    containerStyle={{ flex: 1 }}
+                    style={styles.searchInput}
+                    value={foodSearch}
+                    onChangeText={setFoodSearch}
+                    placeholder="Search foods..."
+                    placeholderTextColor={tc.textMuted}
+                  />
+                </View>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+                  <TouchableOpacity
+                    style={[styles.filterChip, foodCategoryFilter === 'all' && styles.filterChipActive]}
+                    onPress={() => setFoodCategoryFilter('all')}>
+                    <Text style={[styles.filterChipText, foodCategoryFilter === 'all' && styles.filterChipTextActive]}>All</Text>
+                  </TouchableOpacity>
+                  {meta.foodCategories.map(category => (
+                    <TouchableOpacity
+                      key={category.key}
+                      style={[styles.filterChip, foodCategoryFilter === category.key && styles.filterChipActive]}
+                      onPress={() => setFoodCategoryFilter(category.key)}>
+                      <Text style={[styles.filterChipText, foodCategoryFilter === category.key && styles.filterChipTextActive]}>{category.label}</Text>
+                    </TouchableOpacity>
+                  ))}
+                  {customFoodSelected.length > 0 ? (
+                    <TouchableOpacity
+                      style={[styles.filterChip, foodCategoryFilter === 'custom' && styles.filterChipActive]}
+                      onPress={() => setFoodCategoryFilter('custom')}>
+                      <Text style={[styles.filterChipText, foodCategoryFilter === 'custom' && styles.filterChipTextActive]}>Custom</Text>
+                    </TouchableOpacity>
+                  ) : null}
+                </ScrollView>
+
+                {filteredFoodCategories.length === 0 && filteredCustomFoods.length === 0 && !aiFoodSearchLoading && aiFoodResults.length === 0 ? (
+                  <Text style={styles.emptySearchText}>No local foods match — try AI search below.</Text>
+                ) : null}
+
+                {authToken && foodSearch.length > 1 && (
+                  <TouchableOpacity
+                    style={[styles.sectionAddBtn, { alignItems: 'center', marginBottom: 10, backgroundColor: tc.primary + '18', borderColor: tc.primary }]}
+                    onPress={handleAiFoodSearch}
+                    disabled={aiFoodSearchLoading}>
+                    {aiFoodSearchLoading
+                      ? <ActivityIndicator size="small" color={tc.primary} />
+                      : <Text style={[styles.sectionAddBtnText, { color: tc.primary, fontWeight: '700' }]}>Search "{foodSearch}" with AI</Text>}
+                  </TouchableOpacity>
+                )}
+
+                {aiFoodResults.length > 0 && (
+                  <View style={{ marginBottom: 16 }}>
+                    <Text style={[styles.chipGroupLabel, { marginBottom: 8 }]}>AI Results</Text>
+                    {aiFoodResults.map((item, idx) => (
+                      <TouchableOpacity
+                        key={`${item.name}-${idx}`}
+                        style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tc.surface, borderRadius: radius.md, borderWidth: 1, borderColor: tc.primary + '44', padding: 12, marginBottom: 8 }}
+                        onPress={() => addAiFoodResult(item)}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 14, fontWeight: '600', color: tc.textPrimary }}>{item.name}</Text>
+                          <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>{item.serving}</Text>
+                          <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 2 }}>
+                            {item.calories} cal · {item.protein}g pro · {item.carbs}g carbs · {item.fat}g fat
+                          </Text>
+                        </View>
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: tc.primary, marginLeft: 8 }}>+ Add</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+
+                {filteredFoodCategories.map(category => (
+                  <View key={category.key} style={styles.chipGroup}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={15} color={colors.textSecondary} /> : <Text style={{ fontSize: 15 }}>{category.icon}</Text>}
+                      <Text style={styles.chipGroupLabel}>{category.label}</Text>
+                    </View>
+                    <View style={styles.chips}>
+                      {category.foods.map(food => {
+                        const selected = foods.includes(food.name);
+                        return (
+                          <TouchableOpacity
+                            key={food.name}
+                            style={[styles.chip, selected && styles.chipActive]}
+                            onPress={() => toggleFood(food.name)}>
+                            <Text style={[styles.chipText, selected && styles.chipTextActive]}>{food.name}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+                ))}
+                {filteredCustomFoods.length > 0 && (
+                  <View style={styles.chipGroup}>
+                    <Text style={styles.chipGroupLabel}>Custom</Text>
+                    <View style={styles.chips}>
+                      {filteredCustomFoods.map(f => {
+                        const selected = foods.includes(f.name);
+                        return (
+                          <TouchableOpacity
+                            key={f.name}
+                            style={[styles.chip, selected && styles.chipActive]}
+                            onPress={() => toggleFood(f.name)}>
+                            <Text style={[styles.chipText, selected && styles.chipTextActive]}>
+                              {f.name}{f.calories ? ` (${f.calories} cal)` : ''}
+                            </Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </View>
+                )}
+                {savedMeals.length > 0 && (
+                  <View style={styles.chipGroup}>
+                    <Text style={styles.chipGroupLabel}>Saved Meals</Text>
+                    <View style={styles.savedMealsList}>
+                      {savedMeals.map((meal) => (
+                        <View key={meal.id} style={styles.savedMealCard}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.savedMealName}>{meal.name}</Text>
+                            <Text style={styles.savedMealMeta}>{meal.items.join(', ')}</Text>
+                            <Text style={styles.savedMealMeta}>{meal.calories} cal · {meal.protein}g protein</Text>
+                          </View>
+                          <TouchableOpacity onPress={() => setSavedMeals(prev => prev.filter(x => x.id !== meal.id))}>
+                            <Text style={styles.savedMealDelete}>Delete</Text>
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                )}
+              </>
+            )}
+            </View>
+          </View>
+
+          {/* ── Settings divider ─────────────────────────────────────── */}
+          <View style={{ height: 1, backgroundColor: tc.border, marginBottom: 20 }} />
+
           {/* ── Meals per day ─────────────────────────────────────────
               How many distinct meals the user eats per day. Drives the
               backend assembler's `mealsPerDay`, which in turn determines
@@ -2801,198 +3029,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
           </View>
 
-          <View style={{ marginBottom: 8 }}>
-            <TouchableOpacity
-              style={[styles.sectionTopRow, { backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, borderWidth: 1, borderColor: tc.border }]}
-              onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setFoodsExpanded(p => !p); }}
-              activeOpacity={0.7}>
-              <Text style={[styles.sectionLabel, { marginBottom: 0 }]}>
-                Foods in Kitchen{(() => { const count = foods.filter(f => !f.startsWith('__supp__')).length; return count > 0 ? `  ·  ${count} selected` : ''; })()}
-              </Text>
-              <Ionicons name={foodsExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
-            </TouchableOpacity>
-            <View style={{ display: foodsExpanded ? 'flex' : 'none', marginTop: 8 }}>
-            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 6 }}>
-              <TouchableOpacity style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center' }]} onPress={() => handleAddScanPhotos('camera')} disabled={scanFoodsLoading}>
-                <Text style={styles.sectionAddBtnText}><Ionicons name="camera-outline" size={14} /> Camera</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center' }]} onPress={() => handleAddScanPhotos('library')} disabled={scanFoodsLoading}>
-                <Text style={styles.sectionAddBtnText}><Ionicons name="images-outline" size={14} /> Library</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center' }]} onPress={() => setAddFoodVisible(true)}>
-                <Text style={styles.sectionAddBtnText}>+ Manual</Text>
-              </TouchableOpacity>
-            </View>
-            {pendingImages.length > 0 && (
-              <View style={{ gap: 6, marginBottom: 6 }}>
-                <TextInput
-                  style={styles.searchInput}
-                  value={scanContext}
-                  onChangeText={setScanContext}
-                  placeholder="Context (e.g. batch of 4, I eat 3 servings)"
-                  placeholderTextColor={tc.textMuted}
-                />
-                <TouchableOpacity
-                  style={[styles.sectionAddBtn, { alignItems: 'center', backgroundColor: tc.primary + '22', borderColor: tc.primary }]}
-                  onPress={handleScanFoods}
-                  disabled={scanFoodsLoading}>
-                  <Text style={[styles.sectionAddBtnText, { color: tc.primary, fontWeight: '700' }]}>
-                    {scanFoodsLoading ? 'Scanning…' : `Scan ${pendingImages.length} Photo${pendingImages.length > 1 ? 's' : ''}`}
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => { setPendingImages([]); setScanContext(''); }}>
-                  <Text style={{ fontSize: 12, color: tc.textMuted, textAlign: 'center' }}>Clear photos</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-          {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
-            <>
-              <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
-                <SearchInput
-                  containerStyle={{ flex: 1 }}
-                  style={styles.searchInput}
-                  value={foodSearch}
-                  onChangeText={setFoodSearch}
-                  placeholder="Search foods..."
-                  placeholderTextColor={tc.textMuted}
-                />
-                {authToken && (
-                  <TouchableOpacity
-                    style={{ alignItems: 'center', justifyContent: 'center', width: 42, height: 42, borderRadius: 10, backgroundColor: colors.primary }}
-                    onPress={() => setBarcodeScanVisible(true)}>
-                    <Ionicons name="barcode-outline" size={22} color="#fff" />
-                  </TouchableOpacity>
-                )}
-              </View>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
-                <TouchableOpacity
-                  style={[styles.filterChip, foodCategoryFilter === 'all' && styles.filterChipActive]}
-                  onPress={() => setFoodCategoryFilter('all')}>
-                  <Text style={[styles.filterChipText, foodCategoryFilter === 'all' && styles.filterChipTextActive]}>All</Text>
-                </TouchableOpacity>
-                {meta.foodCategories.map(category => (
-                  <TouchableOpacity
-                    key={category.key}
-                    style={[styles.filterChip, foodCategoryFilter === category.key && styles.filterChipActive]}
-                    onPress={() => setFoodCategoryFilter(category.key)}>
-                    <Text style={[styles.filterChipText, foodCategoryFilter === category.key && styles.filterChipTextActive]}>{category.label}</Text>
-                  </TouchableOpacity>
-                ))}
-                {customFoodSelected.length > 0 ? (
-                  <TouchableOpacity
-                    style={[styles.filterChip, foodCategoryFilter === 'custom' && styles.filterChipActive]}
-                    onPress={() => setFoodCategoryFilter('custom')}>
-                    <Text style={[styles.filterChipText, foodCategoryFilter === 'custom' && styles.filterChipTextActive]}>Custom</Text>
-                  </TouchableOpacity>
-                ) : null}
-              </ScrollView>
-
-              {filteredFoodCategories.length === 0 && filteredCustomFoods.length === 0 && !aiFoodSearchLoading && aiFoodResults.length === 0 ? (
-                <Text style={styles.emptySearchText}>No local foods match — try AI search below.</Text>
-              ) : null}
-
-              {/* AI Food Search */}
-              {authToken && foodSearch.length > 1 && (
-                <TouchableOpacity
-                  style={[styles.sectionAddBtn, { alignItems: 'center', marginBottom: 10, backgroundColor: tc.primary + '18', borderColor: tc.primary }]}
-                  onPress={handleAiFoodSearch}
-                  disabled={aiFoodSearchLoading}>
-                  {aiFoodSearchLoading
-                    ? <ActivityIndicator size="small" color={tc.primary} />
-                    : <Text style={[styles.sectionAddBtnText, { color: tc.primary, fontWeight: '700' }]}>Search "{foodSearch}" with AI</Text>}
-                </TouchableOpacity>
-              )}
-
-              {aiFoodResults.length > 0 && (
-                <View style={{ marginBottom: 16 }}>
-                  <Text style={[styles.chipGroupLabel, { marginBottom: 8 }]}>AI Results</Text>
-                  {aiFoodResults.map((item, idx) => (
-                    <TouchableOpacity
-                      key={`${item.name}-${idx}`}
-                      style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tc.surface, borderRadius: radius.md, borderWidth: 1, borderColor: tc.primary + '44', padding: 12, marginBottom: 8 }}
-                      onPress={() => addAiFoodResult(item)}>
-                      <View style={{ flex: 1 }}>
-                        <Text style={{ fontSize: 14, fontWeight: '600', color: tc.textPrimary }}>{item.name}</Text>
-                        <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>{item.serving}</Text>
-                        <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 2 }}>
-                          {item.calories} cal · {item.protein}g pro · {item.carbs}g carbs · {item.fat}g fat
-                        </Text>
-                      </View>
-                      <Text style={{ fontSize: 13, fontWeight: '700', color: tc.primary, marginLeft: 8 }}>+ Add</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              )}
-
-              {filteredFoodCategories.map(category => (
-                <View key={category.key} style={styles.chipGroup}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={15} color={colors.textSecondary} /> : <Text style={{ fontSize: 15 }}>{category.icon}</Text>}
-                    <Text style={styles.chipGroupLabel}>{category.label}</Text>
-                  </View>
-                  <View style={styles.chips}>
-                    {category.foods.map(food => {
-                      const selected = foods.includes(food.name);
-                      return (
-                        <TouchableOpacity
-                          key={food.name}
-                          style={[styles.chip, selected && styles.chipActive]}
-                          onPress={() => toggleFood(food.name)}>
-                          <Text style={[styles.chipText, selected && styles.chipTextActive]}>{food.name}</Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                </View>
-              ))}
-              {filteredCustomFoods.length > 0 && (
-                <View style={styles.chipGroup}>
-                  <Text style={styles.chipGroupLabel}>Custom</Text>
-                  <View style={styles.chips}>
-                    {filteredCustomFoods.map(f => {
-                      const selected = foods.includes(f.name);
-                      return (
-                        <TouchableOpacity
-                          key={f.name}
-                          style={[styles.chip, selected && styles.chipActive]}
-                          onPress={() => toggleFood(f.name)}>
-                          <Text style={[styles.chipText, selected && styles.chipTextActive]}>
-                            {f.name}{f.calories ? ` (${f.calories} cal)` : ''}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    })}
-                  </View>
-                </View>
-              )}
-              {savedMeals.length > 0 && (
-                <View style={styles.chipGroup}>
-                  <Text style={styles.chipGroupLabel}>Saved Meals</Text>
-                  <View style={styles.savedMealsList}>
-                    {savedMeals.map((meal) => (
-                      <View key={meal.id} style={styles.savedMealCard}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={styles.savedMealName}>{meal.name}</Text>
-                          <Text style={styles.savedMealMeta}>{meal.items.join(', ')}</Text>
-                          <Text style={styles.savedMealMeta}>{meal.calories} cal · {meal.protein}g protein</Text>
-                        </View>
-                        <TouchableOpacity onPress={() => setSavedMeals(prev => prev.filter(x => x.id !== meal.id))}>
-                          <Text style={styles.savedMealDelete}>Delete</Text>
-                        </TouchableOpacity>
-                      </View>
-                    ))}
-                  </View>
-                </View>
-              )}
-
-              {/* Routine management moved out of the edit-meal-plan page.
-                  Pin meals as routines directly from the Meal card on the
-                  home screen via "Pin as Routine" — one-tap, tied to the
-                  exact meal the user is looking at. No duplicate UI. */}
-            </>
-          )}
-          </View>
-          </View>
         </View>
         )}
 

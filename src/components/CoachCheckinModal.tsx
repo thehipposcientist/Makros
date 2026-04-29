@@ -16,8 +16,10 @@ import { cleanAiText } from '../utils/aiText';
 import type { AppThemeName } from '../types';
 import {
   submitCoachCheckin,
+  submitPlanWeekCheckin,
   CoachCheckinFeedback,
   CoachCheckinResponse,
+  PlanWeekCheckinRecord,
   getWeeklyReview,
   WeeklyReviewResponse,
   applyRecommendationAction,
@@ -38,9 +40,16 @@ interface Props {
   authToken: string;
   onClose: () => void;
   /** Called after a successful check-in so the parent can refresh state. */
-  onCompleted?: (response: CoachCheckinResponse) => void;
+  onCompleted?: (response: CoachCheckinResponse | PlanWeekCheckinRecord) => void;
   /** Active theme — falls back to `midnight` when not provided. */
   themeName?: AppThemeName;
+  /** When set, submit hits the durable plan-week check-in endpoint (one-time per week). */
+  planWeekId?: number | null;
+  /** When true, skip the form and show the saved recap from existingCheckin. */
+  readOnly?: boolean;
+  existingCheckin?: PlanWeekCheckinRecord | null;
+  /** Shown as a secondary link when the user can skip this week's check-in. */
+  onSkip?: () => void;
 }
 
 type Scale = 1 | 2 | 3 | 4 | 5;
@@ -52,7 +61,10 @@ const SCALE_LABELS: Record<string, string[]> = {
   motivation: ['Zero',    'Low',  'OK',     'Good',  'Fired up'],
 };
 
-export default function CoachCheckinModal({ visible, authToken, onClose, onCompleted, themeName }: Props) {
+export default function CoachCheckinModal({
+  visible, authToken, onClose, onCompleted, themeName,
+  planWeekId, readOnly, existingCheckin, onSkip,
+}: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
   const styles = React.useMemo(() => createStyles(colors), [colors]);
@@ -109,20 +121,31 @@ export default function CoachCheckinModal({ visible, authToken, onClose, onCompl
     setSubmitting(true);
     setError(null);
     try {
-      const feedback: CoachCheckinFeedback = {};
-      if (energy !== null) feedback.energy = energy;
-      if (hunger !== null) feedback.hunger = hunger;
-      if (soreness !== null) feedback.soreness = soreness;
-      if (motivation !== null) feedback.motivation = motivation;
-      if (scheduleIssue) feedback.schedule_issue = true;
-      if (note.trim()) feedback.note = note.trim();
-
-      const res = await submitCoachCheckin(authToken, {
-        checkin_type: 'manual',
-        feedback,
-      });
-      setResponse(res);
-      onCompleted?.(res);
+      if (planWeekId) {
+        // Durable plan-week check-in — one-time per week, saves AI response
+        const res = await submitPlanWeekCheckin(authToken, planWeekId, {
+          energy: energy ?? undefined,
+          hunger: hunger ?? undefined,
+          soreness: soreness ?? undefined,
+          motivation: motivation ?? undefined,
+          schedule_issue: scheduleIssue,
+          note: note.trim() || undefined,
+        });
+        setResponse(res as any);
+        onCompleted?.(res);
+      } else {
+        // Legacy manual check-in (non-plan-week context)
+        const feedback: CoachCheckinFeedback = {};
+        if (energy !== null) feedback.energy = energy;
+        if (hunger !== null) feedback.hunger = hunger;
+        if (soreness !== null) feedback.soreness = soreness;
+        if (motivation !== null) feedback.motivation = motivation;
+        if (scheduleIssue) feedback.schedule_issue = true;
+        if (note.trim()) feedback.note = note.trim();
+        const res = await submitCoachCheckin(authToken, { checkin_type: 'manual', feedback });
+        setResponse(res);
+        onCompleted?.(res);
+      }
     } catch (e: any) {
       setError(e?.message ?? 'Check-in failed');
     } finally {
@@ -179,7 +202,7 @@ export default function CoachCheckinModal({ visible, authToken, onClose, onCompl
           <TouchableOpacity onPress={handleClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={styles.cancelText}>Close</Text>
           </TouchableOpacity>
-          <Text style={styles.title}>Check in</Text>
+          <Text style={styles.title}>{readOnly ? 'Weekly recap' : 'Check in'}</Text>
           <View style={{ width: 50 }} />
         </View>
 
@@ -191,7 +214,100 @@ export default function CoachCheckinModal({ visible, authToken, onClose, onCompl
             contentContainerStyle={styles.scrollContent}
             keyboardShouldPersistTaps="handled">
 
-            {!response ? (
+            {/* Read-only recap: show saved check-in without the form */}
+            {readOnly && existingCheckin ? (
+              <>
+                {existingCheckin.review_snapshot_json && (
+                  <View style={{
+                    backgroundColor: colors.surface, borderRadius: radius.lg,
+                    padding: 14, marginBottom: 16,
+                    borderWidth: 1, borderColor: colors.primary + '44',
+                  }}>
+                    <Text style={{ fontSize: 10, fontWeight: '800', letterSpacing: 0.8, color: colors.primary, marginBottom: 6 }}>
+                      WEEKLY REVIEW · {existingCheckin.week_start_date
+                        ? `${new Date(existingCheckin.week_start_date + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${new Date(existingCheckin.week_end_date + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
+                        : ''}
+                    </Text>
+                    <View style={{ flexDirection: 'row', gap: 16, marginBottom: existingCheckin.ai_message ? 12 : 0 }}>
+                      {existingCheckin.review_snapshot_json.sessions_completed != null && (
+                        <View>
+                          <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>SESSIONS</Text>
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginTop: 1 }}>
+                            {existingCheckin.review_snapshot_json.sessions_completed}/{existingCheckin.review_snapshot_json.sessions_planned}
+                          </Text>
+                        </View>
+                      )}
+                      {existingCheckin.review_snapshot_json.cardio_minutes != null && (
+                        <View>
+                          <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>CARDIO</Text>
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginTop: 1 }}>
+                            {Math.round(existingCheckin.review_snapshot_json.cardio_minutes)}m
+                          </Text>
+                        </View>
+                      )}
+                      {existingCheckin.review_snapshot_json.avg_protein_g != null && existingCheckin.review_snapshot_json.days_logged > 0 && (
+                        <View>
+                          <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>PROTEIN</Text>
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginTop: 1 }}>
+                            {Math.round(existingCheckin.review_snapshot_json.avg_protein_g)}g
+                          </Text>
+                        </View>
+                      )}
+                    </View>
+                  </View>
+                )}
+
+                {existingCheckin.ai_message && (
+                  <View style={[styles.responseHeader, { borderLeftColor: colors.primary }]}>
+                    <Text style={styles.responseType}>coach message</Text>
+                    <Text style={styles.responseMessage}>{cleanAiText(existingCheckin.ai_message)}</Text>
+                  </View>
+                )}
+
+                {existingCheckin.ai_delta && Object.keys(existingCheckin.ai_delta).length > 0 && (
+                  <View style={styles.deltaBlock}>
+                    <Text style={styles.deltaLabel}>Plan adjustment</Text>
+                    {Object.entries(existingCheckin.ai_delta).map(([k, v]) => (
+                      <Text key={k} style={styles.deltaLine}>
+                        {k}: {typeof v === 'number' && v > 0 ? '+' : ''}{String(v)}
+                      </Text>
+                    ))}
+                  </View>
+                )}
+
+                {existingCheckin.commitments_json && existingCheckin.commitments_json.length > 0 && (
+                  <View style={styles.deltaBlock}>
+                    <Text style={styles.deltaLabel}>Next week commitments</Text>
+                    {existingCheckin.commitments_json.map((c, i) => (
+                      <Text key={i} style={styles.deltaLine}>• {c.label ?? c.kind}</Text>
+                    ))}
+                  </View>
+                )}
+
+                {existingCheckin.energy != null && (
+                  <View style={{ marginBottom: 16 }}>
+                    <Text style={{ fontSize: 10, fontWeight: '800', color: colors.textMuted, letterSpacing: 0.5, marginBottom: 8 }}>YOUR RATINGS</Text>
+                    <View style={{ flexDirection: 'row', gap: 16, flexWrap: 'wrap' }}>
+                      {[
+                        { label: 'ENERGY', value: existingCheckin.energy },
+                        { label: 'HUNGER', value: existingCheckin.hunger },
+                        { label: 'SORENESS', value: existingCheckin.soreness },
+                        { label: 'MOTIVATION', value: existingCheckin.motivation },
+                      ].filter(r => r.value != null).map(r => (
+                        <View key={r.label}>
+                          <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>{r.label}</Text>
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginTop: 1 }}>{r.value}/5</Text>
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                )}
+
+                <TouchableOpacity style={styles.doneBtn} onPress={handleClose}>
+                  <Text style={styles.doneBtnText}>Done</Text>
+                </TouchableOpacity>
+              </>
+            ) : !response ? (
               <>
                 {/* Trainer + nutritionist read for the week — lets the
                     check-in read as "confirm / refine" instead of the
@@ -363,53 +479,85 @@ export default function CoachCheckinModal({ visible, authToken, onClose, onCompl
                 <Text style={styles.submitHint}>
                   The coach will review your trends and let you know if anything needs to change.
                 </Text>
+                {onSkip && (
+                  <TouchableOpacity onPress={onSkip} style={{ alignItems: 'center', paddingVertical: 10 }}>
+                    <Text style={{ color: colors.textMuted, fontSize: 13, fontWeight: '600' }}>
+                      Skip this week's check-in
+                    </Text>
+                  </TouchableOpacity>
+                )}
               </>
             ) : (
               <>
-                <View style={[styles.responseHeader, { borderLeftColor: responseColor(response.response_type) }]}>
-                  <Text style={styles.responseType}>{response.response_type.replace('_', ' ')}</Text>
-                  <Text style={styles.responseMessage}>{cleanAiText(response.message)}</Text>
-                </View>
-
-                {response.delta && (
-                  <View style={styles.deltaBlock}>
-                    <Text style={styles.deltaLabel}>Plan adjustment</Text>
-                    {Object.entries(response.delta).map(([k, v]) => (
-                      <Text key={k} style={styles.deltaLine}>
-                        {k}: {typeof v === 'number' && v > 0 ? '+' : ''}{String(v)}
-                      </Text>
-                    ))}
-                    {response.applied_kcal_adjustment_total !== null && (
-                      <Text style={styles.deltaFootnote}>
-                        New total coaching offset: {response.applied_kcal_adjustment_total >= 0 ? '+' : ''}
-                        {response.applied_kcal_adjustment_total} kcal/day
-                      </Text>
-                    )}
-                  </View>
-                )}
-
-                {response.flags.length > 0 && (
-                  <View style={styles.flagsBlock}>
-                    <Text style={styles.flagsLabel}>Active flags</Text>
-                    {response.flags.map((f) => (
-                      <View key={f.key} style={styles.flagRow}>
-                        <Text style={styles.flagKey}>{f.key.replace(/_/g, ' ')}</Text>
-                        <Text style={[styles.flagSeverity, {
-                          color: f.severity === 'high' ? '#ef4444' : f.severity === 'med' ? '#F59E0B' : colors.textMuted,
-                        }]}>{f.severity}</Text>
+                {(() => {
+                  // Support both CoachCheckinResponse (legacy) and PlanWeekCheckinRecord shapes
+                  const r = response as any;
+                  const msg = r.ai_message ?? r.message ?? '';
+                  const delta = r.ai_delta ?? r.delta ?? null;
+                  const responseType = r.response_type ?? null;
+                  const flags: any[] = r.flags ?? [];
+                  const overrides: string[] = r.overrides ?? [];
+                  const commitments: any[] = r.commitments_json ?? [];
+                  return (
+                    <>
+                      <View style={[styles.responseHeader, { borderLeftColor: responseType ? responseColor(responseType) : colors.primary }]}>
+                        {responseType && (
+                          <Text style={styles.responseType}>{responseType.replace('_', ' ')}</Text>
+                        )}
+                        <Text style={styles.responseMessage}>{cleanAiText(msg)}</Text>
                       </View>
-                    ))}
-                  </View>
-                )}
 
-                {response.overrides.length > 0 && (
-                  <View style={styles.overridesBlock}>
-                    <Text style={styles.overridesLabel}>Safety overrides</Text>
-                    {response.overrides.map((o, i) => (
-                      <Text key={i} style={styles.overrideLine}>• {o}</Text>
-                    ))}
-                  </View>
-                )}
+                      {delta && (
+                        <View style={styles.deltaBlock}>
+                          <Text style={styles.deltaLabel}>Plan adjustment</Text>
+                          {Object.entries(delta).map(([k, v]) => (
+                            <Text key={k} style={styles.deltaLine}>
+                              {k}: {typeof v === 'number' && (v as number) > 0 ? '+' : ''}{String(v)}
+                            </Text>
+                          ))}
+                          {r.applied_kcal_adjustment_total != null && (
+                            <Text style={styles.deltaFootnote}>
+                              New total coaching offset: {r.applied_kcal_adjustment_total >= 0 ? '+' : ''}
+                              {r.applied_kcal_adjustment_total} kcal/day
+                            </Text>
+                          )}
+                        </View>
+                      )}
+
+                      {commitments.length > 0 && (
+                        <View style={styles.deltaBlock}>
+                          <Text style={styles.deltaLabel}>Next week commitments</Text>
+                          {commitments.map((c, i) => (
+                            <Text key={i} style={styles.deltaLine}>• {c.label ?? c.kind}</Text>
+                          ))}
+                        </View>
+                      )}
+
+                      {flags.length > 0 && (
+                        <View style={styles.flagsBlock}>
+                          <Text style={styles.flagsLabel}>Active flags</Text>
+                          {flags.map((f) => (
+                            <View key={f.key} style={styles.flagRow}>
+                              <Text style={styles.flagKey}>{f.key.replace(/_/g, ' ')}</Text>
+                              <Text style={[styles.flagSeverity, {
+                                color: f.severity === 'high' ? '#ef4444' : f.severity === 'med' ? '#F59E0B' : colors.textMuted,
+                              }]}>{f.severity}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      )}
+
+                      {overrides.length > 0 && (
+                        <View style={styles.overridesBlock}>
+                          <Text style={styles.overridesLabel}>Safety overrides</Text>
+                          {overrides.map((o, i) => (
+                            <Text key={i} style={styles.overrideLine}>• {o}</Text>
+                          ))}
+                        </View>
+                      )}
+                    </>
+                  );
+                })()}
 
                 <TouchableOpacity style={styles.doneBtn} onPress={handleClose}>
                   <Text style={styles.doneBtnText}>Done</Text>

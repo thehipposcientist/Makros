@@ -281,19 +281,43 @@ export default function SocialFeedView({
           </View>
         ) : null}
 
-        {prs.length > 0 ? (
-          <View style={styles.prRow}>
-            {prs.map((pr, i) => (
-              <View key={i} style={styles.prBadge}>
-                <Ionicons name="trophy-outline" size={10} color={colors.warning ?? '#F59E0B'} />
-                <Text style={styles.prText} numberOfLines={1}>
-                  {pr.payload.exercise}
-                  {pr.payload.value != null ? `  ${pr.payload.value} ${pr.payload.unit ?? 'lbs'}` : ''}
-                </Text>
-              </View>
-            ))}
-          </View>
-        ) : null}
+        {prs.length > 0 ? (() => {
+          // One badge per exercise — keep the most descriptive PR type.
+          // heaviest_weight > estimated_1rm > volume_record. Without this,
+          // a single Bench Press session hitting all three types produces
+          // three identical-looking "Bench Press 225 lbs" trophies.
+          const PR_PRIORITY: Record<string, number> = {
+            heaviest_weight: 3, estimated_1rm: 2, volume_record: 1,
+          };
+          const PR_LABEL: Record<string, string> = {
+            heaviest_weight: 'New max', estimated_1rm: 'New 1RM', volume_record: 'Vol PR',
+          };
+          const byExercise = new Map<string, FeedItem>();
+          for (const pr of prs) {
+            const ex = (pr.payload.exercise ?? '').toLowerCase();
+            const existing = byExercise.get(ex);
+            const currP = PR_PRIORITY[pr.payload.pr_type ?? ''] ?? 0;
+            const exiP  = existing ? (PR_PRIORITY[existing.payload.pr_type ?? ''] ?? 0) : -1;
+            if (!existing || currP > exiP) byExercise.set(ex, pr);
+          }
+          return (
+            <View style={styles.prRow}>
+              {Array.from(byExercise.values()).map((pr, i) => {
+                const typeLabel = PR_LABEL[pr.payload.pr_type ?? ''];
+                return (
+                  <View key={i} style={styles.prBadge}>
+                    <Ionicons name="trophy-outline" size={10} color={colors.warning ?? '#F59E0B'} />
+                    <Text style={styles.prText} numberOfLines={1}>
+                      {pr.payload.exercise}
+                      {typeLabel ? `  ·  ${typeLabel}` : ''}
+                      {pr.payload.value != null ? `  ${pr.payload.value} ${pr.payload.unit ?? 'lbs'}` : ''}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          );
+        })() : null}
 
         <View style={styles.actionRow}>
           <TouchableOpacity

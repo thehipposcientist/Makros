@@ -3223,12 +3223,106 @@ export interface AutoRenewPlanWeekResponse {
   explanation: string;
 }
 
+/** Returned by auto-renew when a check-in must be completed first. */
+export interface CheckinRequiredResponse {
+  checkin_required: true;
+  plan_week_id: number;
+  week_start: string;
+  week_end: string;
+}
+
+export interface PlanWeekCheckinRecord {
+  id: number;
+  user_id: number;
+  plan_week_id: number;
+  week_start_date: string;
+  week_end_date: string;
+  submitted_at: string | null;
+  skipped: boolean;
+  energy: number | null;
+  hunger: number | null;
+  soreness: number | null;
+  motivation: number | null;
+  schedule_issue: boolean;
+  note: string | null;
+  review_snapshot_json: Record<string, any> | null;
+  ai_decision_id: number | null;
+  ai_message: string | null;
+  ai_delta: Record<string, any> | null;
+  commitments_json: Array<Record<string, any>> | null;
+  plan_goal: string | null;
+  created_at: string;
+  // Extra fields included in submit response
+  review_summary?: Record<string, any>;
+}
+
+export interface CheckinStatusResponse {
+  status: 'pending' | 'completed' | 'skipped' | 'none';
+  checkin: PlanWeekCheckinRecord | null;
+  week_start: string | null;
+  week_end: string | null;
+  plan_week_id: number | null;
+}
+
+export interface PlanWeekCheckinSubmit {
+  energy?: number | null;
+  hunger?: number | null;
+  soreness?: number | null;
+  motivation?: number | null;
+  schedule_issue?: boolean;
+  note?: string | null;
+}
+
 /** Auto-generate the next 7-day week when the active PlanWeek has
- *  expired (end_date < today). Idempotent: a no-op when the current
- *  week is still active. */
-export async function autoRenewPlanWeek(token: string): Promise<AutoRenewPlanWeekResponse> {
-  return request<AutoRenewPlanWeekResponse>('/plans/week/auto-renew', {
+ *  expired (end_date < today). Returns CheckinRequiredResponse when
+ *  a check-in must be completed or skipped first. */
+export async function autoRenewPlanWeek(
+  token: string,
+): Promise<AutoRenewPlanWeekResponse | CheckinRequiredResponse> {
+  return request<AutoRenewPlanWeekResponse | CheckinRequiredResponse>('/plans/week/auto-renew', {
     method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function getCheckinStatus(token: string): Promise<CheckinStatusResponse> {
+  return request<CheckinStatusResponse>('/plans/week/checkin-status', {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** Submit the one-time coaching check-in for a plan week. HTTP 409 if already submitted. */
+export async function submitPlanWeekCheckin(
+  token: string,
+  planWeekId: number,
+  body: PlanWeekCheckinSubmit,
+): Promise<PlanWeekCheckinRecord> {
+  return request<PlanWeekCheckinRecord>(`/plans/week/${planWeekId}/checkin`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Skip the check-in for a plan week and immediately auto-renew. */
+export async function skipPlanWeekCheckin(
+  token: string,
+  planWeekId: number,
+): Promise<AutoRenewPlanWeekResponse> {
+  return request<AutoRenewPlanWeekResponse>(`/plans/week/${planWeekId}/checkin/skip`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** Fetch a saved check-in recap without triggering AI. */
+export async function getPlanWeekCheckin(
+  token: string,
+  planWeekId: number,
+): Promise<PlanWeekCheckinRecord> {
+  return request<PlanWeekCheckinRecord>(`/plans/week/${planWeekId}/checkin`, {
+    method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -3640,6 +3734,7 @@ export interface GearItem {
   retirement_threshold_miles: number | null;
   auto_track_keywords: string[];
   notes: string | null;
+  photos: string[];
   created_at: string;
   // Computed by backend
   total_miles: number;
@@ -3655,6 +3750,7 @@ export interface GearItemCreate {
   retirement_threshold_miles?: number | null;
   auto_track_keywords?: string[];
   notes?: string | null;
+  photos?: string[];
 }
 
 export async function listGear(token: string): Promise<GearItem[]> {
@@ -3714,11 +3810,11 @@ export interface GearIdentifyResult {
   notes: string | null;
 }
 
-export async function identifyGear(token: string, imageBase64: string): Promise<GearIdentifyResult> {
+export async function identifyGear(token: string, images: string[]): Promise<GearIdentifyResult> {
   return request<GearIdentifyResult>('/gear/identify', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ image_base64: imageBase64 }),
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ images }),
   });
 }
 

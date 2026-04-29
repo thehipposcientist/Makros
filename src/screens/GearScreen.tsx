@@ -120,6 +120,20 @@ function GearCard({
         </View>
       </View>
 
+      {/* Photo strip — shown when the item has reference photos */}
+      {item.photos && item.photos.length > 0 && (
+        <View style={{ flexDirection: 'row', gap: 6, marginTop: 10 }}>
+          {item.photos.slice(0, 4).map((uri, idx) => (
+            <Image
+              key={idx}
+              source={{ uri }}
+              style={{ width: 56, height: 56, borderRadius: 8, backgroundColor: color + '11' }}
+              resizeMode="cover"
+            />
+          ))}
+        </View>
+      )}
+
       <View style={styles.statsRow}>
         <View style={styles.stat}>
           <Text style={[styles.statValue, { color: tc.textPrimary }]}>{item.total_miles.toFixed(1)}</Text>
@@ -150,6 +164,8 @@ function GearCard({
 
 // ─── Add/Edit modal ───────────────────────────────────────────────────────────
 
+const MAX_PHOTOS = 4;
+
 function GearFormModal({
   visible,
   initial,
@@ -172,7 +188,7 @@ function GearFormModal({
   const [keywords, setKeywords] = useState('');
   const [notes, setNotes] = useState('');
   const [aiScanning, setAiScanning] = useState(false);
-  const [aiPhoto, setAiPhoto] = useState<string | null>(null);
+  const [photos, setPhotos] = useState<string[]>([]);  // data URIs
   const [aiNote, setAiNote] = useState<string | null>(null);
 
   useEffect(() => {
@@ -183,7 +199,7 @@ function GearFormModal({
       setThreshold(initial?.retirement_threshold_miles != null ? String(initial.retirement_threshold_miles) : '');
       setKeywords((initial?.auto_track_keywords ?? []).join(', '));
       setNotes(initial?.notes ?? '');
-      setAiPhoto(null);
+      setPhotos(initial?.photos ?? []);
       setAiNote(null);
     }
   }, [visible, initial]);
@@ -200,50 +216,56 @@ function GearFormModal({
     }
   };
 
-  const handleAIScan = async () => {
+  const handleAddPhoto = async () => {
+    if (photos.length >= MAX_PHOTOS) return;
     try {
       const ImagePicker = await import('expo-image-picker');
       const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!perm.granted) {
-        Alert.alert('Permission needed', 'Allow photo access to scan your gear.');
+        Alert.alert('Permission needed', 'Allow photo access to add gear photos.');
         return;
       }
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        quality: 0.6,
+        quality: 0.5,
         base64: true,
         allowsEditing: true,
         aspect: [4, 3],
       });
       if (result.canceled || !result.assets?.[0]?.base64) return;
-      const b64 = result.assets[0].base64!;
-      setAiPhoto(`data:image/jpeg;base64,${b64}`);
-      setAiScanning(true);
-      try {
-        const identified = await identifyGear(authToken, b64);
-        // Pre-fill form with AI results, but don't overwrite values the
-        // user already typed (only fill when the field is empty/default).
-        if (!name) setName(identified.name);
-        if (GEAR_TYPES.find(g => g.value === identified.gear_type)) {
-          handleGearTypeChange(identified.gear_type);
-        }
-        if (identified.estimated_miles != null && startingMiles === '0') {
-          setStartingMiles(String(Math.round(identified.estimated_miles)));
-        }
-        if (identified.retirement_threshold_miles != null && !threshold) {
-          setThreshold(String(Math.round(identified.retirement_threshold_miles)));
-        }
-        const conf = identified.confidence === 'high' ? '✓ High confidence'
-          : identified.confidence === 'medium' ? '~ Medium confidence'
-          : '? Low confidence — please verify';
-        setAiNote(`${conf}${identified.notes ? `\n${identified.notes}` : ''}`);
-      } catch {
-        setAiNote('AI identification failed — fill in manually.');
-      } finally {
-        setAiScanning(false);
-      }
+      const uri = `data:image/jpeg;base64,${result.assets[0].base64}`;
+      setPhotos(prev => [...prev, uri]);
     } catch {
       Alert.alert('Photo error', 'Could not open photo library.');
+    }
+  };
+
+  const handleScanAll = async () => {
+    if (photos.length === 0) return;
+    setAiScanning(true);
+    setAiNote(null);
+    try {
+      // Send raw base64 strings (strip data URI prefix)
+      const b64List = photos.map(p => p.includes(',') ? p.split(',')[1] : p);
+      const identified = await identifyGear(authToken, b64List);
+      if (!name) setName(identified.name);
+      if (GEAR_TYPES.find(g => g.value === identified.gear_type)) {
+        handleGearTypeChange(identified.gear_type);
+      }
+      if (identified.estimated_miles != null && startingMiles === '0') {
+        setStartingMiles(String(Math.round(identified.estimated_miles)));
+      }
+      if (identified.retirement_threshold_miles != null && !threshold) {
+        setThreshold(String(Math.round(identified.retirement_threshold_miles)));
+      }
+      const conf = identified.confidence === 'high' ? '✓ High confidence'
+        : identified.confidence === 'medium' ? '~ Medium confidence'
+        : '? Low confidence — please verify';
+      setAiNote(`${conf}${identified.notes ? `\n${identified.notes}` : ''}`);
+    } catch {
+      setAiNote('AI identification failed — fill in manually.');
+    } finally {
+      setAiScanning(false);
     }
   };
 
@@ -259,6 +281,7 @@ function GearFormModal({
       retirement_threshold_miles: threshold ? parseFloat(threshold) : null,
       auto_track_keywords: keywords.split(',').map(k => k.trim()).filter(Boolean),
       notes: notes.trim() || null,
+      photos,
     });
   };
 
@@ -278,43 +301,83 @@ function GearFormModal({
         </View>
 
         <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 60 }}>
-          {/* AI scan — only show when adding new gear */}
-          {!initial && (
-            <View style={{ marginBottom: 20 }}>
+          {/* Photos section — visible when adding or editing (editing shows existing photos) */}
+          <View style={{ marginBottom: 20 }}>
+            <Text style={[styles.fieldLabel, { color: tc.textSecondary, marginTop: 0 }]}>
+              PHOTOS {photos.length > 0 ? `(${photos.length}/${MAX_PHOTOS})` : `— UP TO ${MAX_PHOTOS}`}
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+              {photos.map((uri, idx) => (
+                <View key={idx} style={{ position: 'relative' }}>
+                  <Image
+                    source={{ uri }}
+                    style={{ width: 80, height: 80, borderRadius: 10, backgroundColor: tc.surface }}
+                    resizeMode="cover"
+                  />
+                  <TouchableOpacity
+                    onPress={() => setPhotos(prev => prev.filter((_, i) => i !== idx))}
+                    style={{
+                      position: 'absolute', top: -6, right: -6,
+                      width: 20, height: 20, borderRadius: 10,
+                      backgroundColor: tc.error ?? '#EF4444',
+                      alignItems: 'center', justifyContent: 'center',
+                    }}
+                    hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                  >
+                    <Ionicons name="close" size={12} color="#fff" />
+                  </TouchableOpacity>
+                </View>
+              ))}
+              {photos.length < MAX_PHOTOS && (
+                <TouchableOpacity
+                  onPress={handleAddPhoto}
+                  style={{
+                    width: 80, height: 80, borderRadius: 10, borderWidth: 1.5,
+                    borderStyle: 'dashed', borderColor: tc.primary + '66',
+                    alignItems: 'center', justifyContent: 'center',
+                    backgroundColor: tc.primary + '0A',
+                  }}
+                >
+                  <Ionicons name="add" size={26} color={tc.primary} />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {/* Scan with AI — appears when photos are present */}
+            {photos.length > 0 && (
               <TouchableOpacity
-                onPress={handleAIScan}
+                onPress={handleScanAll}
                 disabled={aiScanning}
                 style={{
                   flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                  backgroundColor: tc.primary + '18', borderRadius: 12, borderWidth: 1,
-                  borderColor: tc.primary + '55', padding: 14, gap: 8,
+                  backgroundColor: tc.primary + '18', borderRadius: 10, borderWidth: 1,
+                  borderColor: tc.primary + '55', padding: 11, gap: 7, marginTop: 10,
                 }}
               >
                 {aiScanning
                   ? <ActivityIndicator size="small" color={tc.primary} />
-                  : <Ionicons name="camera-outline" size={20} color={tc.primary} />}
-                <Text style={{ color: tc.primary, fontWeight: '700', fontSize: 15 }}>
-                  {aiScanning ? 'Scanning…' : 'Scan Gear with AI'}
+                  : <Ionicons name="sparkles-outline" size={17} color={tc.primary} />}
+                <Text style={{ color: tc.primary, fontWeight: '700', fontSize: 14 }}>
+                  {aiScanning ? 'Scanning…' : `Identify with AI (${photos.length} photo${photos.length > 1 ? 's' : ''})`}
                 </Text>
               </TouchableOpacity>
-              {aiPhoto && !aiScanning && (
-                <Image
-                  source={{ uri: aiPhoto }}
-                  style={{ width: '100%', height: 120, borderRadius: 10, marginTop: 10, resizeMode: 'cover' }}
-                />
-              )}
-              {aiNote && !aiScanning && (
-                <View style={{ backgroundColor: tc.surface, borderRadius: 8, padding: 10, marginTop: 8, borderWidth: 1, borderColor: tc.border }}>
-                  <Text style={{ color: tc.textSecondary, fontSize: 12, lineHeight: 18 }}>{aiNote}</Text>
-                </View>
-              )}
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 8 }}>
-                <View style={{ flex: 1, height: 1, backgroundColor: tc.border }} />
-                <Text style={{ color: tc.textMuted, fontSize: 11 }}>or fill in manually</Text>
-                <View style={{ flex: 1, height: 1, backgroundColor: tc.border }} />
+            )}
+            {aiNote && !aiScanning && (
+              <View style={{ backgroundColor: tc.surface, borderRadius: 8, padding: 10, marginTop: 8, borderWidth: 1, borderColor: tc.border }}>
+                <Text style={{ color: tc.textSecondary, fontSize: 12, lineHeight: 18 }}>{aiNote}</Text>
               </View>
+            )}
+            {photos.length === 0 && (
+              <Text style={{ color: tc.textMuted, fontSize: 12, marginTop: 6 }}>
+                Add photos of your gear — AI can identify the model, estimate mileage, and pre-fill this form.
+              </Text>
+            )}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 10 }}>
+              <View style={{ flex: 1, height: 1, backgroundColor: tc.border }} />
+              <Text style={{ color: tc.textMuted, fontSize: 11 }}>or fill in manually</Text>
+              <View style={{ flex: 1, height: 1, backgroundColor: tc.border }} />
             </View>
-          )}
+          </View>
 
           <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>NAME</Text>
           <TextInput

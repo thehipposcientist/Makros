@@ -172,6 +172,11 @@ def compute_weekly_review(
     avg_resting_hr: float | None = None,
     avg_steps: float | None = None,
     readiness_score: int | None = None,
+    # When provided, evaluates the week against this goal instead of the
+    # currently active UserGoal. Used by auto_renew_week to score the
+    # expiring week against the goal it was actually generated with (the
+    # user may have changed goal mid-week).
+    goal_override: str | None = None,
 ) -> WeeklyReview:
     """Produce a full weekly review with structured recommendations.
 
@@ -185,10 +190,13 @@ def compute_weekly_review(
     start = end_date - timedelta(days=days - 1)
 
     # Active goal — drives targets.
-    goal = db.exec(
-        select(UserGoal).where(UserGoal.user_id == user_id, UserGoal.is_active == True)
-    ).first()
-    goal_bucket = (goal.goal_type.value if goal and hasattr(goal.goal_type, "value") else None) or "general_health"
+    if goal_override:
+        goal_bucket = goal_override
+    else:
+        goal = db.exec(
+            select(UserGoal).where(UserGoal.user_id == user_id, UserGoal.is_active == True)
+        ).first()
+        goal_bucket = (goal.goal_type.value if goal and hasattr(goal.goal_type, "value") else None) or "general_health"
 
     # Completions in window.
     completions = db.exec(

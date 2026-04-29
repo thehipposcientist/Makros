@@ -147,6 +147,12 @@ interface Props {
    *  can use the SAME number for watch pushes. Eliminates phone vs.
    *  watch drift caused by independent compute calls. */
   onScoreComputed?: (score: number, label: string) => void;
+  /** Called after load with the full result — lets a parent seed a second
+   *  card instance (e.g. modal) so it renders immediately without a blank flash. */
+  onDataComputed?: (prep: PreparednessResult) => void;
+  /** Pre-seed state from a background card that already loaded. Eliminates
+   *  the blank → pop-in flash when the modal opens a fresh instance. */
+  initialPrep?: PreparednessResult | null;
   defaultExpanded?: boolean;
   /** When true the card reframes from "are you ready?" to "how is recovery
    *  going?" — different dial label, copy, and muscle-bar framing. */
@@ -154,15 +160,15 @@ interface Props {
 }
 
 export default function TrainingReadinessCard({
-  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed, defaultExpanded, workoutDone,
+  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed, onDataComputed, initialPrep, defaultExpanded, workoutDone,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
 
-  const [prep, setPrep] = useState<PreparednessResult | null>(null);
+  const [prep, setPrep] = useState<PreparednessResult | null>(initialPrep ?? null);
   const [fatigue, setFatigue] = useState<FatigueScore | null>(null);
   const [hasAppleHealth, setHasAppleHealth] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!initialPrep);
   const [expanded, setExpanded] = useState(defaultExpanded ?? false);
 
   const load = useCallback(async () => {
@@ -293,6 +299,7 @@ export default function TrainingReadinessCard({
       }
 
       try { onScoreComputed?.(displayScore, displayLabel); } catch {}
+      try { onDataComputed?.(displayResult); } catch {}
 
       // Push the SERVER response (or our local fallback) verbatim to
       // the watch. The existing watchSync.pushReadinessToWatch maps
@@ -331,7 +338,6 @@ export default function TrainingReadinessCard({
 
   useEffect(() => { load(); }, [load]);
 
-  if (loading && !prep) return null;
   if (!prep) return null;
   // Zero real signals → don't show a misleading "0 Fatigued" dial. Show
   // a neutral CTA instead. The user can still open Apple Health from

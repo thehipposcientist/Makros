@@ -289,6 +289,21 @@ def create_food(
 
     db.commit()
     db.refresh(food)
+
+    # Pre-classify processing_bucket for non-seed foods so the first meal
+    # log doesn't pay the classification cost. AI is only called for USER
+    # and BARCODE sources (explicit user-created foods); USDA gets the
+    # deterministic pass only since the name is already canonical.
+    if source != FoodSource.SEED:
+        try:
+            from app.services.nutrition.ai_classify import get_or_create_metadata
+            get_or_create_metadata(
+                name, db=db,
+                allow_ai=(source in (FoodSource.USER, FoodSource.BARCODE)),
+            )
+        except Exception:
+            pass  # classification failure must never block food creation
+
     return food
 
 

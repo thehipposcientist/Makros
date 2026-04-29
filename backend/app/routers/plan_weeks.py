@@ -75,6 +75,23 @@ class AutoRenewResponse(BaseModel):
     explanation: str
 
 
+class CheckinRequiredResponse(BaseModel):
+    """Returned by auto-renew when a check-in must be completed first."""
+    checkin_required: bool = True
+    plan_week_id: int
+    week_start: str
+    week_end: str
+
+
+class PlanWeekCheckinSubmitRequest(BaseModel):
+    energy: int | None = None
+    hunger: int | None = None
+    soreness: int | None = None
+    motivation: int | None = None
+    schedule_issue: bool = False
+    note: str | None = None
+
+
 class StartNewWeekRequest(BaseModel):
     force: bool = False
 
@@ -206,6 +223,7 @@ def start_new_week(
         )
     ).first()
     goal = active_goal.goal_type.value if active_goal else "body_recomp"
+    goal_pace = active_goal.pace.value if active_goal and active_goal.pace else None
     days_per_week = int(getattr(prefs, "days_per_week", None) or getattr(profile, "days_per_week", 4) or 4)
     session_minutes = int(getattr(prefs, "workout_duration_minutes", None) or getattr(profile, "workout_duration_minutes", 45) or 45)
     experience = str(getattr(profile, "experience_level", "intermediate") or "intermediate")
@@ -303,6 +321,8 @@ def start_new_week(
         days_per_week=days_per_week,
         preferred_split=preferred_split,
         planner_version=PLANNER_VERSION,
+        goal_pace=goal_pace,
+        session_minutes=session_minutes,
     )
 
     days = get_week_days(db, pw.id)
@@ -319,11 +339,15 @@ def auto_renew(
     avg_resting_hr: float | None = None,
     avg_steps: float | None = None,
     readiness_score: int | None = None,
-) -> AutoRenewResponse:
+) -> AutoRenewResponse | CheckinRequiredResponse:
     """Auto-generate a new week when the active plan has expired.
 
-    Called on app open when `needs_new_week === true`.
+    If the expired week has no completed or skipped check-in, returns
+    CheckinRequiredResponse instead of renewing. The client should surface
+    the weekly check-in prompt before calling auto-renew again.
     """
+    from app.models import PlanWeekCheckin
+
     pw = get_active_week(db, current_user.id)
     if pw and not week_needs_renewal(pw):
         days = get_week_days(db, pw.id)
@@ -335,6 +359,23 @@ def auto_renew(
             needs_review=[],
             explanation="Your current week is still active.",
         )
+
+    # Gate renewal: if the expired week has no check-in (or a pending one),
+    # prompt the user to complete or skip before generating the next week.
+    if pw:
+        checkin = db.exec(
+            select(PlanWeekCheckin).where(
+                PlanWeekCheckin.user_id == current_user.id,
+                PlanWeekCheckin.plan_week_id == pw.id,
+            )
+        ).first()
+        if not checkin or (not checkin.submitted_at and not checkin.skipped):
+            return CheckinRequiredResponse(
+                checkin_required=True,
+                plan_week_id=pw.id,
+                week_start=pw.start_date.isoformat(),
+                week_end=pw.end_date.isoformat(),
+            )
 
     result = auto_renew_week(
         db, current_user.id,
@@ -359,6 +400,356 @@ def auto_renew(
         needs_review=result.get("needs_review", []),
         explanation=result.get("explanation", ""),
     )
+
+
+@router.get("/week/checkin-status")
+def get_checkin_status(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """Return whether a coaching check-in is pending, completed, or not due.
+
+    status:
+      "pending"   — expired week exists, no check-in submitted or skipped
+      "completed" — check-in was submitted for this week
+      "skipped"   — user explicitly skipped
+      "none"      — no expired week / week still active
+    """
+    from app.models import PlanWeekCheckin
+
+    pw = get_active_week(db, current_user.id)
+    if not pw or not week_needs_renewal(pw):
+        return {"status": "none", "checkin": None, "week_start": None, "week_end": None, "plan_week_id": None}
+
+    checkin = db.exec(
+        select(PlanWeekCheckin).where(
+            PlanWeekCheckin.user_id == current_user.id,
+            PlanWeekCheckin.plan_week_id == pw.id,
+        )
+    ).first()
+
+    status = "pending"
+    if checkin and checkin.skipped:
+        status = "skipped"
+    elif checkin and checkin.submitted_at:
+        status = "completed"
+
+    return {
+        "status": status,
+        "checkin": _checkin_to_dict(checkin) if checkin else None,
+        "week_start": pw.start_date.isoformat(),
+        "week_end": pw.end_date.isoformat(),
+        "plan_week_id": pw.id,
+    }
+
+
+@router.get("/week/{plan_week_id}/checkin")
+def get_plan_week_checkin(
+    plan_week_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """Return the saved check-in record for a plan week (read-only recap)."""
+    from app.models import PlanWeekCheckin
+
+    checkin = db.exec(
+        select(PlanWeekCheckin).where(
+            PlanWeekCheckin.user_id == current_user.id,
+            PlanWeekCheckin.plan_week_id == plan_week_id,
+        )
+    ).first()
+    if not checkin:
+        raise HTTPException(status_code=404, detail="No check-in found for this plan week")
+    return _checkin_to_dict(checkin)
+
+
+@router.post("/week/{plan_week_id}/checkin")
+def submit_plan_week_checkin(
+    plan_week_id: int,
+    body: PlanWeekCheckinSubmitRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> dict:
+    """Submit the one-time coaching check-in for a plan week.
+
+    Calls the AI once, saves the result, and returns the full recap.
+    Returns HTTP 409 if a completed check-in already exists.
+    """
+    from app.models import PlanWeekCheckin, AIDecision, CoachMemory, UserProfile
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    from app.services.coach.checkin_ai import call_checkin_llm, CheckinAIError
+    from app.services.coach.decision_rules import gate
+    from app.services.coach.payload import build_weekly_payload
+    from app.services.coach.checkin_evaluator import evaluate_week, recommend_from_evaluation
+    import json
+
+    # Idempotency guard — one submission per PlanWeek
+    existing = db.exec(
+        select(PlanWeekCheckin).where(
+            PlanWeekCheckin.user_id == current_user.id,
+            PlanWeekCheckin.plan_week_id == plan_week_id,
+            PlanWeekCheckin.submitted_at.isnot(None),
+        )
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Check-in already submitted for this plan week")
+
+    pw = db.exec(
+        select(PlanWeek).where(
+            PlanWeek.id == plan_week_id,
+            PlanWeek.user_id == current_user.id,
+        )
+    ).first()
+    if not pw:
+        raise HTTPException(status_code=404, detail="Plan week not found")
+
+    # Deterministic review
+    try:
+        review = compute_weekly_review(db, current_user.id)
+    except Exception as e:
+        logger.warning(f"[week-checkin] compute_weekly_review failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not compute weekly review")
+
+    review_snapshot = {
+        "headline": review.headline,
+        "goal": review.goal,
+        "sessions_completed": review.sessions_completed,
+        "sessions_planned": review.sessions_planned,
+        "adherence_pct": review.adherence_pct,
+        "cardio_minutes": review.cardio_minutes,
+        "zone2_minutes": review.zone2_minutes,
+        "total_hard_sets": review.volume.total_hard_sets,
+        "avg_protein_g": review.avg_protein_g,
+        "days_logged": review.days_logged,
+        "weight_trend_direction": review.weight_trend_direction,
+    }
+
+    # Build AI payload
+    feedback_dict = {}
+    if body.energy is not None:
+        feedback_dict["energy"] = body.energy
+    if body.hunger is not None:
+        feedback_dict["hunger"] = body.hunger
+    if body.soreness is not None:
+        feedback_dict["soreness"] = body.soreness
+    if body.motivation is not None:
+        feedback_dict["motivation"] = body.motivation
+    if body.schedule_issue:
+        feedback_dict["schedule_issue"] = True
+    if body.note:
+        feedback_dict["note"] = body.note
+
+    try:
+        payload = build_weekly_payload(db, current_user.id, feedback_dict)
+    except Exception as e:
+        logger.warning(f"[week-checkin] build_weekly_payload failed: {e}")
+        payload = {"checkin_type": "weekly", "feedback": feedback_dict}
+
+    # Attach deterministic review so AI responds to what user saw
+    payload["weekly_review"] = {
+        **review_snapshot,
+        "muscles_low": review.volume.muscles_low() if hasattr(review.volume, "muscles_low") else [],
+        "muscles_high": review.volume.muscles_high() if hasattr(review.volume, "muscles_high") else [],
+        "recommendations": [
+            {"key": r.key, "title": r.title, "priority": r.priority, "area": r.area, "detail": r.detail}
+            for r in review.recommendations[:5]
+        ],
+    }
+
+    # Deterministic evaluation of prior commitments
+    try:
+        prior = db.exec(
+            select(CoachMemory)
+            .where(
+                CoachMemory.user_id == current_user.id,
+                CoachMemory.event_type == "commitment",
+            )
+            .order_by(CoachMemory.created_at.desc())
+            .limit(1)
+        ).first()
+        prior_commitments = []
+        if prior and isinstance(prior.details, dict):
+            items = prior.details.get("items") or []
+            prior_commitments = [i for i in items if isinstance(i, dict)]
+        evaluation = evaluate_week(db=db, user_id=current_user.id, prior_commitments=prior_commitments)
+        recommendation = recommend_from_evaluation(evaluation)
+        payload["evaluation"] = evaluation.to_dict()
+        payload["recommendation"] = recommendation
+    except Exception as e:
+        logger.warning(f"[week-checkin] evaluation failed: {e}")
+
+    # AI call (non-fatal — fall back to headline if it fails)
+    ai_message = review.headline
+    ai_delta = None
+    ai_decision_id = None
+    commitments = []
+
+    try:
+        raw = call_checkin_llm(payload)
+        result = gate(raw, payload, db, current_user.id)
+        ai_message = result.message or review.headline
+        ai_delta = result.delta
+
+        # Persist AIDecision
+        decision = AIDecision(
+            user_id=current_user.id,
+            checkin_type="weekly",
+            response_type=result.response_type,
+            rationale_key=result.rationale_key,
+            delta=result.delta,
+            message=result.message,
+            model=raw.get("_model"),
+        )
+        db.add(decision)
+        db.flush()
+        ai_decision_id = decision.id
+
+        # Apply delta if warranted
+        if result.response_type in ("small_adjust", "deep_review") and result.delta:
+            from app.routers.coach import _apply_delta
+            _apply_delta(db, current_user.id, result.delta)
+
+        # Save commitments for next week's grading
+        next_commitments = raw.get("next_commitments") if isinstance(raw, dict) else None
+        if isinstance(next_commitments, list):
+            commitments = [c for c in next_commitments if isinstance(c, dict)]
+            if commitments:
+                db.add(CoachMemory(
+                    user_id=current_user.id,
+                    event_type="commitment",
+                    summary=f"{len(commitments)} commitments for next week",
+                    details={"items": commitments, "source": "plan_week_checkin"},
+                ))
+
+        db.add(CoachMemory(
+            user_id=current_user.id,
+            event_type="ai_checkin",
+            summary=f"weekly plan_week_id={plan_week_id}: {result.response_type}",
+            details={"plan_week_id": plan_week_id, "delta": result.delta, "feedback": feedback_dict},
+        ))
+
+    except CheckinAIError as e:
+        logger.warning(f"[week-checkin] AI call failed (using fallback): {e}")
+    except Exception as e:
+        logger.warning(f"[week-checkin] AI processing failed (using fallback): {e}")
+
+    # Upsert the PlanWeekCheckin record
+    checkin_row = db.exec(
+        select(PlanWeekCheckin).where(
+            PlanWeekCheckin.user_id == current_user.id,
+            PlanWeekCheckin.plan_week_id == plan_week_id,
+        )
+    ).first()
+    if not checkin_row:
+        checkin_row = PlanWeekCheckin(
+            user_id=current_user.id,
+            plan_week_id=plan_week_id,
+            week_start_date=pw.start_date,
+            week_end_date=pw.end_date,
+        )
+        db.add(checkin_row)
+
+    checkin_row.submitted_at = datetime.now(timezone.utc)
+    checkin_row.skipped = False
+    checkin_row.energy = body.energy
+    checkin_row.hunger = body.hunger
+    checkin_row.soreness = body.soreness
+    checkin_row.motivation = body.motivation
+    checkin_row.schedule_issue = body.schedule_issue
+    checkin_row.note = body.note
+    checkin_row.review_snapshot_json = review_snapshot
+    checkin_row.ai_decision_id = ai_decision_id
+    checkin_row.ai_message = ai_message
+    checkin_row.ai_delta = ai_delta
+    checkin_row.commitments_json = commitments or None
+    checkin_row.plan_goal = pw.goal
+
+    db.commit()
+
+    return {
+        **_checkin_to_dict(checkin_row),
+        "review_summary": review_snapshot,
+    }
+
+
+@router.post("/week/{plan_week_id}/checkin/skip")
+def skip_plan_week_checkin(
+    plan_week_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> AutoRenewResponse | dict:
+    """Skip the check-in for a plan week and immediately auto-renew the next week."""
+    from app.models import PlanWeekCheckin
+
+    pw = db.exec(
+        select(PlanWeek).where(
+            PlanWeek.id == plan_week_id,
+            PlanWeek.user_id == current_user.id,
+        )
+    ).first()
+    if not pw:
+        raise HTTPException(status_code=404, detail="Plan week not found")
+
+    # Upsert the check-in row as skipped
+    checkin_row = db.exec(
+        select(PlanWeekCheckin).where(
+            PlanWeekCheckin.user_id == current_user.id,
+            PlanWeekCheckin.plan_week_id == plan_week_id,
+        )
+    ).first()
+    if not checkin_row:
+        checkin_row = PlanWeekCheckin(
+            user_id=current_user.id,
+            plan_week_id=plan_week_id,
+            week_start_date=pw.start_date,
+            week_end_date=pw.end_date,
+            plan_goal=pw.goal,
+        )
+        db.add(checkin_row)
+    checkin_row.skipped = True
+    checkin_row.submitted_at = None
+    db.commit()
+
+    # Now auto-renew — check-in is marked so gate won't block
+    result = auto_renew_week(db, current_user.id)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    new_pw = get_active_week(db, current_user.id)
+    days = get_week_days(db, new_pw.id) if new_pw else []
+    return AutoRenewResponse(
+        plan_week=_plan_week_to_response(new_pw, days) if new_pw else None,
+        review_headline=result.get("review_headline", ""),
+        review_summary=result.get("review_summary", {}),
+        auto_applied=result.get("auto_applied", []),
+        needs_review=result.get("needs_review", []),
+        explanation=result.get("explanation", ""),
+    )
+
+
+def _checkin_to_dict(checkin) -> dict:
+    return {
+        "id": checkin.id,
+        "user_id": checkin.user_id,
+        "plan_week_id": checkin.plan_week_id,
+        "week_start_date": checkin.week_start_date.isoformat() if checkin.week_start_date else None,
+        "week_end_date": checkin.week_end_date.isoformat() if checkin.week_end_date else None,
+        "submitted_at": checkin.submitted_at.isoformat() if checkin.submitted_at else None,
+        "skipped": checkin.skipped,
+        "energy": checkin.energy,
+        "hunger": checkin.hunger,
+        "soreness": checkin.soreness,
+        "motivation": checkin.motivation,
+        "schedule_issue": checkin.schedule_issue,
+        "note": checkin.note,
+        "review_snapshot_json": checkin.review_snapshot_json,
+        "ai_decision_id": checkin.ai_decision_id,
+        "ai_message": checkin.ai_message,
+        "ai_delta": checkin.ai_delta,
+        "commitments_json": checkin.commitments_json,
+        "plan_goal": checkin.plan_goal,
+        "created_at": checkin.created_at.isoformat() if checkin.created_at else None,
+    }
 
 
 class ReviewAndApplyRequest(BaseModel):

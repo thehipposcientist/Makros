@@ -49,6 +49,8 @@ def create_plan_week(
     preferred_split: str | None,
     planner_version: str,
     generation_source: str = "initial",
+    goal_pace: str | None = None,
+    session_minutes: int | None = None,
 ) -> PlanWeek:
     """Create a PlanWeek + 7 PlanDay rows.
 
@@ -87,6 +89,8 @@ def create_plan_week(
         goal=goal,
         days_per_week=days_per_week,
         preferred_split=preferred_split,
+        goal_pace=goal_pace,
+        session_minutes=session_minutes,
         status="active",
     )
     db.add(pw)
@@ -418,6 +422,12 @@ def auto_renew_week(
     from app.seed_exercises_data import SEED_EXERCISES
     import json
 
+    # Snapshot the goal the expiring week was generated with so the review
+    # evaluates that week against its own goal, not whatever UserGoal is
+    # active now (user may have changed goal mid-week).
+    expiring_pw = get_active_week(db, user_id)
+    expiring_goal = expiring_pw.goal if expiring_pw else None
+
     # Step 1: Compute the weekly review
     review = compute_weekly_review(
         db, user_id,
@@ -426,6 +436,7 @@ def auto_renew_week(
         avg_resting_hr=avg_resting_hr,
         avg_steps=avg_steps,
         readiness_score=readiness_score,
+        goal_override=expiring_goal,
     )
 
     # Step 2a: Readiness-based auto-deload — if readiness is Fatigued or
@@ -478,6 +489,7 @@ def auto_renew_week(
         )
     ).first()
     goal = active_goal.goal_type.value if active_goal else "body_recomp"
+    goal_pace = active_goal.pace.value if active_goal and active_goal.pace else None
     days_per_week = int(getattr(prefs, "days_per_week", None) or getattr(profile, "days_per_week", 4) or 4)
     session_minutes = int(getattr(prefs, "workout_duration_minutes", None) or getattr(profile, "workout_duration_minutes", 45) or 45)
     experience = str(getattr(profile, "experience_level", "intermediate") or "intermediate")
@@ -568,10 +580,17 @@ def auto_renew_week(
         preferred_split=preferred_split,
         planner_version=PLANNER_VERSION,
         generation_source="auto_renew",
+        goal_pace=goal_pace,
+        session_minutes=session_minutes,
     )
 
     # Step 4: Build explanation
     explanation_parts = []
+    if expiring_goal and expiring_goal != goal:
+        explanation_parts.append(
+            f"This week was built for {expiring_goal.replace('_', ' ')}. "
+            f"Your next week will use your new {goal.replace('_', ' ')} goal."
+        )
     if review.headline:
         explanation_parts.append(f"Last week: {review.headline}")
     if applied_summaries:

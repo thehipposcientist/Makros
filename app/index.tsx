@@ -150,7 +150,10 @@ const USER_SCOPED_KEYS = [
   'preservedCheckedMeals',
   'healthSummary',
   'healthScoreResult',
-  'appleHealthEnabled',
+  // appleHealthEnabled intentionally excluded — it's a device-level OS
+  // permission preference, not user data. Wiping it on user-switch or
+  // session reset forces unnecessary "reconnect" prompts even when the
+  // iOS HealthKit permission is still granted.
   'pendingProfileChanges',
   'pending_plan_job',
 ];
@@ -890,6 +893,18 @@ export default function Index() {
     await pullUserStateFromBackend(token);
     await loadProfile(token);
     setAuthToken(token);
+
+    // Auto-reconnect Apple Health silently if the user previously enabled it.
+    // HealthKit permissions are iOS-level and survive logout — we just need to
+    // re-request (no dialog shown if already granted) so the session is warm
+    // and ProgressScreen doesn't show the "Connect" prompt on first visit.
+    try {
+      const { isAppleHealthEnabled: ahEnabled } = await import('../src/utils/workoutHistory');
+      const { isHealthKitAvailable, requestHealthPermissions } = await import('../src/services/appleHealth');
+      if (await ahEnabled() && isHealthKitAvailable()) {
+        requestHealthPermissions().catch(() => {});
+      }
+    } catch { /* HealthKit optional, never block sign-in */ }
   };
 
   const handleProfileComplete = async (profile: UserProfile) => {
@@ -1605,7 +1620,7 @@ export default function Index() {
                 </Text>
                 <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', marginBottom: 20, lineHeight: 18 }}>
                   {isGoal
-                    ? 'Changing your goal will regenerate both your workout and nutrition plans to match. This may take 30-60 seconds.'
+                    ? 'Your current week\'s workouts and nutrition targets stay unchanged so your active plan isn\'t disrupted. Your new goal applies to next week\'s generated plan.'
                     : 'Your workout plan will be regenerated with the new settings. Your nutrition plan won\'t change.'}
                 </Text>
                 <TouchableOpacity

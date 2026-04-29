@@ -243,6 +243,36 @@ class WeeklyCheckIn(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class PlanWeekCheckin(SQLModel, table=True):
+    """One-time coaching check-in per PlanWeek.
+    Blocks auto-renew until submitted or skipped.
+    Stores the deterministic review snapshot + AI decision + self-report ratings."""
+    __tablename__ = "plan_week_checkins"
+    __table_args__ = (UniqueConstraint("user_id", "plan_week_id", name="uq_plan_week_checkin"),)
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    plan_week_id: int = Field(foreign_key="plan_weeks.id", index=True)
+    week_start_date: date = Field(sa_column=Column(Date, nullable=False))
+    week_end_date: date = Field(sa_column=Column(Date, nullable=False))
+    submitted_at: datetime | None = Field(default=None)
+    skipped: bool = Field(default=False)
+    # Self-report ratings 1–5
+    energy: int | None = Field(default=None)
+    hunger: int | None = Field(default=None)
+    soreness: int | None = Field(default=None)
+    motivation: int | None = Field(default=None)
+    schedule_issue: bool = Field(default=False)
+    note: str | None = Field(default=None)
+    # Snapshotted review + AI output
+    review_snapshot_json: dict | None = Field(default=None, sa_column=Column(JSON))
+    ai_decision_id: int | None = Field(default=None)  # references ai_decisions.id
+    ai_message: str | None = Field(default=None)
+    ai_delta: dict | None = Field(default=None, sa_column=Column(JSON))
+    commitments_json: list | None = Field(default=None, sa_column=Column(JSON))
+    plan_goal: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class CoachMemory(SQLModel, table=True):
     __tablename__ = "coach_memory"
     id: int | None = Field(default=None, primary_key=True)
@@ -473,6 +503,8 @@ class PlanWeek(SQLModel, table=True):
     goal: str
     days_per_week: int
     preferred_split: str | None = Field(default=None)
+    goal_pace: str | None = Field(default=None)       # conservative | moderate | aggressive
+    session_minutes: int | None = Field(default=None)  # session duration at generation time
     status: str = Field(default="active")  # active | completed | abandoned
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = Field(default=None)
@@ -804,6 +836,7 @@ class GearItem(SQLModel, table=True):
     # e.g. ["treadmill", "run", "incline walk"] for running shoes.
     auto_track_keywords: list = Field(default_factory=list, sa_column=Column(JSON))
     notes: str | None = Field(default=None)
+    photos: list = Field(default_factory=list, sa_column=Column(JSON))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -816,6 +849,7 @@ class GearItemCreate(SQLModel):
     retirement_threshold_miles: float | None = None
     auto_track_keywords: list[str] = []
     notes: str | None = None
+    photos: list[str] = []
 
 
 class GearItemRead(SQLModel):
@@ -830,6 +864,7 @@ class GearItemRead(SQLModel):
     retirement_threshold_miles: float | None
     auto_track_keywords: list[str]
     notes: str | None
+    photos: list[str] = []
     created_at: datetime
     # Computed fields populated by the router
     total_miles: float = 0.0

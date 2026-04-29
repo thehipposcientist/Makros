@@ -1525,10 +1525,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showTrainerNote, setShowTrainerNote] = useState(false);
   const [showLogActivity, setShowLogActivity] = useState(false);
   const [showLiveTracker, setShowLiveTracker] = useState(false);
-  const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
+  // showWeeklyCheckin removed — weekly check-in is now handled by WeeklyCheckinCard in ProgressScreen
   const [showFriends, setShowFriends] = useState(false);
   const [showGoalEditor, setShowGoalEditor] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsFirstName, setSettingsFirstName] = useState('');
+  const [settingsLastName, setSettingsLastName] = useState('');
   const [showGearScreen, setShowGearScreen] = useState(false);
   const [showReadiness, setShowReadiness] = useState(false);
   const [readinessBadge, setReadinessBadge] = useState<{ score: number; label: string } | null>(null);
@@ -1543,15 +1545,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     chosen: Record<string, boolean>;
   } | null>(null);
   const unloggedPromptCheckedRef = useRef(false);
-  // Days until the next weekly AI check-in. Computed from `weekStartDate`
-  // on mount + whenever the plan refreshes. Negative means overdue. Null
-  // means the user hasn't generated a plan yet (nothing to check in on).
-  const [daysUntilCheckin, setDaysUntilCheckin] = useState<number | null>(null);
-  const [nextCheckinDate, setNextCheckinDate] = useState<Date | null>(null);
-  const [checkinAdherence, setCheckinAdherence] = useState(3); // 1-5
-  const [checkinEnergy, setCheckinEnergy] = useState(3);       // 1-5
-  const [checkinNotes, setCheckinNotes] = useState('');
-  const [checkinInjuryStatuses, setCheckinInjuryStatuses] = useState<Record<string, InjuryEntry['status']>>({});
+  // Legacy check-in state removed — weekly check-in is now handled by WeeklyCheckinCard in ProgressScreen
 
   // Recompute nutrition score client-side whenever the plan changes
   useEffect(() => {
@@ -1641,30 +1635,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // workout thumbnails have the name→video_id index populated even
     // for users who never visit the Library sub-tab.
     ensureExerciseLibrary().catch(() => {});
-    // Weekly check-in — auto-popup every 7 days
-    AsyncStorage.getItem('weekStartDate').then(async raw => {
-      if (!raw) {
-        setDaysUntilCheckin(null);
-        setNextCheckinDate(null);
-        return;
-      }
-      const startMs = new Date(raw).getTime();
-      const daysSince = (Date.now() - startMs) / (1000 * 60 * 60 * 24);
-      setDaysUntilCheckin(Math.max(0, Math.ceil(7 - daysSince)));
-      setNextCheckinDate(new Date(startMs + 7 * 24 * 60 * 60 * 1000));
-      if (daysSince >= 7) {
-        const profileRaw = await AsyncStorage.getItem('userProfile');
-        if (profileRaw) {
-          const p: UserProfile = JSON.parse(profileRaw);
-          const initial: Record<string, InjuryEntry['status']> = {};
-          for (const inj of (p.injuryEntries ?? [])) {
-            initial[inj.id] = inj.status;
-          }
-          setCheckinInjuryStatuses(initial);
-        }
-        setShowWeeklyCheckin(true);
-      }
-    });
+    // Weekly check-in prompt is now handled by WeeklyCheckinCard in ProgressScreen (backend-backed).
     // NOTE: `meta.allFoods.length` was previously in this dep array but caused
     // `loadPlans` to re-fire whenever the parent re-rendered (e.g. when a menu
     // opened), which made in-progress plan generation look like it was
@@ -2187,6 +2158,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           // value (set by TrainingReadinessCard's onScoreComputed). The
           // dedicated readiness payload below carries the authoritative
           // server score with the server's syncedAtMs.
+          // Sequential awaits so each updateApplicationContext call
+          // completes before the next reads s.applicationContext.
+          // Concurrent fire-and-forget causes all three to read the
+          // same stale context and only the last writer's keys survive.
           (async () => {
             let isWorkoutInProgress = false;
             try {
@@ -2206,23 +2181,23 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               : 'scheduled';
             const reachSid = status === 'active' ? getActiveWatchSessionId() : null;
             console.log('[watch] reachable — re-pushing full home snapshot', { status });
-            pushWorkoutToWatch(todayWorkout, {
+            await pushWorkoutToWatch(todayWorkout, {
               dateISO: todayISO,
               status,
               sessionId: reachSid,
               readiness: s.readinessScore?.score ?? null,
               readinessLabel: s.readinessScore?.label ?? null,
             }).catch(() => {});
+            await pushThemeToWatch(s.themePreference).catch(() => {});
+            const todayPlan = s.nutritionPlansByDate[todayISO]
+              ?? (Object.values(s.nutritionPlansByDate)[0] as any);
+            await pushMealsToWatch(
+              todayPlan,
+              s.checkedMealsByDate[todayISO],
+              todayISO,
+              s.nutritionScoreData?.score ?? null,
+            ).catch(() => {});
           })();
-          pushThemeToWatch(s.themePreference).catch(() => {});
-          const todayPlan = s.nutritionPlansByDate[todayISO]
-            ?? (Object.values(s.nutritionPlansByDate)[0] as any);
-          pushMealsToWatch(
-            todayPlan,
-            s.checkedMealsByDate[todayISO],
-            todayISO,
-            s.nutritionScoreData?.score ?? null,
-          ).catch(() => {});
 
           // Sleep / readiness / weight pulled from cached health summary so
           // we don't re-query Apple Health on every reachability flip.
@@ -2469,8 +2444,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             console.log('[watch] pull_state requested — pushing snapshot');
             (async () => {
               try {
-                const { pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch } =
-                  await import('../utils/watchSync');
+                const watchSync = await import('../utils/watchSync');
+                const {
+                  pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
+                  pushSleepToWatch, pushSupplementsToWatch, pushWeightToWatch,
+                } = watchSync;
                 const s = rePushStateRef.current;
                 const todayISO = new Date().toISOString().slice(0, 10);
                 const todayItem = (s.schedule as any[])?.find((it: any) => dateKey(it.date) === todayISO) ?? (s.schedule as any[])?.[0] ?? null;
@@ -2501,22 +2479,77 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   : todayItem?.isRest ? 'rest'
                   : 'scheduled';
                 const pullSid = status === 'active' ? getActiveWatchSessionId() : null;
-                pushWorkoutToWatch(todayWorkout, {
+                // SEQUENTIAL awaits — each call merges into applicationContext
+                // before the next reads it. Concurrent fire-and-forget causes
+                // a race where all three read the same stale applicationContext
+                // and only the last writer's keys survive (dropping workout).
+                await pushWorkoutToWatch(todayWorkout, {
                   dateISO: todayISO,
                   status,
                   sessionId: pullSid,
                   readiness: s.readinessScore?.score ?? null,
                   readinessLabel: s.readinessScore?.label ?? null,
                 }).catch(() => {});
-                pushThemeToWatch(s.themePreference).catch(() => {});
+                await pushThemeToWatch(s.themePreference).catch(() => {});
                 const todayPlan = s.nutritionPlansByDate[todayISO]
                   ?? (Object.values(s.nutritionPlansByDate)[0] as any);
-                pushMealsToWatch(
+                await pushMealsToWatch(
                   todayPlan,
                   s.checkedMealsByDate[todayISO],
                   todayISO,
                   s.nutritionScoreData?.score ?? null,
                 ).catch(() => {});
+                // push_state also sends the full data set that the
+                // reachability listener sends, so a manual sync is
+                // equivalent to re-opening the watch app.
+                (async () => {
+                  try {
+                    const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
+                    const cached = await getCachedHealthDataSummary().catch(() => null);
+                    const hours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : 0;
+                    let score: number | null = null, label: string | null = null, summary: string | null = null;
+                    if (hours >= 8) { score = 90; label = 'Great'; summary = `${hours.toFixed(1)}h — well rested.`; }
+                    else if (hours >= 7) { score = 75; label = 'Good'; summary = `${hours.toFixed(1)}h — solid night.`; }
+                    else if (hours >= 6) { score = 55; label = 'OK'; summary = `${hours.toFixed(1)}h — a touch short.`; }
+                    else if (hours > 0) { score = 30; label = 'Low'; summary = `${hours.toFixed(1)}h — dial intensity back today.`; }
+                    await pushSleepToWatch({ score, hoursLastNight: hours, restingHr: cached?.restingHeartRate ?? null, hrvMs: cached?.hrv ?? null, label, summary });
+                  } catch { /* non-fatal */ }
+                })();
+                (async () => {
+                  try {
+                    if (!authToken) return;
+                    const { getTodaySupplements } = await import('../services/api');
+                    const stack = await getTodaySupplements(authToken).catch(() => null);
+                    if (stack) {
+                      await pushSupplementsToWatch(stack.map((sup: any) => ({
+                        id: sup.id, name: sup.custom_name || 'Supplement',
+                        dose: `${sup.dose_amount}${sup.dose_unit}`,
+                        timing: sup.timing ?? null,
+                        taken: !!(sup.logs_today || []).find((l: any) => !l.skipped),
+                        skipped: !!(sup.logs_today || []).find((l: any) => l.skipped),
+                      })));
+                    }
+                  } catch { /* non-fatal */ }
+                })();
+                (async () => {
+                  try {
+                    const { loadWeightEntries } = await import('../utils/weightHistory');
+                    const entries: Array<{ date: string; weight_lbs: number }> = await loadWeightEntries().catch(() => []);
+                    let latest: number | null = null, daysSince: number | null = null, slope: number | null = null, ema: number | null = null;
+                    if (entries.length > 0) {
+                      const last = entries[entries.length - 1];
+                      latest = Number(last.weight_lbs) || null;
+                      try { daysSince = Math.max(0, Math.floor((Date.now() - new Date(last.date).getTime()) / 86400000)); } catch {}
+                    }
+                    if (entries.length >= 3) {
+                      const recent = entries.slice(-7);
+                      ema = recent.reduce((acc: number, e: any) => acc + Number(e.weight_lbs), 0) / recent.length;
+                      const old = entries.slice(-14, -7);
+                      if (old.length > 0) slope = ema - old.reduce((acc: number, e: any) => acc + Number(e.weight_lbs), 0) / old.length;
+                    }
+                    await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope });
+                  } catch { /* non-fatal */ }
+                })();
               } catch { /* bridge optional */ }
             })();
             return;
@@ -2963,15 +2996,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             console.log('[loadPlans] startNewPlanWeek failed (will fall back to legacy cache):', e);
           }
         } else if (pw.needs_new_week) {
-          // The active week's end_date has passed — auto-generate the
-          // next 7 days. The backend persists the new PlanWeek and
-          // returns it in `plan_week`. Swap the local reference so the
-          // rest of loadPlans renders the fresh week.
-          console.log(`[loadPlans] PlanWeek expired (ended ${pw.end_date}) — auto-renewing`);
+          // The active week's end_date has passed — try to auto-renew.
+          // If a check-in is due the backend returns {checkin_required:true}
+          // instead of a new plan week. The check-in card in ProgressScreen
+          // handles the prompt; we just keep the stale week in that case.
+          console.log(`[loadPlans] PlanWeek expired (ended ${pw.end_date}) — checking for pending check-in`);
           try {
             const renewed = await autoRenewPlanWeek(authToken);
-            if (renewed?.plan_week) {
-              pw = renewed.plan_week;
+            if ('checkin_required' in renewed && renewed.checkin_required) {
+              console.log(`[loadPlans] check-in required for plan_week_id=${renewed.plan_week_id} — deferring renewal`);
+              // Keep stale pw; ProgressScreen's WeeklyCheckinCard will prompt
+            } else if ((renewed as any)?.plan_week) {
+              pw = (renewed as any).plan_week;
               console.log(`[loadPlans] auto-renewed: new week ${pw.start_date} → ${pw.end_date}`);
             }
           } catch (e) {
@@ -4845,6 +4881,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // value (when fresh) so phone display and watch display SHARE one
   // computation. Without this, two independent computes drifted.
   const canonicalPrepRef = useRef<{ score: number; label: string; computedAt: number } | null>(null);
+  // Full prep result from the background card — passed as initialPrep to the
+  // modal card so it renders immediately without a blank → pop-in flash.
+  const bgPrepDataRef = useRef<import('../services/preparedness').PreparednessResult | null>(null);
 
   if (!userProfile || !workoutPlan) return <View style={styles.container} />;
 
@@ -5480,6 +5519,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       canonicalPrepRef.current = { score, label, computedAt: Date.now() };
                       setReadinessBadge({ score, label });
                     }}
+                    onDataComputed={(prep) => { bgPrepDataRef.current = prep; }}
                   />
                 </View>
               );
@@ -6204,6 +6244,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             todaysFocus={todaysFocusR}
                             workoutDone={todayDone}
                             defaultExpanded
+                            initialPrep={bgPrepDataRef.current}
                             onScoreComputed={(score, label) => {
                               canonicalPrepRef.current = { score, label, computedAt: Date.now() };
                               setReadinessBadge({ score, label });
@@ -7076,23 +7117,54 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           </View>
                           <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
                         </View>
-                        {isExpanded && p.exercises && p.exercises.length > 0 && (
-                          <View style={{ borderTopWidth: 1, borderTopColor: themeColors.border, paddingHorizontal: 14, paddingVertical: 10, gap: 8 }}>
-                            {p.exercises.map((ex, ei) => (
-                              <View key={ei}>
-                                <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textPrimary, marginBottom: 3 }}>{ex.name}</Text>
-                                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
-                                  {ex.sets.map(s => `${s.reps} reps${s.weight ? ` @ ${s.weight} lbs` : ''}`).join('  ·  ')}
-                                </Text>
+                        {isExpanded && (() => {
+                          // Exercises can live at payload.exercises (workout_completed)
+                          // or payload.workout_summary.exercises (workout_post).
+                          const exercises: Array<{ name: string; sets: Array<Record<string, any>> }> =
+                            p.exercises ?? p.workout_summary?.exercises ?? [];
+                          if (exercises.length === 0) {
+                            return (
+                              <View style={{ borderTopWidth: 1, borderTopColor: themeColors.border, padding: 14 }}>
+                                <Text style={{ fontSize: 12, color: themeColors.textMuted }}>No exercise detail available.</Text>
                               </View>
-                            ))}
-                          </View>
-                        )}
-                        {isExpanded && (!p.exercises || p.exercises.length === 0) && (
-                          <View style={{ borderTopWidth: 1, borderTopColor: themeColors.border, padding: 14 }}>
-                            <Text style={{ fontSize: 12, color: themeColors.textMuted }}>No exercise detail available.</Text>
-                          </View>
-                        )}
+                            );
+                          }
+                          return (
+                            <View style={{ borderTopWidth: 1, borderTopColor: themeColors.border, paddingHorizontal: 14, paddingVertical: 10, gap: 10 }}>
+                              {exercises.map((ex, ei) => {
+                                const usableSets = (ex.sets ?? []).filter(
+                                  s => s.reps != null && Number(s.reps) > 0,
+                                );
+                                // Group consecutive sets with same weight into "NxR @ W"
+                                const groups: Array<{ weight: number | null; count: number; reps: number }> = [];
+                                for (const s of usableSets) {
+                                  const w = s.weight ? Math.round(Number(s.weight)) : null;
+                                  const r = Math.round(Number(s.reps));
+                                  const last = groups[groups.length - 1];
+                                  if (last && last.weight === w && last.reps === r) {
+                                    last.count++;
+                                  } else {
+                                    groups.push({ weight: w, count: 1, reps: r });
+                                  }
+                                }
+                                const setStr = groups.length
+                                  ? groups.map(g =>
+                                      `${g.count > 1 ? `${g.count}×` : ''}${g.reps} reps${g.weight ? ` @ ${g.weight} lbs` : ''}`,
+                                    ).join('  ·  ')
+                                  : `${ex.sets?.length ?? 0} sets`;
+                                return (
+                                  <View key={ei} style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
+                                    <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: themeColors.primary, marginTop: 5 }} />
+                                    <View style={{ flex: 1 }}>
+                                      <Text style={{ fontSize: 13, fontWeight: '600', color: themeColors.textPrimary }}>{ex.name}</Text>
+                                      <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>{setStr}</Text>
+                                    </View>
+                                  </View>
+                                );
+                              })}
+                            </View>
+                          );
+                        })()}
                       </TouchableOpacity>
                     );
                   })}
@@ -7128,7 +7200,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     import('../services/api').then(api =>
                       api.getUserFeed(authToken, digestFriend.user_id)
                     ).then(res => {
-                      setFriendFeedItems(res.items.filter(i => i.event_type === 'workout_completed'));
+                      // Accept both auto-logged and manual-post events.
+                      // Deduplicate by workout date — one card per day.
+                      // workout_post (manual share) beats workout_completed
+                      // for the same date; otherwise keep the highest id (latest).
+                      const raw = res.items.filter(
+                        (i: import('../services/api').FeedItem) =>
+                          i.event_type === 'workout_completed' || i.event_type === 'workout_post',
+                      );
+                      const byDate = new Map<string, import('../services/api').FeedItem>();
+                      for (const item of raw) {
+                        const date = item.payload.date ?? item.created_at.slice(0, 10);
+                        const existing = byDate.get(date);
+                        if (
+                          !existing ||
+                          (item.event_type === 'workout_post' && existing.event_type !== 'workout_post') ||
+                          item.id > existing.id
+                        ) {
+                          byDate.set(date, item);
+                        }
+                      }
+                      setFriendFeedItems(
+                        Array.from(byDate.values()).sort((a, b) => b.id - a.id),
+                      );
                     }).catch(() => {}).finally(() => setFriendFeedLoading(false));
                   }
                 }
@@ -7179,7 +7273,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </Text>
             </View>
             <TouchableOpacity
-              onPress={() => { setShowSettings(true); }}
+              onPress={() => {
+                setSettingsFirstName(userProfile.firstName ?? '');
+                setSettingsLastName(userProfile.lastName ?? '');
+                setShowSettings(true);
+              }}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               style={{ padding: 4 }}
             >
@@ -9364,6 +9462,50 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   <AppleHealthToggleRow themeColors={themeColors} userAge={userProfile.physicalStats?.age ?? null} />
                 </View>
 
+                {/* Name */}
+                <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>NAME</Text>
+                <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border, padding: 12, gap: 8 }]}>
+                  <View style={{ flexDirection: 'row', gap: 10 }}>
+                    <TextInput
+                      style={{ flex: 1, height: 42, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: themeColors.border, backgroundColor: themeColors.surfaceRaised, color: themeColors.textPrimary, fontSize: 14 }}
+                      value={settingsFirstName}
+                      onChangeText={setSettingsFirstName}
+                      placeholder="First name"
+                      placeholderTextColor={themeColors.textMuted}
+                      autoCapitalize="words"
+                      returnKeyType="next"
+                      onBlur={async () => {
+                        const fn = settingsFirstName.trim();
+                        const ln = settingsLastName.trim();
+                        if (fn !== (userProfile.firstName ?? '') || ln !== (userProfile.lastName ?? '')) {
+                          const { updateName } = await import('../services/api');
+                          await updateName(authToken, fn, ln).catch(() => {});
+                          onProfileUpdate?.({ firstName: fn || undefined, lastName: ln || undefined } as any, true);
+                        }
+                      }}
+                    />
+                    <TextInput
+                      style={{ flex: 1, height: 42, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: themeColors.border, backgroundColor: themeColors.surfaceRaised, color: themeColors.textPrimary, fontSize: 14 }}
+                      value={settingsLastName}
+                      onChangeText={setSettingsLastName}
+                      placeholder="Last name"
+                      placeholderTextColor={themeColors.textMuted}
+                      autoCapitalize="words"
+                      returnKeyType="done"
+                      onBlur={async () => {
+                        const fn = settingsFirstName.trim();
+                        const ln = settingsLastName.trim();
+                        if (fn !== (userProfile.firstName ?? '') || ln !== (userProfile.lastName ?? '')) {
+                          const { updateName } = await import('../services/api');
+                          await updateName(authToken, fn, ln).catch(() => {});
+                          onProfileUpdate?.({ firstName: fn || undefined, lastName: ln || undefined } as any, true);
+                        }
+                      }}
+                    />
+                  </View>
+                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Used to personalize your daily motto and greetings</Text>
+                </View>
+
                 {/* Account + Sign out */}
                 <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>ACCOUNT</Text>
                 <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
@@ -9391,135 +9533,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
           );
         })()}
-      </Modal>
-
-      {/* Weekly check-in — auto-popup every 7 days */}
-      <Modal visible={showWeeklyCheckin} transparent animationType="slide" onRequestClose={() => setShowWeeklyCheckin(false)}>
-        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}>
-          <View style={{ backgroundColor: themeColors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderTopColor: themeColors.border, maxHeight: '90%' }}>
-          <ScrollView contentContainerStyle={{ padding: 24, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
-            <Text style={{ fontSize: 20, fontWeight: '700', color: themeColors.textPrimary, marginBottom: 4 }}>Weekly Review</Text>
-            <Text style={{ fontSize: 13, color: themeColors.textSecondary, marginBottom: 20 }}>
-              Rate how this week went. The AI will use your feedback to generate next week's plan.
-            </Text>
-
-            <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary, marginBottom: 8 }}>Workout adherence</Text>
-            <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginBottom: 8 }}>How many planned workouts did you complete?</Text>
-            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 20 }}>
-              {[1,2,3,4,5].map(v => (
-                <TouchableOpacity key={v} onPress={() => setCheckinAdherence(v)}
-                  style={{ flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center', backgroundColor: checkinAdherence === v ? themeColors.primary : themeColors.surfaceRaised, borderWidth: 1, borderColor: checkinAdherence === v ? themeColors.primary : themeColors.border }}>
-                  <Text style={{ fontWeight: '700', color: checkinAdherence === v ? '#fff' : themeColors.textSecondary }}>{v}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: -16, marginBottom: 20 }}>
-              <Text style={{ fontSize: 11, color: themeColors.textMuted }}>None</Text>
-              <Text style={{ fontSize: 11, color: themeColors.textMuted }}>All of them</Text>
-            </View>
-
-            <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary, marginBottom: 8 }}>Energy & recovery</Text>
-            <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginBottom: 8 }}>How did your body feel this week overall?</Text>
-            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 20 }}>
-              {['Burned out','Tired','OK','Good','Great'].map((label, i) => (
-                <TouchableOpacity key={i} onPress={() => setCheckinEnergy(i + 1)}
-                  style={{ flex: 1, paddingVertical: 10, borderRadius: 10, alignItems: 'center', backgroundColor: checkinEnergy === i + 1 ? themeColors.primary : themeColors.surfaceRaised, borderWidth: 1, borderColor: checkinEnergy === i + 1 ? themeColors.primary : themeColors.border }}>
-                  <Text style={{ fontSize: 10, fontWeight: '700', color: checkinEnergy === i + 1 ? '#fff' : themeColors.textSecondary, textAlign: 'center' }}>{label}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            {/* Injury log review */}
-            {(userProfile?.injuryEntries ?? []).filter(i => i.status !== 'resolved').length > 0 && (
-              <View style={{ marginBottom: 20 }}>
-                <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary, marginBottom: 4 }}>Injury log</Text>
-                <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginBottom: 10 }}>Update the status of any injuries flagged this week.</Text>
-                {(userProfile?.injuryEntries ?? []).filter(i => i.status !== 'resolved').map(inj => {
-                  const currentStatus = checkinInjuryStatuses[inj.id] ?? inj.status;
-                  const statusColors: Record<string, string> = { active: '#ef4444', recovering: '#f59e0b', resolved: '#22c55e' };
-                  return (
-                    <View key={inj.id} style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 12, marginBottom: 8, borderWidth: 1, borderColor: themeColors.border }}>
-                      <Text style={{ fontSize: 13, fontWeight: '600', color: themeColors.textPrimary, marginBottom: 2 }}>{inj.bodyPart}</Text>
-                      <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginBottom: 8 }} numberOfLines={2}>{inj.description}</Text>
-                      <Text style={{ fontSize: 11, color: themeColors.textMuted, marginBottom: 6 }}>Logged {new Date(inj.reportedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</Text>
-                      <View style={{ flexDirection: 'row', gap: 6 }}>
-                        {(['active', 'recovering', 'resolved'] as InjuryEntry['status'][]).map(s => (
-                          <TouchableOpacity key={s} onPress={() => setCheckinInjuryStatuses(prev => ({ ...prev, [inj.id]: s }))}
-                            style={{ flex: 1, paddingVertical: 6, borderRadius: 8, alignItems: 'center',
-                              backgroundColor: currentStatus === s ? statusColors[s] : themeColors.surface,
-                              borderWidth: 1, borderColor: currentStatus === s ? statusColors[s] : themeColors.border }}>
-                            <Text style={{ fontSize: 11, fontWeight: '600', color: currentStatus === s ? '#fff' : themeColors.textMuted, textTransform: 'capitalize' }}>{s}</Text>
-                          </TouchableOpacity>
-                        ))}
-                      </View>
-                    </View>
-                  );
-                })}
-              </View>
-            )}
-
-            <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textPrimary, marginBottom: 8 }}>Anything to flag? (optional)</Text>
-            <TextInput
-              value={checkinNotes}
-              onChangeText={setCheckinNotes}
-              placeholder="Injuries, schedule changes, too easy/hard..."
-              placeholderTextColor={themeColors.textMuted}
-              multiline
-              style={{ borderWidth: 1, borderColor: themeColors.border, borderRadius: 10, padding: 12, color: themeColors.textPrimary, backgroundColor: themeColors.surfaceRaised, minHeight: 64, marginBottom: 20, fontSize: 13 }}
-            />
-
-            <TouchableOpacity
-              style={{ backgroundColor: themeColors.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
-              onPress={async () => {
-                setShowWeeklyCheckin(false);
-                await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
-                // Save any injury status changes made during check-in
-                if (Object.keys(checkinInjuryStatuses).length > 0) {
-                  try {
-                    const profileRaw = await AsyncStorage.getItem('userProfile');
-                    if (profileRaw) {
-                      const p: UserProfile = JSON.parse(profileRaw);
-                      const updated = (p.injuryEntries ?? []).map(inj =>
-                        checkinInjuryStatuses[inj.id] !== undefined
-                          ? { ...inj, status: checkinInjuryStatuses[inj.id], statusUpdatedAt: new Date().toISOString() }
-                          : inj
-                      );
-                      await AsyncStorage.setItem('userProfile', JSON.stringify({ ...p, injuryEntries: updated }));
-                    }
-                  } catch {}
-                }
-                // Gather pending profile changes
-                let pendingChanges: any[] = [];
-                try {
-                  const pendingRaw = await AsyncStorage.getItem('pendingProfileChanges');
-                  pendingChanges = pendingRaw ? JSON.parse(pendingRaw) : [];
-                } catch {}
-
-                // Send the weekly review to AI for next week's plan
-                if (onWeeklyRefresh) {
-                  onWeeklyRefresh({
-                    adherence: checkinAdherence,
-                    energy: checkinEnergy,
-                    notes: checkinNotes || undefined,
-                    pendingChanges: pendingChanges.length > 0 ? pendingChanges : undefined,
-                  });
-                }
-
-                setCheckinAdherence(3);
-                setCheckinEnergy(3);
-                setCheckinNotes('');
-                setCheckinInjuryStatuses({});
-              }}>
-              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>Generate next week's plan</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity onPress={() => { setShowWeeklyCheckin(false); setCheckinAdherence(3); setCheckinEnergy(3); setCheckinNotes(''); setCheckinInjuryStatuses({}); }}
-              style={{ alignItems: 'center', paddingVertical: 10 }}>
-              <Text style={{ color: themeColors.textMuted, fontWeight: '600', fontSize: 14 }}>Skip — keep current plan</Text>
-            </TouchableOpacity>
-          </ScrollView>
-          </View>
-        </View>
       </Modal>
 
       {/* Supplement Library Modal */}

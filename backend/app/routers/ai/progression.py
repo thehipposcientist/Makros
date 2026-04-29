@@ -1686,6 +1686,22 @@ def enrich_food_db(
     }
 
 
+@router.post("/backfill-food-processing")
+def backfill_food_processing(
+    limit: int = 0,
+    current_user: User = Depends(get_current_user),
+):
+    """Classify processing_bucket for every Food row that lacks a FoodMetadata
+    entry at the current classifier version. Covers seeded, USDA-imported, and
+    custom foods. AI is called only for genuinely ambiguous names.
+
+    Pass ?limit=N to process a test batch. Omit for a full run.
+    Idempotent — already-classified rows are skipped."""
+    from app.services.nutrition.gut_backfill import backfill_all_food_rows
+    max_rows = limit if limit > 0 else None
+    return backfill_all_food_rows(allow_ai=True, max_rows=max_rows)
+
+
 @router.post("/validate-food-macros")
 def validate_food_macros(
     body: ValidateFoodMacrosRequest,

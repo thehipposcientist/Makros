@@ -24,6 +24,7 @@ import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadG
 import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import WeeklyCheckinModal from '../components/WeeklyCheckinModal';
+import WeeklyCheckinCard from '../components/WeeklyCheckinCard';
 import BodyMeasurementsModal from '../components/BodyMeasurementsModal';
 import Zone2TargetCard from '../components/Zone2TargetCard';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
@@ -144,7 +145,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
   // Default to 'volume' — most users care about total work done per
   // session more than max load on a single set. Toggleable.
-  const [chartMode, setChartMode] = useState<'weight' | 'volume' | 'duration' | 'e1rm'>('volume');
+  const [chartMode, setChartMode] = useState<'weight' | 'volume' | 'duration' | 'e1rm' | 'pr'>('volume');
   const [e1rmHistory, setE1rmHistory] = useState<Array<{ date: string; e1rm_lbs: number; confidence: string }>>([]);
   // Optional muscle filter for the exercise picker. 'all' = no filter.
   const [chartMuscleFilter, setChartMuscleFilter] = useState<string>('all');
@@ -745,8 +746,32 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 const hasDuration = trend.some(p => p.totalDuration > 0);
                 const hasWeight = trend.some(p => p.bestWeight > 0);
                 const hasE1rm = e1rmHistory.length >= 2;
+
+                // PR progression — running max weight per session (all history,
+                // capped at 20 for chart legibility). Points where the running
+                // max increased are flagged isPr so the chart can highlight them.
+                const prPts = (() => {
+                  const sessions = [...history]
+                    .sort((a, b) => +new Date(a.date) - +new Date(b.date))
+                    .filter(s => s.exercises.some(e => e.name.toLowerCase() === selectedExercise.toLowerCase()))
+                    .slice(-20);
+                  let runningMax = 0;
+                  return sessions.map(s => {
+                    const ex = s.exercises.find(e => e.name.toLowerCase() === selectedExercise.toLowerCase())!;
+                    const w = ex.sets.length ? Math.max(...ex.sets.map(set => set.weightLbs)) : 0;
+                    const isPr = w > runningMax;
+                    if (isPr) runningMax = w;
+                    const d = new Date(s.date);
+                    return { weight: w, label: `${d.getMonth() + 1}/${d.getDate()}`, isPr };
+                  });
+                })();
+                const hasPr = !isCardioExercise && prPts.length >= 2;
+
                 const effectiveMode = chartMode === 'e1rm' && hasE1rm ? 'e1rm'
-                  : isCardioExercise && !hasWeight && hasDuration ? 'duration' : (chartMode === 'e1rm' ? 'weight' : chartMode);
+                  : chartMode === 'pr' && hasPr ? 'pr'
+                  : isCardioExercise && !hasWeight && hasDuration ? 'duration'
+                  : (chartMode === 'e1rm' || chartMode === 'pr') ? 'weight'
+                  : chartMode;
 
                 if (effectiveMode === 'e1rm') {
                   const e1rmValues = e1rmHistory.map(p => Math.round(p.e1rm_lbs));
@@ -788,6 +813,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           {hasWeight && (
                             <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('volume')} activeOpacity={0.75}>
                               <Text style={styles.chartModeBtnText}>Volume</Text>
+                            </TouchableOpacity>
+                          )}
+                          {hasPr && (
+                            <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('pr')} activeOpacity={0.75}>
+                              <Text style={styles.chartModeBtnText}>PR</Text>
                             </TouchableOpacity>
                           )}
                           <TouchableOpacity style={[styles.chartModeBtn, styles.chartModeBtnActive]} onPress={() => {}}>
@@ -851,6 +881,113 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   );
                 }
 
+                if (effectiveMode === 'pr') {
+                  const weights = prPts.map(p => p.weight);
+                  const prMin = Math.min(...weights);
+                  const prMax = Math.max(...weights, 1);
+                  const chartW = 320;
+                  const chartH = 140;
+                  const padL = 44;
+                  const padR = 16;
+                  const padT = 16;
+                  const padB = 28;
+                  const plotW = chartW - padL - padR;
+                  const plotH = chartH - padT - padB;
+                  const rangeMin = Math.max(0, prMin - 10);
+                  const rangeMax = prMax + 10;
+                  const rangeDelta = rangeMax - rangeMin || 1;
+                  const pts = weights.map((v, i) => ({
+                    x: padL + (weights.length > 1 ? (i / (weights.length - 1)) * plotW : plotW / 2),
+                    y: padT + plotH - ((v - rangeMin) / rangeDelta) * plotH,
+                    val: v,
+                    label: prPts[i].label,
+                    isPr: prPts[i].isPr,
+                  }));
+                  const polyPoints = pts.map(p => `${p.x},${p.y}`).join(' ');
+                  const gridLines = 4;
+                  const gridVals = Array.from({ length: gridLines }, (_, i) =>
+                    Math.round(rangeMin + (rangeDelta * (i / (gridLines - 1))))
+                  );
+                  const prCount = prPts.filter(p => p.isPr).length;
+                  return (
+                    <View style={styles.graphCard}>
+                      <View style={styles.graphHeader}>
+                        <Text style={styles.graphTitle}>{selectedExercise}</Text>
+                        <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+                          {hasWeight && (
+                            <TouchableOpacity style={styles.chartModeBtn} onPress={() => setChartMode('weight')} activeOpacity={0.75}>
+                              <Text style={styles.chartModeBtnText}>Weight</Text>
+                            </TouchableOpacity>
+                          )}
+                          {hasWeight && (
+                            <TouchableOpacity style={styles.chartModeBtn} onPress={() => setChartMode('volume')} activeOpacity={0.75}>
+                              <Text style={styles.chartModeBtnText}>Volume</Text>
+                            </TouchableOpacity>
+                          )}
+                          {hasE1rm && (
+                            <TouchableOpacity style={styles.chartModeBtn} onPress={() => setChartMode('e1rm')} activeOpacity={0.75}>
+                              <Text style={styles.chartModeBtnText}>Est. 1RM</Text>
+                            </TouchableOpacity>
+                          )}
+                          <TouchableOpacity style={[styles.chartModeBtn, styles.chartModeBtnActive]} onPress={() => {}}>
+                            <Text style={[styles.chartModeBtnText, styles.chartModeBtnTextActive]}>PR</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                      <Text style={styles.graphSubtitle}>Best set weight (lbs) per session · PR sessions highlighted</Text>
+                      <View style={{ alignItems: 'center', marginVertical: 8 }}>
+                        <Svg width={chartW} height={chartH}>
+                          {gridVals.map((gv, gi) => {
+                            const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
+                            return (
+                              <Line key={gi} x1={padL} y1={gy} x2={chartW - padR} y2={gy}
+                                stroke={colors.border} strokeWidth={1} strokeDasharray="4,4" />
+                            );
+                          })}
+                          {gridVals.map((gv, gi) => {
+                            const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
+                            return (
+                              <SvgText key={`lbl${gi}`} x={padL - 6} y={gy + 4}
+                                fontSize={10} fill={colors.textMuted} textAnchor="end">
+                                {gv}
+                              </SvgText>
+                            );
+                          })}
+                          <Polyline points={polyPoints}
+                            fill="none" stroke={colors.primary} strokeWidth={2.5}
+                            strokeLinejoin="round" strokeLinecap="round" />
+                          {pts.map((p, i) => (
+                            <Circle key={i} cx={p.x} cy={p.y}
+                              r={p.isPr ? 5.5 : 3.5}
+                              fill={p.isPr ? colors.accent : colors.primary}
+                              stroke={colors.surface} strokeWidth={1.5} />
+                          ))}
+                          {pts.length <= 12 && pts.map((p, i) => (
+                            <SvgText key={`d${i}`} x={p.x} y={chartH - 4}
+                              fontSize={9} fill={colors.textMuted} textAnchor="middle">
+                              {p.label}
+                            </SvgText>
+                          ))}
+                        </Svg>
+                      </View>
+                      <View style={styles.chartSummaryRow}>
+                        <View style={styles.chartStat}>
+                          <Text style={styles.chartStatValue}>{weights[weights.length - 1]} lbs</Text>
+                          <Text style={styles.chartStatLabel}>Latest</Text>
+                        </View>
+                        <View style={styles.chartStat}>
+                          <Text style={[styles.chartStatValue, { color: colors.accent }]}>{prMax} lbs</Text>
+                          <Text style={styles.chartStatLabel}>All-time PR</Text>
+                        </View>
+                        <View style={styles.chartStat}>
+                          <Text style={[styles.chartStatValue, { color: colors.primary }]}>{prCount}</Text>
+                          <Text style={styles.chartStatLabel}>PRs logged</Text>
+                        </View>
+                      </View>
+                    </View>
+                  );
+                }
+
                 const values = trend.map(p =>
                   effectiveMode === 'weight' ? p.bestWeight
                     : effectiveMode === 'duration' ? Math.round(p.totalDuration / 60)
@@ -882,6 +1019,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                             style={[styles.chartModeBtn, effectiveMode === 'duration' && styles.chartModeBtnActive]}
                             onPress={() => setChartMode('duration')}>
                             <Text style={[styles.chartModeBtnText, effectiveMode === 'duration' && styles.chartModeBtnTextActive]}>Duration</Text>
+                          </TouchableOpacity>
+                        )}
+                        {hasPr && (
+                          <TouchableOpacity
+                            style={[styles.chartModeBtn]}
+                            onPress={() => setChartMode('pr')}>
+                            <Text style={styles.chartModeBtnText}>PR</Text>
                           </TouchableOpacity>
                         )}
                         {hasE1rm && (
@@ -1401,11 +1545,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 });
                 const totalMin = Math.round(thisWeek.reduce((s, w) => s + (w.durationSeconds || 0), 0) / 60);
                 const avgMin = thisWeek.length > 0 ? Math.round(totalMin / thisWeek.length) : 0;
-                // Compute streak from consecutive days with workouts
-                const allDoneDates = new Set(history.filter(s => s.date && !s.skipped).map(s => {
-                  const p = new Date(s.date);
+                // Compute streak from consecutive days with workouts (history + summaries, matching HomeScreen)
+                const toStreakKey = (d: string) => {
+                  const p = new Date(d);
+                  if (isNaN(p.getTime())) return d.slice(0, 10);
                   return `${p.getFullYear()}-${String(p.getMonth() + 1).padStart(2, '0')}-${String(p.getDate()).padStart(2, '0')}`;
-                }));
+                };
+                const allDoneDates = new Set([
+                  ...history.filter(s => s.date && !s.skipped).map(s => toStreakKey(s.date)),
+                  ...summaries.filter(s => s.date).map(s => toStreakKey(s.date)),
+                ]);
                 let streak = 0;
                 const checkDate = new Date();
                 const todayStr = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
@@ -1973,6 +2122,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'health' ? (
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
+          {authToken && (
+            <WeeklyCheckinCard
+              authToken={authToken}
+              themeName={userProfile.themePreference}
+            />
+          )}
           {authToken && (
             <TouchableOpacity
               onPress={() => setWeeklyCheckinVisible(true)}

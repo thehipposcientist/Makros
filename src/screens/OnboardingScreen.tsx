@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -389,14 +389,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   // stays accurate as users age.
   const [birthdate, setBirthdate] = useState<string | null>(null);
   const [gender, setGender] = useState<Gender | ''>('');
-  // Optional initial body measurements (submitted as first checkin after account creation)
-  const [initWaist, setInitWaist] = useState('');
-  const [initChest, setInitChest] = useState('');
-  const [initHips, setInitHips] = useState('');
-  const [initBicep, setInitBicep] = useState('');
-  const [initThigh, setInitThigh] = useState('');
-  const [initCalf, setInitCalf] = useState('');
-
   // Step 4 — Training days
   const [daysPerWeek, setDaysPerWeekRaw] = useState('3');
   // Preferred split (auto lets the planner pick based on goal + daysPerWeek).
@@ -453,6 +445,19 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const steps = getSteps();
   const totalSteps = steps.length;
   const currentStepKey = steps[currentStep];
+
+  // Auto-scroll carousel to the selected goal whenever the goal step becomes active
+  // (covers both initial load and navigating back from a later step).
+  useEffect(() => {
+    if (currentStepKey !== 'goal') return;
+    const idx = LAUNCH_GOALS.findIndex(g => g.id === selectedGoal);
+    if (idx < 0) return;
+    const timer = setTimeout(() => {
+      goalCarouselRef.current?.scrollTo({ x: idx * (screenWidth * 0.82 + 12), animated: false });
+      setGoalScrollIdx(idx);
+    }, 240); // wait for FadeInView to finish before scrolling
+    return () => clearTimeout(timer);
+  }, [currentStepKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectGoal = (goalId: string) => {
     if (goalId !== selectedGoal) {
@@ -563,23 +568,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     if (weightLbs) {
       const { saveWeightEntry } = await import('../utils/weightHistory');
       await saveWeightEntry(parseFloat(weightLbs), 'onboarding');
-    }
-    // Log initial measurements if any were entered
-    const parseMeasure = (v: string) => { const n = parseFloat(v); return isNaN(n) ? undefined : n; };
-    const hasAnyMeasurement = [initWaist, initChest, initHips, initBicep, initThigh, initCalf].some(v => v.trim() !== '');
-    if (authToken && weightLbs && hasAnyMeasurement) {
-      const { submitWeeklyCheckin } = await import('../services/api');
-      submitWeeklyCheckin(authToken, {
-        checkin_date: new Date().toISOString().slice(0, 10),
-        weight_lbs: parseFloat(weightLbs),
-        waist_in: parseMeasure(initWaist),
-        chest_in: parseMeasure(initChest),
-        hips_in: parseMeasure(initHips),
-        bicep_in: parseMeasure(initBicep),
-        thigh_in: parseMeasure(initThigh),
-        calf_in: parseMeasure(initCalf),
-        energy: 3, sleep: 3, adherence: 3,
-      }).catch(() => null);
     }
     const cat = goalCategory(selectedGoal) ?? 'lifestyle_consistency';
 
@@ -1180,32 +1168,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         </View>
       </View>
 
-      {/* Optional body measurements */}
-      <View style={styles.fieldGroup}>
-        <Text style={styles.fieldLabel}>Body measurements <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text></Text>
-        <Text style={[styles.hint, { marginBottom: 10 }]}>Record your starting numbers — these help track progress over time.</Text>
-        {([
-          { label: 'Waist', state: initWaist, setter: setInitWaist },
-          { label: 'Chest', state: initChest, setter: setInitChest },
-          { label: 'Hips',  state: initHips,  setter: setInitHips  },
-          { label: 'Bicep', state: initBicep, setter: setInitBicep },
-          { label: 'Thigh', state: initThigh, setter: setInitThigh },
-          { label: 'Calf',  state: initCalf,  setter: setInitCalf  },
-        ] as Array<{ label: string; state: string; setter: (v: string) => void }>).map(f => (
-          <View key={f.label} style={[styles.inlineInput, { marginBottom: 8 }]}>
-            <Text style={{ fontSize: 14, color: colors.textSecondary, width: 52 }}>{f.label}</Text>
-            <TextInput
-              style={[styles.input, { flex: 1 }]}
-              placeholder="—"
-              placeholderTextColor={colors.textMuted}
-              keyboardType="decimal-pad"
-              value={f.state}
-              onChangeText={f.setter}
-            />
-            <Text style={styles.unit}>in</Text>
-          </View>
-        ))}
-      </View>
     </View>
   );
 

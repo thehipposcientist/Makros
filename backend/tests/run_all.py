@@ -66,6 +66,10 @@ _TEST_MODULES = (
     "tests.test_plan_week",
     # Mid-week regeneration: done-day protection + split/dpw/equipment changes.
     "tests.test_plan_week_midweek_regen",
+    # Goal change: no PlanWeek/PlanDay mutation, snapshot fields, review override.
+    "tests.test_plan_week_goal_change",
+    # PlanWeekCheckin: status, gate, idempotency, skip, recap.
+    "tests.test_plan_week_checkin",
     # Change Day Type — conflict detection + smart adjust reconciliation.
     "tests.test_change_day_type",
     # Switch Day pin/rotate/swap algorithm — pure-function helper.

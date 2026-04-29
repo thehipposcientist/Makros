@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
-  Platform, Image, Dimensions, Alert, Animated,
+  Platform, Image, Dimensions, Alert,
 } from 'react-native';
 import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestion } from '../services/api';
 import { colors, radius } from '../constants/theme';
@@ -45,17 +45,6 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const confirmPasswordRef = useRef<TextInput>(null);
   const answerRef          = useRef<TextInput>(null);
   const scrollRef          = useRef<ScrollView>(null);
-
-  // Sliding pill indicator behind the Login/Sign Up toggle. 0 = login,
-  // 1 = signup. Reset modes share the login slot so the pill stays parked.
-  const togglePos = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    Animated.timing(togglePos, {
-      toValue: mode === 'signup' ? 1 : 0,
-      duration: 220,
-      useNativeDriver: false,
-    }).start();
-  }, [mode, togglePos]);
 
   const switchMode = (next: 'login' | 'signup' | 'reset_email' | 'reset_answer') => {
     setMode(next);
@@ -176,21 +165,15 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
         <View style={styles.formCard}>
           {/* Login / Sign Up toggle — sliding pill indicator */}
           <View style={styles.toggle}>
-            <Animated.View
-              pointerEvents="none"
-              style={[styles.toggleIndicator, {
-                left: togglePos.interpolate({ inputRange: [0, 1], outputRange: ['0%', '50%'] }),
-              }]}
-            />
             <TouchableOpacity
               activeOpacity={0.75}
-              style={styles.toggleButton}
+              style={[styles.toggleButton, mode === 'login' && styles.toggleButtonActive]}
               onPress={() => switchMode('login')}>
               <Text style={[styles.toggleText, mode === 'login' && styles.toggleTextActive]}>Log In</Text>
             </TouchableOpacity>
             <TouchableOpacity
               activeOpacity={0.75}
-              style={styles.toggleButton}
+              style={[styles.toggleButton, mode === 'signup' && styles.toggleButtonActive]}
               onPress={() => switchMode('signup')}>
               <Text style={[styles.toggleText, mode === 'signup' && styles.toggleTextActive]}>Sign Up</Text>
             </TouchableOpacity>
@@ -387,6 +370,11 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               <Text style={styles.forgotText}>Forgot password?</Text>
             </TouchableOpacity>
           )}
+          {mode === 'signup' && (
+            <TouchableOpacity onPress={() => switchMode('login')} style={styles.forgotBtn}>
+              <Text style={styles.forgotText}>Already have an account? Log in</Text>
+            </TouchableOpacity>
+          )}
           {(mode === 'reset_email' || mode === 'reset_answer') && (
             <TouchableOpacity onPress={() => switchMode('login')} style={styles.forgotBtn}>
               <Text style={styles.forgotText}>Back to log in</Text>
@@ -419,30 +407,25 @@ const styles = StyleSheet.create({
 
   toggle: {
     flexDirection: 'row',
-    backgroundColor: colors.surfaceRaised,
+    gap: 2,
+    backgroundColor: colors.background,
     borderRadius: radius.full,
     padding: 3,
     marginBottom: 4,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: colors.border,
-    position: 'relative',
   },
-  toggleIndicator: {
-    position: 'absolute',
-    top: 3,
-    bottom: 3,
-    width: '50%',
-    backgroundColor: colors.primary,
-    borderRadius: radius.full,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 3,
+  toggleButton: {
+    flex: 1, paddingVertical: 8, borderRadius: radius.full, alignItems: 'center',
   },
-  toggleButton:     { flex: 1, paddingVertical: 12, borderRadius: radius.full, alignItems: 'center' },
-  toggleText:       { fontSize: 15, fontWeight: '600', color: colors.textMuted },
-  toggleTextActive: { color: '#FFFFFF', fontWeight: '700' },
+  toggleButtonActive: {
+    backgroundColor: colors.primary + '22',
+  },
+  toggleText: {
+    fontSize: 11, fontWeight: '500', color: colors.textMuted,
+    letterSpacing: 0.7, textTransform: 'uppercase', opacity: 0.55,
+  },
+  toggleTextActive: { color: colors.primary, fontWeight: '700', opacity: 1 },
 
   input: {
     borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,

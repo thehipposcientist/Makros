@@ -745,6 +745,17 @@ def _ensure_gear_items_table() -> None:
         print(f"[migration] gear_items table failed (non-fatal): {e}")
 
 
+def _ensure_gear_items_photos_column() -> None:
+    """Add photos JSONB column to gear_items if missing (idempotent)."""
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE gear_items ADD COLUMN IF NOT EXISTS photos JSONB DEFAULT '[]'"
+            ))
+    except Exception as e:
+        print(f"[migration] gear_items photos column failed (non-fatal): {e}")
+
+
 def _ensure_weekly_checkin_body_columns() -> None:
     """Add body_fat_pct / bp_systolic / bp_diastolic to weekly_checkins
     if they don't exist yet. All optional — `None` for any user who
@@ -993,6 +1004,68 @@ def _ensure_user_name_columns() -> None:
         print(f"[migration] user name columns failed (non-fatal): {e}")
 
 
+def _ensure_plan_week_snapshot_columns() -> None:
+    """Add goal_pace + session_minutes to plan_weeks.
+
+    These snapshot the UserGoal.pace and workout duration at the moment the
+    week was generated so compute_weekly_review can evaluate the completed
+    week against the goal/pace it was actually built for — not whatever
+    UserGoal happens to be active at review time (user may have changed it
+    mid-week)."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE plan_weeks ADD COLUMN IF NOT EXISTS goal_pace VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE plan_weeks ADD COLUMN IF NOT EXISTS session_minutes INTEGER"
+            ))
+    except Exception as e:
+        print(f"[migration] plan_weeks snapshot columns failed (non-fatal): {e}")
+
+
+def _ensure_plan_week_checkins_table() -> None:
+    """Create plan_week_checkins — one coaching check-in record per PlanWeek.
+    Blocks auto-renew until submitted or skipped."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS plan_week_checkins (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES "user"(id),
+                    plan_week_id INTEGER NOT NULL REFERENCES plan_weeks(id),
+                    week_start_date DATE NOT NULL,
+                    week_end_date DATE NOT NULL,
+                    submitted_at TIMESTAMPTZ,
+                    skipped BOOLEAN NOT NULL DEFAULT FALSE,
+                    energy INTEGER,
+                    hunger INTEGER,
+                    soreness INTEGER,
+                    motivation INTEGER,
+                    schedule_issue BOOLEAN NOT NULL DEFAULT FALSE,
+                    note TEXT,
+                    review_snapshot_json JSONB,
+                    ai_decision_id INTEGER,
+                    ai_message TEXT,
+                    ai_delta JSONB,
+                    commitments_json JSONB,
+                    plan_goal VARCHAR,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT uq_plan_week_checkin UNIQUE (user_id, plan_week_id)
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_plan_week_checkins_user "
+                "ON plan_week_checkins(user_id)"
+            ))
+    except Exception as e:
+        print(f"[migration] plan_week_checkins table failed (non-fatal): {e}")
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
     from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, PlanWeek, PlanDay, UserEquipmentProfile, GearItem
@@ -1021,6 +1094,7 @@ def create_db_and_tables():
     _ensure_weekly_checkin_measurements_columns()
     _ensure_recovery_activities_table()
     _ensure_gear_items_table()
+    _ensure_gear_items_photos_column()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()
     _backfill_custom_food_micronutrients()
@@ -1029,6 +1103,8 @@ def create_db_and_tables():
     _seed_supplement_ingredients()
     _ensure_user_name_columns()
     _ensure_plan_week_tables()
+    _ensure_plan_week_snapshot_columns()
+    _ensure_plan_week_checkins_table()
     _backfill_plan_weeks()
     from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
     with Session(engine) as session:
