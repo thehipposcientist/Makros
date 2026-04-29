@@ -29,6 +29,11 @@ class NutritionScoreResponse(BaseModel):
     indicators: dict
 
 
+class NameUpdate(BaseModel):
+    first_name: str | None = None
+    last_name: str | None = None
+
+
 class UserStateBody(BaseModel):
     state: dict
 
@@ -294,7 +299,24 @@ def get_my_profile(
         "goal": goal,
         "preferences": prefs,
         "coaching": coaching,
+        "first_name": current_user.first_name,
+        "last_name": current_user.last_name,
     }
+
+
+@router.patch("/name")
+def update_name(
+    body: NameUpdate,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    if body.first_name is not None:
+        current_user.first_name = body.first_name.strip() or None
+    if body.last_name is not None:
+        current_user.last_name = body.last_name.strip() or None
+    session.add(current_user)
+    session.commit()
+    return {"first_name": current_user.first_name, "last_name": current_user.last_name}
 
 
 @router.get("/day-state/{day_key}")

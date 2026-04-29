@@ -171,6 +171,9 @@ export interface UserLogEntry {
 }
 
 export interface UserProfile {
+  firstName?: string;
+  lastName?: string;
+
   // ── Hierarchical goal (new model) ──────────────────────────────────────────
   goal: Goal;                    // primary goal id (from goalConfig PRIMARY_GOALS)
   goalSelection?: GoalSelection; // full hierarchical selection (category + modifiers + target focus)

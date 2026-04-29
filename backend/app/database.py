@@ -980,6 +980,19 @@ def _backfill_plan_weeks() -> None:
             pass
 
 
+def _ensure_user_name_columns() -> None:
+    """Add first_name / last_name to the user table. Nullable so existing
+    rows migrate cleanly without a default."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text('ALTER TABLE "user" ADD COLUMN IF NOT EXISTS first_name VARCHAR'))
+            conn.execute(text('ALTER TABLE "user" ADD COLUMN IF NOT EXISTS last_name VARCHAR'))
+    except Exception as e:
+        print(f"[migration] user name columns failed (non-fatal): {e}")
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
     from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, PlanWeek, PlanDay, UserEquipmentProfile, GearItem
@@ -1014,6 +1027,7 @@ def create_db_and_tables():
     _backfill_mealitem_food_ids()
     _recompute_recent_daily_metrics()
     _seed_supplement_ingredients()
+    _ensure_user_name_columns()
     _ensure_plan_week_tables()
     _backfill_plan_weeks()
     from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals

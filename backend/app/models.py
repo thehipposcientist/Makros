@@ -18,10 +18,10 @@ class User(SQLModel, table=True):
     hashed_password: str
     is_active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    # Recovery question pair. Nullable so existing rows migrate cleanly and
-    # so fresh signups can defer the prompt until after first login.
     recovery_question: str | None = Field(default=None)
     recovery_answer_hash: str | None = Field(default=None)
+    first_name: str | None = Field(default=None)
+    last_name: str | None = Field(default=None)
 
 
 # ─── User profile / stats ─────────────────────────────────────────────────────

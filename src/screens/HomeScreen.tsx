@@ -5486,7 +5486,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             {/* Streak + daily motto */}
             {workoutSubTab === 'plan' && authToken && (
-              <StreakConsistencyWidget authToken={authToken} themeName={userProfile.themePreference} displayName={username || undefined} />
+              <StreakConsistencyWidget authToken={authToken} themeName={userProfile.themePreference} displayName={userProfile.firstName || username || undefined} />
             )}
 
             {/* Combined "Today's training readiness" — fuses Recovery (per-muscle

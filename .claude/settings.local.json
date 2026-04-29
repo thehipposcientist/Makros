@@ -211,7 +211,8 @@
       "Bash(]\" | head -30)",
       "Bash(xxd)",
       "Bash(export PATH=\"/opt/homebrew/bin:$HOME/.nvm/versions/node/*/bin:$PATH\")",
-      "Bash(npx babel *)"
+      "Bash(npx babel *)",
+      "Bash(npx --yes @babel/parser@7)"
     ]
   }
 }

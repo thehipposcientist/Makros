@@ -139,6 +139,8 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
     });
     // Map backend snake_case → frontend UserProfile shape
     return {
+      firstName:  data.first_name ?? undefined,
+      lastName:   data.last_name ?? undefined,
       goal:       data.goal.goal_type,
       goalDetails: {
         pace:             data.goal.pace,
@@ -919,6 +921,14 @@ export async function updatePhysicalStats(
       birthdate:     stats.birthdate ?? null,
       gender:        stats.gender,
     }),
+  });
+}
+
+export async function updateName(token: string, firstName: string, lastName: string) {
+  return request('/profile/name', {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ first_name: firstName, last_name: lastName }),
   });
 }
 
