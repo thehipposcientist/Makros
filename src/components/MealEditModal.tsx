@@ -785,22 +785,11 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     setAiResults(prev => prev.filter(r => r.name !== aiItem.name));
   };
 
-  // Memoized so it doesn't rebuild on every keystroke (the old code was
-  // re-scanning the entire food library on every render, which made typing
-  // in the search field feel laggy with the seeded ~200-item library).
-  const filteredCategories = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    const existingNames = new Set(items.map(it => it.name.toLowerCase()));
-    return foodCategories
-      .map(cat => ({
-        ...cat,
-        foods: cat.foods.filter(f =>
-          (!needle || f.name.toLowerCase().includes(needle))
-          && !existingNames.has(f.name.toLowerCase())
-        ),
-      }))
-      .filter(cat => cat.foods.length > 0);
-  }, [foodCategories, search, items]);
+  // The category-grouped food list was removed in favor of a search-only UX —
+  // the always-visible scroll of every seed/custom food was visual noise and
+  // pushed the actual actions (search, barcode, photo, voice) below the fold.
+  // `foodCategories` is still accepted as a prop for backwards compat but is
+  // no longer rendered; food name lookups go through `allFoods` + `lookupFood`.
 
   // A routine-tagged meal carries a `_routineId`. Editing one from the
   // day card presents a scope prompt on save: "Just today" detaches
@@ -1351,8 +1340,11 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               )}
             </View>
 
-            {filteredCategories.length === 0 && search.length > 0 && !aiSearchLoading && aiResults.length === 0 && (
-              <Text style={s.emptyText}>No local matches — tap Search to look up nutrition</Text>
+            {/* Hint when search has text but the user hasn't tapped Search yet
+                (or the AI returned nothing). Replaces the old "No local matches"
+                copy from when there was an inline category list to filter. */}
+            {search.length > 1 && !aiSearchLoading && aiResults.length === 0 && (
+              <Text style={s.emptyText}>Tap Search to look up "{search.trim()}"</Text>
             )}
 
             {aiResults.length > 0 && (() => {
@@ -1397,22 +1389,6 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               );
             })()}
 
-            {filteredCategories.map(cat => (
-              <View key={cat.key} style={s.catSection}>
-                <Text style={s.catLabel}>{cat.icon}  {cat.label}</Text>
-                <View style={s.foodChips}>
-                  {cat.foods.map(food => (
-                    <TouchableOpacity
-                      key={food.name}
-                      style={s.foodChip}
-                      onPress={() => addFood(food.name)}>
-                      <Text style={s.foodChipName}>{food.name}</Text>
-                      <Text style={s.foodChipCal}>{food.calories} cal</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </View>
-            ))}
           </ScrollView>
         </KeyboardAvoidingView>
       </View>
@@ -1695,18 +1671,6 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   },
   clearBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: colors.border, alignItems: 'center', justifyContent: 'center' },
   clearBtnText: { fontSize: 13, color: colors.textSecondary, fontWeight: '700' },
-
-  catSection: { marginBottom: 16 },
-  catLabel:   { fontSize: 11, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.6, marginBottom: 8 },
-  foodChips:  { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  foodChip: {
-    backgroundColor: colors.surface, borderRadius: radius.full,
-    borderWidth: 1, borderColor: colors.border,
-    paddingVertical: 6, paddingHorizontal: 12,
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-  },
-  foodChipName: { fontSize: 13, color: colors.textPrimary, fontWeight: '500' },
-  foodChipCal:  { fontSize: 11, color: colors.textMuted },
 
   // AI search — inline button next to search input
   aiSearchInlineBtn: {

@@ -15,7 +15,18 @@ import PRCelebrationModal from '../components/PRCelebrationModal';
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
-import * as ImagePicker from 'expo-image-picker';
+// Lazy reference — keeps expo-image-picker out of the cold-start parse pass.
+// First ImagePicker.X access triggers require(); cached after. Every callsite
+// is already async (camera/library picks always are).
+const ImagePicker: typeof import('expo-image-picker') = (() => {
+  let mod: any = null;
+  return new Proxy({} as any, {
+    get: (_t, prop) => {
+      if (!mod) mod = require('expo-image-picker');
+      return mod[prop as string];
+    },
+  });
+})();
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
@@ -660,7 +671,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     overrideReps?: string,
   ) => Promise<void> | void>(() => {});
   const exercisesRef = useRef<SessionExercise[]>([]);
-  const startRestTimerRef = useRef<(seconds: number, exerciseName: string) => void>(() => {});
+  const startRestTimerRef = useRef<(seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string }) => void>(() => {});
   const clearRestStateRef = useRef<() => void>(() => {});
   const rescheduleRestNotificationsRef = useRef<(params: {
     seconds: number;
@@ -1795,7 +1806,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setRestRemaining(restSeconds);
       setRestNextTarget(nextSetLabel);
       setRestCue(null);
-      startRestTimerRef.current(restSeconds, ex.name);
+      startRestTimerRef.current(restSeconds, ex.name, { nextTarget: nextSetLabel, cue: undefined });
       // Push rest seconds to watch so its rest-timer view reflects the
       // phone's timer without running a second independent clock.
       (async () => {
@@ -2036,7 +2047,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, []);
 
   // Timestamp-based rest timer — avoids drift from re-running setInterval every second
-  const startRestTimer = useCallback((seconds: number, exerciseName: string) => {
+  const startRestTimer = useCallback((seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string }) => {
     if (restTimerRef.current) clearInterval(restTimerRef.current);
     restStartAtRef.current = Date.now();
     restTotalSecondsRef.current = seconds;
@@ -2048,16 +2059,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // continues ticking even when the user switches to another app.
     import('../utils/feedback').then(f => f.startRestTimerKeepalive()).catch(() => {});
 
-    // Persist the snapshot synchronously so an iOS background-kill or app
-    // crash mid-rest can resume the countdown on relaunch. Refs are the
-    // source of truth here (state updates are batched), and we capture the
-    // current next-set tip + cue from their mirror refs.
+    // Use explicitly passed values when available (refs lag one render behind
+    // state batching, so call sites that just called setRestNextTarget must
+    // pass the value directly or the lock screen / AsyncStorage snapshot
+    // will capture the stale previous value).
+    const snapNextTarget = opts?.nextTarget !== undefined ? opts.nextTarget : restNextTargetRef.current;
+    const snapCue = opts?.cue !== undefined ? opts.cue : restCueRef.current;
+
     AsyncStorage.setItem('activeWorkoutRest', JSON.stringify({
       startAtMs: restStartAtRef.current,
       totalSeconds: seconds,
       exerciseName,
-      nextTarget: restNextTargetRef.current,
-      cue: restCueRef.current,
+      nextTarget: snapNextTarget,
+      cue: snapCue,
     })).catch(() => {});
 
     // Kick off a Live Activity on the lock screen. End any prior one first
@@ -2071,8 +2085,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }
         const startedAtMs = restStartAtRef.current || Date.now();
         const durationSeconds = Math.max(1, seconds);
-        const nextTarget = restNextTargetRef.current ?? 'Next set';
-        const nextCue = restCueRef.current;
+        const nextTarget = snapNextTarget ?? 'Next set';
+        const nextCue = snapCue;
         const currentExercise = exercisesRef.current.find(ex => ex.name === exerciseName);
         const id = await startRestActivity({
           exerciseName,
@@ -2261,10 +2275,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }
         restDurationSeconds.current = totalSeconds;
         setRestForExercise(exName);
-        if (typeof data.nextTarget === 'string') setRestNextTarget(data.nextTarget);
-        if (typeof data.cue === 'string') setRestCue(data.cue);
+        const restoredNextTarget = typeof data.nextTarget === 'string' ? data.nextTarget : undefined;
+        const restoredCue = typeof data.cue === 'string' ? data.cue : undefined;
+        if (restoredNextTarget) setRestNextTarget(restoredNextTarget);
+        if (restoredCue) setRestCue(restoredCue);
         setRestRemaining(remaining);
-        startRestTimer(remaining, exName);
+        startRestTimer(remaining, exName, { nextTarget: restoredNextTarget, cue: restoredCue });
         console.log(`[ActiveWorkout] restored rest timer: ${remaining}s remaining for ${exName}`);
       } catch {
         AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
@@ -2393,7 +2409,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setRestRemaining(restSeconds);
       setRestNextTarget(nextSetLabel);
       setRestCue(null);
-      startRestTimer(restSeconds, ex.name);
+      startRestTimer(restSeconds, ex.name, { nextTarget: nextSetLabel, cue: undefined });
       await rescheduleRestNotifications({
         seconds: restSeconds,
         exerciseName: ex.name,
@@ -2414,10 +2430,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // so the backend gets the feel field and the AI-reviewer layer
     // can flag feel-vs-reps conflicts properly.
     //
-    // Clear any stale AI tip from a prior set so the card stays hidden
-    // until the user rates this one.
+    // Clear any stale AI tip from a prior set so the cue stays hidden
+    // until the user rates this one. Keep restNextTarget — it holds the
+    // plain "Set N: X lbs x Y reps" label set when rest started.
     setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: undefined } : e));
-    setRestNextTarget(null);
     setRestCue(null);
     const setsLogged = updatedSets.length;
     if (setsLogged >= targetSetCount) {

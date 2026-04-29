@@ -281,6 +281,7 @@ import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
 import EditProfileScreen from '../src/screens/EditProfileScreen';
 import ActiveWorkoutScreen from '../src/screens/ActiveWorkoutScreen';
+import SettingsScreen from '../src/screens/SettingsScreen';
 import ProgressScreen from '../src/screens/ProgressScreen';
 import SupplementsScreen from '../src/screens/SupplementsScreen';
 import RecoveryQuestionModal from '../src/components/RecoveryQuestionModal';
@@ -345,6 +346,7 @@ export default function Index() {
   const [isNutritionUpdating, setIsNutritionUpdating] = useState(false);
   const [showProgress, setShowProgress]   = useState(false);
   const [showAccount, setShowAccount]     = useState(false);
+  const [showSettings, setShowSettings]   = useState(false);
   const [showSupplements, setShowSupplements] = useState(false);
   // Post-onboarding tutorial — owned at the app root so the
   // AccountInfoModal "Show tutorial again" button can flip it on
@@ -1505,6 +1507,33 @@ export default function Index() {
             setShowAccount(false);
             setTimeout(() => setShowTutorial(true), 200);
           }}
+          onOpenSettings={() => {
+            setShowAccount(false);
+            setTimeout(() => setShowSettings(true), 180);
+          }}
+        />
+      )}
+
+      {/* Centralized Settings hub — notifications, units, permissions.
+          Lives outside the Account modal so it has room to grow without
+          bloating account-info chrome. Opened via Account → Settings. */}
+      {showSettings && userProfile && (
+        <SettingsScreen
+          visible
+          profile={userProfile}
+          themeName={userProfile.themePreference}
+          onClose={() => setShowSettings(false)}
+          onProfileUpdate={(changes, skipRegen) => {
+            // Reuse the existing profile-update path so unit + theme
+            // changes follow the same persistence rules as everything
+            // else (no plan regen on display-only fields).
+            const updated = { ...userProfile, ...changes };
+            setUserProfile(updated);
+            AsyncStorage.setItem('userProfile', JSON.stringify(updated)).catch(() => {});
+            if (authToken && !skipRegen) {
+              syncOnboarding(authToken, updated).catch(() => null);
+            }
+          }}
         />
       )}
 
@@ -1787,7 +1816,7 @@ function SplashLoadingScreen() {
 // ── Account Info Modal ────────────────────────────────────────────────────────
 
 function AccountInfoModal({
-  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut, onShowTutorial,
+  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut, onShowTutorial, onOpenSettings,
 }: {
   token: string;
   profile: UserProfile;
@@ -1800,6 +1829,9 @@ function AccountInfoModal({
    *  to navigate). Owner is the app root, which renders the
    *  TutorialOverlay. */
   onShowTutorial?: () => void;
+  /** Opens the Settings hub (notifications, units, permissions). When
+   *  unset, the Settings row is hidden. */
+  onOpenSettings?: () => void;
 }) {
   const tc = getTheme(profile.themePreference).colors;
   const c = tc; // alias for the new Developer-logs block below
@@ -2004,6 +2036,14 @@ function AccountInfoModal({
             authToken={token}
             onDone={() => { setShowRecoveryModal(false); setHasRecoveryQuestion(true); }}
           />
+
+          {onOpenSettings && (
+            <ActionRow
+              label="Settings"
+              desc="Notifications, units (lbs/kg, mi/km), and permissions."
+              onPress={onOpenSettings}
+            />
+          )}
 
           <ActionRow
             label="Legal & Safety"

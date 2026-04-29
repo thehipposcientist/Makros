@@ -108,6 +108,44 @@ function isMileTracked(gearType: string): boolean {
   return MILE_TRACKED_TYPES.has(gearType);
 }
 
+// Default session-based wear estimates for gear that does eventually wear
+// out by use rather than miles. Empty for indestructible items (yoga mat,
+// foam roller, lifting belt) so the UI stays clean — users can still set a
+// custom threshold if they want one.
+const DEFAULT_SESSION_THRESHOLDS: Record<string, number | null> = {
+  cycling_shoe:    300,
+  jump_rope:       500,
+  lifting_shoe:    400,
+  knee_sleeves:    200,
+  wrist_wraps:     200,
+  lifting_straps:  300,
+  climbing_shoe:   150,
+  resistance_band: 200,
+  boxing_gloves:   150,
+};
+
+// "Last used 3 days ago" — converts an ISO timestamp to a short relative
+// hint for the gear card. Returns null when ts is missing.
+function formatLastUsed(iso: string | null): string | null {
+  if (!iso) return null;
+  const then = new Date(iso);
+  if (isNaN(then.getTime())) return null;
+  const days = Math.floor((Date.now() - then.getTime()) / 86_400_000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 7) return `${days} days ago`;
+  if (days < 30) {
+    const weeks = Math.floor(days / 7);
+    return `${weeks} week${weeks !== 1 ? 's' : ''} ago`;
+  }
+  if (days < 365) {
+    const months = Math.floor(days / 30);
+    return `${months} month${months !== 1 ? 's' : ''} ago`;
+  }
+  const years = Math.floor(days / 365);
+  return `${years} year${years !== 1 ? 's' : ''} ago`;
+}
+
 // ─── Mileage progress bar ─────────────────────────────────────────────────────
 
 function MileageBar({ pct, color }: { pct: number | null; color: string }) {
@@ -193,9 +231,22 @@ function GearCard({
             <Text style={[styles.statLabel, { color: tc.textSecondary }]}>used</Text>
           </View>
         ) : null}
+        {(() => {
+          const lastUsed = formatLastUsed(item.last_used_at);
+          if (!lastUsed) return null;
+          return (
+            <View style={styles.stat}>
+              <Text style={[styles.statValue, { color: tc.textPrimary, fontSize: 13 }]}>{lastUsed}</Text>
+              <Text style={[styles.statLabel, { color: tc.textSecondary }]}>last used</Text>
+            </View>
+          );
+        })()}
       </View>
 
-      {isMileTracked(item.gear_type) && <MileageBar pct={item.pct_used} color={color} />}
+      {/* Wear progress bar — shown for both mile-tracked and session-tracked
+          gear once a threshold is set. pct_used is computed by the backend
+          off whichever metric applies. */}
+      {item.pct_used !== null && <MileageBar pct={item.pct_used} color={color} />}
 
       {item.recommendation ? (
         <Text style={[styles.recommendation, { color: item.pct_used !== null && item.pct_used >= 0.85 ? color : tc.textSecondary }]}>
@@ -229,6 +280,7 @@ function GearFormModal({
   const [gearType, setGearType] = useState('running_shoe');
   const [startingMiles, setStartingMiles] = useState('0');
   const [threshold, setThreshold] = useState('');
+  const [sessionThreshold, setSessionThreshold] = useState('');
   const [keywords, setKeywords] = useState('');
   const [notes, setNotes] = useState('');
   const [aiScanning, setAiScanning] = useState(false);
@@ -241,6 +293,7 @@ function GearFormModal({
       setGearType(initial?.gear_type ?? 'running_shoe');
       setStartingMiles(String(initial?.starting_miles ?? 0));
       setThreshold(initial?.retirement_threshold_miles != null ? String(initial.retirement_threshold_miles) : '');
+      setSessionThreshold(initial?.retirement_threshold_sessions != null ? String(initial.retirement_threshold_sessions) : '');
       setKeywords((initial?.auto_track_keywords ?? []).join(', '));
       setNotes(initial?.notes ?? '');
       setPhotos(initial?.photos ?? []);
@@ -253,6 +306,10 @@ function GearFormModal({
     if (!threshold) {
       const def = DEFAULT_THRESHOLDS[type];
       setThreshold(def != null ? String(def) : '');
+    }
+    if (!sessionThreshold) {
+      const def = DEFAULT_SESSION_THRESHOLDS[type];
+      setSessionThreshold(def != null ? String(def) : '');
     }
     if (!keywords) {
       const info = gearTypeInfo(type);
@@ -348,11 +405,16 @@ function GearFormModal({
       Alert.alert('Name required', 'Give your gear a name.');
       return;
     }
+    const isMile = isMileTracked(gearType);
     onSave({
       name: name.trim(),
       gear_type: gearType,
       starting_miles: parseFloat(startingMiles) || 0,
-      retirement_threshold_miles: threshold ? parseFloat(threshold) : null,
+      // Only persist the unit that applies — keeps the other null so the
+      // backend doesn't compute a misleading pct_used off a stale value
+      // when the user changes gear type.
+      retirement_threshold_miles: isMile && threshold ? parseFloat(threshold) : null,
+      retirement_threshold_sessions: !isMile && sessionThreshold ? parseInt(sessionThreshold, 10) : null,
       auto_track_keywords: keywords.split(',').map(k => k.trim()).filter(Boolean),
       notes: notes.trim() || null,
       photos,
@@ -484,10 +546,11 @@ function GearFormModal({
             ))}
           </ScrollView>
 
-          {/* Mileage fields — only relevant for cardio shoes / bikes / etc.
-              Session-only gear (boxing gloves, lifting belts, yoga mats) hides
-              these to keep the form focused. */}
-          {isMileTracked(gearType) && (
+          {/* Wear fields — different unit per gear class. Mile-tracked gear
+              (running shoes, bikes) gets miles; session-tracked gear (gloves,
+              belts, mats) gets a session count. Either is optional — leaving
+              the threshold blank just disables the retirement progress bar. */}
+          {isMileTracked(gearType) ? (
             <>
               <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>MILES ALREADY ON IT</Text>
               <TextInput
@@ -508,6 +571,22 @@ function GearFormModal({
                 placeholder="Leave blank to use default"
                 placeholderTextColor={tc.textMuted}
               />
+            </>
+          ) : (
+            <>
+              <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>RETIREMENT THRESHOLD (sessions)</Text>
+              <TextInput
+                style={[styles.input, { backgroundColor: tc.surface, color: tc.textPrimary, borderColor: tc.border }]}
+                value={sessionThreshold}
+                onChangeText={setSessionThreshold}
+                keyboardType="number-pad"
+                placeholder="Leave blank for no retirement alert"
+                placeholderTextColor={tc.textMuted}
+              />
+              <Text style={[styles.hint, { color: tc.textMuted }]}>
+                Optional — set a session count to track wear (e.g. 150 for boxing gloves).
+                Leave blank if the gear doesn't really wear out (yoga mats, foam rollers).
+              </Text>
             </>
           )}
 

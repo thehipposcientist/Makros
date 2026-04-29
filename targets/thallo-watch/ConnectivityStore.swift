@@ -92,6 +92,8 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         UserDefaults.standard.removeObject(forKey: "thallo.lastEndedSessionId")
         UserDefaults.standard.removeObject(forKey: "thallo.activeWorkoutState")
         UserDefaults.standard.removeObject(forKey: "thallo.hrDiag")
+        UserDefaults.standard.removeObject(forKey: "thallo.hrDiagList")
+        UserDefaults.standard.removeObject(forKey: "thallo.lastAbsorb")
         UserDefaults.standard.removeObject(forKey: "thallo.lastClearWorkoutMs")
     }
 
@@ -180,6 +182,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                 let lastCleared = UserDefaults.standard.double(forKey: "thallo.lastClearWorkoutMs")
                 if clearMs > lastCleared {
                     HeartRateStore.saveDiag("rcv clearWorkoutMs → nil workout")
+                    HeartRateStore.saveLastAbsorb("clearWorkoutMs → nil")
                     workout = nil
                     UserDefaults.standard.set(clearMs, forKey: "thallo.lastClearWorkoutMs")
                 }
@@ -197,24 +200,35 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                     let stored = currentUserId ?? ""
                     let wUserId = decoded.userId ?? ""
                     if !stored.isEmpty && !wUserId.isEmpty && wUserId != stored {
+                        let msg = "rejected: userId \(wUserId.prefix(4))≠\(stored.prefix(4))"
                         HeartRateStore.saveDiag("rejected workout: userId \(wUserId.prefix(4))≠stored \(stored.prefix(4))")
+                        HeartRateStore.saveLastAbsorb(msg)
                     } else if workout == nil || decoded.syncedAtMs >= (workout?.syncedAtMs ?? 0) {
+                        let msg = "accepted status=\(decoded.status) ex=\(decoded.exercises.count)"
                         HeartRateStore.saveDiag("rcv workout accepted status=\(decoded.status) sid=\(decoded.sessionId?.prefix(8) ?? "nil") ex=\(decoded.exercises.count)")
+                        HeartRateStore.saveLastAbsorb(msg)
                         self.workout = decoded
                     } else {
                         HeartRateStore.saveDiag("rcv workout stale syncedAtMs")
+                        HeartRateStore.saveLastAbsorb("stale syncedAtMs (rejected)")
                     }
                 } catch {
+                    let msg = "decode FAIL keys=[\(wKeys)] ex=\(exerciseCount) err=\(error.localizedDescription.prefix(60))"
                     HeartRateStore.saveDiag("workout decode FAIL keys=[\(wKeys)] ex=\(exerciseCount) err=\(error)")
+                    HeartRateStore.saveLastAbsorb(msg)
                 }
             } else {
                 // Plug the silent gap: JSONSerialization.data returned nil.
                 // This usually means the dict contains non-plist values
                 // (NaN/Infinity NSNumber, custom Swift class, etc).
+                let msg = "JSONser FAILED keys=[\(wKeys)] ex=\(exerciseCount)"
                 HeartRateStore.saveDiag("workout JSONser FAILED keys=[\(wKeys)] ex=\(exerciseCount)")
+                HeartRateStore.saveLastAbsorb(msg)
             }
         } else if ctx.keys.contains("workout") {
+            let msg = "workout key wrong type: \(type(of: ctx["workout"]))"
             HeartRateStore.saveDiag("workout key present but not a dict: \(type(of: ctx["workout"]))")
+            HeartRateStore.saveLastAbsorb(msg)
         }
         if let m = ctx["meals"] as? [String: Any] {
             if let data = try? JSONSerialization.data(withJSONObject: m),

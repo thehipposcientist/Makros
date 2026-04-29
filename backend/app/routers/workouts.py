@@ -125,22 +125,52 @@ router = APIRouter(prefix="/workouts", tags=["workouts"])
 
 def _build_session_response(session_row: WorkoutSession, db: Session) -> dict:
     """Assemble nested session → exercises → sets response."""
+    return _build_session_responses_batch([session_row], db)[0]
+
+
+def _build_session_responses_batch(
+    session_rows: list[WorkoutSession], db: Session
+) -> list[dict]:
+    """Batched variant for list endpoints. Was an N+1 before — `list_workouts`
+    fetches up to 50 sessions, and each session triggered (1 + N exercises) set
+    queries. For a typical user that's ~300 round trips per request. This
+    collapses it to 3: 1 for sessions (caller), 1 for all exercises, 1 for all
+    sets, then groups in-memory."""
+    if not session_rows:
+        return []
+
+    from sqlmodel import col
+    session_ids = [s.id for s in session_rows]
+
     exercises = db.exec(
         select(WorkoutExercise)
-        .where(WorkoutExercise.session_id == session_row.id)
-        .order_by(WorkoutExercise.order_index)
+        .where(col(WorkoutExercise.session_id).in_(session_ids))
+        .order_by(WorkoutExercise.session_id, WorkoutExercise.order_index)
     ).all()
-
-    exercise_data = []
+    exercises_by_session: dict[int, list[WorkoutExercise]] = {}
     for ex in exercises:
-        sets = db.exec(
-            select(ExerciseSet)
-            .where(ExerciseSet.workout_exercise_id == ex.id)
-            .order_by(ExerciseSet.set_number)
-        ).all()
-        exercise_data.append({**ex.model_dump(), "sets": [s.model_dump() for s in sets]})
+        exercises_by_session.setdefault(ex.session_id, []).append(ex)
 
-    return {**session_row.model_dump(), "exercises": exercise_data}
+    exercise_ids = [ex.id for ex in exercises]
+    sets_by_exercise: dict[int, list[ExerciseSet]] = {}
+    if exercise_ids:
+        all_sets = db.exec(
+            select(ExerciseSet)
+            .where(col(ExerciseSet.workout_exercise_id).in_(exercise_ids))
+            .order_by(ExerciseSet.workout_exercise_id, ExerciseSet.set_number)
+        ).all()
+        for s in all_sets:
+            sets_by_exercise.setdefault(s.workout_exercise_id, []).append(s)
+
+    out: list[dict] = []
+    for session_row in session_rows:
+        session_exercises = exercises_by_session.get(session_row.id, [])
+        exercise_data = [
+            {**ex.model_dump(), "sets": [s.model_dump() for s in sets_by_exercise.get(ex.id, [])]}
+            for ex in session_exercises
+        ]
+        out.append({**session_row.model_dump(), "exercises": exercise_data})
+    return out
 
 
 @router.get("/progression/{exercise_name}")
@@ -165,33 +195,53 @@ def progression_insights(
         .order_by(WorkoutSession.workout_date.desc())
     ).all()
 
-    points = []
-    for s in sessions:
-        ex_rows = db.exec(
+    # Batched fetch — was a nested N+1 (per-session exercise query, then
+    # per-exercise set query). For 90 days of sessions that's hundreds of
+    # round trips. Collapsed to 2 queries: all matching exercises across
+    # the window, then all completed sets for those exercises.
+    from sqlmodel import col
+    session_ids = [s.id for s in sessions]
+    sessions_by_id = {s.id: s for s in sessions}
+
+    matching_exercises: list[WorkoutExercise] = []
+    if session_ids:
+        matching_exercises = db.exec(
             select(WorkoutExercise)
-            .where(WorkoutExercise.session_id == s.id)
+            .where(col(WorkoutExercise.session_id).in_(session_ids))
             # Case-insensitive exact match. `ilike(exercise_name)` without
             # wildcards was already case-insensitive by luck in Postgres
             # but required the exact name. Keep the same semantics but be
             # explicit so future devs don't "improve" it into a pattern.
             .where(WorkoutExercise.name.ilike(exercise_name))
         ).all()
-        for ex in ex_rows:
-            sets = db.exec(
-                select(ExerciseSet)
-                .where(ExerciseSet.workout_exercise_id == ex.id)
-                .where(ExerciseSet.completed == True)  # noqa: E712
-            ).all()
-            if not sets:
-                continue
-            best = max(sets, key=lambda x: (x.actual_weight_lbs or 0) * (x.actual_reps or 0))
-            score = (best.actual_weight_lbs or 0) * (best.actual_reps or 0)
-            points.append({
-                "date": str(s.workout_date),
-                "weight_lbs": best.actual_weight_lbs or 0,
-                "reps": best.actual_reps or 0,
-                "score": round(score, 1),
-            })
+
+    sets_by_exercise: dict[int, list[ExerciseSet]] = {}
+    if matching_exercises:
+        ex_ids = [ex.id for ex in matching_exercises]
+        all_sets = db.exec(
+            select(ExerciseSet)
+            .where(col(ExerciseSet.workout_exercise_id).in_(ex_ids))
+            .where(ExerciseSet.completed == True)  # noqa: E712
+        ).all()
+        for st in all_sets:
+            sets_by_exercise.setdefault(st.workout_exercise_id, []).append(st)
+
+    points = []
+    for ex in matching_exercises:
+        sets = sets_by_exercise.get(ex.id, [])
+        if not sets:
+            continue
+        best = max(sets, key=lambda x: (x.actual_weight_lbs or 0) * (x.actual_reps or 0))
+        score = (best.actual_weight_lbs or 0) * (best.actual_reps or 0)
+        s = sessions_by_id.get(ex.session_id)
+        if not s:
+            continue
+        points.append({
+            "date": str(s.workout_date),
+            "weight_lbs": best.actual_weight_lbs or 0,
+            "reps": best.actual_reps or 0,
+            "score": round(score, 1),
+        })
 
     points = sorted(points, key=lambda p: p["date"])
     recent = points[-6:]
@@ -1610,9 +1660,11 @@ def mark_workout_complete(
                 )
                 if matched:
                     from datetime import timezone as _tz
+                    now = datetime.now(timezone.utc)
                     gear.accumulated_miles += total_distance_miles
                     gear.accumulated_sessions += 1
-                    gear.updated_at = datetime.now(timezone.utc)
+                    gear.updated_at = now
+                    gear.last_used_at = now
                     db.add(gear)
             if gear_items:
                 db.commit()
@@ -2328,7 +2380,9 @@ def list_workouts(
     sessions = db.exec(
         query.order_by(WorkoutSession.workout_date.desc()).offset(skip).limit(limit)
     ).all()
-    return [_build_session_response(s, db) for s in sessions]
+    # Batched assembly — collapses ~3N+1 queries into 3 total. See
+    # `_build_session_responses_batch` for the in-memory grouping.
+    return _build_session_responses_batch(sessions, db)
 
 
 # ─── Get one ──────────────────────────────────────────────────────────────────
@@ -2398,13 +2452,17 @@ def delete_workout(
     if not session_row or session_row.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Workout not found")
 
-    # Cascade delete sets → exercises → session
-    exercises = db.exec(
-        select(WorkoutExercise).where(WorkoutExercise.session_id == session_id)
-    ).all()
-    for ex in exercises:
-        for s in db.exec(select(ExerciseSet).where(ExerciseSet.workout_exercise_id == ex.id)).all():
-            db.delete(s)
-        db.delete(ex)
+    # Cascade delete sets → exercises → session. Was per-row: N exercise
+    # queries × M set queries × deletes. Now batched into two bulk DELETEs
+    # via SQLAlchemy core, then the session row.
+    from sqlmodel import col, delete as _sm_delete
+    exercise_ids = [
+        ex.id for ex in db.exec(
+            select(WorkoutExercise.id).where(WorkoutExercise.session_id == session_id)
+        ).all()
+    ]
+    if exercise_ids:
+        db.exec(_sm_delete(ExerciseSet).where(col(ExerciseSet.workout_exercise_id).in_(exercise_ids)))
+        db.exec(_sm_delete(WorkoutExercise).where(col(WorkoutExercise.id).in_(exercise_ids)))
     db.delete(session_row)
     db.commit()

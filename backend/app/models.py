@@ -866,6 +866,13 @@ class GearItem(SQLModel, table=True):
     is_active: bool = Field(default=True)
     # Override the type default. Null means "no mile-based threshold".
     retirement_threshold_miles: float | None = Field(default=None)
+    # Session-based wear threshold for non-mileage gear (e.g. boxing gloves
+    # at ~150 sessions). Null means "track usage but don't predict retirement."
+    retirement_threshold_sessions: int | None = Field(default=None)
+    # Last accumulation timestamp — surfaced in the UI as "Last used X ago"
+    # so session-only gear feels alive even without mileage. Updated by the
+    # auto-accumulation hook AND the manual log-miles endpoint.
+    last_used_at: datetime | None = Field(default=None)
     # Activity keywords that trigger auto-accumulation (lowercase).
     # e.g. ["treadmill", "run", "incline walk"] for running shoes.
     auto_track_keywords: list = Field(default_factory=list, sa_column=Column(JSON))
@@ -881,6 +888,7 @@ class GearItemCreate(SQLModel):
     purchase_date: date | None = None
     starting_miles: float = 0.0
     retirement_threshold_miles: float | None = None
+    retirement_threshold_sessions: int | None = None
     auto_track_keywords: list[str] = []
     notes: str | None = None
     photos: list[str] = []
@@ -896,13 +904,15 @@ class GearItemRead(SQLModel):
     accumulated_sessions: int
     is_active: bool
     retirement_threshold_miles: float | None
+    retirement_threshold_sessions: int | None = None
+    last_used_at: datetime | None = None
     auto_track_keywords: list[str]
     notes: str | None
     photos: list[str] = []
     created_at: datetime
     # Computed fields populated by the router
     total_miles: float = 0.0
-    pct_used: float | None = None        # 0–1+; None when no mile threshold
+    pct_used: float | None = None        # 0–1+; None when no wear threshold
     recommendation: str | None = None   # human-readable status
 
 

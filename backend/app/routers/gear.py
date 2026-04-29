@@ -29,10 +29,13 @@ def _compute_fields(item: GearItem) -> GearItemRead:
     threshold = item.retirement_threshold_miles
     if threshold is None:
         threshold = GEAR_RETIREMENT_DEFAULTS.get(item.gear_type)
+    sessions = item.accumulated_sessions
+    session_threshold = item.retirement_threshold_sessions
 
     pct: float | None = None
     recommendation: str | None = None
     if threshold and threshold > 0:
+        # Mileage-tracked gear (running shoes, bikes, treadmill belts).
         pct = total / threshold
         remaining = threshold - total
         if pct >= 1.0:
@@ -43,17 +46,32 @@ def _compute_fields(item: GearItem) -> GearItemRead:
             recommendation = f"Halfway through lifespan — {remaining:.0f} mi remaining."
         else:
             recommendation = f"Good — {total:.0f} mi logged, {remaining:.0f} mi remaining."
+    elif session_threshold and session_threshold > 0:
+        # Session-tracked gear with a wear threshold (e.g. boxing gloves
+        # at ~150 sessions). Same retire-soon ladder, different unit.
+        pct = sessions / session_threshold
+        remaining = max(0, session_threshold - sessions)
+        if pct >= 1.0:
+            recommendation = f"Retire — {sessions} sessions logged, threshold is {session_threshold}."
+        elif pct >= 0.85:
+            recommendation = f"Plan replacement soon — {remaining} sessions remaining of {session_threshold} lifetime."
+        elif pct >= 0.65:
+            recommendation = f"Halfway through lifespan — {remaining} sessions remaining."
+        else:
+            recommendation = f"Good — {sessions} sessions logged, {remaining} remaining."
     else:
-        # Session-only gear (lifting accessories, yoga mats, recovery tools).
-        # Mileage usually stays at 0 here — leading with the session count
-        # reads cleaner than "0 mi logged across N sessions."
-        sessions = item.accumulated_sessions
+        # Session-only gear without a wear threshold — surface usage rather
+        # than leaving the card empty. Combines total sessions with a
+        # last-used hint when available so the user sees the gear is alive.
         if sessions == 0:
             recommendation = "No sessions logged yet — log a matching workout to start tracking."
-        elif total > 0:
-            recommendation = f"{sessions} session{'s' if sessions != 1 else ''} logged ({total:.0f} mi)."
         else:
-            recommendation = f"{sessions} session{'s' if sessions != 1 else ''} logged."
+            base = f"{sessions} session{'s' if sessions != 1 else ''} logged"
+            if total > 0:
+                base += f" ({total:.0f} mi)"
+            if item.last_used_at:
+                base += f" · last used {_friendly_ago(item.last_used_at)}"
+            recommendation = base + "."
 
     return GearItemRead(
         id=item.id,
@@ -65,6 +83,8 @@ def _compute_fields(item: GearItem) -> GearItemRead:
         accumulated_sessions=item.accumulated_sessions,
         is_active=item.is_active,
         retirement_threshold_miles=item.retirement_threshold_miles,
+        retirement_threshold_sessions=item.retirement_threshold_sessions,
+        last_used_at=item.last_used_at,
         auto_track_keywords=item.auto_track_keywords or [],
         notes=item.notes,
         created_at=item.created_at,
@@ -73,6 +93,34 @@ def _compute_fields(item: GearItem) -> GearItemRead:
         pct_used=round(pct, 4) if pct is not None else None,
         recommendation=recommendation,
     )
+
+
+def _friendly_ago(ts: datetime) -> str:
+    """Human-readable 'last used' delta. Backend formats this so the
+    recommendation string ships ready-to-render (the frontend also does
+    its own formatting from `last_used_at` for the dedicated badge)."""
+    now = datetime.now(timezone.utc)
+    # Naive datetimes from older rows — assume UTC.
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    delta = now - ts
+    days = delta.days
+    if days < 0:
+        return "today"
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 7:
+        return f"{days} days ago"
+    if days < 30:
+        weeks = days // 7
+        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+    if days < 365:
+        months = days // 30
+        return f"{months} month{'s' if months != 1 else ''} ago"
+    years = days // 365
+    return f"{years} year{'s' if years != 1 else ''} ago"
 
 
 # ─── CRUD ─────────────────────────────────────────────────────────────────────
@@ -103,6 +151,7 @@ def add_gear(
         purchase_date=body.purchase_date,
         starting_miles=body.starting_miles,
         retirement_threshold_miles=body.retirement_threshold_miles,
+        retirement_threshold_sessions=body.retirement_threshold_sessions,
         auto_track_keywords=[kw.lower().strip() for kw in (body.auto_track_keywords or [])],
         photos=body.photos or [],
         notes=body.notes,
@@ -132,6 +181,7 @@ def update_gear(
     item.purchase_date = body.purchase_date
     item.starting_miles = body.starting_miles
     item.retirement_threshold_miles = body.retirement_threshold_miles
+    item.retirement_threshold_sessions = body.retirement_threshold_sessions
     item.auto_track_keywords = [kw.lower().strip() for kw in (body.auto_track_keywords or [])]
     item.notes = body.notes
     item.photos = body.photos or []
@@ -190,9 +240,14 @@ def log_miles(
     ).first()
     if not item:
         raise HTTPException(status_code=404, detail="Gear item not found")
-    item.accumulated_miles += max(0.0, body.miles)
-    item.accumulated_sessions += max(0, body.sessions)
-    item.updated_at = datetime.now(timezone.utc)
+    miles_added = max(0.0, body.miles)
+    sessions_added = max(0, body.sessions)
+    item.accumulated_miles += miles_added
+    item.accumulated_sessions += sessions_added
+    now = datetime.now(timezone.utc)
+    item.updated_at = now
+    if miles_added > 0 or sessions_added > 0:
+        item.last_used_at = now
     db.add(item)
     db.commit()
     db.refresh(item)

@@ -114,7 +114,10 @@ const LEGACY_FOCUS: Record<string, Record<string, string>> = {
   strength: { push: 'Push', pull: 'Pull', legs: 'Legs', upper_body: 'Upper Body', lower_body: 'Lower Body', full_body: 'Full Body' },
   cardio:   { walk: 'Walking', run: 'Running', ride: 'Cycling', spin: 'Spin Class', hike: 'Hiking', swim: 'Swimming', row: 'Rowing', stair: 'Cardio', elliptical: 'Cardio', bootcamp: 'Cardio', other: 'Cardio' },
   mobility: { yoga: 'Yoga', stretching: 'Stretching', foam_roll: 'Foam Rolling', pilates: 'Pilates' },
-  sport:    { basketball: 'Cardio', soccer: 'Cardio', tennis: 'Cardio', pickleball: 'Cardio', golf: 'Cardio', climbing: 'Cardio', boxing: 'Cardio', kickboxing: 'Cardio', martial_arts: 'Cardio', surfing: 'Cardio', skiing: 'Cardio', other: 'Cardio' },
+  // Sport focus labels intentionally preserve the sport name (not a generic
+  // "Cardio") so gear auto-accumulation can match by keyword — e.g. logging
+  // a Climbing session bumps climbing_shoe sessions, Boxing bumps boxing_gloves.
+  sport:    { basketball: 'Basketball', soccer: 'Soccer', tennis: 'Tennis', pickleball: 'Pickleball', golf: 'Golf', climbing: 'Climbing', boxing: 'Boxing', kickboxing: 'Kickboxing', martial_arts: 'Martial Arts', surfing: 'Surfing', skiing: 'Skiing', other: 'Sport' },
   active:   { yard_work: 'Full Body', chopping_wood: 'Full Body', moving: 'Full Body', gardening: 'Cardio', cleaning: 'Cardio', construction: 'Full Body', shoveling: 'Full Body', playing: 'Cardio', dancing: 'Cardio', other: 'Cardio' },
   recovery: { sauna: 'Recovery', ice_bath: 'Recovery', walk: 'Recovery', sleep: 'Recovery', meditation: 'Recovery', general: 'Recovery' },
 };

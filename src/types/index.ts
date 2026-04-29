@@ -206,6 +206,12 @@ export interface UserProfile {
   focusedMuscleGroup?: string;   // @deprecated — replaced by priorityRegion
 
   themePreference?: AppThemeName;
+  /** Display preference for body weight + lifting weight inputs. Storage
+   *  is always lbs (canonical); formatters convert at the display layer. */
+  weightUnit?: 'lbs' | 'kg';
+  /** Display preference for distance (cardio mileage, gear mileage).
+   *  Storage is always miles; formatters convert at the display layer. */
+  distanceUnit?: 'mi' | 'km';
   physicalStats: PhysicalStats;
   daysPerWeek: number;
   /** Specific days the user can train. 0=Sun, 1=Mon, ..., 6=Sat.

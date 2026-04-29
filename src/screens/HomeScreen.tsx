@@ -4,7 +4,20 @@ import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal,
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
-import * as ImagePicker from 'expo-image-picker';
+// Lazy reference to expo-image-picker — the underlying require() only runs
+// on first ImagePicker.X access. Removes the module from the cold-start
+// parse pass; every callsite is already async so the one-time resolve is
+// invisible. Pattern parallels GearScreen's `await import('expo-image-picker')`
+// but keeps every existing callsite unchanged.
+const ImagePicker: typeof import('expo-image-picker') = (() => {
+  let mod: any = null;
+  return new Proxy({} as any, {
+    get: (_t, prop) => {
+      if (!mod) mod = require('expo-image-picker');
+      return mod[prop as string];
+    },
+  });
+})();
 import { Ionicons } from '@expo/vector-icons';
 import FadeInView from '../components/FadeInView';
 import PulseView from '../components/PulseView';
@@ -2055,10 +2068,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     })();
   // `schedule` is derived every render so we key on its first-item
   // workout reference to avoid sync spam. todayDone / skippedDates
-  // flip the status between lifecycle buckets.
+  // flip the status between lifecycle buckets. planWeek is included
+  // because loadPlans sets it and workoutPlan together — if workoutPlan
+  // was already set (AsyncStorage cache) but planWeek just arrived, we
+  // need to re-push the enriched schedule.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    workoutPlan, userProfile?.themePreference, todayDone, skippedDates,
+    planWeek, workoutPlan, userProfile?.themePreference, todayDone, skippedDates,
     nutritionPlansByDate, checkedMealsByDate,
     readinessScore, nutritionScoreData,
   ]);
@@ -6789,6 +6805,31 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     'Target updated',
                     `Your new calorie target is ${newTarget} kcal/day. The plan will pick this up on your next regeneration.`,
                   );
+                }}
+              />
+            )}
+            {/* Favorites — one-tap repeat from saved meals. Lives at the
+                top of the Plan tab so the highest-frequency action (log a
+                meal you've already saved) is one tap, not three. The
+                SavedMealsSection renders empty-state guidance when the
+                user hasn't saved anything yet, which doubles as a feature
+                discovery hint. Hidden on free tier since saving meals is
+                a Pro feature. */}
+            {mealsSubTab === 'plan' && !isFreeTier && authToken && (
+              <SavedMealsSection
+                authToken={authToken}
+                themeName={userProfile.themePreference}
+                onLogged={() => {
+                  loadDayStatus();
+                  if (userProfile) loadPlans(userProfile);
+                  reloadSavedMeals();
+                }}
+                onEditTemplate={(sm) => {
+                  setEditingSavedMeal({
+                    id: sm.id,
+                    name: sm.name,
+                    items: sm.items || [],
+                  });
                 }}
               />
             )}

@@ -350,15 +350,25 @@ private struct TodayView: View {
 
     /// Small list of the last few HeartRateStore diag entries. Visible
     /// only on the empty-state prompt so a working watch UI stays clean.
+    /// The "Last ctx:" line is pinned from a separate UserDefaults key so
+    /// rapid pull_state entries can never rotate it out of view.
     private var recentDiagStrip: some View {
-        let entries = HeartRateStore.recentDiag(limit: 5)
+        let entries = HeartRateStore.recentDiag(limit: 10)
+        let lastCtx = HeartRateStore.lastAbsorb()
         return Group {
-            if !entries.isEmpty {
+            if !entries.isEmpty || lastCtx != nil {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Sync log (newest last)")
                         .font(.system(size: 9, weight: .heavy))
                         .tracking(0.8)
                         .foregroundColor(theme.textMuted)
+                    if let ctx = lastCtx {
+                        Text(ctx)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(theme.warning)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
                     ForEach(Array(entries.enumerated()), id: \.offset) { _, line in
                         Text(line)
                             .font(.system(size: 9))

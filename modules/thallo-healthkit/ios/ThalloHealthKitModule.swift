@@ -273,7 +273,10 @@ public class ThalloHealthKitModule: Module {
         if s.contains("swim") { return .swimming }
         if s.contains("row") { return .rowing }
         if s.contains("ellipt") { return .elliptical }
+        // Stair climber (machine) before generic "climb" so "stair climbing"
+        // routes to .stairClimbing instead of .climbing (rock/bouldering).
         if s.contains("stair") { return .stairClimbing }
+        if s.contains("climb") || s.contains("boulder") { return .climbing }
         if s.contains("yoga") { return .yoga }
         if s.contains("pilates") { return .pilates }
         if s.contains("hiit") || s.contains("interval") { return .highIntensityIntervalTraining }
@@ -313,6 +316,7 @@ public class ThalloHealthKitModule: Module {
         case .elliptical: return "Elliptical"
         case .rowing: return "Rowing"
         case .stairClimbing: return "Stair Climbing"
+        case .climbing: return "Climbing"
         case .pilates: return "Pilates"
         case .cardioDance: return "Cardio Dance"
         case .socialDance: return "Dance"

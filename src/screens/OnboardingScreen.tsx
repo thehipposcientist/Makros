@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   View,
   Text,
@@ -28,7 +29,16 @@ import FadeInView from '../components/FadeInView';
 import PressableScale from '../components/PressableScale';
 import BirthdateInput from '../components/BirthdateInput';
 import { deriveAge, validateBirthdate } from '../utils/age';
-import * as ImagePicker from 'expo-image-picker';
+// Lazy reference — keeps expo-image-picker out of the cold-start parse pass.
+const ImagePicker: typeof import('expo-image-picker') = (() => {
+  let mod: any = null;
+  return new Proxy({} as any, {
+    get: (_t, prop) => {
+      if (!mod) mod = require('expo-image-picker');
+      return mod[prop as string];
+    },
+  });
+})();
 import { colors, radius } from '../constants/theme';
 import {
   Goal, GoalPace, Gender, UserProfile, PhysicalStats, GoalDetails, GoalSelection, StrengthEquipmentSettings,
@@ -460,6 +470,138 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const totalSteps = steps.length;
   const currentStepKey = steps[currentStep];
 
+  // ── Onboarding draft persistence ─────────────────────────────────────
+  // Without this, closing the app mid-onboarding loses every step's input
+  // and forces a full restart on relaunch — a major drop-off point on
+  // first-run funnels. We snapshot every relevant field to AsyncStorage
+  // on each state change, restore on mount with a "Continue where you
+  // left off?" prompt, and clear the draft on successful completion.
+  //
+  // Versioned key so a future schema change can ignore stale drafts
+  // safely instead of mis-applying old field shapes to new state.
+  const ONBOARDING_DRAFT_KEY = 'onboardingDraft_v1';
+  const [draftRestored, setDraftRestored] = useState(false);
+
+  // Snapshot writer — runs after every relevant state change. Only saves
+  // when the user has progressed past the goal step OR entered any data,
+  // so a user who immediately closes a fresh launch doesn't get a "resume?"
+  // prompt the next time.
+  useEffect(() => {
+    if (!draftRestored) return; // wait until mount-time restore finishes
+    const hasMeaningfulProgress =
+      currentStep > 0
+      || weightLbs !== ''
+      || heightFeet !== ''
+      || selectedEquipment.length > 0
+      || foodsAvailable.length > 0;
+    if (!hasMeaningfulProgress) return;
+    const snapshot = {
+      v: 1,
+      savedAt: Date.now(),
+      currentStep,
+      selectedGoal, selectedModifiers, selectedRegion, pace, targetWeight, targetEvent,
+      weightLbs, heightFeet, heightInches, birthdate, gender,
+      daysPerWeek, selectedTrainingDays, preferredSplit, workoutDuration,
+      selectedEquipment, equipmentSettings,
+      foodsAvailable, allergies,
+      supplementsAvailable, mealRoutine,
+      appleHealthEnabled,
+      injuries, experienceLevel, lastWorkoutContext,
+    };
+    AsyncStorage.setItem(ONBOARDING_DRAFT_KEY, JSON.stringify(snapshot)).catch(() => {});
+  }, [
+    draftRestored,
+    currentStep,
+    selectedGoal, selectedModifiers, selectedRegion, pace, targetWeight, targetEvent,
+    weightLbs, heightFeet, heightInches, birthdate, gender,
+    daysPerWeek, selectedTrainingDays, preferredSplit, workoutDuration,
+    selectedEquipment, equipmentSettings,
+    foodsAvailable, allergies,
+    supplementsAvailable, mealRoutine,
+    appleHealthEnabled,
+    injuries, experienceLevel, lastWorkoutContext,
+  ]);
+
+  // Mount-time draft restore. Reads the snapshot once, prompts the user,
+  // and either applies the draft or clears it. Setting `draftRestored=true`
+  // unblocks the snapshot writer above so we don't immediately overwrite
+  // the user's restored values with the empty initial state.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(ONBOARDING_DRAFT_KEY);
+        if (!raw) { if (!cancelled) setDraftRestored(true); return; }
+        const draft = JSON.parse(raw);
+        if (!draft || draft.v !== 1) { if (!cancelled) setDraftRestored(true); return; }
+        // Stale drafts (>14 days) get cleared automatically — by then the
+        // user has likely moved on and "resume?" feels stale + creepy.
+        const ageDays = (Date.now() - (draft.savedAt ?? 0)) / 86400000;
+        if (ageDays > 14) {
+          await AsyncStorage.removeItem(ONBOARDING_DRAFT_KEY).catch(() => {});
+          if (!cancelled) setDraftRestored(true);
+          return;
+        }
+        const stepLabel = draft.currentStep != null ? `Step ${draft.currentStep + 1}` : 'where you left off';
+        Alert.alert(
+          'Continue setup?',
+          `You started Thallo onboarding earlier. Pick up at ${stepLabel}, or start fresh.`,
+          [
+            {
+              text: 'Start fresh',
+              style: 'destructive',
+              onPress: async () => {
+                await AsyncStorage.removeItem(ONBOARDING_DRAFT_KEY).catch(() => {});
+                if (!cancelled) setDraftRestored(true);
+              },
+            },
+            {
+              text: 'Continue',
+              onPress: () => {
+                if (cancelled) return;
+                // Apply each saved field, defaulting on missing keys so
+                // an older draft shape doesn't crash with undefineds.
+                if (typeof draft.currentStep === 'number') setCurrentStep(draft.currentStep);
+                if (typeof draft.selectedGoal === 'string') setSelectedGoal(draft.selectedGoal);
+                if (Array.isArray(draft.selectedModifiers)) setSelectedModifiers(draft.selectedModifiers);
+                if (typeof draft.selectedRegion === 'string') setSelectedRegion(draft.selectedRegion);
+                if (draft.pace) setPace(draft.pace);
+                if (typeof draft.targetWeight === 'string') setTargetWeight(draft.targetWeight);
+                if (typeof draft.targetEvent === 'string') setTargetEvent(draft.targetEvent);
+                if (typeof draft.weightLbs === 'string') setWeightLbs(draft.weightLbs);
+                if (typeof draft.heightFeet === 'string') setHeightFeet(draft.heightFeet);
+                if (typeof draft.heightInches === 'string') setHeightInches(draft.heightInches);
+                if (draft.birthdate !== undefined) setBirthdate(draft.birthdate);
+                if (draft.gender !== undefined) setGender(draft.gender);
+                if (typeof draft.daysPerWeek === 'string') setDaysPerWeekRaw(draft.daysPerWeek);
+                if (Array.isArray(draft.selectedTrainingDays)) setSelectedTrainingDays(draft.selectedTrainingDays);
+                if (typeof draft.preferredSplit === 'string') setPreferredSplit(draft.preferredSplit);
+                if (typeof draft.workoutDuration === 'number') setWorkoutDuration(draft.workoutDuration);
+                if (Array.isArray(draft.selectedEquipment)) setSelectedEquipment(draft.selectedEquipment);
+                if (draft.equipmentSettings !== undefined) setEquipmentSettings(draft.equipmentSettings);
+                if (Array.isArray(draft.foodsAvailable)) setFoodsAvailable(draft.foodsAvailable);
+                if (Array.isArray(draft.allergies)) setAllergies(draft.allergies);
+                if (Array.isArray(draft.supplementsAvailable)) setSupplementsAvailable(draft.supplementsAvailable);
+                if (typeof draft.mealRoutine === 'string') setMealRoutine(draft.mealRoutine);
+                if (typeof draft.appleHealthEnabled === 'boolean') setAppleHealthEnabled(draft.appleHealthEnabled);
+                if (typeof draft.injuries === 'string') setInjuries(draft.injuries);
+                if (typeof draft.experienceLevel === 'string') setExperienceLevel(draft.experienceLevel);
+                if (typeof draft.lastWorkoutContext === 'string') setLastWorkoutContext(draft.lastWorkoutContext);
+                setDraftRestored(true);
+              },
+            },
+          ],
+          { cancelable: false },
+        );
+      } catch {
+        if (!cancelled) setDraftRestored(true);
+      }
+    })();
+    return () => { cancelled = true; };
+    // Run once on mount only — restore is a one-shot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Auto-scroll carousel to the selected goal whenever the goal step becomes active
   // (covers both initial load and navigating back from a later step).
   useEffect(() => {
@@ -579,6 +721,10 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   };
 
   const handleComplete = async () => {
+    // Clear the resume draft — onboarding has succeeded, future relaunches
+    // should NOT prompt "continue setup?" against stale state.
+    AsyncStorage.removeItem(ONBOARDING_DRAFT_KEY).catch(() => {});
+
     if (weightLbs) {
       const { saveWeightEntry } = await import('../utils/weightHistory');
       await saveWeightEntry(parseFloat(weightLbs), 'onboarding');
@@ -2021,69 +2167,136 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     </View>
   );
 
-  const renderAppleHealthStep = () => (
-    <View>
-      <Text style={styles.stepTitle}>Apple Health is optional</Text>
-      <Text style={styles.hint}>If you connect it, Thallo reads sleep, resting heart rate, HRV, steps, workouts, weight, and active energy, and writes completed workouts back to Apple Health.</Text>
+  const renderAppleHealthStep = () => {
+    // Pre-permission education. Shown BEFORE the OS-level HealthKit prompt so
+    // users see exactly what's read, what's written, and why it matters.
+    // Industry data shows pre-permission education roughly doubles grant rates
+    // vs jumping straight to the system sheet — and HK denial is permanent
+    // until the user manually re-enables it in Settings, so getting opt-in
+    // right matters more than minimizing onboarding length.
+    const READS: { icon: string; label: string; why: string }[] = [
+      { icon: '🌙', label: 'Sleep + HRV',     why: 'Drives your daily readiness score.' },
+      { icon: '❤️', label: 'Resting heart rate', why: 'Detects elevated load + recovery debt.' },
+      { icon: '🏃', label: 'Steps + active energy', why: 'Adjusts daily calorie targets to actual activity.' },
+      { icon: '🏋️', label: 'Workouts',       why: 'Imports outdoor runs, classes, and rides automatically.' },
+      { icon: '⚖️', label: 'Body weight',    why: 'Powers weight trend charts without manual logging.' },
+    ];
 
-      <View style={{ gap: 12, marginTop: 16 }}>
-        <TouchableOpacity
-          style={[styles.chipWide, appleHealthEnabled && styles.chipWideSelected]}
-          onPress={async () => {
-            if (!isHealthKitAvailable()) {
-              Alert.alert('Not Available', 'Apple Health is not available on this device.');
-              return;
-            }
-            Alert.alert(
-              APPLE_HEALTH_PERMISSION_COPY.title,
-              APPLE_HEALTH_PERMISSION_COPY.body,
-              [
-                { text: 'Not now', style: 'cancel' },
-                {
-                  text: 'Continue',
-                  onPress: async () => {
-                    const granted = await requestHealthPermissions();
-                    if (granted) {
-                      setAppleHealthEnabled(true);
-                      await persistHealthEnabled(true);
-                      // Backfill the last 30 days of HK data so weekly_review +
-                      // recovery_flags have history to reason about from day one
-                      // (otherwise the server's daily_health_snapshots stays
-                      // empty until the user opens the app for 30 separate days).
-                      import('../services/healthDataSummary')
-                        .then(({ backfillSnapshotsToBackend }) => backfillSnapshotsToBackend(30))
-                        .catch(() => undefined);
-                    } else {
-                      Alert.alert('Apple Health not connected', APPLE_HEALTH_PERMISSION_COPY.denied);
-                    }
-                  },
-                },
-              ],
-            );
-          }}>
-          <Text style={styles.chipIcon}>⌚</Text>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.chipWideLabel, appleHealthEnabled && styles.chipWideLabelSelected]}>Connect Apple Health</Text>
-            <Text style={styles.chipWideDesc}>Optional: reads sleep, HRV, steps, workouts, weight, and writes completed workouts</Text>
-          </View>
-          {appleHealthEnabled && <Ionicons name="checkmark-circle" size={20} />}
-        </TouchableOpacity>
+    return (
+      <View>
+        <Text style={styles.stepTitle}>Connect Apple Health (optional)</Text>
+        <Text style={styles.hint}>
+          When you connect it, Thallo personalizes readiness, recovery, and calorie targets to your real data instead of estimates. Skip if you'd rather not — you can connect anytime from Settings.
+        </Text>
 
-        <TouchableOpacity
-          style={[styles.chipWide, !appleHealthEnabled && styles.chipWideSelected]}
-          onPress={async () => {
-            setAppleHealthEnabled(false);
-            await persistHealthEnabled(false);
-          }}>
-          <Text style={styles.chipIcon}>📱</Text>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.chipWideLabel, !appleHealthEnabled && styles.chipWideLabelSelected]}>No, skip for now</Text>
-            <Text style={styles.chipWideDesc}>Keep going without it. You can connect later in Account settings.</Text>
+        {/* What we read — itemized so users see exactly what they're granting. */}
+        <View style={{ marginTop: 14, marginBottom: 6 }}>
+          <Text style={[styles.sectionHeading, { marginTop: 0, marginBottom: 8 }]}>What Thallo reads</Text>
+          <View style={{ gap: 8 }}>
+            {READS.map((r) => (
+              <View key={r.label} style={{
+                flexDirection: 'row', alignItems: 'flex-start', gap: 10,
+                paddingVertical: 6, paddingHorizontal: 10,
+                backgroundColor: colors.surface, borderRadius: 10,
+                borderWidth: 1, borderColor: colors.border,
+              }}>
+                <Text style={{ fontSize: 16 }}>{r.icon}</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textPrimary }}>{r.label}</Text>
+                  <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 1 }}>{r.why}</Text>
+                </View>
+              </View>
+            ))}
           </View>
-        </TouchableOpacity>
+        </View>
+
+        {/* What we write — single bullet so it's clear we're not silently
+            polluting Health with extra data. */}
+        <View style={{ marginTop: 12, marginBottom: 6 }}>
+          <Text style={[styles.sectionHeading, { marginTop: 0, marginBottom: 8 }]}>What Thallo writes</Text>
+          <View style={{
+            flexDirection: 'row', alignItems: 'flex-start', gap: 10,
+            paddingVertical: 8, paddingHorizontal: 10,
+            backgroundColor: colors.surface, borderRadius: 10,
+            borderWidth: 1, borderColor: colors.border,
+          }}>
+            <Text style={{ fontSize: 16 }}>✅</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textPrimary }}>Completed workouts only</Text>
+              <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 1 }}>
+                When you finish a workout, it appears in Apple Health alongside your other activity. Nothing else is written.
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* Privacy reassurance — important because users worry health data
+            is monetized. State the fact: HK data stays on device. */}
+        <View style={{
+          marginTop: 12, marginBottom: 16,
+          padding: 11, borderRadius: 10,
+          backgroundColor: (colors.primary as string) + '14',
+          borderWidth: 1, borderColor: (colors.primary as string) + '44',
+        }}>
+          <Text style={{ fontSize: 12, fontWeight: '700', color: colors.primary, marginBottom: 3 }}>
+            🔒 Your Health data stays on your device
+          </Text>
+          <Text style={{ fontSize: 11, color: colors.textSecondary, lineHeight: 16 }}>
+            Thallo reads Apple Health locally on your phone. Aggregated daily summaries (e.g. average sleep, RHR) sync to your account so we can show recovery trends across devices — your raw HealthKit samples never leave the phone.
+          </Text>
+        </View>
+
+        <View style={{ gap: 12 }}>
+          <TouchableOpacity
+            style={[styles.chipWide, appleHealthEnabled && styles.chipWideSelected]}
+            onPress={async () => {
+              if (!isHealthKitAvailable()) {
+                Alert.alert('Not Available', 'Apple Health is not available on this device.');
+                return;
+              }
+              // Skip the Alert.alert "are you sure?" interstitial — the rich
+              // step UI above replaces that. Go straight to the OS prompt
+              // so users who tap Connect see Apple's permission sheet
+              // immediately while their intent is fresh.
+              const granted = await requestHealthPermissions();
+              if (granted) {
+                setAppleHealthEnabled(true);
+                await persistHealthEnabled(true);
+                // Backfill the last 30 days of HK data so weekly_review +
+                // recovery_flags have history to reason about from day one
+                // (otherwise the server's daily_health_snapshots stays
+                // empty until the user opens the app for 30 separate days).
+                import('../services/healthDataSummary')
+                  .then(({ backfillSnapshotsToBackend }) => backfillSnapshotsToBackend(30))
+                  .catch(() => undefined);
+              } else {
+                Alert.alert('Apple Health not connected', APPLE_HEALTH_PERMISSION_COPY.denied);
+              }
+            }}>
+            <Text style={styles.chipIcon}>⌚</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.chipWideLabel, appleHealthEnabled && styles.chipWideLabelSelected]}>Connect Apple Health</Text>
+              <Text style={styles.chipWideDesc}>Apple will ask for each permission individually — pick what you're comfortable sharing.</Text>
+            </View>
+            {appleHealthEnabled && <Ionicons name="checkmark-circle" size={20} />}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.chipWide, !appleHealthEnabled && styles.chipWideSelected]}
+            onPress={async () => {
+              setAppleHealthEnabled(false);
+              await persistHealthEnabled(false);
+            }}>
+            <Text style={styles.chipIcon}>📱</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.chipWideLabel, !appleHealthEnabled && styles.chipWideLabelSelected]}>No, skip for now</Text>
+              <Text style={styles.chipWideDesc}>Thallo still works without it. Connect later from Settings.</Text>
+            </View>
+          </TouchableOpacity>
+        </View>
       </View>
-    </View>
-  );
+    );
+  };
 
   const renderStep = () => {
     switch (currentStepKey) {

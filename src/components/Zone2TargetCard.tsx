@@ -12,7 +12,7 @@
 // refactored to share state via context later — for now, cheap).
 
 import { useEffect, useState } from 'react';
-import { View, Text, ActivityIndicator } from 'react-native';
+import { View, Text, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -34,13 +34,24 @@ const GOAL_ZONE2_TARGET: Record<string, number> = {
   stress_relief: 60,
 };
 
-export default function Zone2TargetCard({ authToken, themeName, appleHealthZone2 }: Props) {
+// Optional debug list — when provided, lets the user tap "Why?" to see
+// exactly which workouts counted (and which didn't). Helps explain
+// "I did cardio Monday but Z2 isn't budging" without needing a debugger.
+export interface Z2DetectedWorkout {
+  name: string;
+  durationMin: number;
+  counted: boolean;
+  reason?: string;
+}
+
+export default function Zone2TargetCard({ authToken, themeName, appleHealthZone2, detectedWorkouts }: Props & { detectedWorkouts?: Z2DetectedWorkout[] }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const [backendMinutes, setBackendMinutes] = useState<number>(0);
   const [target, setTarget] = useState<number>(100);
-  const [goal, setGoal] = useState<string>('general_health');
+  const [, setGoal] = useState<string>('general_health');
   const [loading, setLoading] = useState(true);
+  const [showWhy, setShowWhy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -91,6 +102,55 @@ export default function Zone2TargetCard({ authToken, themeName, appleHealthZone2
           ? "Aerobic base on target for your goal."
           : `${Math.max(0, target - Math.round(minutes))} min short this week — easy walks or bike rides count.`}
       </Text>
+
+      {/* "Why?" expander — surfaces the per-workout breakdown so users
+          can see exactly why a session they did didn't credit toward Z2.
+          Most common gotcha: the workout was logged as Strength (no
+          cardio_style set) or HK named it something the regex doesn't
+          recognize ("Mixed Cardio", "Cardio Dance"). */}
+      {detectedWorkouts && detectedWorkouts.length > 0 && (
+        <TouchableOpacity
+          onPress={() => setShowWhy(!showWhy)}
+          activeOpacity={0.7}
+          style={{ marginTop: 8, alignSelf: 'flex-start' }}
+        >
+          <Text style={{ fontSize: 10, color: tc.textSecondary, fontWeight: '700' }}>
+            {showWhy ? '▾ Hide breakdown' : `▸ Why? · ${detectedWorkouts.length} session${detectedWorkouts.length === 1 ? '' : 's'} this week`}
+          </Text>
+        </TouchableOpacity>
+      )}
+      {showWhy && detectedWorkouts && (
+        <View style={{ marginTop: 8, gap: 4 }}>
+          {detectedWorkouts.map((w, i) => (
+            <View key={`${w.name}-${i}`} style={{
+              flexDirection: 'row', alignItems: 'center', gap: 6,
+              paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6,
+              backgroundColor: w.counted ? (tc.success ?? '#22C55E') + '15' : tc.background,
+              borderWidth: 1, borderColor: w.counted ? (tc.success ?? '#22C55E') + '44' : tc.border,
+            }}>
+              <Ionicons
+                name={w.counted ? 'checkmark-circle' : 'remove-circle-outline'}
+                size={12}
+                color={w.counted ? (tc.success ?? '#22C55E') : tc.textMuted}
+              />
+              <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textPrimary, flex: 1 }} numberOfLines={1}>
+                {w.name}
+              </Text>
+              <Text style={{ fontSize: 10, color: tc.textMuted }}>
+                {Math.round(w.durationMin)}m
+              </Text>
+              {!w.counted && w.reason && (
+                <Text style={{ fontSize: 9, color: tc.textMuted, fontStyle: 'italic' }}>
+                  {w.reason}
+                </Text>
+              )}
+            </View>
+          ))}
+          <Text style={{ fontSize: 9, color: tc.textMuted, marginTop: 2 }}>
+            Counts toward Z2: steady cardio ≥ 20 min where the activity isn't intervals/HIIT. If a session you did isn't here, log it under Cardio with a steady or easy style.
+          </Text>
+        </View>
+      )}
     </View>
   );
 }

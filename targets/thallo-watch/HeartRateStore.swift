@@ -34,7 +34,11 @@ final class HeartRateStore: NSObject, ObservableObject {
 
     private static let kDiagKey = "thallo.hrDiag"
     private static let kDiagListKey = "thallo.hrDiagList"
-    private static let kDiagListMax = 12
+    private static let kDiagListMax = 30
+    // Pinned key: survives ring-buffer rotation. Written by absorbContext
+    // on every workout absorption outcome so it's always readable even
+    // when rapid pull_state sends fill the ring buffer.
+    private static let kLastAbsorbKey = "thallo.lastAbsorb"
 
     /// Save a diagnostic line. Writes the latest message to `kDiagKey`
     /// (single-string, overwrite) AND appends to a small ring buffer at
@@ -52,8 +56,20 @@ final class HeartRateStore: NSObject, ObservableObject {
         UserDefaults.standard.set(list, forKey: kDiagListKey)
     }
 
+    /// Save a pinned "last context absorb" summary. Unlike the ring buffer,
+    /// this key is never rotated out — it holds the most recent workout
+    /// absorption result so the sync-log strip can always show it.
+    static func saveLastAbsorb(_ msg: String) {
+        let stamped = "\(timestamp()) ctx: \(msg)"
+        UserDefaults.standard.set(stamped, forKey: kLastAbsorbKey)
+    }
+
     static func lastDiag() -> String? {
         UserDefaults.standard.string(forKey: kDiagKey)
+    }
+
+    static func lastAbsorb() -> String? {
+        UserDefaults.standard.string(forKey: kLastAbsorbKey)
     }
 
     /// Return the recent diagnostic lines, oldest → newest. Empty when

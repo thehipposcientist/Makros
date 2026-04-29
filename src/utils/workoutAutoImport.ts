@@ -187,7 +187,14 @@ function classifyActivity(name: string): { category: ActivityCategory; subtype: 
   if (/yoga|pilates|stretch|mobility/.test(n))     return { category: 'mobility', subtype: name };
   if (/strength|lift|weight/.test(n))              return { category: 'strength', subtype: 'Strength training' };
   if (/hiit|crossfit|functional/.test(n))          return { category: 'cardio', subtype: 'HIIT', cardioStyle: 'intervals' };
-  if (/sport|basketball|soccer|tennis|pickleball/.test(n))
+  // Stair climber = cardio machine (already mapped via "stair" to its own
+  // path); rock climbing / bouldering = sport so it routes to the climbing
+  // gear keywords. Order matters: check "stair" first so "stair climbing"
+  // doesn't fall into the rock-climbing branch.
+  if (/stair/.test(n))                             return { category: 'cardio', subtype: 'Stair', cardioStyle: 'steady' };
+  if (/climb|boulder/.test(n))                     return { category: 'sport', subtype: 'climbing' };
+  if (/box|kickbox|martial/.test(n))               return { category: 'sport', subtype: /kickbox/.test(n) ? 'kickboxing' : (/martial/.test(n) ? 'martial_arts' : 'boxing') };
+  if (/sport|basketball|soccer|tennis|pickleball|golf|surf|ski/.test(n))
                                                    return { category: 'sport', subtype: name };
   return { category: 'cardio', subtype: name || 'Workout', cardioStyle: 'steady' };
 }

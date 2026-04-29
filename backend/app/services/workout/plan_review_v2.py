@@ -148,6 +148,12 @@ def _sum_cardio_minutes(completions: list[WorkoutCompletion]) -> tuple[float, fl
     mixed sessions only count the finisher/conditioning portion so a
     60-minute push day with 10-15 minutes of cardio does not become a
     fake 60-minute Zone 2 session.
+
+    Z2 inclusion: anything labeled steady/easy/recovery cardio counts.
+    Intervals + sprints + HIIT do NOT count even if the user logged them
+    under the cardio category — those are Z4/Z5 work, not aerobic base.
+    HR-summary (zoneMinutes[]) is preferred when present so we read the
+    actual time-in-zone instead of guessing from the style label.
     """
     total = 0.0
     zone2 = 0.0
@@ -179,9 +185,28 @@ def _sum_cardio_minutes(completions: list[WorkoutCompletion]) -> tuple[float, fl
             continue
 
         total += cardio_mins
-        if style == "steady" or intensity == "easy":
+
+        # Prefer HR-zone time when the user's watch / chest strap supplied
+        # actual zone minutes. `zoneMinutes` is [z1, z2, z3, z4, z5] from
+        # the workout's hr_summary blob. When present, this overrides the
+        # style heuristic — actual data beats labels every time.
+        hr = c.hr_summary or {}
+        zm = hr.get("zoneMinutes") if isinstance(hr, dict) else None
+        if isinstance(zm, list) and len(zm) >= 2 and any(isinstance(x, (int, float)) and x > 0 for x in zm):
+            try:
+                z2_min_actual = float(zm[1])
+                if z2_min_actual > 0:
+                    zone2 += min(z2_min_actual, cardio_mins)
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        # Otherwise infer from style/intensity labels. Adds `style == 'easy'`
+        # and `style == 'recovery'` which were silently dropped before — an
+        # easy walk IS Z2 cardio by definition.
+        if style in {"steady", "easy", "recovery"} or intensity == "easy":
             zone2 += cardio_mins
-        elif " + cardio" in focus and style != "intervals":
+        elif " + cardio" in focus and style not in {"intervals", "sprint"}:
             zone2 += cardio_mins
     return total, zone2
 

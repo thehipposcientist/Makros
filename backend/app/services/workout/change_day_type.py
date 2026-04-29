@@ -209,7 +209,7 @@ def detect_conflicts(
                 severity="warn",
                 message=f"Low readiness ({readiness:.0f}%) for {new_focus}. Muscles may still be recovering.",
                 affected_days=[changed_idx],
-                suggestion=f"A lighter {fam.title()} session or a different focus may be safer.",
+                suggestion=f"A lighter {fam.replace('_', ' ').title()} session or a different focus may be safer.",
             ))
 
     return conflicts
@@ -372,10 +372,14 @@ def smart_adjust_remaining(
 
     # Apply placements to result.
     for fi, fam in placed:
+        # Humanize the snake_case family for display: "full_body" → "Full Body".
+        # Was `fam.title()` which leaves underscores intact and produces
+        # "Full_Body" on the day card after a switch — the user-reported bug.
+        focus_label = fam.replace("_", " ").title()
         if fam in ("recovery", "mobility"):
             result[fi] = DaySlot(
                 index=fi,
-                focus=fam.title(),
+                focus=focus_label,
                 family=fam,
                 locked=False,
                 is_lifting=False,
@@ -383,7 +387,7 @@ def smart_adjust_remaining(
         else:
             result[fi] = DaySlot(
                 index=fi,
-                focus=fam.title(),
+                focus=focus_label,
                 family=fam,
                 locked=False,
                 is_lifting=True,

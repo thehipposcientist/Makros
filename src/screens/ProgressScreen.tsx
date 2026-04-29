@@ -3,7 +3,16 @@ import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
   TextInput, Alert, Image, Linking, Modal, Animated,
 } from 'react-native';
-import * as ImagePicker from 'expo-image-picker';
+// Lazy reference — keeps expo-image-picker out of the cold-start parse pass.
+const ImagePicker: typeof import('expo-image-picker') = (() => {
+  let mod: any = null;
+  return new Proxy({} as any, {
+    get: (_t, prop) => {
+      if (!mod) mod = require('expo-image-picker');
+      return mod[prop as string];
+    },
+  });
+})();
 import { Ionicons } from '@expo/vector-icons';
 import { LayoutAnimation, UIManager, Platform } from 'react-native';
 import FadeInView from '../components/FadeInView';
@@ -145,7 +154,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
   // Default to 'volume' — most users care about total work done per
   // session more than max load on a single set. Toggleable.
-  const [chartMode, setChartMode] = useState<'weight' | 'volume' | 'duration' | 'e1rm' | 'pr'>('volume');
+  // PR chart was removed — running max-weight is essentially the Weight
+  // chart with a different highlight, and Estimated 1RM is the better
+  // progress signal (factors in reps + RIR, not just heaviest set).
+  const [chartMode, setChartMode] = useState<'weight' | 'volume' | 'duration' | 'e1rm'>('volume');
   const [e1rmHistory, setE1rmHistory] = useState<Array<{ date: string; e1rm_lbs: number; confidence: string }>>([]);
   // Optional muscle filter for the exercise picker. 'all' = no filter.
   const [chartMuscleFilter, setChartMuscleFilter] = useState<string>('all');
@@ -327,7 +339,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     }
     AsyncStorage.getItem('bodyScanHistory').then(async raw => {
       const local: BodyScanEntry[] = raw ? (JSON.parse(raw) ?? []) : [];
-      if (local.length > 0) setBodyScanHistory(local);
+      // Cap in-memory history at the most recent 20 scans. Older entries
+      // stay in storage but aren't loaded into render state — body-scan
+      // entries carry full base64 image strings and a long-running user
+      // could otherwise keep hundreds of MBs of decoded images in JS heap.
+      // The history list UI only ever shows the recent slice anyway.
+      const RECENT_CAP = 20;
+      const localSorted = [...local].sort((a, b) => b.date.localeCompare(a.date));
+      if (localSorted.length > 0) setBodyScanHistory(localSorted.slice(0, RECENT_CAP));
       if (authToken) {
         try {
           const { getBodyScanHistory } = await import('../services/api');
@@ -340,7 +359,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               if (!merged.has(key)) merged.set(key, { date: key, ...(e as any) });
             }
             const sorted = Array.from(merged.values()).sort((a, b) => b.date.localeCompare(a.date));
-            setBodyScanHistory(sorted);
+            setBodyScanHistory(sorted.slice(0, RECENT_CAP));
             await AsyncStorage.setItem('bodyScanHistory', JSON.stringify(sorted));
           }
         } catch { /* non-fatal */ }
@@ -747,30 +766,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 const hasWeight = trend.some(p => p.bestWeight > 0);
                 const hasE1rm = e1rmHistory.length >= 2;
 
-                // PR progression — running max weight per session (all history,
-                // capped at 20 for chart legibility). Points where the running
-                // max increased are flagged isPr so the chart can highlight them.
-                const prPts = (() => {
-                  const sessions = [...history]
-                    .sort((a, b) => +new Date(a.date) - +new Date(b.date))
-                    .filter(s => s.exercises.some(e => e.name.toLowerCase() === selectedExercise.toLowerCase()))
-                    .slice(-20);
-                  let runningMax = 0;
-                  return sessions.map(s => {
-                    const ex = s.exercises.find(e => e.name.toLowerCase() === selectedExercise.toLowerCase())!;
-                    const w = ex.sets.length ? Math.max(...ex.sets.map(set => set.weightLbs)) : 0;
-                    const isPr = w > runningMax;
-                    if (isPr) runningMax = w;
-                    const d = new Date(s.date);
-                    return { weight: w, label: `${d.getMonth() + 1}/${d.getDate()}`, isPr };
-                  });
-                })();
-                const hasPr = !isCardioExercise && prPts.length >= 2;
-
                 const effectiveMode = chartMode === 'e1rm' && hasE1rm ? 'e1rm'
-                  : chartMode === 'pr' && hasPr ? 'pr'
                   : isCardioExercise && !hasWeight && hasDuration ? 'duration'
-                  : (chartMode === 'e1rm' || chartMode === 'pr') ? 'weight'
+                  : chartMode === 'e1rm' ? 'weight'
                   : chartMode;
 
                 if (effectiveMode === 'e1rm') {
@@ -813,11 +811,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           {hasWeight && (
                             <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('volume')} activeOpacity={0.75}>
                               <Text style={styles.chartModeBtnText}>Volume</Text>
-                            </TouchableOpacity>
-                          )}
-                          {hasPr && (
-                            <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('pr')} activeOpacity={0.75}>
-                              <Text style={styles.chartModeBtnText}>PR</Text>
                             </TouchableOpacity>
                           )}
                           <TouchableOpacity style={[styles.chartModeBtn, styles.chartModeBtnActive]} onPress={() => {}}>
@@ -881,113 +874,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   );
                 }
 
-                if (effectiveMode === 'pr') {
-                  const weights = prPts.map(p => p.weight);
-                  const prMin = Math.min(...weights);
-                  const prMax = Math.max(...weights, 1);
-                  const chartW = 320;
-                  const chartH = 140;
-                  const padL = 44;
-                  const padR = 16;
-                  const padT = 16;
-                  const padB = 28;
-                  const plotW = chartW - padL - padR;
-                  const plotH = chartH - padT - padB;
-                  const rangeMin = Math.max(0, prMin - 10);
-                  const rangeMax = prMax + 10;
-                  const rangeDelta = rangeMax - rangeMin || 1;
-                  const pts = weights.map((v, i) => ({
-                    x: padL + (weights.length > 1 ? (i / (weights.length - 1)) * plotW : plotW / 2),
-                    y: padT + plotH - ((v - rangeMin) / rangeDelta) * plotH,
-                    val: v,
-                    label: prPts[i].label,
-                    isPr: prPts[i].isPr,
-                  }));
-                  const polyPoints = pts.map(p => `${p.x},${p.y}`).join(' ');
-                  const gridLines = 4;
-                  const gridVals = Array.from({ length: gridLines }, (_, i) =>
-                    Math.round(rangeMin + (rangeDelta * (i / (gridLines - 1))))
-                  );
-                  const prCount = prPts.filter(p => p.isPr).length;
-                  return (
-                    <View style={styles.graphCard}>
-                      <View style={styles.graphHeader}>
-                        <Text style={styles.graphTitle}>{selectedExercise}</Text>
-                        <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
-                          {hasWeight && (
-                            <TouchableOpacity style={styles.chartModeBtn} onPress={() => setChartMode('weight')} activeOpacity={0.75}>
-                              <Text style={styles.chartModeBtnText}>Weight</Text>
-                            </TouchableOpacity>
-                          )}
-                          {hasWeight && (
-                            <TouchableOpacity style={styles.chartModeBtn} onPress={() => setChartMode('volume')} activeOpacity={0.75}>
-                              <Text style={styles.chartModeBtnText}>Volume</Text>
-                            </TouchableOpacity>
-                          )}
-                          {hasE1rm && (
-                            <TouchableOpacity style={styles.chartModeBtn} onPress={() => setChartMode('e1rm')} activeOpacity={0.75}>
-                              <Text style={styles.chartModeBtnText}>Est. 1RM</Text>
-                            </TouchableOpacity>
-                          )}
-                          <TouchableOpacity style={[styles.chartModeBtn, styles.chartModeBtnActive]} onPress={() => {}}>
-                            <Text style={[styles.chartModeBtnText, styles.chartModeBtnTextActive]}>PR</Text>
-                          </TouchableOpacity>
-                        </View>
-                      </View>
-                      <Text style={styles.graphSubtitle}>Best set weight (lbs) per session · PR sessions highlighted</Text>
-                      <View style={{ alignItems: 'center', marginVertical: 8 }}>
-                        <Svg width={chartW} height={chartH}>
-                          {gridVals.map((gv, gi) => {
-                            const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
-                            return (
-                              <Line key={gi} x1={padL} y1={gy} x2={chartW - padR} y2={gy}
-                                stroke={colors.border} strokeWidth={1} strokeDasharray="4,4" />
-                            );
-                          })}
-                          {gridVals.map((gv, gi) => {
-                            const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
-                            return (
-                              <SvgText key={`lbl${gi}`} x={padL - 6} y={gy + 4}
-                                fontSize={10} fill={colors.textMuted} textAnchor="end">
-                                {gv}
-                              </SvgText>
-                            );
-                          })}
-                          <Polyline points={polyPoints}
-                            fill="none" stroke={colors.primary} strokeWidth={2.5}
-                            strokeLinejoin="round" strokeLinecap="round" />
-                          {pts.map((p, i) => (
-                            <Circle key={i} cx={p.x} cy={p.y}
-                              r={p.isPr ? 5.5 : 3.5}
-                              fill={p.isPr ? colors.accent : colors.primary}
-                              stroke={colors.surface} strokeWidth={1.5} />
-                          ))}
-                          {pts.length <= 12 && pts.map((p, i) => (
-                            <SvgText key={`d${i}`} x={p.x} y={chartH - 4}
-                              fontSize={9} fill={colors.textMuted} textAnchor="middle">
-                              {p.label}
-                            </SvgText>
-                          ))}
-                        </Svg>
-                      </View>
-                      <View style={styles.chartSummaryRow}>
-                        <View style={styles.chartStat}>
-                          <Text style={styles.chartStatValue}>{weights[weights.length - 1]} lbs</Text>
-                          <Text style={styles.chartStatLabel}>Latest</Text>
-                        </View>
-                        <View style={styles.chartStat}>
-                          <Text style={[styles.chartStatValue, { color: colors.accent }]}>{prMax} lbs</Text>
-                          <Text style={styles.chartStatLabel}>All-time PR</Text>
-                        </View>
-                        <View style={styles.chartStat}>
-                          <Text style={[styles.chartStatValue, { color: colors.primary }]}>{prCount}</Text>
-                          <Text style={styles.chartStatLabel}>PRs logged</Text>
-                        </View>
-                      </View>
-                    </View>
-                  );
-                }
-
                 const values = trend.map(p =>
                   effectiveMode === 'weight' ? p.bestWeight
                     : effectiveMode === 'duration' ? Math.round(p.totalDuration / 60)
@@ -1019,13 +905,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                             style={[styles.chartModeBtn, effectiveMode === 'duration' && styles.chartModeBtnActive]}
                             onPress={() => setChartMode('duration')}>
                             <Text style={[styles.chartModeBtnText, effectiveMode === 'duration' && styles.chartModeBtnTextActive]}>Duration</Text>
-                          </TouchableOpacity>
-                        )}
-                        {hasPr && (
-                          <TouchableOpacity
-                            style={[styles.chartModeBtn]}
-                            onPress={() => setChartMode('pr')}>
-                            <Text style={styles.chartModeBtnText}>PR</Text>
                           </TouchableOpacity>
                         )}
                         {hasE1rm && (
@@ -2157,23 +2036,52 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Ionicons name="chevron-forward" size={18} color={tc.textMuted} />
             </TouchableOpacity>
           )}
-          {authToken && (
-            <Zone2TargetCard
-              authToken={authToken}
-              themeName={userProfile.themePreference}
-              appleHealthZone2={(() => {
-                const details = healthSummary?.workoutDetails ?? [];
-                let z2 = 0;
-                for (const w of details) {
-                  const mins = Number(w.duration ?? 0);
-                  if (!mins) continue;
-                  const name = String((w as any).activityName ?? (w as any).name ?? '');
-                  if (/run|walk|hike|bik|cycl|row|swim|ellipt|spin/i.test(name) && mins >= 20 && !/hiit|interval|tabata/i.test(name)) z2 += mins;
-                }
-                return z2 > 0 ? Math.round(z2) : null;
-              })()}
-            />
-          )}
+          {authToken && (() => {
+            // Build the Z2 detection list once and feed both the
+            // numeric total AND the per-workout diagnostic list to the
+            // card. Keeping the regex + counted/not-counted reasoning
+            // here so the "Why?" tooltip in the card has the truth.
+            //
+            // Cardio activities the regex catches (counts toward Z2 when
+            // 20+ min and not HIIT/intervals): run, walk, hike, bike,
+            // cycle, row, swim, elliptical, spin, stair climb, cross
+            // training, cardio (literal), aerobic, jog, treadmill,
+            // dance, plus most racquet/ball sports + boxing.
+            const CARDIO_RX = /run|walk|hike|bik|cycl|row|swim|ellipt|spin|stair|cross[\s-]?train|\bcardio\b|aerobic|jog|treadmill|dance|tennis|pickleball|paddle|soccer|basketball|box|kickbox|martial/i;
+            const EXCLUDE_RX = /hiit|interval|tabata|sprint|yoga|pilates|stretch|flex|core|strength|weight|lift/i;
+            const details = healthSummary?.workoutDetails ?? [];
+            let z2 = 0;
+            const detected: { name: string; durationMin: number; counted: boolean; reason?: string }[] = [];
+            for (const w of details) {
+              const mins = Number(w.duration ?? 0);
+              if (!mins) continue;
+              const name = String((w as any).activityName ?? (w as any).name ?? '') || 'Workout';
+              const isCardio = CARDIO_RX.test(name);
+              const isExcluded = EXCLUDE_RX.test(name);
+              const longEnough = mins >= 20;
+              let counted = false;
+              let reason: string | undefined;
+              if (!isCardio) {
+                reason = 'not cardio';
+              } else if (isExcluded) {
+                reason = 'high-intensity / excluded';
+              } else if (!longEnough) {
+                reason = 'under 20 min';
+              } else {
+                counted = true;
+                z2 += mins;
+              }
+              detected.push({ name, durationMin: mins, counted, reason });
+            }
+            return (
+              <Zone2TargetCard
+                authToken={authToken}
+                themeName={userProfile.themePreference}
+                appleHealthZone2={z2 > 0 ? Math.round(z2) : null}
+                detectedWorkouts={detected}
+              />
+            );
+          })()}
 
           {isHealthKitAvailable() && (
             <DetectedWorkoutsCard
@@ -3349,12 +3257,201 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </>
           )}
 
+          {/* Timeline — body fat % chart over time. Renders only when 2+
+              scans exist (a single point isn't a trend). Pure SVG, matches
+              the e1RM chart pattern above so the visual language stays
+              consistent across Progress. Muscle-mass tier is rendered as
+              a colored chip strip below the chart since the value is
+              categorical (low/below_average/average/above_average/high). */}
+          {bodyScanHistory.length >= 2 && (() => {
+            // History is stored newest-first; reverse for chronological plot.
+            const sorted = [...bodyScanHistory].slice().reverse();
+            const bfValues = sorted.map(e => Number(e.bodyFatPct) || 0).filter(v => v > 0);
+            if (bfValues.length < 2) return null;
+
+            const chartW = 320;
+            const chartH = 150;
+            const padL = 36;
+            const padR = 12;
+            const padT = 14;
+            const padB = 24;
+            const plotW = chartW - padL - padR;
+            const plotH = chartH - padT - padB;
+
+            // Snap Y range to nice integer bounds, with at least 4% headroom
+            // so a flat trend line doesn't render as a dot in the middle.
+            const rawMin = Math.min(...bfValues);
+            const rawMax = Math.max(...bfValues);
+            const span = Math.max(2, rawMax - rawMin);
+            const rangeMin = Math.max(0, Math.floor(rawMin - span * 0.25));
+            const rangeMax = Math.ceil(rawMax + span * 0.25);
+            const rangeDelta = Math.max(1, rangeMax - rangeMin);
+
+            const points = sorted.map((entry, i) => {
+              const v = Number(entry.bodyFatPct) || 0;
+              const x = padL + (sorted.length === 1 ? plotW / 2 : (i / (sorted.length - 1)) * plotW);
+              const y = padT + plotH - ((v - rangeMin) / rangeDelta) * plotH;
+              return { x, y, v, entry, i };
+            });
+            const polyPoints = points.map(p => `${p.x},${p.y}`).join(' ');
+
+            const gridLines = 4;
+            const gridVals = Array.from({ length: gridLines }, (_, i) =>
+              Math.round(rangeMin + (rangeDelta * (i / (gridLines - 1))))
+            );
+
+            // First/current/peak summary stats. Peak = lowest BF observed
+            // (improvement direction depends on goal, but lower BF is
+            // typically the milestone users want surfaced).
+            const firstPct = bfValues[0];
+            const currentPct = bfValues[bfValues.length - 1];
+            const peakPct = Math.min(...bfValues);
+            const delta = currentPct - firstPct;
+            const deltaIsImprovement = delta < 0;
+            const deltaColor = deltaIsImprovement ? tc.primary : delta > 0 ? (tc.warning ?? tc.textSecondary) : tc.textSecondary;
+
+            // Date labels — only show first/last on dense charts to avoid
+            // overlap. Up to 6 labels for sparse charts.
+            const showAllLabels = points.length <= 6;
+            const firstD = new Date(sorted[0].date);
+            const lastD = new Date(sorted[sorted.length - 1].date);
+            const fmtDate = (d: Date) => `${MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
+
+            // Muscle-mass tier → ordinal + color for the chip strip.
+            const tierMap: Record<string, { ord: number; label: string; color: string }> = {
+              low:             { ord: 1, label: 'Low',          color: tc.error ?? '#EF4444' },
+              below_average:   { ord: 2, label: 'Below avg',    color: tc.warning ?? '#F59E0B' },
+              average:         { ord: 3, label: 'Average',      color: tc.textSecondary },
+              above_average:   { ord: 4, label: 'Above avg',    color: tc.primary },
+              high:            { ord: 5, label: 'High',         color: tc.primary },
+            };
+
+            return (
+              <View style={[styles.bodyScanHistoryCard, { marginTop: 12 }]}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>Body Fat Trend</Text>
+                  <Text style={{ fontSize: 11, color: tc.textMuted }}>
+                    {points.length} scans · {fmtDate(firstD)} – {fmtDate(lastD)}
+                  </Text>
+                </View>
+                <View style={{ alignItems: 'center', marginVertical: 4 }}>
+                  <Svg width={chartW} height={chartH}>
+                    {gridVals.map((gv, gi) => {
+                      const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
+                      return (
+                        <Line key={gi} x1={padL} y1={gy} x2={chartW - padR} y2={gy}
+                          stroke={tc.border} strokeWidth={1} strokeDasharray="4,4" />
+                      );
+                    })}
+                    {gridVals.map((gv, gi) => {
+                      const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
+                      return (
+                        <SvgText key={`lbl${gi}`} x={padL - 6} y={gy + 4}
+                          fontSize={10} fill={tc.textMuted} textAnchor="end">
+                          {gv}%
+                        </SvgText>
+                      );
+                    })}
+                    <Polyline points={polyPoints}
+                      fill="none" stroke={tc.primary} strokeWidth={2.5}
+                      strokeLinejoin="round" strokeLinecap="round" />
+                    {points.map((p) => (
+                      <Circle key={p.i} cx={p.x} cy={p.y}
+                        r={p.i === points.length - 1 ? 5 : 3.5}
+                        fill={p.i === points.length - 1 ? (tc.accent ?? tc.primary) : tc.primary}
+                        stroke={tc.surface} strokeWidth={1.5} />
+                    ))}
+                    {showAllLabels
+                      ? points.map((p) => (
+                          <SvgText key={`d${p.i}`} x={p.x} y={chartH - 6}
+                            fontSize={9} fill={tc.textMuted} textAnchor="middle">
+                            {fmtDate(new Date(p.entry.date))}
+                          </SvgText>
+                        ))
+                      : (
+                        <>
+                          <SvgText x={points[0].x} y={chartH - 6}
+                            fontSize={9} fill={tc.textMuted} textAnchor="start">
+                            {fmtDate(firstD)}
+                          </SvgText>
+                          <SvgText x={points[points.length - 1].x} y={chartH - 6}
+                            fontSize={9} fill={tc.textMuted} textAnchor="end">
+                            {fmtDate(lastD)}
+                          </SvgText>
+                        </>
+                      )}
+                  </Svg>
+                </View>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-around', marginTop: 6, paddingHorizontal: 6 }}>
+                  <View style={{ alignItems: 'center' }}>
+                    <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>{currentPct.toFixed(1)}%</Text>
+                    <Text style={{ fontSize: 9, color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>Current</Text>
+                  </View>
+                  <View style={{ alignItems: 'center' }}>
+                    <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }}>{peakPct.toFixed(1)}%</Text>
+                    <Text style={{ fontSize: 9, color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>Best</Text>
+                  </View>
+                  <View style={{ alignItems: 'center' }}>
+                    <Text style={{ fontSize: 16, fontWeight: '800', color: deltaColor }}>
+                      {delta > 0 ? '+' : ''}{delta.toFixed(1)}%
+                    </Text>
+                    <Text style={{ fontSize: 9, color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>vs first</Text>
+                  </View>
+                </View>
+
+                {/* Muscle-mass timeline — categorical, so we render as a
+                    horizontal strip of pill chips colored by tier. Lets the
+                    user see "I went from average → above average" without
+                    needing a numeric chart for an ordinal value. */}
+                {(() => {
+                  const tieredScans = sorted
+                    .map(e => ({ entry: e, t: tierMap[(e.muscleMass || '').toLowerCase()] }))
+                    .filter(x => x.t);
+                  if (tieredScans.length < 2) return null;
+                  return (
+                    <View style={{ marginTop: 14 }}>
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 6 }}>
+                        MUSCLE MASS BY SCAN
+                      </Text>
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                        {tieredScans.map(({ entry, t }, i) => (
+                          <View key={`mm-${i}`} style={{
+                            paddingHorizontal: 10, paddingVertical: 6,
+                            borderRadius: 999, marginRight: 6,
+                            backgroundColor: t.color + '22',
+                            borderWidth: 1, borderColor: t.color + '88',
+                          }}>
+                            <Text style={{ fontSize: 10, fontWeight: '800', color: t.color }}>{t.label}</Text>
+                            <Text style={{ fontSize: 9, color: tc.textMuted, marginTop: 1 }}>
+                              {fmtDate(new Date(entry.date))}
+                            </Text>
+                          </View>
+                        ))}
+                      </ScrollView>
+                    </View>
+                  );
+                })()}
+              </View>
+            );
+          })()}
+
           {/* History */}
           {bodyScanHistory.length > 0 && (
             <>
               <Text style={[styles.sectionLabel, { marginTop: 16 }]}>Scan History</Text>
-              {bodyScanHistory.map((entry) => {
+              {bodyScanHistory.map((entry, idx) => {
                 const d = new Date(entry.date);
+                // Show per-scan delta vs the previous (older) scan so users
+                // can see whether each individual scan was an improvement.
+                // bodyScanHistory is newest-first, so the "previous" scan is
+                // the next index. Skip the oldest scan (no prior to compare).
+                const prior = idx < bodyScanHistory.length - 1 ? bodyScanHistory[idx + 1] : null;
+                const priorBf = prior ? Number(prior.bodyFatPct) || 0 : null;
+                const currBf = Number(entry.bodyFatPct) || 0;
+                const scanDelta = priorBf != null && currBf > 0 ? currBf - priorBf : null;
+                const scanDeltaColor = scanDelta == null
+                  ? tc.textMuted
+                  : scanDelta < 0 ? tc.primary : scanDelta > 0 ? (tc.warning ?? tc.textSecondary) : tc.textMuted;
                 return (
                   <View key={entry.id} style={styles.bodyScanHistoryCard}>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -3365,9 +3462,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           {entry.weightLbs ? `  ·  ${entry.weightLbs} lbs` : ''}
                         </Text>
                       </View>
-                      <View style={{ alignItems: 'center' }}>
+                      <View style={{ alignItems: 'flex-end' }}>
                         <Text style={{ fontSize: 20, fontWeight: '800', color: tc.primary }}>{entry.bodyFatPct}%</Text>
                         <Text style={{ fontSize: 9, color: tc.textMuted, textTransform: 'uppercase' }}>Body Fat</Text>
+                        {scanDelta != null && (
+                          <Text style={{ fontSize: 10, fontWeight: '700', color: scanDeltaColor, marginTop: 2 }}>
+                            {scanDelta > 0 ? '+' : ''}{scanDelta.toFixed(1)}% vs prior
+                          </Text>
+                        )}
                       </View>
                     </View>
                     <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 6, lineHeight: 17 }}>{entry.assessment}</Text>

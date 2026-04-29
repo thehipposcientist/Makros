@@ -238,16 +238,21 @@ async function compute(opts: { age?: number | null }): Promise<HealthDataSummary
   const workouts: any[] = Array.isArray(raw.workoutDetails) ? raw.workoutDetails : [];
   let totalCardioMinutes = 0;
   let totalZone2Minutes = 0;
-  const cardioRx = /run|walk|hike|bik|cycl|row|swim|ellipt|spin/i;
+  // Expanded cardio regex — older version only matched run/walk/hike/bike
+  // /cycle/row/swim/elliptical/spin which silently dropped HK names like
+  // "Cardio", "Stair Climber", "Cross Training", "Cardio Dance", and most
+  // sports. Users would do an hour of cardio and see Z2 stuck at 0.
+  const cardioRx = /run|walk|hike|bik|cycl|row|swim|ellipt|spin|stair|cross[\s-]?train|\bcardio\b|aerobic|jog|treadmill|dance|tennis|pickleball|paddle|soccer|basketball|box|kickbox|martial/i;
+  const excludeRx = /hiit|interval|tabata|sprint|yoga|pilates|stretch|flex|core|strength|weight|lift/i;
   for (const w of workouts) {
     const mins = Number(w.duration ?? 0);
     if (!mins) continue;
     const name = String(w.activityName ?? '');
-    if (cardioRx.test(name)) {
+    if (cardioRx.test(name) && !excludeRx.test(name)) {
       totalCardioMinutes += mins;
       // Heuristic Z2 fallback: steady cardio of 20+ min likely spans
-      // Z2. Skip HIIT / intervals / short bursts.
-      if (mins >= 20 && !/hiit|interval|tabata/i.test(name)) {
+      // Z2. Already filtered out HIIT/intervals/strength via excludeRx.
+      if (mins >= 20) {
         totalZone2Minutes += mins;
       }
     }

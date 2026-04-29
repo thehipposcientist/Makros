@@ -16,7 +16,16 @@ import { deriveAge } from '../utils/age';
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
-import * as ImagePicker from 'expo-image-picker';
+// Lazy reference — keeps expo-image-picker out of the cold-start parse pass.
+const ImagePicker: typeof import('expo-image-picker') = (() => {
+  let mod: any = null;
+  return new Proxy({} as any, {
+    get: (_t, prop) => {
+      if (!mod) mod = require('expo-image-picker');
+      return mod[prop as string];
+    },
+  });
+})();
 import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood, Gender, StrengthEquipmentSettings } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, THEME_PICKER_ORDER, colors, getTheme, radius, resolveThemeName } from '../constants/theme';
@@ -324,8 +333,37 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
   // Goal (hierarchical)
   const [selectedGoal, setSelectedGoal] = useState<string>(profile.goalSelection?.primaryGoal ?? profile.goal);
-  const [goalScrollIdx, setGoalScrollIdx] = useState(0);
+  // Initialize the carousel index to the user's currently-selected goal
+  // so the page lands on their actual goal — not the first card. Without
+  // this, opening the goal editor always showed "Build muscle" at the top
+  // even if the user had picked something else, which read as a bug.
+  const [goalScrollIdx, setGoalScrollIdx] = useState<number>(() => {
+    const idx = LAUNCH_GOALS.findIndex(g => g.id === (profile.goalSelection?.primaryGoal ?? profile.goal));
+    return idx >= 0 ? idx : 0;
+  });
   const goalCarouselRef = useRef<ScrollView>(null);
+
+  // Mount-time auto-scroll. The initial state above puts the dot indicator
+  // on the right card immediately, but the ScrollView still needs a manual
+  // scrollTo to actually render the selected card in view (snapToInterval
+  // doesn't honor initial state). 50ms gives the layout pass time to
+  // resolve so the offset math is correct on first render.
+  useEffect(() => {
+    if (mode !== 'goal') return;
+    const idx = LAUNCH_GOALS.findIndex(g => g.id === selectedGoal);
+    if (idx < 0) return;
+    const timer = setTimeout(() => {
+      goalCarouselRef.current?.scrollTo({
+        x: idx * (screenWidth * 0.82 + 12),
+        animated: false,
+      });
+    }, 50);
+    return () => clearTimeout(timer);
+    // Only run on mount + when the screen first becomes the goal mode.
+    // We deliberately don't depend on `selectedGoal` so user taps don't
+    // re-trigger scroll-on-load logic (the tap handler already scrolls).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>(profile.goalSelection?.modifiers ?? []);
   // Preview modal removed — matches onboarding's direct-select UX so
   // editing your goal feels the same as setting it up originally.

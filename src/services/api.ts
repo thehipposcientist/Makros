@@ -3941,6 +3941,8 @@ export interface GearItem {
   accumulated_sessions: number;
   is_active: boolean;
   retirement_threshold_miles: number | null;
+  retirement_threshold_sessions: number | null;
+  last_used_at: string | null;
   auto_track_keywords: string[];
   notes: string | null;
   photos: string[];
@@ -3957,6 +3959,7 @@ export interface GearItemCreate {
   purchase_date?: string | null;
   starting_miles?: number;
   retirement_threshold_miles?: number | null;
+  retirement_threshold_sessions?: number | null;
   auto_track_keywords?: string[];
   notes?: string | null;
   photos?: string[];

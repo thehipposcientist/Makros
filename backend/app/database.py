@@ -778,6 +778,23 @@ def _ensure_gear_items_photos_column() -> None:
         print(f"[migration] gear_items photos column failed (non-fatal): {e}")
 
 
+def _ensure_gear_items_usage_columns() -> None:
+    """Add usage-tracking columns to gear_items so non-mileage gear (boxing
+    gloves, lifting belts, yoga mats) has meaningful telemetry: a session-
+    based retirement threshold + a last-used timestamp for the "Last used X
+    ago" UI strip. Idempotent."""
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE gear_items ADD COLUMN IF NOT EXISTS retirement_threshold_sessions INTEGER"
+            ))
+            conn.execute(text(
+                "ALTER TABLE gear_items ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ"
+            ))
+    except Exception as e:
+        print(f"[migration] gear_items usage columns failed (non-fatal): {e}")
+
+
 def _ensure_weekly_checkin_body_columns() -> None:
     """Add body_fat_pct / bp_systolic / bp_diastolic to weekly_checkins
     if they don't exist yet. All optional — `None` for any user who
@@ -1184,6 +1201,7 @@ def create_db_and_tables():
     _ensure_recovery_activities_table()
     _ensure_gear_items_table()
     _ensure_gear_items_photos_column()
+    _ensure_gear_items_usage_columns()
     _ensure_user_name_columns()
     _ensure_user_trust_account_columns()
     _ensure_user_token_version_column()
