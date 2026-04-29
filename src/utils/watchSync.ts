@@ -223,9 +223,24 @@ export async function pushWorkoutToWatch(
     await recordWatchSync('workout', false, 'bridge_unavailable');
     return false;
   }
-  wsLog('pushWorkoutToWatch', { status: opts.status, focus: payload.focus, userId: userId?.slice(0, 4) });
+  // Surface payload shape + size so we can spot the case where the
+  // merged WCSession applicationContext gets too large to enqueue
+  // (256KB hard cap). When updateApplicationContext throws on iOS, the
+  // bridge falls back to sendMessage which only delivers when the
+  // watch is reachable — explaining "everything else syncs but workout
+  // doesn't" if a single oversized exercise list pushes the merged
+  // dict past the limit.
+  let payloadBytes = 0;
+  try { payloadBytes = JSON.stringify(payload).length; } catch {}
+  wsLog('pushWorkoutToWatch', {
+    status: opts.status,
+    focus: payload.focus,
+    exercises: payload.exercises?.length ?? 0,
+    bytes: payloadBytes,
+    userId: userId?.slice(0, 4),
+  });
   const ok = await WatchBridge.syncWorkout(payload);
-  await recordWatchSync('workout', !!ok, opts.status);
+  await recordWatchSync('workout', !!ok, `${opts.status} ex=${payload.exercises?.length ?? 0} b=${payloadBytes}`);
   return ok;
 }
 

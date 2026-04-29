@@ -29,27 +29,55 @@ import {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const GEAR_TYPES: { value: string; label: string; icon: string; defaultKeywords: string[] }[] = [
-  { value: 'running_shoe',   label: 'Running Shoes',   icon: 'walk-outline',     defaultKeywords: ['run', 'treadmill', 'jog', 'walk'] },
+  // Cardio / running / cycling — primary mile-tracked items.
+  { value: 'running_shoe',   label: 'Running Shoes',   icon: 'walk-outline',       defaultKeywords: ['run', 'treadmill', 'jog', 'walk'] },
   { value: 'trail_shoe',     label: 'Trail Shoes',     icon: 'trail-sign-outline', defaultKeywords: ['trail run', 'hike', 'walk'] },
-  { value: 'cycling_shoe',   label: 'Cycling Shoes',   icon: 'bicycle-outline',  defaultKeywords: ['cycling', 'spin', 'bike'] },
-  { value: 'bike',           label: 'Bike',            icon: 'bicycle-outline',  defaultKeywords: ['cycling', 'spin', 'bike', 'road bike'] },
-  { value: 'bike_tire',      label: 'Bike Tire',       icon: 'ellipse-outline',  defaultKeywords: ['cycling', 'spin', 'bike'] },
-  { value: 'bike_chain',     label: 'Bike Chain',      icon: 'link-outline',     defaultKeywords: ['cycling', 'spin', 'bike'] },
-  { value: 'treadmill_belt', label: 'Treadmill Belt',  icon: 'fitness-outline',  defaultKeywords: ['treadmill', 'run', 'walk'] },
-  { value: 'jump_rope',      label: 'Jump Rope',       icon: 'infinite-outline', defaultKeywords: ['jump rope', 'cardio'] },
-  { value: 'other',          label: 'Other',           icon: 'cube-outline',     defaultKeywords: [] },
+  { value: 'cycling_shoe',   label: 'Cycling Shoes',   icon: 'bicycle-outline',    defaultKeywords: ['cycling', 'spin', 'bike'] },
+  { value: 'bike',           label: 'Bike',            icon: 'bicycle-outline',    defaultKeywords: ['cycling', 'spin', 'bike', 'road bike'] },
+  { value: 'bike_tire',      label: 'Bike Tire',       icon: 'ellipse-outline',    defaultKeywords: ['cycling', 'spin', 'bike'] },
+  { value: 'bike_chain',     label: 'Bike Chain',      icon: 'link-outline',       defaultKeywords: ['cycling', 'spin', 'bike'] },
+  { value: 'treadmill_belt', label: 'Treadmill Belt',  icon: 'fitness-outline',    defaultKeywords: ['treadmill', 'run', 'walk'] },
+  { value: 'jump_rope',      label: 'Jump Rope',       icon: 'infinite-outline',   defaultKeywords: ['jump rope', 'cardio'] },
+  // Lifting accessories — session-tracked. Keywords match exercise names
+  // and focus labels (e.g. "Back Squat", "Romanian Deadlift", "Legs").
+  { value: 'lifting_shoe',   label: 'Lifting Shoes',   icon: 'footsteps-outline',  defaultKeywords: ['squat', 'deadlift', 'snatch', 'clean', 'olympic'] },
+  { value: 'lifting_belt',   label: 'Lifting Belt',    icon: 'shield-half-outline', defaultKeywords: ['squat', 'deadlift'] },
+  { value: 'knee_sleeves',   label: 'Knee Sleeves',    icon: 'bandage-outline',    defaultKeywords: ['squat', 'lunge', 'leg'] },
+  { value: 'wrist_wraps',    label: 'Wrist Wraps',     icon: 'medkit-outline',     defaultKeywords: ['bench', 'press', 'overhead', 'push'] },
+  { value: 'lifting_straps', label: 'Lifting Straps',  icon: 'git-branch-outline', defaultKeywords: ['deadlift', 'row', 'pull-up', 'pull', 'shrug'] },
+  // Recovery / specialty — session-tracked.
+  { value: 'chest_strap',    label: 'HR Chest Strap',  icon: 'heart-outline',      defaultKeywords: ['cardio', 'run', 'cycling', 'spin', 'bike'] },
+  { value: 'yoga_mat',       label: 'Yoga Mat',        icon: 'leaf-outline',       defaultKeywords: ['yoga', 'pilates', 'stretch', 'mobility'] },
+  { value: 'climbing_shoe',  label: 'Climbing Shoes',  icon: 'triangle-outline',   defaultKeywords: ['climb', 'bouldering'] },
+  { value: 'resistance_band',label: 'Resistance Bands',icon: 'options-outline',    defaultKeywords: ['band', 'mobility', 'warmup'] },
+  { value: 'foam_roller',    label: 'Foam Roller',     icon: 'remove-outline',     defaultKeywords: ['mobility', 'recovery', 'foam'] },
+  { value: 'massage_gun',    label: 'Massage Gun',     icon: 'flash-outline',      defaultKeywords: ['recovery'] },
+  { value: 'boxing_gloves',  label: 'Boxing Gloves',   icon: 'hand-right-outline', defaultKeywords: ['box', 'kickbox', 'martial'] },
+  { value: 'other',          label: 'Other',           icon: 'cube-outline',       defaultKeywords: [] },
 ];
 
 const DEFAULT_THRESHOLDS: Record<string, number | null> = {
-  running_shoe:   400,
-  trail_shoe:     350,
-  cycling_shoe:   null,
-  bike:           null,
-  bike_tire:      2000,
-  bike_chain:     1500,
-  treadmill_belt: 3000,
-  jump_rope:      null,
-  other:          null,
+  running_shoe:    400,
+  trail_shoe:      350,
+  cycling_shoe:    null,
+  bike:            null,
+  bike_tire:       2000,
+  bike_chain:      1500,
+  treadmill_belt:  3000,
+  jump_rope:       null,
+  lifting_shoe:    null,
+  lifting_belt:    null,
+  knee_sleeves:    null,
+  wrist_wraps:     null,
+  lifting_straps:  null,
+  chest_strap:     null,
+  yoga_mat:        null,
+  climbing_shoe:   null,
+  resistance_band: null,
+  foam_roller:     null,
+  massage_gun:     null,
+  boxing_gloves:   null,
+  other:           null,
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -216,12 +244,41 @@ function GearFormModal({
     }
   };
 
-  const handleAddPhoto = async () => {
+  const handleAddPhoto = () => {
     if (photos.length >= MAX_PHOTOS) return;
+    Alert.alert(
+      'Add Photo',
+      'Take a new photo of your gear or pick one from your library.',
+      [
+        { text: 'Take Photo', onPress: () => pickGearPhoto('camera') },
+        { text: 'Choose from Library', onPress: () => pickGearPhoto('library') },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+    );
+  };
+
+  const pickGearPhoto = async (source: 'camera' | 'library') => {
     try {
       const ImagePicker = await import('expo-image-picker');
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (!perm.granted) {
+      if (source === 'camera') {
+        const cam = await ImagePicker.requestCameraPermissionsAsync();
+        if (!cam.granted) {
+          Alert.alert('Camera permission needed', 'Allow camera access to take gear photos.');
+          return;
+        }
+        const result = await ImagePicker.launchCameraAsync({
+          quality: 0.5,
+          base64: true,
+          allowsEditing: true,
+          aspect: [4, 3],
+          mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        });
+        if (result.canceled || !result.assets?.[0]?.base64) return;
+        setPhotos(prev => [...prev, `data:image/jpeg;base64,${result.assets[0].base64}`]);
+        return;
+      }
+      const lib = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!lib.granted) {
         Alert.alert('Permission needed', 'Allow photo access to add gear photos.');
         return;
       }
@@ -233,10 +290,9 @@ function GearFormModal({
         aspect: [4, 3],
       });
       if (result.canceled || !result.assets?.[0]?.base64) return;
-      const uri = `data:image/jpeg;base64,${result.assets[0].base64}`;
-      setPhotos(prev => [...prev, uri]);
+      setPhotos(prev => [...prev, `data:image/jpeg;base64,${result.assets[0].base64}`]);
     } catch {
-      Alert.alert('Photo error', 'Could not open photo library.');
+      Alert.alert('Photo error', source === 'camera' ? 'Could not open camera.' : 'Could not open photo library.');
     }
   };
 
@@ -440,7 +496,7 @@ function GearFormModal({
             autoCapitalize="none"
           />
           <Text style={[styles.hint, { color: tc.textMuted }]}>
-            Miles from workouts whose focus or exercises match these keywords are automatically counted.
+            Miles + sessions auto-accumulate from any workout (manual log or Apple Health import) whose focus or exercise names match these keywords. Items without a mile threshold track sessions only.
           </Text>
 
           <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>NOTES (optional)</Text>

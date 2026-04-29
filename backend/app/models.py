@@ -817,15 +817,29 @@ class UserEquipmentProfile(SQLModel, table=True):
 
 # Default retirement thresholds (miles). None = track sessions only.
 GEAR_RETIREMENT_DEFAULTS: dict[str, float | None] = {
-    "running_shoe":   400.0,
-    "trail_shoe":     350.0,
-    "cycling_shoe":   None,   # track sessions, not miles
-    "bike":           None,
-    "bike_tire":      2000.0,
-    "bike_chain":     1500.0,
-    "treadmill_belt": 3000.0,
-    "jump_rope":      None,   # track sessions
-    "other":          None,
+    "running_shoe":    400.0,
+    "trail_shoe":      350.0,
+    "cycling_shoe":    None,   # track sessions, not miles
+    "bike":            None,
+    "bike_tire":       2000.0,
+    "bike_chain":      1500.0,
+    "treadmill_belt":  3000.0,
+    "jump_rope":       None,
+    # Strength accessories — sessions only (no meaningful mile threshold).
+    "lifting_shoe":    None,
+    "lifting_belt":    None,
+    "knee_sleeves":    None,
+    "wrist_wraps":     None,
+    "lifting_straps":  None,
+    # Recovery / cardio accessories — sessions only.
+    "chest_strap":     None,
+    "yoga_mat":        None,
+    "climbing_shoe":   None,
+    "resistance_band": None,
+    "foam_roller":     None,
+    "massage_gun":     None,
+    "boxing_gloves":   None,
+    "other":           None,
 }
 
 class GearItem(SQLModel, table=True):

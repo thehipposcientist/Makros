@@ -156,6 +156,13 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     // ─── Message routing ────────────────────────────────────────────
 
     private func absorbContext(_ ctx: [String: Any]) {
+        // Visibility: every absorbed context logs the top-level keys it
+        // carried. Without this, a context that arrives WITHOUT a workout
+        // key looks identical to one where workout decode silently
+        // failed — both leave the latest diag pointing at handleUserSwitch.
+        let keysSorted = ctx.keys.sorted().joined(separator: ",")
+        HeartRateStore.saveDiag("absorbContext keys=[\(keysSorted)]")
+
         // Only process userId when the key is explicitly present in
         // the payload. Missing key = "no user signal" (e.g. a plain
         // workout/meals message that predates userId stamping).
@@ -177,6 +184,10 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                     UserDefaults.standard.set(clearMs, forKey: "thallo.lastClearWorkoutMs")
                 }
             }
+            // Capture the dict's shape BEFORE the JSONSerialization round-trip
+            // so we can tell what arrived even if serialization fails.
+            let wKeys = w.keys.sorted().joined(separator: ",")
+            let exerciseCount = (w["exercises"] as? [Any])?.count ?? -1
             if let data = try? JSONSerialization.data(withJSONObject: w) {
                 let decoder = JSONDecoder()
                 do {
@@ -188,14 +199,19 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                     if !stored.isEmpty && !wUserId.isEmpty && wUserId != stored {
                         HeartRateStore.saveDiag("rejected workout: userId \(wUserId.prefix(4))≠stored \(stored.prefix(4))")
                     } else if workout == nil || decoded.syncedAtMs >= (workout?.syncedAtMs ?? 0) {
-                        HeartRateStore.saveDiag("rcv workout accepted status=\(decoded.status) sid=\(decoded.sessionId?.prefix(8) ?? "nil")")
+                        HeartRateStore.saveDiag("rcv workout accepted status=\(decoded.status) sid=\(decoded.sessionId?.prefix(8) ?? "nil") ex=\(decoded.exercises.count)")
                         self.workout = decoded
                     } else {
                         HeartRateStore.saveDiag("rcv workout stale syncedAtMs")
                     }
                 } catch {
-                    HeartRateStore.saveDiag("workout decode failed: \(error)")
+                    HeartRateStore.saveDiag("workout decode FAIL keys=[\(wKeys)] ex=\(exerciseCount) err=\(error)")
                 }
+            } else {
+                // Plug the silent gap: JSONSerialization.data returned nil.
+                // This usually means the dict contains non-plist values
+                // (NaN/Infinity NSNumber, custom Swift class, etc).
+                HeartRateStore.saveDiag("workout JSONser FAILED keys=[\(wKeys)] ex=\(exerciseCount)")
             }
         } else if ctx.keys.contains("workout") {
             HeartRateStore.saveDiag("workout key present but not a dict: \(type(of: ctx["workout"]))")

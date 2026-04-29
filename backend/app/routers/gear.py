@@ -44,7 +44,16 @@ def _compute_fields(item: GearItem) -> GearItemRead:
         else:
             recommendation = f"Good — {total:.0f} mi logged, {remaining:.0f} mi remaining."
     else:
-        recommendation = f"{total:.0f} mi logged across {item.accumulated_sessions} sessions."
+        # Session-only gear (lifting accessories, yoga mats, recovery tools).
+        # Mileage usually stays at 0 here — leading with the session count
+        # reads cleaner than "0 mi logged across N sessions."
+        sessions = item.accumulated_sessions
+        if sessions == 0:
+            recommendation = "No sessions logged yet — log a matching workout to start tracking."
+        elif total > 0:
+            recommendation = f"{sessions} session{'s' if sessions != 1 else ''} logged ({total:.0f} mi)."
+        else:
+            recommendation = f"{sessions} session{'s' if sessions != 1 else ''} logged."
 
     return GearItemRead(
         id=item.id,
@@ -233,18 +242,28 @@ def identify_gear(
 
     system = (
         "You are a fitness gear expert. The user will show you one or more photos of "
-        "the same piece of athletic gear (running shoes, trail shoes, road bike, "
-        "mountain bike, gym shoes, weightlifting shoes, etc.) from different angles. "
-        "Use all photos together to identify the item and estimate its current mileage "
-        "and remaining lifespan based on visible wear. "
+        "the same piece of athletic gear from different angles — running shoes, trail "
+        "shoes, road/mountain bikes, gym shoes, weightlifting shoes, lifting belts, "
+        "knee sleeves, wrist wraps, chest straps, yoga mats, climbing shoes, "
+        "resistance bands, foam rollers, massage guns, boxing gloves, etc. "
+        "Use all photos together to identify the item, estimate its current mileage / "
+        "session count, and the expected total lifespan based on visible wear. For "
+        "items where mileage doesn't apply (lifting accessories, yoga mats, recovery "
+        "tools), set estimated_miles and retirement_threshold_miles to null — those "
+        "items track by session count, not distance. "
         "Respond ONLY with a JSON object — no markdown, no commentary.\n"
         "JSON shape:\n"
         "{\n"
         '  "name": "Brand Model Name (e.g. Nike Pegasus 40)",\n'
         '  "gear_type": one of ["running_shoe","trail_shoe","cycling_shoe","bike",'
-        '"bike_tire","bike_chain","treadmill_belt","jump_rope","other"],\n'
-        '  "estimated_miles": float or null (miles already on the gear based on wear),\n'
-        '  "retirement_threshold_miles": float or null (expected total lifespan),\n'
+        '"bike_tire","bike_chain","treadmill_belt","jump_rope",'
+        '"lifting_shoe","lifting_belt","knee_sleeves","wrist_wraps","lifting_straps",'
+        '"chest_strap","yoga_mat","climbing_shoe","resistance_band","foam_roller",'
+        '"massage_gun","boxing_gloves","other"],\n'
+        '  "estimated_miles": float or null (miles already on the gear based on wear, '
+        'null for non-distance items),\n'
+        '  "retirement_threshold_miles": float or null (expected total lifespan in '
+        'miles, null when the item tracks sessions instead),\n'
         '  "confidence": "high"|"medium"|"low",\n'
         '  "notes": "Short note about visible wear or identification confidence"\n'
         "}"

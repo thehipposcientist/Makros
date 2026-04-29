@@ -33,13 +33,44 @@ final class HeartRateStore: NSObject, ObservableObject {
     private static let maxAutoRestarts = 3
 
     private static let kDiagKey = "thallo.hrDiag"
+    private static let kDiagListKey = "thallo.hrDiagList"
+    private static let kDiagListMax = 12
 
+    /// Save a diagnostic line. Writes the latest message to `kDiagKey`
+    /// (single-string, overwrite) AND appends to a small ring buffer at
+    /// `kDiagListKey` so the on-watch debug strip can show recent
+    /// history rather than just the most recent line. The single-string
+    /// key is kept so existing call sites stay one-line readable.
     static func saveDiag(_ msg: String) {
-        UserDefaults.standard.set(msg, forKey: kDiagKey)
+        let stamped = "\(timestamp()) \(msg)"
+        UserDefaults.standard.set(stamped, forKey: kDiagKey)
+        var list = UserDefaults.standard.stringArray(forKey: kDiagListKey) ?? []
+        list.append(stamped)
+        if list.count > kDiagListMax {
+            list.removeFirst(list.count - kDiagListMax)
+        }
+        UserDefaults.standard.set(list, forKey: kDiagListKey)
     }
 
     static func lastDiag() -> String? {
         UserDefaults.standard.string(forKey: kDiagKey)
+    }
+
+    /// Return the recent diagnostic lines, oldest → newest. Empty when
+    /// nothing has been logged yet.
+    static func recentDiag(limit: Int = kDiagListMax) -> [String] {
+        let list = UserDefaults.standard.stringArray(forKey: kDiagListKey) ?? []
+        if list.count <= limit { return list }
+        return Array(list.suffix(limit))
+    }
+
+    private static func timestamp() -> String {
+        let now = Date()
+        let cal = Calendar.current
+        let h = cal.component(.hour, from: now)
+        let m = cal.component(.minute, from: now)
+        let s = cal.component(.second, from: now)
+        return String(format: "%02d:%02d:%02d", h, m, s)
     }
 
     func setAge(_ age: Int?) {
