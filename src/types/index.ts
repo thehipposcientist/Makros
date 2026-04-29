@@ -5,17 +5,9 @@ export type Goal = string;
 export type GoalPace = 'conservative' | 'moderate' | 'aggressive';
 export type Gender = 'male' | 'female' | 'nonbinary' | 'prefer_not_to_say';
 export type Equipment = 'home' | 'gym' | 'dumbbells' | 'bodyweight' | 'other';
-export type AppThemeName =
-  | 'midnight' | 'neon'    | 'ocean'   | 'forest'
-  | 'ember'    | 'wine'    | 'obsidian'| 'amethyst'
-  | 'citrus'              | 'cocoa'   | 'slate'
-  | 'scarlet'  | 'sunrise' | 'arctic'  | 'rose'    | 'blossom'
-  | 'parchment'| 'meadow'
-  | 'void'     | 'dusk'    | 'steel'   | 'sand'    | 'lavender'
-  | 'aurora'   | 'copper'  | 'storm'
-  | 'linen'    | 'mint'
-  | 'butter'   | 'seaglass' | 'lilac' | 'cloud'
-  | 'paper'    | 'sky'      | 'sage';
+import type { AppThemeName as _AppThemeName } from '../constants/theme';
+export type { AppThemeName } from '../constants/theme';
+type AppThemeName = _AppThemeName;
 
 export interface GoalOption {
   value: string;

@@ -147,10 +147,11 @@ interface Props {
    *  can use the SAME number for watch pushes. Eliminates phone vs.
    *  watch drift caused by independent compute calls. */
   onScoreComputed?: (score: number, label: string) => void;
+  defaultExpanded?: boolean;
 }
 
 export default function TrainingReadinessCard({
-  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed,
+  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed, defaultExpanded,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -159,7 +160,7 @@ export default function TrainingReadinessCard({
   const [fatigue, setFatigue] = useState<FatigueScore | null>(null);
   const [hasAppleHealth, setHasAppleHealth] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded ?? false);
 
   const load = useCallback(async () => {
     setLoading(true);

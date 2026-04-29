@@ -143,31 +143,26 @@ deploy-backend:
 	@echo ""
 	@echo "Done. Run 'make smoke-prod' in a minute to verify."
 
-# ── Deploy: iOS (EAS Build + TestFlight submit) ──────────────────────────────
+# ── Deploy: iOS (local Xcode build + auto-submit to TestFlight) ───────────────
+# Builds on this machine — no EAS cloud build credits consumed.
+# Requires Xcode + valid Apple certs/provisioning in your keychain.
 deploy-ios:
 	@echo ""
-	@echo "Building + submitting iOS to TestFlight..."
-	@echo "(~15-25 min for build, another ~5-15 min for Apple processing.)"
+	@echo "Building iOS locally + submitting to TestFlight..."
+	@echo "(~15-25 min depending on machine. No EAS build credits used.)"
 	@echo ""
-	@eas build --platform ios --profile production --non-interactive
-	@echo ""
-	@echo "Build finished. Submitting latest to TestFlight..."
-	@eas submit --platform ios --latest --non-interactive
+	@eas build --platform ios --profile production --local --auto-submit
 
-# Fresh iOS build — clears EAS's cached entitlements / provisioning plists.
-# Use when entitlements changed (HealthKit, Push, etc.) OR app.json
-# infoPlist keys changed. Slightly slower than `deploy-ios` since nothing
-# can be cached. Required after any `ios.entitlements` or capability edit
-# in Apple Developer portal.
+# Fresh local iOS build — clears EAS's cached entitlements / provisioning.
+# Use when entitlements changed (HealthKit, Push, etc.) or app.json
+# infoPlist keys changed. Required after any `ios.entitlements` or
+# capability edit in Apple Developer portal.
 deploy-ios-clean:
 	@echo ""
-	@echo "Building iOS with --clear-cache (fresh entitlements)..."
+	@echo "Building iOS locally with --clear-cache (fresh entitlements)..."
 	@echo "(~20-30 min. Use after any entitlement / provisioning change.)"
 	@echo ""
-	@eas build --platform ios --profile production --clear-cache --non-interactive
-	@echo ""
-	@echo "Build finished. Submitting latest to TestFlight..."
-	@eas submit --platform ios --latest --non-interactive
+	@eas build --platform ios --profile production --local --auto-submit --clear-cache
 	@echo ""
 	@echo "Done. Check App Store Connect -> TestFlight tab for processing status."
 

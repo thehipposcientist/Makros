@@ -10,6 +10,8 @@ import { Platform, Vibration } from 'react-native';
 
 const SETTINGS_KEY = 'appSettings';
 
+export type RestTimerSound = 'chime' | 'beep' | 'ping' | 'double';
+
 export interface AppSettings {
   hapticsEnabled: boolean;
   soundsEnabled: boolean;
@@ -21,6 +23,9 @@ export interface AppSettings {
    *  in-app chime mixes with music; the background notification still
    *  vibrates + shows a banner, just silently. */
   restNotificationSoundEnabled: boolean;
+  /** Which sound plays when the rest timer ends. Defaults to 'chime'
+   *  (the original bell tone). Options: chime, beep, ping, double. */
+  restTimerSound: RestTimerSound;
 }
 
 const DEFAULTS: AppSettings = {
@@ -28,6 +33,7 @@ const DEFAULTS: AppSettings = {
   soundsEnabled: true,
   vibrationEnabled: true,
   restNotificationSoundEnabled: false,
+  restTimerSound: 'chime',
 };
 
 let _cached: AppSettings = { ...DEFAULTS };
@@ -116,8 +122,19 @@ export async function hapticSelection() {
 // ── Sound playback ──────────────────────────────────────────────
 
 let _Audio: typeof import('expo-av').Audio | null = null;
-let _restTimerSound: import('expo-av').Audio.Sound | null = null;
+// Keyed by sound name so switching sounds forces a fresh load.
+const _soundCache: Partial<Record<RestTimerSound, import('expo-av').Audio.Sound>> = {};
 let _audioSessionConfigured = false;
+
+function getSoundAsset(name: RestTimerSound) {
+  // require() must be static — bundler resolves at build time.
+  switch (name) {
+    case 'beep':   return require('../../assets/sounds/rest-timer-beep.wav');
+    case 'ping':   return require('../../assets/sounds/rest-timer-ping.wav');
+    case 'double': return require('../../assets/sounds/rest-timer-double.wav');
+    default:       return require('../../assets/sounds/rest-timer-end.wav');
+  }
+}
 
 async function getAudio() {
   if (_Audio) return _Audio;
@@ -162,21 +179,23 @@ async function ensureAudioSession(Audio: typeof import('expo-av').Audio): Promis
   }
 }
 
-/** Pre-load the rest timer chime once. Called by ActiveWorkoutScreen
- *  on mount so the first set's rest end doesn't pay the load cost
- *  (a few hundred ms on a cold start). Idempotent. */
+/** Pre-load the currently configured rest timer sound. Called by
+ *  ActiveWorkoutScreen on mount so the first rest end doesn't pay the
+ *  load cost. If the user changes the sound mid-session the new file
+ *  is loaded lazily on the next play. */
 export async function preloadRestTimerSound(): Promise<void> {
-  if (_restTimerSound) return;
   try {
     const Audio = await getAudio();
     if (!Audio) return;
     await ensureAudioSession(Audio);
+    const s = await loadSettings();
+    const name = s.restTimerSound ?? 'chime';
+    if (_soundCache[name]) return;
     const { sound } = await Audio.Sound.createAsync(
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require('../../assets/sounds/rest-timer-end.wav'),
+      getSoundAsset(name),
       { shouldPlay: false, volume: 1.0 },
     );
-    _restTimerSound = sound;
+    _soundCache[name] = sound;
   } catch { /* preload best-effort — playRestTimerDone re-tries the load */ }
 }
 
@@ -192,19 +211,54 @@ export async function playRestTimerDone() {
     const Audio = await getAudio();
     if (!Audio) return;
     await ensureAudioSession(Audio);
-    if (!_restTimerSound) {
+    const name = s.restTimerSound ?? 'chime';
+    if (!_soundCache[name]) {
       const { sound } = await Audio.Sound.createAsync(
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        require('../../assets/sounds/rest-timer-end.wav'),
+        getSoundAsset(name),
         { shouldPlay: false, volume: 1.0 },
       );
-      _restTimerSound = sound;
+      _soundCache[name] = sound;
     }
-    // Rewind + play. replayAsync handles both (faster than stop+play).
-    await _restTimerSound.replayAsync();
+    await _soundCache[name]!.replayAsync();
   } catch {
     // Any failure — silent. Vibration above already ran.
   }
+}
+
+// ── Background audio keepalive ──────────────────────────────────
+// iOS suspends the JS runtime when no audio session is active, so a
+// setInterval-based rest countdown stops firing when the user switches
+// away. Playing a 0-volume silent loop during the rest period keeps
+// UIBackgroundModes:audio alive — the interval then fires at t=0 and
+// calls playRestTimerDone() mixed with music (no ducking).
+
+let _keepaliveSound: import('expo-av').Audio.Sound | null = null;
+
+export async function startRestTimerKeepalive(): Promise<void> {
+  try {
+    const Audio = await getAudio();
+    if (!Audio) return;
+    await ensureAudioSession(Audio);
+    if (_keepaliveSound) {
+      await _keepaliveSound.stopAsync().catch(() => {});
+      await _keepaliveSound.unloadAsync().catch(() => {});
+      _keepaliveSound = null;
+    }
+    const { sound } = await Audio.Sound.createAsync(
+      require('../../assets/sounds/rest-timer-silence.wav'),
+      { shouldPlay: true, isLooping: true, volume: 0 },
+    );
+    _keepaliveSound = sound;
+  } catch { /* keepalive is best-effort — notification is the hard fallback */ }
+}
+
+export async function stopRestTimerKeepalive(): Promise<void> {
+  if (!_keepaliveSound) return;
+  try {
+    await _keepaliveSound.stopAsync();
+    await _keepaliveSound.unloadAsync();
+  } catch {}
+  _keepaliveSound = null;
 }
 
 // ── Vibration ───────────────────────────────────────────────────

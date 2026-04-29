@@ -228,12 +228,12 @@ class WeeklyCheckIn(SQLModel, table=True):
     checkin_date: date = Field(index=True)
     weight_lbs: float
     waist_in: float | None = Field(default=None)
-    # Body composition — optional. Lets the app distinguish muscle gain
-    # (weight ↑, BF% ↓) from fat gain on a bulk, and surface a lean-mass
-    # trendline alongside the raw weight EMA.
+    chest_in: float | None = Field(default=None)
+    hips_in: float | None = Field(default=None)
+    bicep_in: float | None = Field(default=None)
+    thigh_in: float | None = Field(default=None)
+    calf_in: float | None = Field(default=None)
     body_fat_pct: float | None = Field(default=None)
-    # Optional blood pressure — for users tracking hypertension or in
-    # cardiac rehab. No scoring yet, just storage + trend chart.
     bp_systolic: int | None = Field(default=None)
     bp_diastolic: int | None = Field(default=None)
     energy: int = Field(default=3)
@@ -1323,6 +1323,11 @@ class WeeklyCheckInCreate(SQLModel):
     checkin_date: date
     weight_lbs: float
     waist_in: float | None = None
+    chest_in: float | None = None
+    hips_in: float | None = None
+    bicep_in: float | None = None
+    thigh_in: float | None = None
+    calf_in: float | None = None
     body_fat_pct: float | None = None
     bp_systolic: int | None = None
     bp_diastolic: int | None = None

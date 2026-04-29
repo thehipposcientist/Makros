@@ -1319,7 +1319,21 @@ export async function upsertDayState(
 
 export async function submitWeeklyCheckin(
   token: string,
-  body: { checkin_date: string; weight_lbs: number; waist_in?: number; energy: number; sleep: number; adherence: number; notes?: string },
+  body: {
+    checkin_date: string;
+    weight_lbs: number;
+    waist_in?: number;
+    chest_in?: number;
+    hips_in?: number;
+    bicep_in?: number;
+    thigh_in?: number;
+    calf_in?: number;
+    body_fat_pct?: number;
+    energy: number;
+    sleep: number;
+    adherence: number;
+    notes?: string;
+  },
 ) {
   return request('/profile/checkin', {
     method: 'POST',

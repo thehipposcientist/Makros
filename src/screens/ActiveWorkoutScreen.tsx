@@ -2011,6 +2011,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     restTotalSecondsRef.current = seconds;
     restExerciseNameRef.current = exerciseName;
 
+    // Keep the iOS background audio session alive so the rest countdown
+    // continues ticking even when the user switches to another app.
+    import('../utils/feedback').then(f => f.startRestTimerKeepalive()).catch(() => {});
+
     // Persist the snapshot synchronously so an iOS background-kill or app
     // crash mid-rest can resume the countdown on relaunch. Refs are the
     // source of truth here (state updates are batched), and we capture the
@@ -2065,6 +2069,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         restTimerRef.current = null;
         AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
         import('../utils/feedback').then(f => {
+          // Stop the silent keepalive loop before playing the chime so
+          // both don't compete on the audio output buffer.
+          f.stopRestTimerKeepalive();
           // Brief in-app chime (~0.45s) + vibrate + haptic. The
           // pre-scheduled completeId notification (set in
           // rescheduleRestNotifications) ALSO fires at this exact
@@ -2077,12 +2084,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           f.vibrateRestDone();
           f.hapticHeavy();
         }).catch(() => Vibration.vibrate([0, 300, 150, 300, 150, 300]));
-        // Don't cancel the completeId — it's the one that delivers
-        // the background sound. Only cancel the warning notification
-        // (which fires 10s before complete and is now in the past).
-        if (restNotificationIds.current?.warningId) {
-          Notifications.cancelScheduledNotificationAsync(restNotificationIds.current.warningId).catch(() => undefined);
-        }
+        // Cancel remaining scheduled notifications — the keepalive
+        // audio session kept the JS alive so the interval already
+        // delivered the sound. Cancel both warning + complete to avoid
+        // a duplicate banner/vibration arriving a moment later.
+        // (If the app was killed before rest ended the notification
+        // already fired natively and cancellation is a no-op.)
+        cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
         restNotificationIds.current = null;
         // End the Live Activity on the lock screen.
         if (liveActivityIdRef.current) {
@@ -2188,6 +2196,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       clearInterval(restTimerRef.current);
       restTimerRef.current = null;
     }
+    import('../utils/feedback').then(f => f.stopRestTimerKeepalive()).catch(() => {});
     setRestRemaining(0);
     setRestForExercise(null);
     setRestCue(null);

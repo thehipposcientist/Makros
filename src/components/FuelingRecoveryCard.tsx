@@ -107,11 +107,18 @@ export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn
         }}
       >
         <PulsingDot color={badgeColor} />
-        <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>
-          {actionable.length === 1
-            ? `${worst.label} needs attention`
-            : `${actionable.length} recovery signals need attention`}
-        </Text>
+        <View style={{ flex: 1 }}>
+          <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary }}>
+            {actionable.length === 1
+              ? `${worst.label} needs attention`
+              : `${actionable.length} recovery signals need attention`}
+          </Text>
+          {worst.detail ? (
+            <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }} numberOfLines={1}>
+              {worst.detail}
+            </Text>
+          ) : null}
+        </View>
         <Ionicons name="chevron-forward" size={14} color={tc.textMuted} />
       </TouchableOpacity>
 

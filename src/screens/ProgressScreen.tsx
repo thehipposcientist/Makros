@@ -24,6 +24,7 @@ import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadG
 import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import WeeklyCheckinModal from '../components/WeeklyCheckinModal';
+import BodyMeasurementsModal from '../components/BodyMeasurementsModal';
 import Zone2TargetCard from '../components/Zone2TargetCard';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
@@ -33,7 +34,7 @@ import { RECOVERY_LABELS } from '../utils/healthScore';
 import { computeDietConsistency, DietConsistencyScore, getMealChecks } from '../utils/mealTracker';
 import { computePlantDiversity, computeFiberToday, recommendedFiberTarget } from '../utils/gutHealth';
 import { proteinTimingInsights } from '../utils/nutritionInsights';
-import { getGoalEstimate } from '../utils/goalEstimate';
+import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
@@ -185,6 +186,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [weightEntries, setWeightEntries] = useState<import('../types').WeightEntry[]>([]);
   const [weightInputVisible, setWeightInputVisible] = useState(false);
   const [weightInputValue, setWeightInputValue] = useState('');
+  const [measurementsModalVisible, setMeasurementsModalVisible] = useState(false);
   const [muscleFatigue, setMuscleFatigue] = useState<{ score: number; label: string; topFatigued: Array<{ muscle: string; value: number }>; muscleFatigue: Record<string, number> } | null>(null);
   const [nutritionScore, setNutritionScore] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
   const [mealAverages, setMealAverages] = useState<import('../services/api').MealAverages | null>(null);
@@ -565,6 +567,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const currentWeight = userProfile.physicalStats.weightLbs;
   const targetWeight = userProfile.goalDetails.targetWeightLbs;
   const estimate = getGoalEstimate(userProfile, meta.goalConfig);
+  const recompProjection = getRecompProjection(userProfile, meta.goalConfig);
   const lostOrGained = Math.abs(currentWeight - startWeight);
   const direction = currentWeight <= startWeight ? 'down' : 'up';
   const remainingLbs = targetWeight != null ? Math.abs(currentWeight - targetWeight) : null;
@@ -3025,6 +3028,63 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 )}
               </>
             )}
+            {/* Recomp projection — outside the weight-entries gate so it
+                shows even before the user has logged a weight entry. */}
+            {recompProjection && (
+              <View style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                  <Ionicons name="body-outline" size={15} color={tc.primary} />
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    Recomp Target
+                  </Text>
+                  <Text style={{ fontSize: 11, color: tc.textMuted, marginLeft: 2 }}>
+                    — estimated ranges, not exact
+                  </Text>
+                </View>
+                <View style={{ gap: 5 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                    <Text style={{ fontSize: 12, color: tc.textMuted }}>Scale trend</Text>
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary }}>{recompProjection.scaleNote}</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                    <Text style={{ fontSize: 12, color: tc.textMuted }}>Estimated fat loss</Text>
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary }}>{recompProjection.fatLossRange}</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                    <Text style={{ fontSize: 12, color: tc.textMuted }}>Lean mass</Text>
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary }}>{recompProjection.leanMassNote}</Text>
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
+                    <Text style={{ fontSize: 12, color: tc.textMuted }}>Best signals</Text>
+                    <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary, textAlign: 'right', flex: 1 }}>
+                      {recompProjection.bestSignals.join(' · ')}
+                    </Text>
+                  </View>
+                </View>
+                {recompProjection.caveat && (
+                  <View style={{ marginTop: 8, padding: 8, borderRadius: 8, backgroundColor: (tc.warning ?? '#F59E0B') + '18' }}>
+                    <Text style={{ fontSize: 11, color: tc.textSecondary, lineHeight: 15 }}>{recompProjection.caveat}</Text>
+                  </View>
+                )}
+              </View>
+            )}
+          </View>
+
+          {/* Body Measurements */}
+          <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Ionicons name="body-outline" size={22} color={tc.primary} />
+              <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>Measurements</Text>
+              <TouchableOpacity
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: tc.primary, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6 }}
+                onPress={() => setMeasurementsModalVisible(true)}>
+                <Ionicons name="add" size={16} color="#fff" />
+                <Text style={{ fontSize: 13, fontWeight: '600', color: '#fff' }}>Log</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={{ fontSize: 13, color: tc.textMuted, marginTop: 8 }}>
+              Track waist, chest, hips, arms, and more over time.
+            </Text>
           </View>
 
           {/* Scan buttons */}
@@ -3206,6 +3266,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         avgSteps={healthSummary?.avgSteps7d ?? null}
         onClose={() => setWeeklyCheckinVisible(false)}
         onComplete={() => setWeeklyCheckinVisible(false)}
+      />
+      <BodyMeasurementsModal
+        visible={measurementsModalVisible}
+        authToken={authToken}
+        currentWeight={weightEntries.length > 0 ? weightEntries[weightEntries.length - 1].weightLbs : undefined}
+        themeName={userProfile.themePreference}
+        onClose={() => setMeasurementsModalVisible(false)}
+        onSaved={() => import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {})}
       />
       <LogActivityModal
         visible={showLogActivity}

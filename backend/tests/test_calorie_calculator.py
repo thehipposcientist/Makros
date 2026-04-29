@@ -72,6 +72,43 @@ def test_male_fat_loss_moderate() -> None:
     assert targets.bucket_name == "fat_loss"
 
 
+def test_body_recomp_moderate() -> None:
+    """30yo male, 175 lb, 5'11", training 4 days/wk, body_recomp moderate.
+
+    Moderate recomp = 0 cal/day adjustment (maintenance). High protein 1.0 g/lb.
+
+    Expected chain:
+        BMR    = 10*(175/2.205) + 6.25*71*2.54 - 5*30 + 5
+               ≈ 10*79.37 + 6.25*180.34 - 150 + 5
+               ≈ 793 + 1127 - 150 + 5
+               ≈ 1775
+        TDEE   = 1775 * 1.55 ≈ 2751
+        recomp = 2751 + 0 ≈ 2751
+
+        Protein = 175 * 1.0 = 175g
+        Fat     = max(0.3*175=52.5, 0.25*2751/9=76.4) = 76g
+        Carbs   ≈ (2751 - 175*4 - 76*9) / 4 = (2751 - 700 - 684) / 4 = 1367/4 ≈ 342g
+    """
+    print("\n[test] 30yo M, 175lb, 5'11\", 4d/wk, body_recomp, moderate")
+    targets = compute_targets(CalorieInputs(
+        weight_lbs=175, height_feet=5, height_inches=11,
+        age=30, gender="male",
+        training_days_per_week=4,
+        goal_id="body_recomp", pace="moderate",
+    ))
+    _assert_near(targets.bmr,       1775, 15, "BMR")
+    _assert_near(targets.tdee,      2751, 20, "TDEE")
+    _assert_near(targets.calories,  2751, 20, "calories (maintenance)")
+    _assert_near(targets.protein_g,  175,  3, "protein_g (1.0 g/lb)")
+    assert targets.bucket_name == "body_recomp", f"expected body_recomp, got {targets.bucket_name}"
+    # Macro consistency — sum must match stated calories within 10 kcal.
+    delta = macro_consistency_delta(
+        targets.calories, targets.protein_g, targets.carbs_g, targets.fat_g,
+    )
+    assert abs(delta) <= 10, f"macro sum inconsistent: delta={delta} kcal"
+    print(f"  ✓ macros consistent, delta={delta}")
+
+
 def test_female_muscle_gain_aggressive() -> None:
     """25yo female, 140 lb, 5'5", training 5 days/wk, muscle gain aggressive.
 
@@ -299,6 +336,7 @@ if __name__ == "__main__":
 
     cases = [
         test_male_fat_loss_moderate,
+        test_body_recomp_moderate,
         test_female_muscle_gain_aggressive,
         test_minimum_calorie_floor,
         test_custom_override_pins_value,

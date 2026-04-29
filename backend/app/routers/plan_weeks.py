@@ -396,7 +396,7 @@ def review_and_apply(
     from app.services.workout.history import get_recent_completions_for_fatigue
     from app.routers.ai.plans import _resolve_owned_equipment_slugs
     from app.seed_exercises_data import SEED_EXERCISES
-    from app.models import UserProfile, UserPreferences
+    from app.models import UserProfile, UserPreferences, UserGoal
 
     profile = db.exec(
         select(UserProfile).where(UserProfile.user_id == current_user.id)
@@ -406,6 +406,14 @@ def review_and_apply(
     ).first()
     if not profile:
         raise HTTPException(status_code=400, detail="No profile found")
+
+    active_goal = db.exec(
+        select(UserGoal).where(
+            UserGoal.user_id == current_user.id,
+            UserGoal.is_active == True,
+        )
+    ).first()
+    current_goal = active_goal.goal_type.value if active_goal else pw.goal
 
     equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     owned_slugs = _resolve_owned_equipment_slugs(equipment)
@@ -440,7 +448,7 @@ def review_and_apply(
         recent_muscle_exercises = {}
 
     inputs = PlannerInputs(
-        goal=pw.goal,
+        goal=current_goal,
         days_per_week=pw.days_per_week,
         session_minutes=int(getattr(prefs, "workout_duration_minutes", 45) or 45),
         experience=str(getattr(profile, "experience_level", "intermediate") or "intermediate").lower(),
@@ -615,7 +623,7 @@ def adapt_remaining(
     from app.services.workout.history import get_recent_completions_for_fatigue
     from app.routers.ai.plans import _resolve_owned_equipment_slugs
     from app.seed_exercises_data import SEED_EXERCISES
-    from app.models import UserProfile, UserPreferences
+    from app.models import UserProfile, UserPreferences, UserGoal
 
     pw = get_active_week(db, current_user.id)
     if not pw:
@@ -629,6 +637,14 @@ def adapt_remaining(
     ).first()
     if not profile:
         raise HTTPException(status_code=400, detail="No profile found")
+
+    active_goal = db.exec(
+        select(UserGoal).where(
+            UserGoal.user_id == current_user.id,
+            UserGoal.is_active == True,
+        )
+    ).first()
+    current_goal = active_goal.goal_type.value if active_goal else pw.goal
 
     equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     owned_slugs = _resolve_owned_equipment_slugs(equipment)
@@ -663,7 +679,7 @@ def adapt_remaining(
         recent_muscle_exercises = {}
 
     inputs = PlannerInputs(
-        goal=pw.goal,
+        goal=current_goal,
         days_per_week=pw.days_per_week,
         session_minutes=int(getattr(prefs, "workout_duration_minutes", 45) or 45),
         experience=str(getattr(profile, "experience_level", "intermediate") or "intermediate").lower(),
@@ -709,7 +725,7 @@ def regenerate_remaining(
     from app.services.workout.history import get_recent_completions_for_fatigue
     from app.routers.ai.plans import _resolve_owned_equipment_slugs
     from app.seed_exercises_data import SEED_EXERCISES
-    from app.models import UserProfile, UserPreferences
+    from app.models import UserProfile, UserPreferences, UserGoal
 
     pw = get_active_week(db, current_user.id)
     if not pw:
@@ -723,6 +739,14 @@ def regenerate_remaining(
     ).first()
     if not profile:
         raise HTTPException(status_code=400, detail="No profile found")
+
+    active_goal = db.exec(
+        select(UserGoal).where(
+            UserGoal.user_id == current_user.id,
+            UserGoal.is_active == True,
+        )
+    ).first()
+    current_goal = active_goal.goal_type.value if active_goal else pw.goal
 
     new_dpw = body.new_days_per_week or pw.days_per_week
     new_split = body.new_preferred_split or pw.preferred_split

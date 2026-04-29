@@ -59,6 +59,25 @@ def create_plan_week(
     """
     _abandon_active_week(db, user_id)
 
+    # Delete any existing PlanWeek (and its PlanDays) for this start_date.
+    # The unique constraint on (user_id, start_date) prevents inserting a
+    # new row while an abandoned row still holds the slot.
+    existing = db.exec(
+        select(PlanWeek).where(
+            PlanWeek.user_id == user_id,
+            PlanWeek.start_date == start_date,
+        )
+    ).all()
+    for old_pw in existing:
+        old_days = db.exec(
+            select(PlanDay).where(PlanDay.plan_week_id == old_pw.id)
+        ).all()
+        for od in old_days:
+            db.delete(od)
+        db.delete(old_pw)
+    if existing:
+        db.flush()
+
     end_date = start_date + timedelta(days=6)
     pw = PlanWeek(
         user_id=user_id,

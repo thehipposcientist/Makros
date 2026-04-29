@@ -66,14 +66,9 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
   const [searching, setSearching] = useState(false);
   const [requestPending, setRequestPending] = useState<string | null>(null);
   const [showOptIn, setShowOptIn] = useState(false);
-  // Friends / Activity tab. Default to "friends" because it surfaces
-  // the already-loaded digest immediately; activity lazy-loads on
-  // first tab tap so we don't pay for the round-trip when nobody opens
-  // it. We dropped the open-feed framing in favor of a bounded "Recent
-  // Activity" digest — the friend detail page is the primary surface
-  // for browsing a specific person's training; activity is just the
-  // "anything new since I last looked?" check.
-  const [activeTab, setActiveTab] = useState<'friends' | 'activity'>('friends');
+  // Feed is the default tab so users land on activity immediately.
+  // Friends tab lazy-renders on first switch (no extra cost on open).
+  const [activeTab, setActiveTab] = useState<'friends' | 'activity'>('activity');
   // Bumped to force the activity view to re-fetch (e.g., after share).
   const [feedRefreshKey, setFeedRefreshKey] = useState(0);
   void setFeedRefreshKey;
@@ -298,6 +293,9 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
           authToken={authToken}
           themeName={themeName}
           refreshKey={feedRefreshKey}
+          shareEnabled={me?.share_activity_enabled ?? false}
+          myActivity={digest?.you ?? null}
+          myDisplayName={me?.display_name ?? me?.username ?? ''}
           onViewAuthor={(uid, displayName) => {
             // Reuse the existing friend-detail surface — find the
             // matching digest entry so the parent can render their

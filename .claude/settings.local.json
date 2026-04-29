@@ -210,7 +210,8 @@
       "Bash(command -v node tsc /opt/homebrew/bin/npx /usr/local/bin/npx)",
       "Bash(]\" | head -30)",
       "Bash(xxd)",
-      "Bash(export PATH=\"/opt/homebrew/bin:$HOME/.nvm/versions/node/*/bin:$PATH\")"
+      "Bash(export PATH=\"/opt/homebrew/bin:$HOME/.nvm/versions/node/*/bin:$PATH\")",
+      "Bash(npx babel *)"
     ]
   }
 }

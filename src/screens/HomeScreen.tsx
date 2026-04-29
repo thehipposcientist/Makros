@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager } from 'react-native';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -39,7 +39,6 @@ import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
 import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan } from '../utils/mealItems';
 import { cleanAiText } from '../utils/aiText';
-import { formatWaterTarget } from '../utils/hydration';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
@@ -1166,7 +1165,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [commonMeals, setCommonMeals] = useState<any[]>([]);
   // gutHealthToday removed — NutritionCard now computes gut health from plan data
   const [showGroceryList, setShowGroceryList] = useState(false);
-  const [feedbackSettings, setFeedbackSettings] = useState({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true, restNotificationSoundEnabled: false });
+  const [feedbackSettings, setFeedbackSettings] = useState<{ hapticsEnabled: boolean; soundsEnabled: boolean; vibrationEnabled: boolean; restNotificationSoundEnabled: boolean; restTimerSound: import('../utils/feedback').RestTimerSound }>({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true, restNotificationSoundEnabled: false, restTimerSound: 'chime' });
   const [reminderEnabled, setReminderEnabled] = useState(false);
   const [showEmailBanner, setShowEmailBanner] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
@@ -1540,6 +1539,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showWeeklyCheckin, setShowWeeklyCheckin] = useState(false);
   const [showFriends, setShowFriends] = useState(false);
   const [showGoalEditor, setShowGoalEditor] = useState(false);
+  const [showReadiness, setShowReadiness] = useState(false);
+  const [readinessBadge, setReadinessBadge] = useState<{ score: number; label: string } | null>(null);
   const [pendingFriendCount, setPendingFriendCount] = useState(0);
   const [friendCount, setFriendCount] = useState(0);
 
@@ -4927,7 +4928,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // matches the workout strip dimension-for-dimension.
   const mealDays: MealDay[] = _activeWeekMealDays();
 
-  const isLightTheme = ['sunrise', 'arctic', 'parchment', 'steel', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'sky', 'paper', 'frost', 'clay', 'sage', 'mist', 'dune', 'blush', 'canary', 'petal'].includes(userProfile.themePreference ?? 'midnight');
+  const isLightTheme = ['sunrise', 'parchment', 'linen', 'mint', 'butter', 'seaglass', 'lilac', 'sky', 'rose'].includes(userProfile.themePreference ?? 'midnight');
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
 
   // Subtle gradient: slightly lighter at top, fades to base background
@@ -5483,20 +5484,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const todayScheduleItem = schedule?.find(s => dateKey(s.date) === todayKey()) ?? schedule?.[0];
               const todaysFocus = todayScheduleItem?.workout?.focus ?? workoutPlan?.days?.[0]?.focus ?? null;
               return (
-                <TrainingReadinessCard
-                  authToken={authToken}
-                  themeName={userProfile.themePreference}
-                  age={userProfile.physicalStats?.age ?? null}
-                  proteinTarget={todayPlan?.targets?.protein ?? null}
-                  calorieTarget={todayPlan?.targets?.calories ?? null}
-                  todaysFocus={todaysFocus}
-                  onScoreComputed={(score, label) => {
-                    // Cache the canonical phone-displayed value so the
-                    // watch sync useEffect can use it instead of
-                    // re-computing (eliminates phone-vs-watch drift).
-                    canonicalPrepRef.current = { score, label, computedAt: Date.now() };
-                  }}
-                />
+                <View style={{ height: 0, overflow: 'hidden' }}>
+                  <TrainingReadinessCard
+                    authToken={authToken}
+                    themeName={userProfile.themePreference}
+                    age={userProfile.physicalStats?.age ?? null}
+                    proteinTarget={todayPlan?.targets?.protein ?? null}
+                    calorieTarget={todayPlan?.targets?.calories ?? null}
+                    todaysFocus={todaysFocus}
+                    onScoreComputed={(score, label) => {
+                      canonicalPrepRef.current = { score, label, computedAt: Date.now() };
+                      setReadinessBadge({ score, label });
+                    }}
+                  />
+                </View>
               );
             })()}
 
@@ -5510,19 +5511,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <WeeklyDigestCard authToken={authToken} themeName={userProfile.themePreference} />
             )}
 
-            {/* Weekly check-in countdown */}
-            {workoutSubTab === 'plan' && daysUntilCheckin != null && (
-              <TouchableOpacity
-                style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: themeColors.primary + '44' }}
-                onPress={() => setShowWeeklyCheckin(true)}
-                activeOpacity={0.7}>
-                <Ionicons name="calendar-outline" size={16} color={themeColors.primary} />
-                <Text style={{ fontSize: 12, fontWeight: '600', color: themeColors.textPrimary, flex: 1 }}>
-                  {daysUntilCheckin === 0 ? 'Weekly review ready' : `Review in ${daysUntilCheckin}d`}
-                </Text>
-                <Ionicons name="chevron-forward" size={14} color={themeColors.textMuted} />
-              </TouchableOpacity>
-            )}
 
             {/* Active injuries banner */}
             {workoutSubTab === 'plan' && (() => {
@@ -5646,73 +5634,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               />
             )}
 
-            {/* Plan actions row — Start / Log / Edit, with optional
-                "Why this plan" pinned above when a trainer note exists.
-                Four chips in a single 360-ish pt row ran out of space;
-                flexWrap lets them reflow without clipping text. */}
-            {workoutSubTab === 'plan' && (
-              <View style={{ gap: 6, marginBottom: 8 }}>
-                {trainerNote ? (
-                  <TouchableOpacity
-                    style={[styles.planNoteLink, { borderColor: workoutPalette.strong + '55' }]}
-                    onPress={() => setShowTrainerNote(true)}
-                    activeOpacity={0.7}>
-                    <Ionicons name="information-circle-outline" size={14} color={workoutPalette.strong} />
-                    <Text style={[styles.planNoteLinkText, { color: workoutPalette.strong }]}>
-                      Why this plan
-                    </Text>
-                  </TouchableOpacity>
-                ) : null}
-                {/* Action row — icon-forward compact tiles. Labels are
-                    short verbs ("Custom" / "Log" / "Edit") so nothing
-                    truncates at typical iPhone widths. Long-press is
-                    NOT used (doesn't carry semantic affordance for
-                    fitness apps); the icon + caption pattern is the
-                    primary read. */}
-                <View style={{ flexDirection: 'row', gap: 8 }}>
-                  <TouchableOpacity
-                    style={{
-                      flex: 1, alignItems: 'center', paddingVertical: 10,
-                      borderRadius: 12, borderWidth: 1, gap: 4,
-                      borderColor: themeColors.primary + '55',
-                      backgroundColor: themeColors.primary + '0E',
-                    }}
-                    onPress={() => setShowLiveTracker(true)}
-                    activeOpacity={0.7}>
-                    <Ionicons name="flash" size={20} color={themeColors.primary} />
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>
-                      Custom
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={{
-                      flex: 1, alignItems: 'center', paddingVertical: 10,
-                      borderRadius: 12, borderWidth: 1, gap: 4,
-                      borderColor: themeColors.primary + '33',
-                    }}
-                    onPress={() => setShowLogActivity(true)}
-                    activeOpacity={0.7}>
-                    <Ionicons name="add-circle" size={20} color={themeColors.primary} />
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>
-                      Log
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={{
-                      flex: 1, alignItems: 'center', paddingVertical: 10,
-                      borderRadius: 12, borderWidth: 1, gap: 4,
-                      borderColor: themeColors.border,
-                    }}
-                    onPress={() => setWorkoutSubTab('equipment')}
-                    activeOpacity={0.7}>
-                    <Ionicons name="settings-sharp" size={20} color={themeColors.textMuted} />
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.3 }}>
-                      Edit
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            )}
 
             {workoutSubTab === 'plan' && availabilityItems.length > 0 && (
               <View style={{
@@ -5881,7 +5802,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 return completedDates.has(dk) || skippedDates.has(dk);
               };
 
-              return scheduleForRender.map((item, i) => {
+              const _sortedSchedule = scheduleForRender
+                .map((s, origIdx) => ({ s, origIdx }))
+                .sort((a) => dateKey(a.s.date) === todayKey() ? -1 : 1);
+              const _todayAtTop = _sortedSchedule.length > 0 && dateKey(_sortedSchedule[0].s.date) === todayKey();
+              return _sortedSchedule.map(({ s: item, origIdx: i }, renderIdx) => {
               const key = dateKey(item.date);
               // Date-based today check — the schedule now includes
               // yesterday/past days (when they're inside the active
@@ -6012,7 +5937,66 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const sortedOptions = [...allOptions].sort((a, b) => optionRank(a) - optionRank(b));
 
               return (
-                <FadeInView key={i} delay={i * 80}>
+                <React.Fragment key={i}>
+                  {renderIdx === 1 && _todayAtTop && (
+                    <>
+                      <View style={{ gap: 6, marginBottom: 8, marginTop: 4 }}>
+                        {trainerNote ? (
+                          <TouchableOpacity
+                            style={[styles.planNoteLink, { borderColor: workoutPalette.strong + '55' }]}
+                            onPress={() => setShowTrainerNote(true)}
+                            activeOpacity={0.7}>
+                            <Ionicons name="information-circle-outline" size={14} color={workoutPalette.strong} />
+                            <Text style={[styles.planNoteLinkText, { color: workoutPalette.strong }]}>
+                              Why this plan
+                            </Text>
+                          </TouchableOpacity>
+                        ) : null}
+                        <View style={{ flexDirection: 'row', gap: 8 }}>
+                          <TouchableOpacity
+                            style={{
+                              flex: 1, alignItems: 'center', paddingVertical: 10,
+                              borderRadius: 12, borderWidth: 1, gap: 4,
+                              borderColor: themeColors.primary + '55',
+                              backgroundColor: themeColors.primary + '0E',
+                            }}
+                            onPress={() => setShowLiveTracker(true)}
+                            activeOpacity={0.7}>
+                            <Ionicons name="flash" size={20} color={themeColors.primary} />
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Custom</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={{
+                              flex: 1, alignItems: 'center', paddingVertical: 10,
+                              borderRadius: 12, borderWidth: 1, gap: 4,
+                              borderColor: themeColors.primary + '33',
+                            }}
+                            onPress={() => setShowLogActivity(true)}
+                            activeOpacity={0.7}>
+                            <Ionicons name="add-circle" size={20} color={themeColors.primary} />
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Log</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={{
+                              flex: 1, alignItems: 'center', paddingVertical: 10,
+                              borderRadius: 12, borderWidth: 1, gap: 4,
+                              borderColor: themeColors.border,
+                            }}
+                            onPress={() => setWorkoutSubTab('equipment')}
+                            activeOpacity={0.7}>
+                            <Ionicons name="settings-sharp" size={20} color={themeColors.textMuted} />
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.3 }}>Edit</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginVertical: 10 }}>
+                        <View style={{ flex: 1, height: 1, backgroundColor: themeColors.border }} />
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.8, textTransform: 'uppercase' }}>This Week</Text>
+                        <View style={{ flex: 1, height: 1, backgroundColor: themeColors.border }} />
+                      </View>
+                    </>
+                  )}
+                <FadeInView key={i} delay={renderIdx * 80}>
                 <DayCard
                   item={item}
                   themeName={userProfile.themePreference}
@@ -6208,11 +6192,63 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       setRegenSelectedFocus(null);
                     }
                   }}
+                  readinessBadge={isToday ? (readinessBadge ?? undefined) : undefined}
+                  onReadinessTap={isToday ? () => setShowReadiness(true) : undefined}
                 />
                 </FadeInView>
+                </React.Fragment>
               );
             });
             })()}
+
+            {/* Readiness detail modal — centered fade-in popup, single card */}
+            <Modal
+              visible={showReadiness}
+              animationType="fade"
+              transparent
+              onRequestClose={() => setShowReadiness(false)}
+            >
+              <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
+                <TouchableOpacity style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }} activeOpacity={1} onPress={() => setShowReadiness(false)} />
+                <View style={{ width: '100%', maxHeight: '85%' }} pointerEvents="box-none">
+                  <ScrollView scrollEnabled showsVerticalScrollIndicator={false}>
+                    {(() => {
+                      const todayPlanR = nutritionPlansByDate[todayKey()] ?? null;
+                      const todayScheduleItemR = schedule?.find(s => dateKey(s.date) === todayKey()) ?? schedule?.[0];
+                      const todaysFocusR = todayScheduleItemR?.workout?.focus ?? workoutPlan?.days?.[0]?.focus ?? null;
+                      return (
+                        <View>
+                          <TouchableOpacity
+                            onPress={() => setShowReadiness(false)}
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            style={{
+                              alignSelf: 'flex-end', marginBottom: 8,
+                              width: 30, height: 30, borderRadius: 15,
+                              backgroundColor: 'rgba(255,255,255,0.18)',
+                              alignItems: 'center', justifyContent: 'center',
+                            }}>
+                            <Ionicons name="close" size={18} color="#fff" />
+                          </TouchableOpacity>
+                          <TrainingReadinessCard
+                            authToken={authToken ?? ''}
+                            themeName={userProfile.themePreference}
+                            age={userProfile.physicalStats?.age ?? null}
+                            proteinTarget={todayPlanR?.targets?.protein ?? null}
+                            calorieTarget={todayPlanR?.targets?.calories ?? null}
+                            todaysFocus={todaysFocusR}
+                            defaultExpanded
+                            onScoreComputed={(score, label) => {
+                              canonicalPrepRef.current = { score, label, computedAt: Date.now() };
+                              setReadinessBadge({ score, label });
+                            }}
+                          />
+                        </View>
+                      );
+                    })()}
+                  </ScrollView>
+                </View>
+              </View>
+            </Modal>
           </>
           )
         ) : (
@@ -6624,111 +6660,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             })()}
 
-            {/* Daily target banner — shows the user's computed calorie +
-                macro targets at the top of the Plan view so they can see
-                their goal without opening the daily modal. Pulls from
-                today's plan targets. */}
-            {mealsSubTab === 'plan' && (() => {
-              const todayPlan = nutritionPlansByDate[mealDays[0]?.key];
-              const t = todayPlan?.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
-              if (!t.calories) return null;
-              const protPct = t.calories > 0 ? Math.round(((t.protein ?? 0) * 4 / t.calories) * 100) : 0;
-              const carbPct = t.calories > 0 ? Math.round(((t.carbs ?? 0) * 4 / t.calories) * 100) : 0;
-              const fatPct  = t.calories > 0 ? Math.round(((t.fat ?? 0) * 9 / t.calories) * 100) : 0;
-              const goalLabel = userProfile.goalSelection?.primaryGoal
-                ? userProfile.goalSelection.primaryGoal.replace(/_/g, ' ')
-                : userProfile.goal?.replace(/_/g, ' ') ?? '';
-              return (
-                <View style={[styles.dailyTargetBanner, { backgroundColor: themeColors.surface }]}>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                    <Text style={{ fontSize: 22, fontWeight: '800', color: themeColors.textPrimary }}>
-                      Daily Target
-                    </Text>
-                    {/* Edit Plan — small outlined pill, meta-action for the
-                        current plan. Reads as secondary, doesn't compete
-                        with meal cards below. */}
-                    <TouchableOpacity
-                      onPress={() => setMealsSubTab('foods')}
-                      activeOpacity={0.7}
-                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                      style={{
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        gap: 4,
-                        paddingHorizontal: 10,
-                        paddingVertical: 5,
-                        borderRadius: 999,
-                        borderWidth: 1,
-                        borderColor: themeColors.border,
-                      }}>
-                      <Ionicons name="settings-outline" size={12} color={themeColors.textSecondary} />
-                      <Text style={{ fontSize: 11, fontWeight: '600', color: themeColors.textSecondary }}>
-                        Edit Plan
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                  {goalLabel ? (
-                    <Text style={{ fontSize: 11, color: themeColors.textMuted, marginBottom: 10, textTransform: 'capitalize' }}>
-                      {goalLabel}
-                    </Text>
-                  ) : null}
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                    <View style={{ alignItems: 'center' }}>
-                      <Text style={{ fontSize: 20, fontWeight: '800', color: mealPalette.strong }}>{t.calories}</Text>
-                      <Text style={{ fontSize: 11, color: themeColors.textSecondary, fontWeight: '500' }}>cal</Text>
-                    </View>
-                    <View style={{ alignItems: 'center' }}>
-                      <Text style={{ fontSize: 20, fontWeight: '800', color: themeColors.primary }}>{t.protein ?? 0}g</Text>
-                      <Text style={{ fontSize: 11, color: themeColors.textSecondary, fontWeight: '500' }}>protein · {protPct}%</Text>
-                    </View>
-                    <View style={{ alignItems: 'center' }}>
-                      <Text style={{ fontSize: 20, fontWeight: '800', color: '#F59E0B' }}>{t.carbs ?? 0}g</Text>
-                      <Text style={{ fontSize: 11, color: themeColors.textSecondary, fontWeight: '500' }}>carbs · {carbPct}%</Text>
-                    </View>
-                    <View style={{ alignItems: 'center' }}>
-                      <Text style={{ fontSize: 20, fontWeight: '800', color: '#A78BFA' }}>{t.fat ?? 0}g</Text>
-                      <Text style={{ fontSize: 11, color: themeColors.textSecondary, fontWeight: '500' }}>fat · {fatPct}%</Text>
-                    </View>
-                  </View>
-                  {/* Workout-aware nutrition tip */}
-                  {(() => {
-                    const todaySchedule = schedule.find(s => dateKey(s.date) === todayKey()) ?? schedule[0];
-                    let tip = 'Training day — keep protein high for muscle recovery';
-                    if (!todaySchedule || todaySchedule.isRest) tip = 'Rest day — prioritize protein and recovery nutrition';
-                    else {
-                      const stim = todaySchedule.workout?.stimulus;
-                      if (stim === 'strength' || stim === 'power') tip = 'Heavy training day — extra carbs around your workout for fuel';
-                      else if (stim === 'conditioning') tip = 'Cardio day — stay hydrated and replenish electrolytes';
-                    }
-                    return <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginTop: 8, fontWeight: '500' }}>{tip}</Text>;
-                  })()}
-                  {userProfile?.physicalStats?.weightLbs ? (
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 8 }}>
-                      <Ionicons name="water-outline" size={14} color="#38BDF8" />
-                      <Text style={{ fontSize: 12, fontWeight: '500', color: themeColors.textSecondary }}>
-                        {formatWaterTarget(userProfile.physicalStats.weightLbs, userProfile.workoutDurationMinutes ?? 0)}
-                      </Text>
-                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>daily target</Text>
-                    </View>
-                  ) : null}
-                  {/* "Why this plan" — inline muted text link, reads as a
-                      meta-explanation for today's plan rather than a CTA. */}
-                  {nutritionistNote ? (
-                    <TouchableOpacity
-                      onPress={() => setShowNutritionistNote(true)}
-                      activeOpacity={0.6}
-                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                      style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 10, alignSelf: 'flex-start' }}>
-                      <Text style={{ fontSize: 12, fontWeight: '500', color: themeColors.textMuted }}>
-                        Why this plan
-                      </Text>
-                      <Ionicons name="chevron-forward" size={12} color={themeColors.textMuted} />
-                    </TouchableOpacity>
-                  ) : null}
-                </View>
-              );
-            })()}
-
             {/* Free tier — replace the AI-generated meal list with a compact
                 manual-logging prompt. Logged meals still surface via the
                 existing meal-history + checked-meal paths; they just don't
@@ -6811,7 +6742,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 }}
               />
             )}
-            {mealsSubTab === 'plan' && mealDays.map((d, idx) => {
+            {mealsSubTab === 'plan' && (() => {
+              const _todayMealDay = mealDays.find(d => d.key === todayKey());
+              const _restMealDays = mealDays.filter(d => d.key !== todayKey());
+              const _orderedMealDays = _todayMealDay ? [_todayMealDay, ..._restMealDays] : mealDays;
+              return _orderedMealDays.map((d, idx) => {
               // Prefer the locally-loaded plan (which has rich client-side
               // overlays — preserved meals, gut data, etc.). Fall back to
               // the PlanDay's persisted nutrition_json when the rolling
@@ -6871,9 +6806,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const cardBorderStyle: 'solid' | 'dashed' = isPast && !isToday ? 'dashed' : 'solid';
               const cardOpacity = isPast && !isToday ? 0.78 : 1;
               return (
-                <FadeInView key={d.key} delay={idx * 70}>
+                <React.Fragment key={d.key}>
+                  {idx === 1 && _todayMealDay && (
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginVertical: 10 }}>
+                      <View style={{ flex: 1, height: 1, backgroundColor: themeColors.border }} />
+                      <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.8, textTransform: 'uppercase' }}>This Week</Text>
+                      <View style={{ flex: 1, height: 1, backgroundColor: themeColors.border }} />
+                    </View>
+                  )}
+                <FadeInView delay={idx * 70}>
                 <View style={[
                   styles.mealAccordionCard,
+                  isToday && { marginBottom: 16 },
                   {
                     backgroundColor: cardBg,
                     borderColor: cardBorder,
@@ -6911,12 +6855,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           styles.mealAccordionTitle,
                           {
                             color: isToday ? MEALS_ACCENT : themeColors.textPrimary,
-                            fontWeight: isToday ? '800' : '700',
-                            textDecorationLine: isPast && !isToday ? 'line-through' : 'none',
+                            fontWeight: isToday ? '900' : '700',
+                            fontSize: isToday ? 22 : 18,
                           },
                         ]}>
                           {mealDayLabel(d.date, idx)}
                         </Text>
+                        {isToday && (
+                          <View style={{ backgroundColor: MEALS_ACCENT + '22', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 }}>
+                            <Text style={{ fontSize: 9, fontWeight: '800', color: MEALS_ACCENT, letterSpacing: 0.4 }}>TODAY</Text>
+                          </View>
+                        )}
                         {isPastLogged && (
                           <View style={{
                             backgroundColor: MEALS_ACCENT + '22',
@@ -6929,17 +6878,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             </Text>
                           </View>
                         )}
+                        {!isPast && !isToday && (
+                          <View style={{ backgroundColor: themeColors.border, borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 }}>
+                            <Text style={{ fontSize: 9, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.4 }}>PLANNED</Text>
+                          </View>
+                        )}
                       </View>
-                      {/* Compact macro readout under the day label. */}
+                      {/* Calorie progress on first line, macros with targets below. */}
                       <Text style={[styles.mealAccordionMeta, { color: themeColors.textSecondary }]}>
                         <Text style={{ fontWeight: '700', color: mealPalette.strong }}>{Math.round(totalCalories)}</Text>
-                        <Text> / {t.calories} cal  ·  </Text>
-                        <Text style={{ fontWeight: '700' }}>{Math.round(totalProtein)}</Text>
-                        <Text>p  ·  </Text>
-                        <Text style={{ fontWeight: '700' }}>{Math.round(totalCarbs)}</Text>
-                        <Text>c  ·  </Text>
-                        <Text style={{ fontWeight: '700' }}>{Math.round(totalFat)}</Text>
-                        <Text>f</Text>
+                        <Text> / {t.calories} cal</Text>
+                      </Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 1, fontWeight: '500' }}>
+                        <Text style={{ fontWeight: '700', color: themeColors.textSecondary }}>{Math.round(totalProtein)}</Text>
+                        {t.protein > 0 ? `/${t.protein}g P` : 'g P'}
+                        {'  '}
+                        <Text style={{ fontWeight: '700', color: themeColors.textSecondary }}>{Math.round(totalCarbs)}</Text>
+                        {t.carbs > 0 ? `/${t.carbs}g C` : 'g C'}
+                        {'  '}
+                        <Text style={{ fontWeight: '700', color: themeColors.textSecondary }}>{Math.round(totalFat)}</Text>
+                        {t.fat > 0 ? `/${t.fat}g F` : 'g F'}
                       </Text>
                     </View>
                     {/* Per-day nutrition score badge */}
@@ -6948,8 +6906,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       if (!ds || ds.score <= 0) return null;
                       const c = ds.score >= 70 ? themeColors.success : ds.score >= 45 ? themeColors.warning : themeColors.error;
                       return (
-                        <View style={{ width: 28, height: 28, borderRadius: 14, backgroundColor: c + '18', alignItems: 'center', justifyContent: 'center', marginRight: 4 }}>
-                          <Text style={{ fontSize: 11, fontWeight: '900', color: c }}>{ds.score}</Text>
+                        <View style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: c + '18', alignItems: 'center', justifyContent: 'center', marginRight: 4 }}>
+                          <Text style={{ fontSize: 13, fontWeight: '900', color: c }}>{ds.score}</Text>
                         </View>
                       );
                     })()}
@@ -6993,8 +6951,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </AnimatedCollapsible>
                 </View>
                 </FadeInView>
+                </React.Fragment>
               );
-            })}
+            });
+            })()}
           </>
           )
         )}
@@ -7181,62 +7141,35 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const heightStr = ps ? `${ps.heightFeet}'${ps.heightInches}"` : '—';
         type ThemeEntry = { key: import('../types').AppThemeName; label: string; swatch: string; mode: 'dark' | 'light' };
         const allThemes: ThemeEntry[] = [
-          // Dark themes (bg is dark, most ink is light)
           // Dark themes
-          { key: 'midnight',  label: 'Midnight',  swatch: '#15C7B8', mode: 'dark' },
-          { key: 'ocean',     label: 'Ocean',     swatch: '#00CCE8', mode: 'dark' },
-          { key: 'amethyst',  label: 'Amethyst',  swatch: '#9838F8', mode: 'dark' },
-          { key: 'ember',     label: 'Ember',     swatch: '#FF6018', mode: 'dark' },
-          { key: 'wine',      label: 'Wine',      swatch: '#C82848', mode: 'dark' },
-          { key: 'obsidian',  label: 'Obsidian',  swatch: '#C09428', mode: 'dark' },
-          { key: 'neon',      label: 'Neon',      swatch: '#FF18CC', mode: 'dark' },
-          { key: 'citrus',    label: 'Citrus',    swatch: '#AADD00', mode: 'dark' },
-          { key: 'scarlet',   label: 'Scarlet',   swatch: '#FF2020', mode: 'dark' },
-          { key: 'cocoa',     label: 'Cocoa',     swatch: '#C04828', mode: 'dark' },
-          { key: 'blossom',   label: 'Blossom',   swatch: '#FF1890', mode: 'dark' },
-          { key: 'void',      label: 'Void',      swatch: '#4C9EFF', mode: 'dark' },
-          { key: 'dusk',      label: 'Dusk',      swatch: '#E8A878', mode: 'dark' },
-          { key: 'lavender',  label: 'Lavender',  swatch: '#B898E0', mode: 'dark' },
-          { key: 'aurora',    label: 'Aurora',    swatch: '#40E8A0', mode: 'dark' },
-          // Slate-formula: tinted bg + cross-hue primary
-          { key: 'slate',     label: 'Slate',     swatch: '#F07848', mode: 'dark' },
-          { key: 'ash',       label: 'Ash',       swatch: '#48A8FF', mode: 'dark' },
-          { key: 'jade',      label: 'Jade',      swatch: '#F0B030', mode: 'dark' },
-          { key: 'cosmos',    label: 'Cosmos',    swatch: '#FF8C30', mode: 'dark' },
-          { key: 'iron',      label: 'Iron',      swatch: '#F0A030', mode: 'dark' },
-          { key: 'driftwood', label: 'Driftwood', swatch: '#3890FF', mode: 'dark' },
-          { key: 'pine',      label: 'Pine',      swatch: '#FF7848', mode: 'dark' },
-          { key: 'bronze',    label: 'Bronze',    swatch: '#8060F8', mode: 'dark' },
-          { key: 'plum',      label: 'Plum',      swatch: '#90D818', mode: 'dark' },
-          { key: 'rust',      label: 'Rust',      swatch: '#38C0F0', mode: 'dark' },
-          // More dark combo: tinted medium-dark bg + cross-hue primary
-          { key: 'cinder',    label: 'Cinder',    swatch: '#FF2898', mode: 'dark' },
-          { key: 'moss',      label: 'Moss',      swatch: '#F02848', mode: 'dark' },
-          { key: 'smoke',     label: 'Smoke',     swatch: '#A0D820', mode: 'dark' },
-          { key: 'maroon',    label: 'Maroon',    swatch: '#20D8E8', mode: 'dark' },
-          { key: 'navy',      label: 'Navy',      swatch: '#F0C030', mode: 'dark' },
+          { key: 'midnight',  label: 'Midnight',   swatch: '#15C7B8', mode: 'dark' },
+          { key: 'ocean',     label: 'Ocean',      swatch: '#00CCE8', mode: 'dark' },
+          { key: 'amethyst',  label: 'Amethyst',   swatch: '#9838F8', mode: 'dark' },
+          { key: 'ember',     label: 'Ember',      swatch: '#FF6018', mode: 'dark' },
+          { key: 'wine',      label: 'Wine',       swatch: '#C82848', mode: 'dark' },
+          { key: 'obsidian',  label: 'Black Gold', swatch: '#C09428', mode: 'dark' },
+          { key: 'scarlet',   label: 'Scarlet',    swatch: '#FF2020', mode: 'dark' },
+          { key: 'blossom',   label: 'Blossom',    swatch: '#FF1890', mode: 'dark' },
+          { key: 'void',      label: 'Void',       swatch: '#4C9EFF', mode: 'dark' },
+          { key: 'dusk',      label: 'Dusk',       swatch: '#E8A878', mode: 'dark' },
+          { key: 'lavender',  label: 'Lavender',   swatch: '#B898E0', mode: 'dark' },
+          { key: 'aurora',    label: 'Aurora',     swatch: '#40E8A0', mode: 'dark' },
+          { key: 'slate',     label: 'Slate',      swatch: '#F07848', mode: 'dark' },
+          { key: 'ash',       label: 'Ash',        swatch: '#48A8FF', mode: 'dark' },
+          { key: 'cosmos',    label: 'Cosmos',     swatch: '#FF8C30', mode: 'dark' },
+          { key: 'cinder',    label: 'Cinder',     swatch: '#FF2898', mode: 'dark' },
+          { key: 'smoke',     label: 'Smoke',      swatch: '#A0D820', mode: 'dark' },
+          { key: 'maroon',    label: 'Maroon',     swatch: '#20D8E8', mode: 'dark' },
           // Light themes
-          { key: 'arctic',    label: 'Arctic',    swatch: '#2474C8', mode: 'light' },
-          { key: 'sunrise',   label: 'Sunrise',   swatch: '#F28C28', mode: 'light' },
-          { key: 'parchment', label: 'Parchment', swatch: '#7C4F2A', mode: 'light' },
-          { key: 'steel',     label: 'Steel',     swatch: '#3A5BC8', mode: 'light' },
-          { key: 'linen',     label: 'Linen',     swatch: '#6A8030', mode: 'light' },
-          { key: 'mint',      label: 'Mint',      swatch: '#0E8078', mode: 'light' },
-          { key: 'butter',    label: 'Butter',    swatch: '#C07608', mode: 'light' },
-          { key: 'seaglass',  label: 'Seaglass',  swatch: '#B5202A', mode: 'light' },
-          { key: 'lilac',     label: 'Lilac',     swatch: '#6B3AA8', mode: 'light' },
-          { key: 'sky',       label: 'Sky',       swatch: '#0E7AB8', mode: 'light' },
-          { key: 'paper',     label: 'Paper',     swatch: '#1F2933', mode: 'light' },
-          // Light combo: tinted bg + cross-hue primary
-          { key: 'frost',     label: 'Frost',     swatch: '#E06830', mode: 'light' },
-          { key: 'clay',      label: 'Clay',      swatch: '#2870CC', mode: 'light' },
-          { key: 'sage',      label: 'Sage',      swatch: '#C87820', mode: 'light' },
-          // More light combo
-          { key: 'mist',      label: 'Mist',      swatch: '#D01880', mode: 'light' },
-          { key: 'dune',      label: 'Dune',      swatch: '#3828A8', mode: 'light' },
-          { key: 'blush',     label: 'Blush',     swatch: '#1A7850', mode: 'light' },
-          { key: 'canary',    label: 'Canary',    swatch: '#C01840', mode: 'light' },
-          { key: 'petal',     label: 'Petal',     swatch: '#1A7878', mode: 'light' },
+          { key: 'sunrise',   label: 'Sunrise',    swatch: '#F28C28', mode: 'light' },
+          { key: 'parchment', label: 'Parchment',  swatch: '#7C4F2A', mode: 'light' },
+          { key: 'linen',     label: 'Linen',      swatch: '#6A8030', mode: 'light' },
+          { key: 'mint',      label: 'Mint',       swatch: '#0E8078', mode: 'light' },
+          { key: 'butter',    label: 'Butter',     swatch: '#C07608', mode: 'light' },
+          { key: 'seaglass',  label: 'Seaglass',   swatch: '#B5202A', mode: 'light' },
+          { key: 'lilac',     label: 'Lilac',      swatch: '#6B3AA8', mode: 'light' },
+          { key: 'sky',       label: 'Sky',        swatch: '#0E7AB8', mode: 'light' },
+          { key: 'rose',      label: 'Rose',       swatch: '#C04870', mode: 'light' },
         ];
         const visibleThemes = showAllThemes ? allThemes : allThemes.slice(0, 8);
         const darkThemes = visibleThemes.filter(t => t.mode === 'dark');
@@ -7413,25 +7346,51 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 />
               </View>
             ))}
-            {/* Test button — fires the same code path as a real rest-end
-                so users can verify volume / mixing / vibration works
-                without waiting for an actual workout. */}
-            <TouchableOpacity
-              style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}
-              activeOpacity={0.75}
-              onPress={async () => {
-                const { playRestTimerDone } = await import('../utils/feedback');
-                playRestTimerDone();
-              }}
-            >
-              <View style={{ flex: 1, paddingRight: 10 }}>
-                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Test Rest Timer Sound</Text>
-                <Text style={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 15 }}>
-                  Plays the chime + vibration so you can confirm volume + that music keeps playing.
-                </Text>
+            {/* Rest timer sound picker */}
+            <View style={[styles.profileMenuItem, { flexDirection: 'column', alignItems: 'flex-start', gap: 10 }]}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Rest Timer Sound</Text>
+                  <Text style={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 15 }}>
+                    Tap to preview. Selected plays when your rest ends.
+                  </Text>
+                </View>
               </View>
-              <Ionicons name="play-circle-outline" size={22} color={themeColors.primary} />
-            </TouchableOpacity>
+              <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+                {(['chime', 'beep', 'ping', 'double'] as const).map((snd) => {
+                  const active = (feedbackSettings.restTimerSound ?? 'chime') === snd;
+                  const labels: Record<string, string> = { chime: 'Chime', beep: 'Beep', ping: 'Ping', double: 'Double' };
+                  return (
+                    <TouchableOpacity
+                      key={snd}
+                      activeOpacity={0.75}
+                      onPress={async () => {
+                        const { saveSettings, playRestTimerDone } = await import('../utils/feedback');
+                        const updated = await saveSettings({ restTimerSound: snd });
+                        setFeedbackSettings(updated);
+                        playRestTimerDone();
+                      }}
+                      style={{
+                        flexDirection: 'row', alignItems: 'center', gap: 5,
+                        paddingHorizontal: 12, paddingVertical: 7,
+                        borderRadius: 20, borderWidth: 1.5,
+                        borderColor: active ? themeColors.primary : themeColors.border,
+                        backgroundColor: active ? themeColors.primary + '18' : 'transparent',
+                      }}
+                    >
+                      <Ionicons
+                        name={active ? 'radio-button-on' : 'radio-button-off'}
+                        size={14}
+                        color={active ? themeColors.primary : themeColors.textMuted}
+                      />
+                      <Text style={{ fontSize: 13, fontWeight: active ? '700' : '400', color: active ? themeColors.primary : themeColors.textSecondary }}>
+                        {labels[snd]}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </View>
             <AppleHealthToggleRow themeColors={themeColors} userAge={userProfile.physicalStats?.age ?? null} />
           </View>
 
@@ -9962,7 +9921,7 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
         fontWeight: '600',
         color: active ? '#fff' : mutedColor,
         letterSpacing: 0.1,
-      }} numberOfLines={1}>
+      }} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.8}>
         {label}
       </Text>
     </TouchableOpacity>
@@ -10048,7 +10007,7 @@ function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, sessionMinutes, onSwapExercise, onViewExercise, onOpenExerciseVideo }: {
+function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, sessionMinutes, onSwapExercise, onViewExercise, onOpenExerciseVideo, readinessBadge, onReadinessTap }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -10087,6 +10046,8 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
    *  the WorkoutCard thumbnail tap — users can play the YouTube
    *  demo without leaving the plan. */
   onOpenExerciseVideo?: (exerciseName: string) => void;
+  readinessBadge?: { score: number; label: string };
+  onReadinessTap?: () => void;
 }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -10112,7 +10073,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
         },
       ]}>
         {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: workoutPalette.strong, height: 4 }]} />}
-        <View style={[styles.dayCardRow, { paddingTop: isToday ? 0 : 14 }]}>
+        <View style={[styles.dayCardRow, { paddingTop: isToday ? 0 : 16 }]}>
           <View style={styles.dayCardLeft}>
             <Text style={[
               styles.dayCardDow,
@@ -10133,7 +10094,7 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
   if (isSkipped) {
     return (
       <View style={[styles.dayCard, styles.dayCardSkipped, { backgroundColor: tc.surface, borderColor: tc.border }]}>
-        <View style={[styles.dayCardRow, { paddingTop: 14 }]}>
+        <View style={[styles.dayCardRow, { paddingTop: 16 }]}>
           <View style={styles.dayCardLeft}>
             <Text style={[styles.dayCardDow, { color: tc.textSecondary }]}>{dow}</Text>
             <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
@@ -10238,19 +10199,19 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
           </Text>
         </View>
       )}
-      <View style={[styles.dayCardRow, { paddingTop: (isToday || isCompleted) ? 0 : 14 }]}>
+      <View style={[styles.dayCardRow, { paddingTop: (isToday || isCompleted) ? 0 : 16 }]}>
         <View style={styles.dayCardLeft}>
           <Text style={[
             styles.dayCardDow,
-            { color: isToday ? accentColor : tc.textSecondary, fontSize: isToday ? 14 : 13, fontWeight: isToday ? '800' : '700' },
+            { color: isToday ? accentColor : tc.textSecondary, fontSize: isToday ? 22 : 14, fontWeight: isToday ? '900' : '700' },
           ]}>{dow}</Text>
-          <Text style={[styles.dayCardDate, { color: tc.textMuted, textDecorationLine: completedDashed ? 'line-through' : 'none' }]}>{dateStr}</Text>
+          <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
         </View>
         <View style={styles.dayCardRight}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <FocusLabelCrossfade focus={item.workout!.focus} style={[
               styles.focusLabel,
-              { color: completedDashed ? tc.textSecondary : tc.textPrimary, textDecorationLine: completedDashed ? 'line-through' : 'none' },
+              { color: completedDashed ? tc.textSecondary : tc.textPrimary, textDecorationLine: completedDashed ? 'line-through' : 'none', fontSize: isToday ? 20 : 16, fontWeight: isToday ? '800' : '700' },
             ]} />
             {(() => {
               const stim = item.workout?.stimulus;
@@ -10368,7 +10329,62 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
           <Text style={[styles.chevron, { color: tc.textMuted }]}>{expanded ? '▲' : '▼'}</Text>
         )}
       </View>
+      {isToday && readinessBadge && (() => {
+        const rc = readinessBadge.label === 'Primed' || readinessBadge.label === 'Ready'
+          ? accentColor
+          : readinessBadge.label === 'Moderate' ? tc.warning : tc.error;
+        return (
+          <TouchableOpacity
+            onPress={onReadinessTap}
+            activeOpacity={0.8}
+            style={{
+              flexDirection: 'row', alignItems: 'center', gap: 10,
+              paddingHorizontal: 14, paddingVertical: 13,
+              marginTop: 8,
+              borderTopWidth: 1, borderTopColor: tc.border,
+            }}>
+            <View style={{
+              width: 32, height: 32, borderRadius: 16,
+              backgroundColor: rc + '18',
+              alignItems: 'center', justifyContent: 'center',
+            }}>
+              <Text style={{ fontSize: 13, fontWeight: '900', color: rc }}>{readinessBadge.score}</Text>
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary }}>Training Readiness · <Text style={{ color: rc }}>{readinessBadge.label}</Text></Text>
+            </View>
+            <Ionicons name="chevron-forward" size={12} color={tc.textMuted} />
+          </TouchableOpacity>
+        );
+      })()}
 
+      {isToday && !isCompleted && !isSkipped && (
+        <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingBottom: 14, paddingTop: 10 }}>
+          <PulseView active intensity={0.02} duration={2000} style={{ flex: 2 }}>
+            <PressableScale
+              onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}
+              accessibilityRole="button"
+              accessibilityLabel="Start workout">
+              <View style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
+                <Ionicons name="play-circle" size={22} color="#fff" />
+                <Text style={styles.startWorkoutBtnText}>Start Workout</Text>
+              </View>
+            </PressableScale>
+          </PulseView>
+          <Pressable
+            style={[styles.skipSecondaryBtn, { borderColor: tc.border, backgroundColor: tc.surface }]}
+            hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+            onPress={() => {
+              import('../utils/feedback').then(f => f.hapticWarning()).catch(() => {});
+              onSkip(item.workout!.focus);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Skip today's workout">
+            <Ionicons name="close-circle-outline" size={18} color={tc.textSecondary} />
+            <Text style={[styles.skipSecondaryBtnText, { color: tc.textSecondary }]}>Skip</Text>
+          </Pressable>
+        </View>
+      )}
       <AnimatedCollapsible visible={expanded}>
         <View style={styles.expandedContent}>
           {isCompleted ? (
@@ -10595,41 +10611,21 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
                   )}
                 </View>
               )}
-              <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
-                <PulseView active={isToday && !isCompleted} intensity={0.02} duration={2000} style={{ flex: 2 }}>
-                  <PressableScale
-                    onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}
-                    accessibilityRole="button"
-                    accessibilityLabel="Start workout">
-                    <View style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
-                      <Ionicons name="play-circle" size={22} color="#fff" />
-                      <Text style={styles.startWorkoutBtnText}>Start Workout</Text>
-                    </View>
-                  </PressableScale>
-                </PulseView>
-                {isToday && (
-                  // Pressable instead of TouchableOpacity so taps are
-                  // captured eagerly via onPressIn — fixes the case
-                  // where the parent DayCard's expand/collapse
-                  // TouchableOpacity stole the responder before this
-                  // child could fire. Haptic also fires immediately
-                  // so the user gets tactile confirmation even before
-                  // the modal opens.
-                  <Pressable
-                    style={[styles.skipSecondaryBtn, { borderColor: tc.border, backgroundColor: tc.surface }]}
-                    hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                    onPress={() => {
-                      import('../utils/feedback').then(f => f.hapticWarning()).catch(() => {});
-                      console.log('[skip] tapped — focus=', item.workout!.focus);
-                      onSkip(item.workout!.focus);
-                    }}
-                    accessibilityRole="button"
-                    accessibilityLabel="Skip today's workout">
-                    <Ionicons name="close-circle-outline" size={18} color={tc.textSecondary} />
-                    <Text style={[styles.skipSecondaryBtnText, { color: tc.textSecondary }]}>Skip</Text>
-                  </Pressable>
-                )}
-              </View>
+              {!isToday && (
+                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 14 }}>
+                  <PulseView active={false} intensity={0.02} duration={2000} style={{ flex: 2 }}>
+                    <PressableScale
+                      onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}
+                      accessibilityRole="button"
+                      accessibilityLabel="Start workout">
+                      <View style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
+                        <Ionicons name="play-circle" size={22} color="#fff" />
+                        <Text style={styles.startWorkoutBtnText}>Start Workout</Text>
+                      </View>
+                    </PressableScale>
+                  </PulseView>
+                </View>
+              )}
               <WorkoutCard
                 workout={item.workout!}
                 themeName={themeName}
@@ -11060,20 +11056,20 @@ const styles = StyleSheet.create({
   scrollView:    { flex: 1 },
   scrollContent: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 110 },
 
-  dayCard:         { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 14, paddingBottom: 14, paddingTop: 0, marginBottom: 10, overflow: 'hidden' },
+  dayCard:         { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 16, paddingBottom: 16, paddingTop: 0, marginBottom: 12, overflow: 'hidden' },
   dayCardTopAccent: { height: 3, marginBottom: 12, borderRadius: 0 },
   dayCardToday:    { borderColor: colors.primary },
   dayCardComplete: { borderColor: colors.success },
   dayCardSkipped:  { opacity: 0.6 },
   dayCardRow:      { flexDirection: 'row', alignItems: 'center' },
-  dayCardLeft:     { width: 64 },
+  dayCardLeft:     { width: 70 },
   dayCardRight:    { flex: 1 },
-  dayCardDow:      { fontSize: 13, fontWeight: '700', color: colors.textSecondary, marginBottom: 2 },
+  dayCardDow:      { fontSize: 14, fontWeight: '700', color: colors.textSecondary, marginBottom: 2 },
   dayCardDowToday: { color: colors.primary },
-  dayCardDate:     { fontSize: 11, color: colors.textMuted },
+  dayCardDate:     { fontSize: 12, color: colors.textMuted },
 
-  focusLabel:    { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 2 },
-  exerciseCount: { fontSize: 12, color: colors.textMuted },
+  focusLabel:    { fontSize: 16, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
+  exerciseCount: { fontSize: 13, color: colors.textMuted },
   chevron:       { fontSize: 10, color: colors.textMuted, marginLeft: 8 },
 
   completeBadge:     { backgroundColor: colors.success + '22', borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.success },
@@ -11122,19 +11118,19 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    marginBottom: 10,
+    marginBottom: 12,
     overflow: 'hidden',
   },
   mealAccordionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 16,
     borderBottomWidth: 1,
     borderBottomColor: 'transparent',
   },
-  mealAccordionTitle: { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
-  mealAccordionMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 3, fontWeight: '500' },
+  mealAccordionTitle: { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
+  mealAccordionMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2, fontWeight: '500' },
   mealAccordionChevron: { fontSize: 11, color: colors.textMuted, marginLeft: 8 },
 
   groceryCard: {

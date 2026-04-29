@@ -740,6 +740,21 @@ def _ensure_weekly_checkin_body_columns() -> None:
         print(f"[migration] weekly_checkins body columns failed (non-fatal): {e}")
 
 
+def _ensure_weekly_checkin_measurements_columns() -> None:
+    """Add chest_in / hips_in / bicep_in / thigh_in / calf_in to weekly_checkins.
+    All optional — no scoring impact when absent."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            for col in ("chest_in", "hips_in", "bicep_in", "thigh_in", "calf_in"):
+                conn.execute(text(
+                    f"ALTER TABLE weekly_checkins ADD COLUMN IF NOT EXISTS {col} DOUBLE PRECISION"
+                ))
+    except Exception as e:
+        print(f"[migration] weekly_checkins measurements columns failed (non-fatal): {e}")
+
+
 def _ensure_recovery_activities_table() -> None:
     """Create recovery_activities table for cold plunge / sauna /
     breathwork / meditation logging if it doesn't exist yet."""
@@ -961,6 +976,7 @@ def create_db_and_tables():
     _ensure_exercise_set_cardio_hr_columns()
     _ensure_user_equipment_profiles_table()
     _ensure_weekly_checkin_body_columns()
+    _ensure_weekly_checkin_measurements_columns()
     _ensure_recovery_activities_table()
     _backfill_exercise_video_ids()
     _autoscrape_missing_video_ids()

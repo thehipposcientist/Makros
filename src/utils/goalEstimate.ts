@@ -72,3 +72,72 @@ export function getGoalEstimate(profile: UserProfile, goalConfig: GoalConfig): G
     label,
   };
 }
+
+// ── Recomp projection ────────────────────────────────────────────────────────
+
+export interface RecompProjection {
+  /** Display range for expected weekly scale weight change, e.g. "±0.25 lb/week" */
+  scaleNote: string;
+  /** Low end of weekly estimated fat loss in lbs */
+  fatLossLow: number;
+  /** High end of weekly estimated fat loss in lbs */
+  fatLossHigh: number;
+  /** Human label for the fat loss range, e.g. "0.2–0.5 lb/week" */
+  fatLossRange: string;
+  leanMassNote: string;
+  bestSignals: string[];
+  /** Non-null for aggressive pace; warns that fat loss is slower due to surplus. */
+  caveat: string | null;
+  timelineWeeks: number;
+}
+
+// Calorie context mirrors backend goal_params.py BODY_RECOMP adjustments:
+//   conservative: -100 cal/day (slight deficit → better fat loss)
+//   moderate:       0 cal/day (maintenance + training effect)
+//   aggressive:   +100 cal/day (slight surplus → better muscle, slower fat loss)
+const RECOMP_CONFIG: Record<string, {
+  fatLow: number; fatHigh: number;
+  scaleNote: string; leanNote: string; caveat: string | null;
+}> = {
+  conservative: {
+    fatLow: 0.15, fatHigh: 0.35,
+    scaleNote: '±0.25 lb/week',
+    leanNote: 'maintain',
+    caveat: null,
+  },
+  moderate: {
+    fatLow: 0.2, fatHigh: 0.5,
+    scaleNote: '±0.25 lb/week',
+    leanNote: 'maintain or slowly increase',
+    caveat: null,
+  },
+  aggressive: {
+    fatLow: 0.1, fatHigh: 0.3,
+    scaleNote: 'mostly stable or slight gain',
+    leanNote: 'slowly building (muscle focus)',
+    caveat: 'A slight calorie surplus prioritizes muscle growth. Fat loss will be slower — body composition still improves through strength gains.',
+  },
+};
+
+export function getRecompProjection(
+  profile: UserProfile,
+  goalConfig: GoalConfig,
+): RecompProjection | null {
+  const bucket = GOAL_TO_BUCKET[profile.goal] ?? profile.goal;
+  if (bucket !== 'body_recomp') return null;
+
+  const pace = profile.goalDetails?.pace ?? 'moderate';
+  const cfg = RECOMP_CONFIG[pace] ?? RECOMP_CONFIG.moderate;
+  const timelineWeeks = goalConfig.timeline_weeks?.['body_recomp']?.[pace] ?? 24;
+
+  return {
+    scaleNote: cfg.scaleNote,
+    fatLossLow: cfg.fatLow,
+    fatLossHigh: cfg.fatHigh,
+    fatLossRange: `${cfg.fatLow}–${cfg.fatHigh} lb/week`,
+    leanMassNote: cfg.leanNote,
+    bestSignals: ['Waist trend', 'Weekly average weight', 'Strength trend', 'Progress photos'],
+    caveat: cfg.caveat,
+    timelineWeeks,
+  };
+}

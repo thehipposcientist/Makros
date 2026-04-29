@@ -14,7 +14,14 @@ import {
   Modal,
   findNodeHandle,
   UIManager,
+  LayoutAnimation,
+  Keyboard,
+  useWindowDimensions,
 } from 'react-native';
+
+if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
+  UIManager.setLayoutAnimationEnabledExperimental(true);
+}
 import { Ionicons } from '@expo/vector-icons';
 import Animated, { LinearTransition } from 'react-native-reanimated';
 import FadeInView from '../components/FadeInView';
@@ -313,7 +320,21 @@ interface OnboardingScreenProps {
 
 export default function OnboardingScreen({ authToken, onComplete, onExit }: OnboardingScreenProps) {
   const meta = useMetaData();
+  const { width: screenWidth } = useWindowDimensions();
   const scrollRef = useRef<ScrollView>(null);
+  const goalCarouselRef = useRef<ScrollView>(null);
+  const carouselSectionRef = useRef<View>(null);
+
+  const scrollCarouselIntoView = () => {
+    if (!carouselSectionRef.current || !scrollRef.current) return;
+    const scrollNode = findNodeHandle(scrollRef.current);
+    if (!scrollNode) return;
+    carouselSectionRef.current.measureLayout(
+      scrollNode,
+      (_x, y) => { scrollRef.current?.scrollTo({ y: Math.max(0, y - 16), animated: true }); },
+      () => {},
+    );
+  };
 
   /** Scroll so the focused input is visible above the keyboard.
    *
@@ -347,6 +368,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   // Step 1 — Goal selection (hierarchical)
   const [selectedGoal, setSelectedGoal] = useState('build_muscle');
+  const [goalScrollIdx, setGoalScrollIdx] = useState(0);
   const [goalQuery, setGoalQuery] = useState('');
   const [goalMatchLoading, setGoalMatchLoading] = useState(false);
   const [goalMatchReason, setGoalMatchReason] = useState<string | null>(null);
@@ -367,6 +389,13 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   // stays accurate as users age.
   const [birthdate, setBirthdate] = useState<string | null>(null);
   const [gender, setGender] = useState<Gender | ''>('');
+  // Optional initial body measurements (submitted as first checkin after account creation)
+  const [initWaist, setInitWaist] = useState('');
+  const [initChest, setInitChest] = useState('');
+  const [initHips, setInitHips] = useState('');
+  const [initBicep, setInitBicep] = useState('');
+  const [initThigh, setInitThigh] = useState('');
+  const [initCalf, setInitCalf] = useState('');
 
   // Step 4 — Training days
   const [daysPerWeek, setDaysPerWeekRaw] = useState('3');
@@ -431,6 +460,12 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       setSelectedGoal(goalId);
       setSelectedModifiers([]);
       setSelectedRegion('balanced');
+    }
+    const idx = LAUNCH_GOALS.findIndex(g => g.id === goalId);
+    if (idx >= 0) {
+      goalCarouselRef.current?.scrollTo({ x: idx * (screenWidth * 0.82 + 12), animated: true });
+      LayoutAnimation.configureNext({ duration: 220, update: { type: 'spring', springDamping: 0.75 } });
+      setGoalScrollIdx(idx);
     }
   };
 
@@ -528,6 +563,23 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     if (weightLbs) {
       const { saveWeightEntry } = await import('../utils/weightHistory');
       await saveWeightEntry(parseFloat(weightLbs), 'onboarding');
+    }
+    // Log initial measurements if any were entered
+    const parseMeasure = (v: string) => { const n = parseFloat(v); return isNaN(n) ? undefined : n; };
+    const hasAnyMeasurement = [initWaist, initChest, initHips, initBicep, initThigh, initCalf].some(v => v.trim() !== '');
+    if (authToken && weightLbs && hasAnyMeasurement) {
+      const { submitWeeklyCheckin } = await import('../services/api');
+      submitWeeklyCheckin(authToken, {
+        checkin_date: new Date().toISOString().slice(0, 10),
+        weight_lbs: parseFloat(weightLbs),
+        waist_in: parseMeasure(initWaist),
+        chest_in: parseMeasure(initChest),
+        hips_in: parseMeasure(initHips),
+        bicep_in: parseMeasure(initBicep),
+        thigh_in: parseMeasure(initThigh),
+        calf_in: parseMeasure(initCalf),
+        energy: 3, sleep: 3, adherence: 3,
+      }).catch(() => null);
     }
     const cat = goalCategory(selectedGoal) ?? 'lifestyle_consistency';
 
@@ -741,6 +793,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 const res = await matchGoal(goalQuery.trim());
                 selectGoal(res.goal_id);
                 setGoalMatchReason(res.reason);
+                Keyboard.dismiss();
+                setTimeout(scrollCarouselIntoView, 340);
               } catch {}
               setGoalMatchLoading(false);
             }}>
@@ -762,48 +816,69 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         {/* Launch goals — the 8 most common. Each card shows a short
             description so users can compare without tapping. Selected
             card expands to full width for the full text. */}
+        <View ref={carouselSectionRef}>
         <Text style={styles.sectionHeading}>Most popular</Text>
-        {/* 2-column grid. Cards stay at 48% width regardless of selection
-            (removed the active → 100% width trick that made selection
-            re-flow the entire grid and look broken). Selected card just
-            gets a highlighted border + checkmark + longer description. */}
-        <View style={styles.goalGrid}>
+        {/* Horizontal carousel — each card is ~80% screen width so the next
+            card peeks in from the right. Snap alignment keeps it crisp. */}
+        <ScrollView
+          ref={goalCarouselRef}
+          horizontal
+          pagingEnabled={false}
+          snapToInterval={screenWidth * 0.82 + 12}
+          snapToAlignment="start"
+          decelerationRate="fast"
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ paddingRight: screenWidth * 0.18, gap: 12 }}
+          style={{ marginHorizontal: -20, paddingHorizontal: 20, marginBottom: 4 }}
+          onMomentumScrollEnd={e => {
+            const idx = Math.round(e.nativeEvent.contentOffset.x / (screenWidth * 0.82 + 12));
+            const clamped = Math.max(0, Math.min(idx, LAUNCH_GOALS.length - 1));
+            LayoutAnimation.configureNext({ duration: 220, update: { type: 'spring', springDamping: 0.75 } });
+            setGoalScrollIdx(clamped);
+          }}
+        >
           {LAUNCH_GOALS.map((g, gIdx) => {
             const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
             const active = selectedGoal === g.id;
             return (
-              <FadeInView key={g.id} delay={gIdx * 40} duration={260} slideDistance={8} style={styles.goalCardWrap}>
-              <TouchableOpacity
-                testID={`goal-card-${g.id}`}
-                accessibilityLabel={`goal-card-${g.id}`}
-                style={[styles.goalCard, active && styles.goalCardActive]}
+              <PressableScale
+                key={g.id}
+                style={[
+                  styles.goalCard,
+                  active && styles.goalCardActive,
+                  { width: screenWidth * 0.82, alignItems: 'flex-start', padding: 18 },
+                ]}
                 onPress={() => selectGoal(g.id)}
-                activeOpacity={0.75}
+                scaleDown={0.97}
               >
-                <View style={{ flexDirection: 'row', alignItems: 'center', width: '100%', justifyContent: 'center' }}>
-                  <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={22} color={active ? colors.primary : colors.textMuted} />
-                  {active && (
-                    <Ionicons name="checkmark-circle" size={16} color={colors.primary} style={{ position: 'absolute', right: -2, top: -2 }} />
-                  )}
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                  <View style={{
+                    width: 38, height: 38, borderRadius: 10,
+                    backgroundColor: active ? colors.primary + '22' : colors.surfaceRaised,
+                    alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={20} color={active ? colors.primary : colors.textMuted} />
+                  </View>
+                  <Text style={[styles.goalLabel, active && styles.goalLabelActive, { flex: 1 }]}>{g.label}</Text>
+                  {active && <Ionicons name="checkmark-circle" size={20} color={colors.primary} />}
                 </View>
-                <Text style={[styles.goalLabel, active && styles.goalLabelActive, { marginTop: 6, textAlign: 'center' }]}>{g.label}</Text>
-                <Text
-                  style={{
-                    fontSize: 11,
-                    color: active ? colors.textSecondary : colors.textMuted,
-                    marginTop: 4,
-                    lineHeight: 15,
-                    textAlign: 'center',
-                    width: '100%',
-                  }}
-                  numberOfLines={active ? 6 : 2}
-                >
+                <Text style={{ fontSize: 13, color: active ? colors.textSecondary : colors.textMuted, lineHeight: 18 }}>
                   {g.description}
                 </Text>
-              </TouchableOpacity>
-              </FadeInView>
+              </PressableScale>
             );
           })}
+        </ScrollView>
+        <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6, marginTop: 10, marginBottom: 4 }}>
+          {LAUNCH_GOALS.map((_, i) => (
+            <View key={i} style={{
+              height: 6,
+              width: goalScrollIdx === i ? 16 : 6,
+              borderRadius: 3,
+              backgroundColor: goalScrollIdx === i ? colors.primary : colors.border,
+            }} />
+          ))}
+        </View>
         </View>
 
         {/* Pace — shown inline on the goal step itself whenever the user
@@ -858,7 +933,9 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 })}
               </View>
               <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 6, textAlign: 'center' }}>
-                Sets your weekly target rate. Used to estimate when you'll hit your goal.
+                {selectedGoal === 'body_recomp'
+                  ? 'Sets your calorie target. Conservative = small deficit; Moderate = maintenance; Aggressive = slight surplus (muscle focus).'
+                  : 'Sets your weekly target rate. Used to estimate when you\'ll hit your goal.'}
               </Text>
             </View>
           );
@@ -1101,6 +1178,33 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             </TouchableOpacity>
           ))}
         </View>
+      </View>
+
+      {/* Optional body measurements */}
+      <View style={styles.fieldGroup}>
+        <Text style={styles.fieldLabel}>Body measurements <Text style={{ fontWeight: '400', color: colors.textMuted }}>(optional)</Text></Text>
+        <Text style={[styles.hint, { marginBottom: 10 }]}>Record your starting numbers — these help track progress over time.</Text>
+        {([
+          { label: 'Waist', state: initWaist, setter: setInitWaist },
+          { label: 'Chest', state: initChest, setter: setInitChest },
+          { label: 'Hips',  state: initHips,  setter: setInitHips  },
+          { label: 'Bicep', state: initBicep, setter: setInitBicep },
+          { label: 'Thigh', state: initThigh, setter: setInitThigh },
+          { label: 'Calf',  state: initCalf,  setter: setInitCalf  },
+        ] as Array<{ label: string; state: string; setter: (v: string) => void }>).map(f => (
+          <View key={f.label} style={[styles.inlineInput, { marginBottom: 8 }]}>
+            <Text style={{ fontSize: 14, color: colors.textSecondary, width: 52 }}>{f.label}</Text>
+            <TextInput
+              style={[styles.input, { flex: 1 }]}
+              placeholder="—"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="decimal-pad"
+              value={f.state}
+              onChangeText={f.setter}
+            />
+            <Text style={styles.unit}>in</Text>
+          </View>
+        ))}
       </View>
     </View>
   );

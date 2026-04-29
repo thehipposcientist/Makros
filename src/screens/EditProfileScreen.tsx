@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
+import PressableScale from '../components/PressableScale';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import BarcodeScannerModal from '../components/BarcodeScannerModal';
+import BodyMeasurementsModal from '../components/BodyMeasurementsModal';
 import FormVideoModal from '../components/FormVideoModal';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, KeyboardAvoidingView, Platform, ActivityIndicator, Alert, Image, Linking, Keyboard,
-  LayoutAnimation, UIManager, Animated, Easing,
+  LayoutAnimation, UIManager, Animated, Easing, useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import FadeInView from '../components/FadeInView';
@@ -311,9 +313,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const tc = getTheme(profile.themePreference).colors;
   const styles = createStyles(tc);
   const meta = useMetaData();
+  const { width: screenWidth } = useWindowDimensions();
 
   // Goal (hierarchical)
   const [selectedGoal, setSelectedGoal] = useState<string>(profile.goalSelection?.primaryGoal ?? profile.goal);
+  const [goalScrollIdx, setGoalScrollIdx] = useState(0);
+  const goalCarouselRef = useRef<ScrollView>(null);
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>(profile.goalSelection?.modifiers ?? []);
   // Preview modal removed — matches onboarding's direct-select UX so
   // editing your goal feels the same as setting it up originally.
@@ -347,6 +352,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   );
   const [currentWeightModalVisible, setCurrentWeightModalVisible] = useState(false);
   const [currentWeightInput, setCurrentWeightInput]               = useState('');
+  const [measurementsModalVisible, setMeasurementsModalVisible]   = useState(false);
 
   // Body mode fields
   const [bodyHeightFeet, setBodyHeightFeet] = useState<string>(
@@ -1505,44 +1511,72 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textMuted, marginBottom: 8, letterSpacing: 0.5 }}>
             OR PICK ONE DIRECTLY
           </Text>
-          <View style={[styles.goalGrid, { marginBottom: 6 }]}>
-            {LAUNCH_GOALS.map((g, idx) => {
+          {/* Horizontal carousel — each card is ~80% screen width */}
+          <ScrollView
+            ref={goalCarouselRef}
+            horizontal
+            pagingEnabled={false}
+            snapToInterval={screenWidth * 0.82 + 12}
+            snapToAlignment="start"
+            decelerationRate="fast"
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{ paddingRight: screenWidth * 0.18, gap: 12 }}
+            style={{ marginHorizontal: -20, paddingHorizontal: 20, marginBottom: 6 }}
+            onMomentumScrollEnd={e => {
+              const idx = Math.round(e.nativeEvent.contentOffset.x / (screenWidth * 0.82 + 12));
+              const clamped = Math.max(0, Math.min(idx, LAUNCH_GOALS.length - 1));
+              LayoutAnimation.configureNext({ duration: 220, update: { type: 'spring', springDamping: 0.75 } });
+              setGoalScrollIdx(clamped);
+            }}
+          >
+            {LAUNCH_GOALS.map((g, gIdx) => {
               const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
               const active = selectedGoal === g.id;
               return (
-                <AnimatedGoalCard
+                <PressableScale
                   key={g.id}
-                  delay={80 + idx * 50}
-                  active={active}
-                  style={[styles.goalCard, active && styles.goalCardActive, active && { width: '100%' }]}
+                  style={[
+                    styles.goalCard,
+                    active && styles.goalCardActive,
+                    { width: screenWidth * 0.82, alignItems: 'flex-start', padding: 18 },
+                  ]}
                   onPress={() => {
-                    // Direct select — matches onboarding's UX. No
-                    // preview modal before committing; the value only
-                    // persists when the user hits Save at the bottom.
-                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    goalCarouselRef.current?.scrollTo({ x: gIdx * (screenWidth * 0.82 + 12), animated: true });
+                    LayoutAnimation.configureNext({ duration: 220, update: { type: 'spring', springDamping: 0.75 } });
+                    setGoalScrollIdx(gIdx);
                     setSelectedGoal(g.id);
                     setSelectedModifiers([]);
                     setPace('moderate');
                   }}
+                  scaleDown={0.97}
                 >
-                  <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={26} color={active ? tc.primary : tc.textMuted} style={{ marginBottom: 6 }} />
-                  <Text style={[styles.goalLabel, active && { color: tc.primary, fontWeight: '700' as const }]}>{g.label}</Text>
-                  <Text
-                    style={{
-                      fontSize: 11,
-                      color: active ? tc.textSecondary : tc.textMuted,
-                      marginTop: 6,
-                      lineHeight: 15,
-                      textAlign: active ? 'left' : 'center',
-                      width: '100%',
-                    }}
-                    numberOfLines={active ? undefined : 3}
-                  >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                    <View style={{
+                      width: 38, height: 38, borderRadius: 10,
+                      backgroundColor: active ? tc.primary + '22' : tc.surfaceRaised,
+                      alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <Ionicons name={(catDef?.icon ?? 'flag-outline') as any} size={20} color={active ? tc.primary : tc.textMuted} />
+                    </View>
+                    <Text style={[styles.goalLabel, active && { color: tc.primary, fontWeight: '700' as const }, { flex: 1 }]}>{g.label}</Text>
+                    {active && <Ionicons name="checkmark-circle" size={20} color={tc.primary} />}
+                  </View>
+                  <Text style={{ fontSize: 13, color: active ? tc.textSecondary : tc.textMuted, lineHeight: 18 }}>
                     {g.description}
                   </Text>
-                </AnimatedGoalCard>
+                </PressableScale>
               );
             })}
+          </ScrollView>
+          <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6, marginTop: 10, marginBottom: 4 }}>
+            {LAUNCH_GOALS.map((_, i) => (
+              <View key={i} style={{
+                height: 6,
+                width: goalScrollIdx === i ? 16 : 6,
+                borderRadius: 3,
+                backgroundColor: goalScrollIdx === i ? tc.primary : tc.border,
+              }} />
+            ))}
           </View>
         </View>
 
@@ -1642,6 +1676,18 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               {currentWeight ? `${currentWeight} lbs` : 'Tap to set current weight'}
             </Text>
             <Text style={styles.editHint}>Edit</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* ── Body Measurements ── */}
+        <View style={styles.section}>
+          <Text style={styles.sectionLabel}>Body Measurements</Text>
+          <TouchableOpacity
+            style={[styles.weightBtn, { gap: 8 }]}
+            onPress={() => setMeasurementsModalVisible(true)}>
+            <Ionicons name="body-outline" size={18} color={tc.primary} />
+            <Text style={{ fontSize: 15, fontWeight: '600', color: tc.textPrimary, flex: 1 }}>Log waist, chest, hips, arms…</Text>
+            <Text style={styles.editHint}>Log</Text>
           </TouchableOpacity>
         </View>
 
@@ -3592,6 +3638,13 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         visible={barcodeScanVisible}
         onClose={() => setBarcodeScanVisible(false)}
         onScan={handleBarcodeScan}
+      />
+      <BodyMeasurementsModal
+        visible={measurementsModalVisible}
+        authToken={authToken}
+        currentWeight={profile.physicalStats?.weightLbs}
+        themeName={profile?.themePreference}
+        onClose={() => setMeasurementsModalVisible(false)}
       />
       <FormVideoModal
         visible={!!videoExerciseName}

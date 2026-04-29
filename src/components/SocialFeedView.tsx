@@ -43,6 +43,12 @@ interface Props {
    *  Instagram-style infinite scroll. Default 10 — enough to feel
    *  alive at pilot scale without becoming a doom-scroll surface. */
   maxItems?: number;
+  /** Whether the current user has sharing enabled. When true a "Your
+   *  Activity" summary card is pinned at the top of the feed so the
+   *  user can see what their friends see. */
+  shareEnabled?: boolean;
+  myActivity?: { sessions: number; streak: number } | null;
+  myDisplayName?: string;
 }
 
 // One bounded fetch — no pagination by design. The view is an "is
@@ -73,6 +79,7 @@ function formatDuration(sec: number | undefined | null): string {
 
 export default function SocialFeedView({
   authToken, themeName, onViewAuthor, refreshKey, maxItems,
+  shareEnabled, myActivity, myDisplayName,
 }: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
@@ -244,12 +251,60 @@ export default function SocialFeedView({
     );
   }
 
+  const myActivityHeader = shareEnabled && myActivity ? (
+    <View style={[styles.card, styles.myActivityCard]}>
+      <View style={styles.cardHeader}>
+        <View style={styles.authorRow}>
+          <View style={[styles.avatar, styles.myAvatar]}>
+            <Text style={styles.avatarText}>
+              {((myDisplayName ?? '')[0] ?? 'Y').toUpperCase()}
+            </Text>
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.authorName}>
+              {myDisplayName || 'You'}
+              <Text style={styles.myLabel}>  ·  Your activity</Text>
+            </Text>
+            <Text style={styles.authorMeta}>Shared with friends</Text>
+          </View>
+          <View style={styles.sharingBadge}>
+            <Ionicons name="globe-outline" size={11} color={colors.primary} />
+            <Text style={styles.sharingBadgeText}>Sharing on</Text>
+          </View>
+        </View>
+      </View>
+      <View style={styles.summaryBlock}>
+        <View style={styles.summaryStatsRow}>
+          <Text style={styles.summaryStat}>
+            <Text style={styles.summaryStatNum}>{myActivity.sessions}</Text>
+            {` session${myActivity.sessions === 1 ? '' : 's'} this week`}
+          </Text>
+          {myActivity.streak > 0 && (
+            <>
+              <Text style={styles.summaryStatDot}>·</Text>
+              <Text style={styles.summaryStat}>
+                <Text style={styles.summaryStatNum}>{myActivity.streak}</Text>
+                {myActivity.streak === 1 ? ' day streak' : ' day streak'}
+              </Text>
+            </>
+          )}
+        </View>
+        {myActivity.sessions === 0 && (
+          <Text style={[styles.authorMeta, { marginTop: 2 }]}>
+            Log a workout this week to appear in your friends' feeds.
+          </Text>
+        )}
+      </View>
+    </View>
+  ) : null;
+
   return (
     <FlatList
       data={items}
       keyExtractor={keyExtractor}
       renderItem={renderItem}
       contentContainerStyle={styles.listContent}
+      ListHeaderComponent={myActivityHeader}
       refreshControl={
         <RefreshControl
           refreshing={refreshing}
@@ -332,5 +387,14 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
     actionRow: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingTop: 4 },
     likeBtn: { flexDirection: 'row', alignItems: 'center', gap: 5 },
     likeCount: { fontSize: 12, color: c.textSecondary, fontWeight: '600', minWidth: 12 },
+    myActivityCard: { borderColor: c.primary + '40' },
+    myAvatar: { backgroundColor: c.primary + '20', borderColor: c.primary + '40' },
+    myLabel: { fontSize: 12, fontWeight: '400', color: c.textMuted },
+    sharingBadge: {
+      flexDirection: 'row', alignItems: 'center', gap: 3,
+      paddingHorizontal: 7, paddingVertical: 3,
+      borderRadius: 10, backgroundColor: c.primary + '15',
+    },
+    sharingBadgeText: { fontSize: 10, fontWeight: '700', color: c.primary },
   });
 }
