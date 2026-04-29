@@ -18,6 +18,7 @@ interface Props {
   authToken: string;
   themeName?: AppThemeName;
   thyroidOptIn?: boolean;
+  variant?: 'card' | 'note' | 'button';
 }
 
 /** 8px alert dot with a soft, looping pulse — opacity 1.0 → 0.55 → 1.0
@@ -65,7 +66,7 @@ function PulsingDot({ color }: { color: string }) {
   );
 }
 
-export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn }: Props) {
+export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn, variant = 'card' }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
 
@@ -93,6 +94,8 @@ export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn
 
   const worst = actionable.find(f => f.state === 'red') ?? actionable[0];
   const badgeColor = worst.state === 'red' ? tc.error : tc.warning;
+  const isNote = variant === 'note';
+  const isButton = variant === 'button';
 
   return (
     <>
@@ -101,25 +104,46 @@ export default function FuelingRecoveryCard({ authToken, themeName, thyroidOptIn
         onPress={() => setModalOpen(true)}
         style={{
           flexDirection: 'row', alignItems: 'center', gap: 10,
-          backgroundColor: tc.surface, borderRadius: radius.lg,
-          paddingVertical: 10, paddingHorizontal: 12, marginBottom: 12,
-          borderWidth: 1, borderColor: badgeColor + '44',
+          alignSelf: isButton ? 'flex-start' : undefined,
+          backgroundColor: isButton ? badgeColor : isNote ? badgeColor + '10' : tc.surface,
+          borderRadius: isButton ? 999 : isNote ? radius.md : radius.lg,
+          paddingVertical: isButton ? 5 : isNote ? 8 : 10,
+          paddingHorizontal: isButton ? 8 : isNote ? 10 : 12,
+          marginTop: isNote ? 8 : 0,
+          marginBottom: isNote || isButton ? 0 : 12,
+          borderWidth: 1,
+          borderColor: isButton ? badgeColor : isNote ? badgeColor + '2E' : badgeColor + '44',
         }}
       >
-        <PulsingDot color={badgeColor} />
-        <View style={{ flex: 1 }}>
-          <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary }}>
+        {isButton ? (
+          <Ionicons name="alert" size={10} color="#fff" />
+        ) : isNote ? (
+          <View style={{
+            width: 18, height: 18, borderRadius: 9,
+            backgroundColor: badgeColor + '18',
+            alignItems: 'center', justifyContent: 'center',
+          }}>
+            <Ionicons name="alert" size={12} color={badgeColor} />
+          </View>
+        ) : (
+          <PulsingDot color={badgeColor} />
+        )}
+        <View style={{ flex: isButton ? 0 : 1 }}>
+          <Text
+            style={{ fontSize: isButton ? 10 : isNote ? 11 : 12, fontWeight: '800', color: isButton ? '#fff' : tc.textPrimary }}
+            numberOfLines={1}
+          >
             {actionable.length === 1
-              ? `${worst.label} needs attention`
-              : `${actionable.length} recovery signals need attention`}
+              ? (isButton ? 'Nutrient check' : isNote ? `${worst.label}: quick check` : `${worst.label} needs attention`)
+              : (isButton ? `${actionable.length} nutrient notes` : isNote ? `${actionable.length} recovery notes to review` : `${actionable.length} recovery signals need attention`)}
           </Text>
-          {worst.detail ? (
-            <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }} numberOfLines={1}>
+          {!isButton && worst.detail ? (
+            <Text style={{ fontSize: isNote ? 10 : 11, color: tc.textMuted, marginTop: 2 }} numberOfLines={isNote ? 2 : 1}>
               {worst.detail}
             </Text>
           ) : null}
         </View>
-        <Ionicons name="chevron-forward" size={14} color={tc.textMuted} />
+        {!isButton ? <Ionicons name="chevron-forward" size={isNote ? 12 : 14} color={tc.textMuted} /> : null}
       </TouchableOpacity>
 
       <FuelingRecoveryModal

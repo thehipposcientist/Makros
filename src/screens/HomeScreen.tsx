@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager, Easing } from 'react-native';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -1672,6 +1672,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     if (!authToken) return;
     const current = hydration?.ounces ?? 0;
     const next = Math.max(0, Math.round((current + deltaOz) * 10) / 10);
+    setHydrationLoading(true);
+    setHydration(prev => prev
+      ? { ...prev, ounces: next }
+      : { date: todayKey(), ounces: next, target_ounces: 64 });
+    try {
+      const result = await logHydration(authToken, next);
+      setHydration(prev => ({
+        date: result.date,
+        ounces: result.ounces,
+        target_ounces: prev?.target_ounces ?? hydration?.target_ounces ?? 64,
+      }));
+    } catch {
+      setHydration(prev => prev ? { ...prev, ounces: current } : prev);
+      Alert.alert('Hydration not saved', 'Could not update water intake right now.');
+    } finally {
+      setHydrationLoading(false);
+    }
+  }, [authToken, hydration?.ounces, hydration?.target_ounces]);
+
+  const handleHydrationSet = useCallback(async (ounces: number) => {
+    if (!authToken) return;
+    const current = hydration?.ounces ?? 0;
+    const next = Math.max(0, Math.round(ounces * 10) / 10);
     setHydrationLoading(true);
     setHydration(prev => prev
       ? { ...prev, ounces: next }
@@ -6405,7 +6428,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               onRequestClose={() => setShowReadiness(false)}
             >
               <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.82)', justifyContent: 'center', alignItems: 'center', padding: 20 }}>
-                <TouchableOpacity style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }} activeOpacity={1} onPress={() => setShowReadiness(false)} />
                 <View style={{ width: '100%', maxHeight: '85%' }} pointerEvents="box-none">
                   <ScrollView scrollEnabled showsVerticalScrollIndicator={false}>
                     {(() => {
@@ -6413,17 +6435,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       const todayScheduleItemR = schedule?.find(s => dateKey(s.date) === todayKey()) ?? schedule?.[0];
                       const todaysFocusR = todayScheduleItemR?.workout?.focus ?? workoutPlan?.days?.[0]?.focus ?? null;
                       return (
-                        <View>
+                        <View style={{ position: 'relative', paddingTop: 2 }}>
                           <TouchableOpacity
                             onPress={() => setShowReadiness(false)}
                             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                             style={{
-                              alignSelf: 'flex-end', marginBottom: 8,
-                              width: 30, height: 30, borderRadius: 15,
-                              backgroundColor: 'rgba(255,255,255,0.18)',
+                              position: 'absolute', top: 12, right: 12, zIndex: 10,
+                              width: 32, height: 32, borderRadius: 16,
+                              backgroundColor: themeColors.background + 'E6',
+                              borderWidth: 1, borderColor: themeColors.border + 'AA',
                               alignItems: 'center', justifyContent: 'center',
                             }}>
-                            <Ionicons name="close" size={18} color="#fff" />
+                            <Ionicons name="close" size={18} color={themeColors.textPrimary} />
                           </TouchableOpacity>
                           <TrainingReadinessCard
                             authToken={authToken ?? ''}
@@ -6434,6 +6457,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             todaysFocus={todaysFocusR}
                             workoutDone={todayDone}
                             defaultExpanded
+                            lockedExpanded
                             initialPrep={bgPrepDataRef.current}
                             onScoreComputed={(score, label) => {
                               canonicalPrepRef.current = { score, label, computedAt: Date.now() };
@@ -7058,6 +7082,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           {adjustedDailyTarget.note ? ` · ${adjustedDailyTarget.note}` : ''}
                         </Text>
                       )}
+                      {isToday && authToken ? (
+                        <View style={{ marginTop: 7 }}>
+                          <FuelingRecoveryCard authToken={authToken} themeName={userProfile.themePreference} variant="button" />
+                        </View>
+                      ) : null}
                     </View>
                     {/* Per-day nutrition score badge */}
                     {(() => {
@@ -7074,59 +7103,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </TouchableOpacity>
 
                   {isToday && authToken && (
-                    <View style={[
-                      styles.mealHydrationPanel,
-                      {
-                        backgroundColor: MEALS_ACCENT + '0F',
-                        borderColor: MEALS_ACCENT + '33',
-                      },
-                    ]}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                        <View style={{
-                          width: 32, height: 32, borderRadius: 16,
-                          backgroundColor: MEALS_ACCENT + '18',
-                          alignItems: 'center', justifyContent: 'center',
-                        }}>
-                          <Ionicons name="water-outline" size={18} color={MEALS_ACCENT} />
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ fontSize: 12, fontWeight: '900', color: themeColors.textPrimary }}>Hydration</Text>
-                          <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 1 }}>
-                            {hydrationOunces} / {hydrationTarget} oz · {hydrationPct}% complete
-                          </Text>
-                        </View>
-                        {hydrationLoading && <ActivityIndicator size="small" color={MEALS_ACCENT} />}
-                      </View>
-                      <View style={{
-                        height: 6,
-                        borderRadius: 999,
-                        backgroundColor: themeColors.surface,
-                        overflow: 'hidden',
-                        marginTop: 10,
-                      }}>
-                        <View style={{ width: `${hydrationPct}%`, height: '100%', backgroundColor: MEALS_ACCENT }} />
-                      </View>
-                      <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
-                        {[8, 16, 24].map(oz => (
-                          <TouchableOpacity
-                            key={oz}
-                            onPress={() => handleHydrationDelta(oz)}
-                            disabled={hydrationLoading}
-                            activeOpacity={0.82}
-                            style={{
-                              flex: 1,
-                              paddingVertical: 8,
-                              borderRadius: 10,
-                              backgroundColor: themeColors.surface,
-                              borderWidth: 1,
-                              borderColor: MEALS_ACCENT + '3D',
-                              alignItems: 'center',
-                            }}>
-                            <Text style={{ fontSize: 12, fontWeight: '900', color: MEALS_ACCENT }}>+{oz} oz</Text>
-                          </TouchableOpacity>
-                        ))}
-                      </View>
-                    </View>
+                    <HydrationTodayPanel
+                      ounces={hydrationOunces}
+                      target={hydrationTarget}
+                      pct={hydrationPct}
+                      loading={hydrationLoading}
+                      colors={themeColors}
+                      onDelta={handleHydrationDelta}
+                      onSet={handleHydrationSet}
+                    />
                   )}
 
                   <AnimatedCollapsible visible={isExpanded}>
@@ -7219,7 +7204,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             />
                           );
                         })()}
-                        <FuelingRecoveryCard authToken={authToken} themeName={userProfile.themePreference} />
                         <AdaptiveMacroCard
                           authToken={authToken}
                           themeName={userProfile.themePreference}
@@ -10435,6 +10419,229 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
             </TouchableOpacity>
           );
         })}
+      </View>
+    </View>
+  );
+}
+
+function HydrationTodayPanel({
+  ounces,
+  target,
+  pct,
+  loading,
+  colors,
+  onDelta,
+  onSet,
+}: {
+  ounces: number;
+  target: number;
+  pct: number;
+  loading: boolean;
+  colors: ReturnType<typeof getTheme>['colors'];
+  onDelta: (deltaOz: number) => void;
+  onSet: (ounces: number) => void;
+}) {
+  const fillAnim = useRef(new Animated.Value(pct / 100)).current;
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const rippleAnim = useRef(new Animated.Value(0)).current;
+  const burstAnim = useRef(new Animated.Value(0)).current;
+  const previousOunces = useRef(ounces);
+  const [manualOunces, setManualOunces] = useState(String(ounces || ''));
+  const [burstLabel, setBurstLabel] = useState('');
+
+  useEffect(() => {
+    setManualOunces(String(ounces || ''));
+  }, [ounces]);
+
+  useEffect(() => {
+    Animated.timing(fillAnim, {
+      toValue: Math.max(0, Math.min(1, pct / 100)),
+      duration: 420,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    }).start();
+  }, [fillAnim, pct]);
+
+  useEffect(() => {
+    if (previousOunces.current === ounces) return;
+    const delta = ounces - previousOunces.current;
+    previousOunces.current = ounces;
+    setBurstLabel(delta > 0 ? `+${Math.round(delta)} oz` : 'Updated');
+    rippleAnim.setValue(0);
+    burstAnim.setValue(0);
+    Animated.sequence([
+      Animated.parallel([
+        Animated.spring(pulseAnim, { toValue: 1.16, friction: 5, tension: 190, useNativeDriver: true }),
+        Animated.timing(rippleAnim, {
+          toValue: 1,
+          duration: 620,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.sequence([
+          Animated.timing(burstAnim, {
+            toValue: 1,
+            duration: 180,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: true,
+          }),
+          Animated.timing(burstAnim, {
+            toValue: 0,
+            duration: 520,
+            easing: Easing.in(Easing.cubic),
+            useNativeDriver: true,
+          }),
+        ]),
+      ]),
+      Animated.spring(pulseAnim, { toValue: 1, friction: 6, tension: 140, useNativeDriver: true }),
+    ]).start();
+  }, [burstAnim, ounces, pulseAnim, rippleAnim]);
+
+  const fillWidth = fillAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0%', '100%'],
+  });
+  const rippleScale = rippleAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0.55, 2.6],
+  });
+  const rippleOpacity = rippleAnim.interpolate({
+    inputRange: [0, 0.65, 1],
+    outputRange: [0.28, 0.12, 0],
+  });
+  const burstTranslateY = burstAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [8, -16],
+  });
+
+  const submitManual = () => {
+    const parsed = Number(manualOunces.replace(/[^0-9.]/g, ''));
+    if (!Number.isFinite(parsed)) return;
+    onSet(parsed);
+  };
+
+  return (
+    <View style={[
+      styles.mealHydrationPanel,
+      {
+        backgroundColor: MEALS_ACCENT + '0F',
+        borderColor: MEALS_ACCENT + '33',
+      },
+    ]}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+        <Animated.View style={{
+          width: 32, height: 32, borderRadius: 16,
+          backgroundColor: MEALS_ACCENT + '18',
+          alignItems: 'center', justifyContent: 'center',
+          transform: [{ scale: pulseAnim }],
+        }}>
+          <Animated.View style={{
+            position: 'absolute',
+            width: 30,
+            height: 30,
+            borderRadius: 15,
+            backgroundColor: MEALS_ACCENT,
+            opacity: rippleOpacity,
+            transform: [{ scale: rippleScale }],
+          }} />
+          <Ionicons name="water-outline" size={18} color={MEALS_ACCENT} />
+        </Animated.View>
+        <View style={{ flex: 1 }}>
+          <Text style={{ fontSize: 12, fontWeight: '900', color: colors.textPrimary }}>Hydration</Text>
+          <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 1 }}>
+            {ounces} / {target} oz · {pct}% complete
+          </Text>
+        </View>
+        {loading && <ActivityIndicator size="small" color={MEALS_ACCENT} />}
+      </View>
+      <View style={{ position: 'relative' }}>
+        <Animated.View pointerEvents="none" style={{
+          position: 'absolute',
+          right: 0,
+          top: -12,
+          opacity: burstAnim,
+          transform: [{ translateY: burstTranslateY }],
+        }}>
+          <Text style={{ fontSize: 10, fontWeight: '900', color: MEALS_ACCENT }}>{burstLabel}</Text>
+        </Animated.View>
+        <View style={{
+          height: 8,
+          borderRadius: 999,
+          backgroundColor: colors.surface,
+          overflow: 'hidden',
+          marginTop: 10,
+        }}>
+        <Animated.View style={{ width: fillWidth, height: '100%', backgroundColor: MEALS_ACCENT }} />
+        </View>
+      </View>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 }}>
+        <View style={{
+          width: 82,
+          minHeight: 32,
+          borderRadius: 10,
+          backgroundColor: colors.surface,
+          borderWidth: 1,
+          borderColor: colors.border,
+          flexDirection: 'row',
+          alignItems: 'center',
+          paddingHorizontal: 8,
+        }}>
+          <TextInput
+            value={manualOunces}
+            onChangeText={setManualOunces}
+            onSubmitEditing={submitManual}
+            keyboardType="decimal-pad"
+            returnKeyType="done"
+            editable={!loading}
+            selectTextOnFocus
+            style={{
+              flex: 1,
+              minWidth: 0,
+              paddingVertical: 5,
+              fontSize: 12,
+              fontWeight: '900',
+              color: colors.textPrimary,
+            }}
+          />
+          <Text style={{ fontSize: 9, fontWeight: '800', color: colors.textMuted }}>oz</Text>
+        </View>
+        <PressableScale
+          onPress={submitManual}
+          disabled={loading}
+          scaleDown={0.94}
+          style={{
+            minHeight: 32,
+            paddingHorizontal: 10,
+            borderRadius: 10,
+            backgroundColor: MEALS_ACCENT,
+            alignItems: 'center',
+            justifyContent: 'center',
+            opacity: loading ? 0.55 : 1,
+          }}>
+          <Text style={{ fontSize: 10, fontWeight: '900', color: '#fff' }}>Set</Text>
+        </PressableScale>
+        {[8, 16, 24].map(oz => (
+          <PressableScale
+            key={oz}
+            onPress={() => onDelta(oz)}
+            disabled={loading}
+            scaleDown={0.94}
+            style={{
+              flex: 1,
+              minHeight: 32,
+              paddingVertical: 7,
+              paddingHorizontal: 4,
+              borderRadius: 10,
+              backgroundColor: colors.surface,
+              borderWidth: 1,
+              borderColor: MEALS_ACCENT + '3D',
+              alignItems: 'center',
+              justifyContent: 'center',
+              opacity: loading ? 0.55 : 1,
+            }}>
+            <Text style={{ fontSize: 10, fontWeight: '900', color: MEALS_ACCENT }} numberOfLines={1}>+{oz}</Text>
+          </PressableScale>
+        ))}
       </View>
     </View>
   );

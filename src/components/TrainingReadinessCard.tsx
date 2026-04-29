@@ -154,13 +154,14 @@ interface Props {
    *  the blank → pop-in flash when the modal opens a fresh instance. */
   initialPrep?: PreparednessResult | null;
   defaultExpanded?: boolean;
+  lockedExpanded?: boolean;
   /** When true the card reframes from "are you ready?" to "how is recovery
    *  going?" — different dial label, copy, and muscle-bar framing. */
   workoutDone?: boolean;
 }
 
 export default function TrainingReadinessCard({
-  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed, onDataComputed, initialPrep, defaultExpanded, workoutDone,
+  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed, onDataComputed, initialPrep, defaultExpanded, lockedExpanded, workoutDone,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -168,11 +169,10 @@ export default function TrainingReadinessCard({
   const [prep, setPrep] = useState<PreparednessResult | null>(initialPrep ?? null);
   const [fatigue, setFatigue] = useState<FatigueScore | null>(null);
   const [hasAppleHealth, setHasAppleHealth] = useState(false);
-  const [loading, setLoading] = useState(!initialPrep);
   const [expanded, setExpanded] = useState(defaultExpanded ?? false);
+  const isExpanded = lockedExpanded ? true : expanded;
 
   const load = useCallback(async () => {
-    setLoading(true);
     try {
       // PERMANENT FIX for phone↔watch readiness drift: fetch from
       // the server, render the response directly, push it unchanged
@@ -331,8 +331,6 @@ export default function TrainingReadinessCard({
       } catch { /* watch bridge optional */ }
     } catch {
       setPrep(null);
-    } finally {
-      setLoading(false);
     }
   }, [authToken, parentSummary, age, proteinTarget, calorieTarget, todaysFocus]);
 
@@ -387,6 +385,7 @@ export default function TrainingReadinessCard({
   );
 
   const toggle = () => {
+    if (lockedExpanded) return;
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setExpanded(e => !e);
   };
@@ -424,8 +423,8 @@ export default function TrainingReadinessCard({
 
   return (
     <TouchableOpacity
-      activeOpacity={0.85}
-      onPress={toggle}
+      activeOpacity={lockedExpanded ? 1 : 0.85}
+      onPress={lockedExpanded ? undefined : toggle}
       style={{
         backgroundColor: tc.surface, borderRadius: radius.lg, padding: 14, marginBottom: 12,
         borderWidth: 1,
@@ -488,7 +487,7 @@ export default function TrainingReadinessCard({
               Today's training readiness · {prep.signalsPresent}/{prep.signalsTotal} signals
             </Text>
           )}
-          {!expanded && (
+          {!isExpanded && (
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 3 }} numberOfLines={1}>
               {workoutDone
                 ? (relevantMuscles.length > 0
@@ -500,10 +499,12 @@ export default function TrainingReadinessCard({
             </Text>
           )}
         </View>
-        <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
+        {!lockedExpanded ? (
+          <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
+        ) : null}
       </View>
 
-      {expanded && (
+      {isExpanded && (
         <View style={{ marginTop: 10, gap: 4 }}>
           {/* Muscle-specific readiness for today's focus */}
           {relevantMuscles.length > 0 && (
