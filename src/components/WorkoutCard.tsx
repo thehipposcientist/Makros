@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Pressable, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { WorkoutDay, AppThemeName } from '../types';
-import { getTheme, radius } from '../constants/theme';
+import { elevations, getTheme, radius, typography } from '../constants/theme';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
 import { shouldHideWeight } from '../utils/exerciseDisplay';
@@ -111,7 +111,7 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
     return null;
   };
 
-  const { estimatedSeconds, estimatedMinutes } = useMemo(() => {
+  const { estimatedMinutes } = useMemo(() => {
     // Per-exercise estimate accounts for THREE things the old formula missed:
     //   1. Working time per set is ~55s on a real strength set (rack/unrack
     //      + slower tempo on heavy lifts + form check). Was 45s.
@@ -509,16 +509,17 @@ const chipStyles = StyleSheet.create({
 
 const createStyles = (
   c: ReturnType<typeof getTheme>['colors'],
-  _s: ReturnType<typeof getTheme>['sections']['workout'],
+  s: ReturnType<typeof getTheme>['sections']['workout'],
 ) => StyleSheet.create({
 
   card: {
     backgroundColor: c.surface,
-    borderRadius: radius.xl,
+    borderRadius: 22,
     marginBottom: 12,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: c.border,
+    ...elevations.card,
   },
 
   // Stats strip — plain inline row, no colored background. Mirrors the
@@ -528,23 +529,27 @@ const createStyles = (
     flexDirection: 'row',
     alignItems: 'center',
     gap: 14,
-    paddingHorizontal: 16,
-    paddingTop: 14,
-    paddingBottom: 6,
+    marginHorizontal: 14,
+    marginTop: 14,
+    marginBottom: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    backgroundColor: s.soft,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: s.strong + '24',
   },
-  statsDivider: { width: 1, height: 12 },
+  statsDivider: { width: 1, height: 14 },
 
   warmupHint: {
-    fontSize: 10,
-    fontWeight: '500',
+    ...typography.micro,
     color: c.textMuted,
-    paddingHorizontal: 16,
-    paddingBottom: 6,
-    fontStyle: 'italic',
+    paddingHorizontal: 18,
+    paddingBottom: 8,
   },
 
   // Body
-  body: { paddingHorizontal: 16, paddingTop: 4, paddingBottom: 8 },
+  body: { paddingHorizontal: 16, paddingTop: 2, paddingBottom: 10 },
 
   // Exercise row
   exRow: {
@@ -556,7 +561,7 @@ const createStyles = (
   exNum: {
     width: 28,
     height: 28,
-    borderRadius: radius.sm,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 1,
@@ -564,8 +569,8 @@ const createStyles = (
   },
   exNumText:   { fontSize: 10, fontWeight: '900', color: '#fff', letterSpacing: 0.5 },
   exInfo:      { flex: 1, gap: 3 },
-  exName:      { fontSize: 14, fontWeight: '700', lineHeight: 19 },
-  exEquipment: { fontSize: 11, fontWeight: '500', marginBottom: 6 },
+  exName:      { ...typography.cardTitle, lineHeight: 19 },
+  exEquipment: { ...typography.micro, marginBottom: 6 },
   exChips:     { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
 
   videoChip: {
@@ -574,8 +579,9 @@ const createStyles = (
     gap: 4,
     borderWidth: 1,
     borderRadius: radius.full,
-    paddingHorizontal: 9,
-    paddingVertical: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    backgroundColor: c.surfaceRaised,
   },
-  videoChipText: { fontSize: 11, fontWeight: '700' },
+  videoChipText: { ...typography.micro, fontWeight: '700' },
 });

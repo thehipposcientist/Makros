@@ -193,8 +193,9 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
             DayArchetype.LIFT_LEGS_HEAVY,
             DayArchetype.LIFT_PUSH_VOLUME, DayArchetype.LIFT_PULL_VOLUME,
             DayArchetype.LIFT_LEGS_VOLUME, DayArchetype.LIFT_FULL_BODY_STRENGTH,
-            # Lift + same-day cardio — preferred over dedicated cardio
-            # days for body_recomp to keep lift-day discipline high.
+            # Lift + same-day cardio — preferred for body_recomp to keep
+            # lift-day discipline high while still delivering a cardio
+            # component inside the week.
             DayArchetype.LIFT_PUSH_PLUS_CARDIO,
             DayArchetype.LIFT_PULL_PLUS_CARDIO,
             DayArchetype.LIFT_UPPER_PLUS_CARDIO,
@@ -207,18 +208,19 @@ _PROFILE_TABLE: dict[str, GoalProfile] = {
         ),
         # Route through lifting_plus_cardio instead of pure lifting so
         # the 15% conditioning fraction in `mix` actually materializes
-        # as real cardio days. Previously body_recomp's profile
+        # as cardio components. Previously body_recomp's profile
         # *claimed* conditioning + mobility archetypes in
         # `allowed_archetypes` but the lifting-only recipe generator
         # ignored them — the plan never had a single cardio day
         # regardless of day count. The `_lifting_plus_cardio_recipe`
-        # reads `mix.conditioning` and reserves cardio days
-        # accordingly (1 at 4-5 days, 2 at 6+).
+        # reads `mix.conditioning` and reserves cardio components
+        # accordingly, often as PLUS_CARDIO finishers so recovery and
+        # lifting frequency are preserved.
         planner_mode="lifting_plus_cardio",
         stable_lifts=True,
         notes=(
             "Balanced hypertrophy + conditioning. Lifting backbone "
-            "with 1-2 dedicated cardio days per week at 4+ days/week."
+            "with cardio components at 4+ days/week, often as same-day finishers."
         ),
     ),
 

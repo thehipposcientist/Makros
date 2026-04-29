@@ -1004,7 +1004,8 @@ def generate_full_week(
             pin_day_index=body.pin_day_index,
             pin_focus=body.pin_focus,
             preferred_split=body.preferred_split,
-            prefer_swap=using_current_days,
+            prefer_swap=using_current_days
+            and (body.preferred_split or "").lower().strip() != "bro",
         )
         target_idx = decision.target_idx
 

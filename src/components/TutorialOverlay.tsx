@@ -261,7 +261,7 @@ function buildSteps(tier: TutorialTier, tc: any): Step[] {
   const healthStep: Step = {
     icon: 'heart-outline',
     title: 'Connect Apple Health',
-    body: 'Sleep, RHR, HRV, weight, and workout data make every recommendation sharper. Connect from Account → Apple Health when you\'re ready.',
+    body: 'Apple Health is optional. Connect it from Account when you want sleep, HRV, weight, and workout context inside Thallo.',
     bullets: [
       { icon: 'moon-outline', text: 'Sleep tracking feeds your readiness score', tint: tc.primary },
       { icon: 'fitness-outline', text: 'Workout calories from your Watch land in Progress', tint: tc.success },
@@ -330,7 +330,7 @@ function buildSteps(tier: TutorialTier, tc: any): Step[] {
     {
       icon: 'watch-outline',
       title: 'Apple Health + Watch',
-      body: 'Connect Apple Health and pair your Watch for the full experience. Workouts, sleep, HR — everything flows in.',
+      body: 'Apple Health and Watch sync are optional enhancements. Connect them when you want more sleep, heart-rate, and workout context in the app.',
       bullets: [
         { icon: 'heart-outline', text: 'Sleep, HRV, RHR feed readiness daily', tint: tc.primary },
         { icon: 'fitness-outline', text: 'Watch tracks heart rate during sessions', tint: tc.warning },

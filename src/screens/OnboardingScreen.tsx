@@ -35,7 +35,7 @@ import {
 } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal } from '../services/api';
-import { isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
+import { APPLE_HEALTH_PERMISSION_COPY, isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistHealthEnabled } from '../utils/workoutHistory';
 import {
   LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES,
@@ -1863,8 +1863,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const renderAppleHealthStep = () => (
     <View>
-      <Text style={styles.stepTitle}>Do you use an Apple Watch?</Text>
-      <Text style={styles.hint}>Connect Apple Health to unlock recovery + readiness from your HR, sleep, and activity.</Text>
+      <Text style={styles.stepTitle}>Apple Health is optional</Text>
+      <Text style={styles.hint}>If you connect it, Thallo reads sleep, resting heart rate, HRV, steps, workouts, weight, and active energy, and writes completed workouts back to Apple Health.</Text>
 
       <View style={{ gap: 12, marginTop: 16 }}>
         <TouchableOpacity
@@ -1874,25 +1874,37 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               Alert.alert('Not Available', 'Apple Health is not available on this device.');
               return;
             }
-            const granted = await requestHealthPermissions();
-            if (granted) {
-              setAppleHealthEnabled(true);
-              await persistHealthEnabled(true);
-              // Backfill the last 30 days of HK data so weekly_review +
-              // recovery_flags have history to reason about from day one
-              // (otherwise the server's daily_health_snapshots stays
-              // empty until the user opens the app for 30 separate days).
-              import('../services/healthDataSummary')
-                .then(({ backfillSnapshotsToBackend }) => backfillSnapshotsToBackend(30))
-                .catch(() => undefined);
-            } else {
-              Alert.alert('Permission Needed', 'Please enable Health access in Settings > Privacy > Health > Thallo.');
-            }
+            Alert.alert(
+              APPLE_HEALTH_PERMISSION_COPY.title,
+              APPLE_HEALTH_PERMISSION_COPY.body,
+              [
+                { text: 'Not now', style: 'cancel' },
+                {
+                  text: 'Continue',
+                  onPress: async () => {
+                    const granted = await requestHealthPermissions();
+                    if (granted) {
+                      setAppleHealthEnabled(true);
+                      await persistHealthEnabled(true);
+                      // Backfill the last 30 days of HK data so weekly_review +
+                      // recovery_flags have history to reason about from day one
+                      // (otherwise the server's daily_health_snapshots stays
+                      // empty until the user opens the app for 30 separate days).
+                      import('../services/healthDataSummary')
+                        .then(({ backfillSnapshotsToBackend }) => backfillSnapshotsToBackend(30))
+                        .catch(() => undefined);
+                    } else {
+                      Alert.alert('Apple Health not connected', APPLE_HEALTH_PERMISSION_COPY.denied);
+                    }
+                  },
+                },
+              ],
+            );
           }}>
           <Text style={styles.chipIcon}>⌚</Text>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.chipWideLabel, appleHealthEnabled && styles.chipWideLabelSelected]}>Yes, connect Apple Health</Text>
-            <Text style={styles.chipWideDesc}>Reads heart rate, steps, sleep, and workouts</Text>
+            <Text style={[styles.chipWideLabel, appleHealthEnabled && styles.chipWideLabelSelected]}>Connect Apple Health</Text>
+            <Text style={styles.chipWideDesc}>Optional: reads sleep, HRV, steps, workouts, weight, and writes completed workouts</Text>
           </View>
           {appleHealthEnabled && <Ionicons name="checkmark-circle" size={20} />}
         </TouchableOpacity>
@@ -1906,7 +1918,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           <Text style={styles.chipIcon}>📱</Text>
           <View style={{ flex: 1 }}>
             <Text style={[styles.chipWideLabel, !appleHealthEnabled && styles.chipWideLabelSelected]}>No, skip for now</Text>
-            <Text style={styles.chipWideDesc}>You can enable this later in Account settings</Text>
+            <Text style={styles.chipWideDesc}>Keep going without it. You can connect later in Account settings.</Text>
           </View>
         </TouchableOpacity>
       </View>

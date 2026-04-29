@@ -2331,6 +2331,8 @@ PODS:
     - Yoga
   - ThalloHealthKit (1.0.0):
     - ExpoModulesCore
+  - ThalloLiveActivity (1.0.0):
+    - ExpoModulesCore
   - ThalloWatchBridge (1.0.0):
     - ExpoModulesCore
   - Yoga (0.0.0)
@@ -2451,6 +2453,7 @@ DEPENDENCIES:
   - RNSVG (from `../node_modules/react-native-svg`)
   - RNWorklets (from `../node_modules/react-native-worklets`)
   - ThalloHealthKit (from `../modules/thallo-healthkit/ios`)
+  - ThalloLiveActivity (from `../modules/thallo-live-activity/ios`)
   - ThalloWatchBridge (from `../modules/thallo-watch-bridge/ios`)
   - Yoga (from `../node_modules/react-native/ReactCommon/yoga`)
 
@@ -2679,6 +2682,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/react-native-worklets"
   ThalloHealthKit:
     :path: "../modules/thallo-healthkit/ios"
+  ThalloLiveActivity:
+    :path: "../modules/thallo-live-activity/ios"
   ThalloWatchBridge:
     :path: "../modules/thallo-watch-bridge/ios"
   Yoga:
@@ -2795,6 +2800,7 @@ SPEC CHECKSUMS:
   RNSVG: 31d6639663c249b7d5abc9728dde2041eb2a3c34
   RNWorklets: 76fce72926e28e304afb44f0da23b2d24f2c1fa0
   ThalloHealthKit: f8144d9612c6ebde942ccad53b57c061404a5fe0
+  ThalloLiveActivity: 93185995d94c62566049d2d9386501b77d0966a6
   ThalloWatchBridge: cfe7450d3ffd602c16946b7f3130254a704af4c0
   Yoga: 5934998fbeaef7845dbf698f698518695ab4cd1a
   ZXingObjC: 8898711ab495761b2dbbdec76d90164a6d7e14c5

@@ -39,7 +39,7 @@
       </dict>
     </array>
     <key>CFBundleVersion</key>
-    <string>13</string>
+    <string>140</string>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
     <key>LSMinimumSystemVersion</key>
@@ -58,9 +58,9 @@
     <key>NSFaceIDUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to use Face ID</string>
     <key>NSHealthShareUsageDescription</key>
-    <string>Thallo reads your resting heart rate, steps, workouts, sleep, and active energy from Apple Health to calculate your fitness score and recovery status.</string>
+    <string>Thallo reads your sleep, resting heart rate, heart rate variability, steps, workouts, weight, and active energy from Apple Health so you can see readiness, recovery, and progress trends in the app.</string>
     <key>NSHealthUpdateUsageDescription</key>
-    <string>Thallo saves your completed workouts to Apple Health so they appear in your health timeline.</string>
+    <string>Thallo writes your completed workouts to Apple Health so they appear alongside your other activity.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to access your microphone</string>
     <key>NSPhotoLibraryUsageDescription</key>

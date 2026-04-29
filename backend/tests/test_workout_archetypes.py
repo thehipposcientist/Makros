@@ -104,9 +104,9 @@ def test_athletic_recipe_mixes_strength_power_conditioning() -> None:
 
 def test_fat_loss_4d_has_conditioning_day() -> None:
     """Regression from user complaint: fat_loss at 4+ days used to be
-    all-lifting. The `fat_loss_mix` recipe must inject at least one
-    conditioning day."""
-    print("\n[test] fat_loss 4d includes a conditioning day")
+    all-lifting. The recipe must inject at least one cardio component,
+    either as a dedicated conditioning day or a PLUS_CARDIO finisher."""
+    print("\n[test] fat_loss 4d includes a cardio component")
     from app.services.workout.goal_profiles import goal_profile_for
     from app.services.workout.weekly_recipe import generate_weekly_recipe
     from app.services.workout.archetypes import ARCHETYPE_META
@@ -115,9 +115,10 @@ def test_fat_loss_4d_has_conditioning_day() -> None:
     cond_days = sum(
         1 for a in recipe
         if ARCHETYPE_META[a].category in ("cond", "hybrid")
+        or a.value.endswith("_plus_cardio")
     )
     assert cond_days >= 1, (
-        f"fat_loss 4d should have at least 1 conditioning day, got 0. "
+        f"fat_loss 4d should have at least 1 cardio component, got 0. "
         f"recipe={[a.value for a in recipe]}"
     )
     _ok(f"recipe={[a.value for a in recipe]}")
@@ -421,13 +422,20 @@ def test_cardio_classification_is_single_source_of_truth() -> None:
         "movement_pattern": "cardio",
         "is_compound": False,
     })
-    # is_compound fallback for plain names
+    # is_compound fallback for plain names with no steady/easy keyword
     assert is_interval_cardio({
-        "name": "Treadmill",
+        "name": "Generic Erg",
         "exercise_type": "cardio",
         "movement_pattern": "cardio",
         "is_compound": True,
     })
+    # Steady machine names override the legacy flag so Zone 2 picks stay sane
+    assert classify_cardio({
+        "name": "Treadmill",
+        "exercise_type": "cardio",
+        "movement_pattern": "cardio",
+        "is_compound": True,
+    }) == "steady"
     _ok("classify_cardio handles name, easy, intervals, fallback")
 
 
@@ -521,6 +529,27 @@ def test_recent_focus_rotation_avoids_legs_back_to_back() -> None:
         f"expected Upper as new day 0, got {rotated[0].value}"
     )
     _ok(f"rotated: {[a.value for a in original]} → {[a.value for a in rotated]}")
+
+
+def test_recent_lower_family_avoids_ppl_legs() -> None:
+    """Cross-split continuity: a stored Upper/Lower "Lower" completion
+    must still protect a PPL "Legs" day from appearing first."""
+    print("\n[test] recent lower family also avoids PPL legs")
+    from app.services.workout.weekly_recipe import _rotate_recipe_to_avoid_recent
+    from app.services.workout.archetypes import DayArchetype
+
+    original = [
+        DayArchetype.LIFT_LEGS,
+        DayArchetype.LIFT_PUSH,
+        DayArchetype.LIFT_PULL,
+    ]
+    rotated = _rotate_recipe_to_avoid_recent(
+        original, ("lower",), mode="lifting",
+    )
+    assert rotated[0] != DayArchetype.LIFT_LEGS, (
+        f"recent lower should avoid PPL legs day0; got {rotated[0].value}"
+    )
+    _ok(f"recent lower rotated day0 to {rotated[0].value}")
 
 
 def test_rotation_avoids_two_recent_buckets_when_possible() -> None:
@@ -629,21 +658,21 @@ def test_recent_focus_no_op_when_day0_already_safe() -> None:
     _ok("Upper-first recipe with recent lower_body → unchanged")
 
 
-def test_body_recomp_has_real_cardio_days_at_4plus_days() -> None:
+def test_body_recomp_has_cardio_components_at_4plus_days() -> None:
     """Regression: body_recomp at 4+ days/week used to be pure
     upper/lower with zero cardio, even though its mix declared 15%
-    conditioning. It's now routed through `lifting_plus_cardio`
-    mode which reserves 1 cardio day at 4-5 days and 2 at 6+."""
-    print("\n[test] body_recomp 4+ days actually schedules cardio")
+    conditioning. It now routes through `lifting_plus_cardio`, where
+    the cardio component may be dedicated or merged into PLUS_CARDIO."""
+    print("\n[test] body_recomp 4+ days schedules cardio components")
     from app.services.workout.planner import PlannerInputs, generate_workout_plan
     from app.seed_exercises_data import SEED_EXERCISES
 
     eq = ("barbell", "dumbbells", "flat_bench", "squat_rack", "treadmill", "stationary_bike")
     cases = [
         (3, 0),  # 3 days still pure lifting
-        (4, 1),  # 4 days gets 1 cardio
-        (5, 1),  # 5 days gets 1 cardio (PPL→UL auto-convert @ 4 lifts keeps cardio)
-        (6, 0),  # 6 days: cardio dropped to bump lifts 5→6 for PPL balance (2P/2Pu/2L)
+        (4, 1),
+        (5, 1),
+        (6, 1),
     ]
     for days, expected_cardio in cases:
         inputs = PlannerInputs(
@@ -654,13 +683,14 @@ def test_body_recomp_has_real_cardio_days_at_4plus_days() -> None:
         cardio_count = sum(
             1 for d in plan["workout_plan"]["days"]
             if d["category"] in ("cond", "hybrid")
+            or str(d.get("archetype", "")).endswith("_plus_cardio")
         )
         assert cardio_count == expected_cardio, (
-            f"body_recomp {days}d: expected {expected_cardio} cardio days, "
+            f"body_recomp {days}d: expected {expected_cardio} cardio components, "
             f"got {cardio_count} — "
             f"{[d['category'] for d in plan['workout_plan']['days']]}"
         )
-    _ok("body_recomp 3/4/5/6 days → 0/1/1/0 cardio days (6d drops cardio for PPL balance)")
+    _ok("body_recomp 3/4/5/6 days → 0/1/1/1 cardio components")
 
 
 def test_strength_does_not_get_cardio_days() -> None:
@@ -769,8 +799,8 @@ def test_most_recent_completed_focus_reads_workout_completion_table() -> None:
     assert buckets == ["lower_body", "upper_body"], (
         f"expected ['lower_body', 'upper_body'], got {buckets}"
     )
-    assert families == ["legs", "upper"], (
-        f"expected ['legs', 'upper'], got {families}"
+    assert families == ["lower", "upper"], (
+        f"expected ['lower', 'upper'], got {families}"
     )
     _ok(f"buckets = {buckets}, families = {families} — reads WorkoutCompletion via normalizer")
 
@@ -951,11 +981,12 @@ def _run_all() -> int:
         test_cardio_classification_is_single_source_of_truth,
         test_focus_normalization_handles_variants,
         test_recent_focus_rotation_avoids_legs_back_to_back,
+        test_recent_lower_family_avoids_ppl_legs,
         test_rotation_avoids_two_recent_buckets_when_possible,
         test_rotation_returns_original_when_no_alternative_exists,
         test_recent_focus_rotation_respects_mode_anchors,
         test_recent_focus_no_op_when_day0_already_safe,
-        test_body_recomp_has_real_cardio_days_at_4plus_days,
+        test_body_recomp_has_cardio_components_at_4plus_days,
         test_strength_does_not_get_cardio_days,
         test_body_recomp_4d_with_recent_legs_via_full_planner,
         test_most_recent_completed_focus_reads_workout_completion_table,

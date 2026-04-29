@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import date, timedelta, timezone, datetime
+import json
 
 from sqlmodel import Session, select, col
 
@@ -37,6 +38,28 @@ def _classify_food(name: str) -> str:
         if kw in lower:
             return "whole"
     return "unknown"
+
+
+def _normalize_meal_text(value: str | None) -> str:
+    return " ".join((value or "").lower().strip().split())
+
+
+def _normalized_item_signature(items: list[dict]) -> str:
+    canonical = []
+    for item in items or []:
+        canonical.append({
+            "name": _normalize_meal_text(str(item.get("name", ""))),
+            "quantity": round(float(item.get("quantity", 0) or 0), 3),
+            "unit": _normalize_meal_text(str(item.get("unit", ""))),
+            "calories": round(float(item.get("calories", 0) or 0), 2),
+            "protein": round(float(item.get("protein", 0) or 0), 2),
+            "carbs": round(float(item.get("carbs", 0) or 0), 2),
+            "fat": round(float(item.get("fat", 0) or 0), 2),
+        })
+    canonical.sort(key=lambda row: (
+        row["name"], row["unit"], row["quantity"], row["calories"], row["protein"], row["carbs"], row["fat"]
+    ))
+    return json.dumps(canonical, separators=(",", ":"), sort_keys=True)
 
 
 # ─── Log a meal from plan check-off ──────────────────────────────────────────
@@ -76,6 +99,46 @@ def log_meal_from_plan(
             resolved_type = MealType.SNACK
 
     resolved_source = MealSource.GENERATED if source == "plan_check" else MealSource.LOGGED
+    incoming_name = _normalize_meal_text(meal_data.get("meal", "Checked meal"))
+    incoming_signature = _normalized_item_signature(meal_data.get("items") or [])
+
+    # Idempotency for flaky networks / repeated meal-check taps:
+    # if the exact same payload has already been logged for this
+    # user/date/type/source, return the existing row instead of adding
+    # another duplicate meal entry.
+    existing_meals = db.exec(
+        select(Meal)
+        .where(Meal.user_id == user_id)
+        .where(Meal.meal_date == meal_date)
+        .where(Meal.meal_type == resolved_type)
+        .where(Meal.source == resolved_source)
+        .order_by(col(Meal.created_at).desc())
+        .limit(10)
+    ).all()
+    if existing_meals:
+        existing_items = db.exec(
+            select(MealItem).where(col(MealItem.meal_id).in_([m.id for m in existing_meals]))
+        ).all()
+        items_by_meal: dict[int, list[MealItem]] = defaultdict(list)
+        for item in existing_items:
+            items_by_meal[item.meal_id].append(item)
+        for existing in existing_meals:
+            if _normalize_meal_text(existing.name) != incoming_name:
+                continue
+            signature = _normalized_item_signature([
+                {
+                    "name": item.food_name,
+                    "quantity": item.quantity,
+                    "unit": item.unit,
+                    "calories": item.calories,
+                    "protein": item.protein_g,
+                    "carbs": item.carbs_g,
+                    "fat": item.fat_g,
+                }
+                for item in items_by_meal.get(existing.id, [])
+            ])
+            if signature == incoming_signature:
+                return {"id": existing.id, "name": existing.name, "meal_date": str(existing.meal_date)}
 
     meal = Meal(
         user_id=user_id,

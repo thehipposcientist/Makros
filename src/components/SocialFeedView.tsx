@@ -30,6 +30,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import type { AppThemeName } from '../types';
+import FadeInView from './FadeInView';
 import {
   FeedItem,
   getSocialFeed,
@@ -184,7 +185,7 @@ export default function SocialFeedView({
     }
   }, [authToken]);
 
-  const renderItem = useCallback(({ item: grouped }: { item: GroupedItem }) => {
+  const renderItem = useCallback(({ item: grouped, index }: { item: GroupedItem; index: number }) => {
     const { workout: item, prs } = grouped;
     const author = item.display_name ?? item.username;
 
@@ -212,6 +213,7 @@ export default function SocialFeedView({
     const photo = item.payload.photo_base64;
 
     return (
+      <FadeInView delay={Math.min(index * 45, 260)} duration={280} slideDistance={10}>
       <View style={styles.card}>
         <View style={styles.cardHeader}>
           <TouchableOpacity
@@ -337,6 +339,7 @@ export default function SocialFeedView({
           </TouchableOpacity>
         </View>
       </View>
+      </FadeInView>
     );
   }, [styles, colors, pendingLikes, onViewAuthor, handleLike]);
 
@@ -351,6 +354,7 @@ export default function SocialFeedView({
   }
 
   const myActivityHeader = shareEnabled && myActivity ? (
+    <FadeInView delay={0} duration={260} slideDistance={8}>
     <View style={[styles.card, styles.myActivityCard]}>
       <View style={styles.cardHeader}>
         <View style={styles.authorRow}>
@@ -395,6 +399,7 @@ export default function SocialFeedView({
         )}
       </View>
     </View>
+    </FadeInView>
   ) : null;
 
   return (
@@ -412,6 +417,7 @@ export default function SocialFeedView({
         />
       }
       ListEmptyComponent={
+        <FadeInView delay={0} duration={240} slideDistance={8}>
         <View style={styles.empty}>
           <Ionicons name="checkmark-circle-outline" size={28} color={colors.textMuted} />
           <Text style={styles.emptyTitle}>You're all caught up</Text>
@@ -419,6 +425,7 @@ export default function SocialFeedView({
             Nothing new from your friends right now. Pull to refresh.
           </Text>
         </View>
+        </FadeInView>
       }
       ListFooterComponent={
         displayItems.length >= cap ? (

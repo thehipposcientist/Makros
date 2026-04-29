@@ -27,6 +27,22 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutDay, AppThemeName, DailyNutritionPlan } from '../types';
 import { getTheme } from '../constants/theme';
 
+export { WatchBridge };
+
+function localDateISO(date: Date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+async function getStoredUserId(): Promise<string | null> {
+  return AsyncStorage.getItem('last_user_id').catch(() => null);
+}
+
+async function stampBridgeUserId(userId?: string | null): Promise<string | null> {
+  const resolved = userId !== undefined ? userId : await getStoredUserId();
+  try { WatchBridge.setUserId(resolved ?? null); } catch {}
+  return resolved ?? null;
+}
+
 export type WatchExerciseClient = {
   name: string;
   sets: number;
@@ -66,7 +82,7 @@ export function buildWatchWorkoutPayload(
     return {
       focus: opts.status === 'rest' ? 'Rest' : 'Loading…',
       durationMinutes: 0,
-      dateISO: opts.dateISO || new Date().toISOString().slice(0, 10),
+      dateISO: opts.dateISO || localDateISO(),
       status: opts.status,
       sessionId: opts.sessionId ?? null,
       readiness: opts.readiness ?? null,
@@ -92,7 +108,7 @@ export function buildWatchWorkoutPayload(
   return {
     focus: String(day.focus || 'Workout'),
     durationMinutes: Number((day as any).durationMinutes ?? (day as any).duration ?? 60),
-    dateISO: opts.dateISO || new Date().toISOString().slice(0, 10),
+    dateISO: opts.dateISO || localDateISO(),
     status: opts.status,
     sessionId: opts.sessionId ?? null,
     readiness: opts.readiness ?? null,
@@ -167,9 +183,7 @@ export async function pushWorkoutToWatch(
   // Resolve userId: caller can pass it explicitly; otherwise fall back to
   // the stored last_user_id so every push carries the correct identity
   // without requiring every call site to look it up.
-  const userId = opts.userId !== undefined
-    ? opts.userId
-    : await AsyncStorage.getItem('last_user_id').catch(() => null);
+  const userId = await stampBridgeUserId(opts.userId);
   const payload = buildWatchWorkoutPayload(day, { ...opts, userId });
   if (!payload) return false;
   if (!canPush()) { wsLog('pushWorkoutToWatch skipped — bridge unavailable'); return false; }
@@ -180,6 +194,7 @@ export async function pushWorkoutToWatch(
 export async function pushThemeToWatch(themeName: AppThemeName | undefined) {
   const palette = buildWatchPalette(themeName);
   if (!canPush()) return false;
+  await stampBridgeUserId();
   return WatchBridge.syncTheme(palette);
 }
 
@@ -199,6 +214,7 @@ export async function pushMealsToWatch(
 ): Promise<boolean> {
   if (!plan) return false;
   if (!canPush()) return false;
+  await stampBridgeUserId();
 
   const targets = plan.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
   const mealArr = plan.meals ?? [];
@@ -228,7 +244,7 @@ export async function pushMealsToWatch(
   });
 
   const payload: WatchMealsPayload = {
-    dateISO: dateISO || new Date().toISOString().slice(0, 10),
+    dateISO: dateISO || localDateISO(),
     targets: {
       calories: Math.round(Number(targets.calories ?? 0)),
       proteinG: Math.round(Number(targets.protein  ?? 0)),
@@ -264,6 +280,7 @@ export async function pushSleepToWatch(opts: {
   summary?: string | null;
 }): Promise<boolean> {
   if (!canPush()) return false;
+  await stampBridgeUserId();
   const payload: WatchSleepPayload = {
     score: opts.score ?? null,
     hoursLastNight: opts.hoursLastNight ?? null,
@@ -298,6 +315,7 @@ export async function pushReadinessToWatch(opts: {
   syncedAtMs?: number;
 }): Promise<boolean> {
   if (!canPush()) return false;
+  await stampBridgeUserId();
   const payload: WatchReadinessPayload = {
     score: opts.score ?? null,
     label: opts.label ?? null,
@@ -319,6 +337,7 @@ export async function pushWeightToWatch(opts: {
   slopeLbsPerWeek?: number | null;
 }): Promise<boolean> {
   if (!canPush()) return false;
+  await stampBridgeUserId();
   const payload: WatchWeightPayload = {
     latestLbs: opts.latestLbs ?? null,
     daysSinceLastLog: opts.daysSinceLastLog ?? null,
@@ -350,7 +369,7 @@ export async function clearWatchData(): Promise<void> {
   await WatchBridge.syncWorkout({
     focus: 'Rest',
     durationMinutes: 0,
-    dateISO: new Date().toISOString().slice(0, 10),
+    dateISO: localDateISO(),
     status: 'rest',
     sessionId: null,
     readiness: null,
@@ -360,7 +379,7 @@ export async function clearWatchData(): Promise<void> {
     clearWorkoutMs: now,
   } as any).catch(() => {});
   await WatchBridge.syncMeals({
-    dateISO: new Date().toISOString().slice(0, 10),
+    dateISO: localDateISO(),
     targets: { calories: 0, proteinG: 0, carbsG: 0, fatG: 0 },
     actual:  { calories: 0, proteinG: 0, carbsG: 0, fatG: 0 },
     score: null,
@@ -368,7 +387,7 @@ export async function clearWatchData(): Promise<void> {
     syncedAtMs: now,
   }).catch(() => {});
   await WatchBridge.syncSupplements({
-    dateISO: new Date().toISOString().slice(0, 10),
+    dateISO: localDateISO(),
     items: [],
     syncedAtMs: now,
   }).catch(() => {});
@@ -391,8 +410,9 @@ export async function pushSupplementsToWatch(
   dateISO?: string,
 ): Promise<boolean> {
   if (!canPush()) return false;
+  await stampBridgeUserId();
   const payload: WatchSupplementsPayload = {
-    dateISO: dateISO || new Date().toISOString().slice(0, 10),
+    dateISO: dateISO || localDateISO(),
     items: items.map((s): WatchSupplementItem => ({
       id: Number(s.id),
       name: String(s.name ?? 'Supplement'),

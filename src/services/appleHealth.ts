@@ -41,6 +41,16 @@ const READ_TYPES = [
 const SLEEP_HISTORY_KEY = 'sleepHistory_v1';
 const MAX_HISTORY_NIGHTS = 30;
 
+export const APPLE_HEALTH_PERMISSION_COPY = {
+  title: 'Connect Apple Health?',
+  body:
+    'Apple Health is optional.\n\n' +
+    'If you connect it, Thallo can read sleep, resting heart rate, HRV, steps, workouts, weight, and active energy to improve readiness, recovery, and progress trends.\n\n' +
+    'Thallo also writes your completed workouts back to Apple Health.',
+  denied:
+    'Apple Health stays optional. You can keep using Thallo normally and enable categories later in iPhone Settings -> Privacy & Security -> Health -> Thallo.',
+};
+
 export function isHealthKitAvailable(): boolean {
   if (Platform.OS !== 'ios') return false;
   const mod = getModule();

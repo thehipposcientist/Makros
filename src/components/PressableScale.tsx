@@ -3,15 +3,21 @@
  * Replaces TouchableOpacity for key CTAs where physical feedback matters.
  */
 import React, { useRef } from 'react';
-import { ViewStyle, TouchableOpacity, Animated } from 'react-native';
+import { ViewStyle, TouchableOpacity, Animated, StyleProp, TouchableOpacityProps } from 'react-native';
+import { SPRING_SNAPPY, useReducedMotion } from '../utils/motion';
 
 interface Props {
   children: React.ReactNode;
   onPress: () => void;
-  style?: ViewStyle | ViewStyle[] | any;
+  style?: StyleProp<ViewStyle>;
   scaleDown?: number;
   disabled?: boolean;
 }
+
+type PressableScaleProps = Props & Pick<
+  TouchableOpacityProps,
+  'accessibilityLabel' | 'accessibilityRole' | 'accessibilityState' | 'hitSlop'
+>;
 
 export default function PressableScale({
   children,
@@ -19,14 +25,28 @@ export default function PressableScale({
   style,
   scaleDown = 0.96,
   disabled = false,
-}: Props) {
+  accessibilityLabel,
+  accessibilityRole,
+  accessibilityState,
+  hitSlop,
+}: PressableScaleProps) {
+  const reducedMotion = useReducedMotion();
   const scale = useRef(new Animated.Value(1)).current;
+  const translateY = useRef(new Animated.Value(0)).current;
 
   const onPressIn = () => {
-    Animated.spring(scale, { toValue: scaleDown, useNativeDriver: true, damping: 18, stiffness: 300 }).start();
+    if (reducedMotion) return;
+    Animated.parallel([
+      Animated.spring(scale, { toValue: scaleDown, useNativeDriver: true, ...SPRING_SNAPPY }),
+      Animated.spring(translateY, { toValue: -1, useNativeDriver: true, ...SPRING_SNAPPY }),
+    ]).start();
   };
   const onPressOut = () => {
-    Animated.spring(scale, { toValue: 1, useNativeDriver: true, damping: 18, stiffness: 300 }).start();
+    if (reducedMotion) return;
+    Animated.parallel([
+      Animated.spring(scale, { toValue: 1, useNativeDriver: true, ...SPRING_SNAPPY }),
+      Animated.spring(translateY, { toValue: 0, useNativeDriver: true, ...SPRING_SNAPPY }),
+    ]).start();
   };
 
   return (
@@ -35,8 +55,12 @@ export default function PressableScale({
       disabled={disabled}
       onPress={onPress}
       onPressIn={onPressIn}
-      onPressOut={onPressOut}>
-      <Animated.View style={[style, { transform: [{ scale }] }]}>
+      onPressOut={onPressOut}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityRole={accessibilityRole}
+      accessibilityState={accessibilityState}
+      hitSlop={hitSlop}>
+      <Animated.View style={[style, { transform: [{ scale }, { translateY }] }]}>
         {children}
       </Animated.View>
     </TouchableOpacity>

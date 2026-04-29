@@ -65,7 +65,7 @@ import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
 // CoachCheckinModal removed — coach chat handles check-ins now
-import { colors, getTheme, radius } from '../constants/theme';
+import { colors, elevations, getTheme, radius, typography } from '../constants/theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
 // Inline-rendered tab content. Goals and Progress used to be modal
@@ -748,16 +748,30 @@ function AppleHealthToggleRow({
       }
       const { setAppleHealthEnabled } = await import('../utils/workoutHistory');
       if (next) {
-        await setAppleHealthEnabled(true);
-        const granted = await ah.requestHealthPermissions();
-        setEnabled(true);
-        if (!granted) {
-          const err = ah.getLastHealthKitError();
-          Alert.alert(
-            'Permission needed',
-            `Open iPhone Settings → Privacy & Security → Health → Thallo to enable categories.\n\n${err ?? ''}`.trim(),
-          );
-        }
+        Alert.alert(
+          ah.APPLE_HEALTH_PERMISSION_COPY.title,
+          ah.APPLE_HEALTH_PERMISSION_COPY.body,
+          [
+            { text: 'Not now', style: 'cancel', onPress: () => setBusy(false) },
+            {
+              text: 'Continue',
+              onPress: async () => {
+                const granted = await ah.requestHealthPermissions();
+                await setAppleHealthEnabled(granted);
+                setEnabled(granted);
+                if (!granted) {
+                  const err = ah.getLastHealthKitError();
+                  Alert.alert(
+                    'Apple Health not connected',
+                    `${ah.APPLE_HEALTH_PERMISSION_COPY.denied}\n\n${err ?? ''}`.trim(),
+                  );
+                }
+                setBusy(false);
+              },
+            },
+          ],
+        );
+        return;
       } else {
         await setAppleHealthEnabled(false);
         setEnabled(false);
@@ -778,8 +792,8 @@ function AppleHealthToggleRow({
           {enabled === null
             ? 'Checking…'
             : enabled
-              ? 'Sleep, RHR, HRV, weight, and workouts feed your plan'
-              : 'Connect to enrich readiness, recovery, and macros'}
+              ? 'Optional sync adds sleep, HRV, weight, and workout context'
+              : 'Optional enhancement for sleep, readiness, and workout context'}
         </Text>
       </View>
       <Switch
@@ -1834,7 +1848,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const {
           pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
         } = await import('../utils/watchSync');
-        const todayISO = new Date().toISOString().slice(0, 10);
+        const todayISO = todayKey();
         // Find today by date in the schedule — with the PlanWeek model,
         // today may be at any index (e.g., index 1 if the week started
         // yesterday). Falls back to position 0 only if no date match.
@@ -2139,7 +2153,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const unsub = onWatchReachabilityChange((info) => {
           if (!info.reachable) return;
           const s = rePushStateRef.current;
-          const todayISO = new Date().toISOString().slice(0, 10);
+          const todayISO = todayKey();
           // Find today by date — with the dated PlanWeek the today card
           // is no longer guaranteed to live at index 0 (e.g. it sits at
           // index 1 when the week started Monday and today is Tuesday).
@@ -2451,7 +2465,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   pushSleepToWatch, pushSupplementsToWatch, pushWeightToWatch,
                 } = watchSync;
                 const s = rePushStateRef.current;
-                const todayISO = new Date().toISOString().slice(0, 10);
+                const todayISO = todayKey();
                 const todayItem = (s.schedule as any[])?.find((it: any) => dateKey(it.date) === todayISO) ?? (s.schedule as any[])?.[0] ?? null;
                 const todayWorkout = todayItem?.workout ?? s.workoutPlan?.days?.[0] ?? null;
                 // Detect in-progress workout BEFORE computing status —
@@ -2581,7 +2595,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   const { pushWorkoutToWatch } = await import('../utils/watchSync');
                   const s = rePushStateRef.current;
                   await pushWorkoutToWatch(today, {
-                    dateISO: new Date().toISOString().slice(0, 10),
+                    dateISO: todayKey(),
                     status: 'active',
                     sessionId,
                     readiness: s.readinessScore?.score ?? null,
@@ -2610,7 +2624,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             if (msg) console.log(msg);
           } else if (command === 'toggle_meal') {
             const mealType = String(payload?.mealType || '');
-            const todayISO = new Date().toISOString().slice(0, 10);
+            const todayISO = todayKey();
             if (mealType) watchCmdHandlersRef.current.toggleMeal(todayISO, mealType);
           } else if (command === 'toggle_supplement') {
             // Watch tapped a supplement row — log the dose on the
@@ -2682,7 +2696,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 await AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
               } catch { /* non-fatal */ }
               // Push explicit skipped status so watch exits active state immediately.
-              const skipISO = new Date().toISOString().slice(0, 10);
+              const skipISO = todayKey();
               const skipSchedule = rePushStateRef.current.schedule as any[];
               const skipTodayItem = skipSchedule?.find((it: any) => dateKey(it.date) === skipISO) ?? skipSchedule?.[0] ?? null;
               try {
@@ -2721,7 +2735,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 if (!authToken) return;
                 const items = (payload?.items as any[]) ?? [];
                 if (!items.length) return;
-                const todayISO = new Date().toISOString().slice(0, 10);
+                const todayISO = todayKey();
                 const totalCal  = items.reduce((s: number, it: any) => s + Number(it.calories), 0);
                 const totalPro  = items.reduce((s: number, it: any) => s + Number(it.protein),  0);
                 const totalCarb = items.reduce((s: number, it: any) => s + Number(it.carbs),    0);
@@ -4953,8 +4967,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   // Subtle gradient: slightly lighter at top, fades to base background
   const gradientColors: [string, string, string] = isLightTheme
-    ? [themeColors.surfaceRaised, themeColors.background, themeColors.background]
-    : [themeColors.surfaceRaised, themeColors.background, themeColors.background];
+    ? [themeColors.primary + '10', themeColors.surfaceRaised, themeColors.background]
+    : [themeColors.primary + '16', themeColors.surfaceRaised, themeColors.background];
 
   return (
     <LinearGradient colors={gradientColors} style={styles.container} locations={[0, 0.4, 1]}>
@@ -6968,7 +6982,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {/* ── Social tab — Friends + Weekly Digest ──────── */}
       {activeTab === 'friends' && (
         <ErrorBoundary>
-        <View style={{ flex: 1, marginBottom: 70, backgroundColor: themeColors.background }}>
+        <FadeInView key={viewingFriend ? `friend-${viewingFriend.user_id}` : 'social-home'} duration={280} slideDistance={10} style={{ flex: 1, marginBottom: 70, backgroundColor: themeColors.background }}>
           {viewingFriend ? (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 24 }}>
               <TouchableOpacity
@@ -7230,7 +7244,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               }}
             />
           )}
-        </View>
+        </FadeInView>
         </ErrorBoundary>
       )}
 
@@ -9997,30 +10011,30 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
   onPress: () => void;
 }) {
   return (
-    <TouchableOpacity
+    <PressableScale
       onPress={onPress}
-      activeOpacity={0.7}
       hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
       style={{
         flex: 1,
-        paddingVertical: 6,
+        paddingVertical: 8,
         paddingHorizontal: 8,
         borderRadius: 999,
-        backgroundColor: active ? tint + '22' : 'transparent',
+        backgroundColor: active ? tint + '18' : 'transparent',
+        borderWidth: active ? 1 : 0,
+        borderColor: active ? tint + '32' : 'transparent',
         alignItems: 'center',
         justifyContent: 'center',
-      }}>
+      }}
+      scaleDown={0.985}>
       <Text style={{
-        fontSize: 10,
+        ...typography.label,
         fontWeight: active ? '700' : '500',
         color: active ? tint : mutedColor,
-        letterSpacing: 0.7,
-        textTransform: 'uppercase',
         opacity: active ? 1 : 0.55,
       }} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75}>
         {label}
       </Text>
-    </TouchableOpacity>
+    </PressableScale>
   );
 }
 
@@ -10037,33 +10051,34 @@ function BottomTabButton({
   badge?: number;
 }) {
   return (
-    <TouchableOpacity
+    <PressableScale
       style={btStyles.btn}
       onPress={() => { import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {}); onPress(); }}
-      activeOpacity={0.7}
+      scaleDown={0.97}
       hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
       accessibilityRole="tab"
       accessibilityLabel={`${label} tab`}
       accessibilityState={{ selected: active }}>
-      {/* Thin top-edge accent line */}
-      <View style={[btStyles.activeIndicator, { backgroundColor: active ? tint : 'transparent' }]} />
-      <View style={{ position: 'relative' }}>
-        <Ionicons
-          name={(active ? iconName.replace('-outline', '') : iconName) as any}
-          size={22}
-          color={active ? tint : mutedColor}
-          style={{ opacity: active ? 1 : 0.35 }}
-        />
-        {badge != null && badge > 0 && (
-          <View style={{ position: 'absolute', top: -4, right: -8, backgroundColor: tint, borderRadius: 999, minWidth: 14, height: 14, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 }}>
-            <Text style={{ fontSize: 9, fontWeight: '800', color: '#000' }}>{badge}</Text>
-          </View>
-        )}
+      <View style={[btStyles.inner, { backgroundColor: active ? tint + '14' : 'transparent' }]}>
+        <View style={[btStyles.activeIndicator, { backgroundColor: active ? tint : 'transparent', opacity: active ? 1 : 0 }]} />
+        <View style={{ position: 'relative' }}>
+          <Ionicons
+            name={(active ? iconName.replace('-outline', '') : iconName) as any}
+            size={22}
+            color={active ? tint : mutedColor}
+            style={{ opacity: active ? 1 : 0.5 }}
+          />
+          {badge != null && badge > 0 && (
+            <View style={{ position: 'absolute', top: -4, right: -8, backgroundColor: tint, borderRadius: 999, minWidth: 14, height: 14, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 }}>
+              <Text style={{ fontSize: 9, fontWeight: '800', color: '#000' }}>{badge}</Text>
+            </View>
+          )}
+        </View>
+        <Text style={[btStyles.label, { color: active ? tint : mutedColor, opacity: active ? 1 : 0.55 }]} numberOfLines={1}>
+          {label.toUpperCase()}
+        </Text>
       </View>
-      <Text style={[btStyles.label, { color: active ? tint : mutedColor, opacity: active ? 1 : 0.35 }]} numberOfLines={1}>
-        {label.toUpperCase()}
-      </Text>
-    </TouchableOpacity>
+    </PressableScale>
   );
 }
 
@@ -10072,20 +10087,28 @@ const btStyles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingTop: 10,
-    paddingBottom: 4,
-    gap: 3,
+    paddingTop: 6,
+    paddingBottom: 2,
     position: 'relative',
+  },
+  inner: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    minWidth: 64,
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    borderRadius: 18,
   },
   activeIndicator: {
     position: 'absolute',
-    top: 0,
-    width: 20,
-    height: 2,
+    top: 2,
+    width: 22,
+    height: 3,
     borderRadius: 1,
   },
   icon:  { fontSize: 22 },
-  label: { fontSize: 9, fontWeight: '500', letterSpacing: 0.6 },
+  label: { ...typography.micro, fontWeight: '700' },
 });
 
 // ── FocusLabelCrossfade ─────────────────────────────────────────────────────
@@ -10770,7 +10793,7 @@ const styles = StyleSheet.create({
   headerLogoWrap: { height: 70, justifyContent: 'center', alignItems: 'flex-start' },
   headerLogo: { width: 280, height: 70 },
   headerLogoDark: { width: 280, height: 70 },
-  greeting:            { fontSize: 26, fontWeight: '800', color: colors.textPrimary, marginBottom: 6, letterSpacing: -0.5 },
+  greeting:            { ...typography.hero, color: colors.textPrimary, marginBottom: 6 },
   headerBadgeRow:  { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6, marginBottom: 4 },
   goalBadge:       { backgroundColor: colors.surface, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.primary },
   goalBadgeText:   { fontSize: 11, color: colors.primary, fontWeight: '600', letterSpacing: 0.5, textTransform: 'uppercase' },
@@ -10808,13 +10831,16 @@ const styles = StyleSheet.create({
   // body doesn't bleed through.
   bottomBar: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
+    left: 12,
+    right: 12,
+    bottom: 10,
     flexDirection: 'row',
-    paddingBottom: 20,
-    paddingHorizontal: 4,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: 4,
+    paddingBottom: 18,
+    paddingHorizontal: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 28,
+    ...elevations.floating,
   },
 
   // Placeholder content for the goals/progress/profile tabs until they
@@ -10843,13 +10869,12 @@ const styles = StyleSheet.create({
   // stay beneath it.
   fixedSubTabBar: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    height: 52,
+    left: 12,
+    right: 12,
+    minHeight: 56,
     flexDirection: 'row',
     alignItems: 'center',
-    borderBottomWidth: 1,
-    paddingHorizontal: 12,
+    paddingHorizontal: 0,
     zIndex: 6,
   },
   // Pill segmented control. Full-radius capsule container; active
@@ -10859,10 +10884,11 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: 'row',
     alignItems: 'stretch',
-    padding: 3,
+    padding: 4,
     borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
     gap: 2,
+    ...elevations.subtle,
   },
 
   // Next-checkin indicator on the workout Plan sub-tab.
@@ -10919,9 +10945,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
     borderRadius: radius.full,
+    ...elevations.subtle,
   },
   askAiIcon: { width: 16, height: 16 },
   askAiText: { fontSize: 12, fontWeight: '800', letterSpacing: 0.3, color: '#FFFFFF' },
@@ -10944,10 +10971,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 14,
-    borderRadius: radius.lg,
+    borderRadius: 20,
     borderWidth: 1,
     padding: 16,
     marginBottom: 14,
+    ...elevations.card,
   },
   profileAvatar: {
     width: 56, height: 56, borderRadius: 28,
@@ -11099,10 +11127,11 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
-    borderRadius: radius.md,
-    padding: 12,
+    borderRadius: radius.lg,
+    padding: 14,
     marginBottom: 12,
     gap: 8,
+    ...elevations.subtle,
   },
   insightTitle: { fontSize: 13, fontWeight: '700', color: colors.textPrimary },
   insightSubtitle: { fontSize: 12, color: colors.textSecondary },
@@ -11129,10 +11158,11 @@ const styles = StyleSheet.create({
 
   warmupCard: {
     borderWidth: 1,
-    borderRadius: radius.md,
+    borderRadius: radius.lg,
     padding: 14,
     marginBottom: 12,
     gap: 8,
+    ...elevations.subtle,
   },
   warmupTitle: { fontSize: 14, fontWeight: '800' },
   warmupStep: { fontSize: 12, color: colors.textPrimary, lineHeight: 18 },
@@ -11145,7 +11175,7 @@ const styles = StyleSheet.create({
   scrollView:    { flex: 1 },
   scrollContent: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 110 },
 
-  dayCard:         { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 16, paddingBottom: 16, paddingTop: 0, marginBottom: 12, overflow: 'hidden' },
+  dayCard:         { backgroundColor: colors.surface, borderRadius: 22, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 16, paddingBottom: 16, paddingTop: 0, marginBottom: 14, overflow: 'hidden', ...elevations.card },
   dayCardTopAccent: { height: 3, marginBottom: 12, borderRadius: 0 },
   dayCardToday:    { borderColor: colors.primary },
   dayCardComplete: { borderColor: colors.success },

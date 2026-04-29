@@ -171,7 +171,7 @@ function scoreDurationBanded(hours: number, max: number): PillarResult {
   else if ((hours >= 6.5 && hours < 7) || (hours > 9 && hours <= 9.5)) frac = 0.85;
   else if ((hours >= 6 && hours < 6.5) || (hours > 9.5 && hours <= 10)) frac = 0.62;
   else if (hours >= 5 && hours < 6) { frac = 0.34; insight = 'Sleep duration below target'; }
-  else { frac = 0.10; insight = hours < 5 ? 'Very short sleep — prioritise rest' : 'Oversleeping — check for illness or debt'; }
+  else { frac = 0.10; insight = hours < 5 ? 'Very short sleep — prioritise rest' : 'Long sleep duration — often tied to accumulated fatigue or schedule drift'; }
   return { points: Math.round(max * frac), insight };
 }
 
@@ -345,7 +345,7 @@ function scoreAwakeFragmentation(
     insight = `Mid-sleep wake totaled ${Math.round(awakeMin)} min — check room temp, light, or late hydration.`;
   } else {
     frac = 0.20;
-    insight = `Highly fragmented night (${Math.round(awakeMin)} min awake). If this is recurring, consider a sleep professional.`;
+    insight = `Highly fragmented night (${Math.round(awakeMin)} min awake). If this keeps repeating, look at bedtime routine, light, temperature, or caffeine timing.`;
   }
   return { points: Math.round(max * frac), insight, ratio: awakeMin };
 }

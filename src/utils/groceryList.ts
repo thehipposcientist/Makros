@@ -10,7 +10,19 @@ export interface GroceryRow {
   quantity: number;
   unit: string;
   meals: number; // how many meals across the week use this item
+  category: GroceryCategory;
 }
+
+export type GroceryCategory =
+  | 'Produce'
+  | 'Protein'
+  | 'Dairy & Eggs'
+  | 'Grains & Bakery'
+  | 'Pantry'
+  | 'Frozen'
+  | 'Drinks'
+  | 'Supplements'
+  | 'Other';
 
 const PLURAL_RULES: Array<[RegExp, string]> = [
   [/ies$/i, 'y'],
@@ -35,6 +47,19 @@ function keyFor(name: string, unit: string): string {
   return `${normalizeName(name)}__${unit.toLowerCase()}`;
 }
 
+function inferCategory(name: string): GroceryCategory {
+  const n = normalizeName(name);
+  if (/(spinach|kale|broccoli|lettuce|salad|pepper|onion|garlic|tomato|cucumber|carrot|avocado|banana|apple|berry|berries|fruit|vegetable|lemon|lime|orange|potato|sweet potato)/i.test(n)) return 'Produce';
+  if (/(chicken|beef|turkey|salmon|tuna|shrimp|fish|pork|tofu|tempeh|protein)/i.test(n)) return 'Protein';
+  if (/(milk|cheese|butter|kefir|greek yogurt|yogurt|cottage cheese|egg|eggs)/i.test(n)) return 'Dairy & Eggs';
+  if (/(bread|bagel|wrap|tortilla|rice|oats|oatmeal|quinoa|pasta|granola|cereal)/i.test(n)) return 'Grains & Bakery';
+  if (/(frozen)/i.test(n)) return 'Frozen';
+  if (/(coffee|tea|juice|water|electrolyte|drink|smoothie)/i.test(n)) return 'Drinks';
+  if (/(creatine|vitamin|magnesium|omega|supplement|powder)/i.test(n)) return 'Supplements';
+  if (/(olive oil|oil|sauce|seasoning|salt|pepper|peanut butter|almond butter|nuts|nut butter|bean|beans|lentils|hummus|salsa|honey)/i.test(n)) return 'Pantry';
+  return 'Other';
+}
+
 export function buildGroceryList(plans: DailyNutritionPlan[]): GroceryRow[] {
   const map = new Map<string, GroceryRow>();
 
@@ -55,6 +80,7 @@ export function buildGroceryList(plans: DailyNutritionPlan[]): GroceryRow[] {
             quantity: Number(item.quantity) || 0,
             unit: String(item.unit ?? ''),
             meals: 1,
+            category: inferCategory(item.name),
           });
         }
       }
@@ -70,8 +96,32 @@ export function formatGroceryText(rows: GroceryRow[], header?: string): string {
   const out: string[] = [];
   if (header) out.push(header, '');
   for (const r of rows) {
-    const q = r.quantity % 1 === 0 ? String(r.quantity) : r.quantity.toFixed(1);
-    out.push(`- ${r.name} — ${q}${r.unit ? ' ' + r.unit : ''}${r.meals > 1 ? ` (${r.meals}x)` : ''}`);
+    out.push(`- ${r.name} — ${formatGroceryQuantity(r.quantity, r.unit)}${r.meals > 1 ? ` (${r.meals} meals)` : ''}`);
   }
   return out.join('\n');
+}
+
+export function formatGroceryQuantity(quantity: number, unit: string): string {
+  const q = quantity % 1 === 0 ? String(quantity) : quantity.toFixed(1);
+  const rawUnit = (unit || '').trim().toLowerCase();
+  if (!rawUnit) return `${q} item${quantity === 1 ? '' : 's'}`;
+  const singularPlural: Record<string, { one: string; many: string }> = {
+    serving: { one: 'serving', many: 'servings' },
+    servings: { one: 'serving', many: 'servings' },
+    cup: { one: 'cup', many: 'cups' },
+    cups: { one: 'cup', many: 'cups' },
+    slice: { one: 'slice', many: 'slices' },
+    slices: { one: 'slice', many: 'slices' },
+    can: { one: 'can', many: 'cans' },
+    cans: { one: 'can', many: 'cans' },
+    packet: { one: 'packet', many: 'packets' },
+    packets: { one: 'packet', many: 'packets' },
+    piece: { one: 'piece', many: 'pieces' },
+    pieces: { one: 'piece', many: 'pieces' },
+    clove: { one: 'clove', many: 'cloves' },
+    cloves: { one: 'clove', many: 'cloves' },
+  };
+  const mapped = singularPlural[rawUnit];
+  if (mapped) return `${q} ${quantity === 1 ? mapped.one : mapped.many}`;
+  return `${q} ${unit}`;
 }

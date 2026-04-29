@@ -274,10 +274,10 @@ def _score_yesterday(yesterday_minutes: int | None) -> tuple[int | None, str | N
 #                      systemic baseline. Soft penalty validates the feeling
 #                      instead of letting the user blame themselves.
 _CYCLE_PHASE_MULTIPLIERS: dict[str, tuple[float, str]] = {
-    "follicular": (1.00, "follicular phase (high recovery)"),
+    "follicular": (1.00, "follicular phase"),
     "ovulation":  (0.95, "ovulation phase"),
     "menses":     (0.85, "menstrual phase"),
-    "luteal":     (0.70, "luteal phase (lower recovery is normal)"),
+    "luteal":     (0.70, "luteal phase"),
 }
 
 
@@ -603,7 +603,7 @@ def _no_data_summary(missing: list[str]) -> str:
     to which pillars are missing so the user knows what to do."""
     wearable_missing = ("sleep" in missing) and ("hrv" in missing) and ("rhr" in missing)
     if wearable_missing:
-        return "Not enough data — wear your Apple Watch overnight to get a readiness score."
+        return "Not enough Apple Health data yet. Thallo still works without it, and readiness will fill in once sleep or heart-rate signals arrive."
     if "sleep" in missing:
-        return "Last night's sleep didn't sync. Check the Health app, then refresh."
-    return "Not enough signals yet — log meals and wear your watch overnight to see today's readiness."
+        return "Last night's sleep didn't sync yet. Check Apple Health when convenient, then refresh."
+    return "Not enough signals yet — log meals or connect Apple Health for a fuller readiness read."

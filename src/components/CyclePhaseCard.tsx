@@ -1,12 +1,12 @@
 // Cycle phase card. Reads menstrual data from Apple Health and shows current
-// phase + training guidance. Shown only when data is available — opt-in via
-// Apple Health, no manual toggle needed.
+// phase + light training context. Shown only when data is available — opt-in
+// via Apple Health, no manual toggle needed.
 //
-// Training implications:
-//   - menses:     slightly reduced intensity is OK, prioritise iron-rich food
-//   - follicular: strongest training window, estrogen supports recovery
-//   - ovulation:  peak performance, push hard if motivated
-//   - luteal:     hydration + sleep matter more, slight capacity dip is normal
+// General context only:
+//   - menses:     some people prefer lighter training early in the phase
+//   - follicular: energy can feel steadier for some people
+//   - ovulation:  some people feel sharp and energetic here
+//   - luteal:     sleep, hydration, and pacing can matter more here
 
 import { useEffect, useState } from 'react';
 import { View, Text } from 'react-native';
@@ -20,10 +20,10 @@ interface Props {
 }
 
 const PHASE_INFO: Record<string, { label: string; color: string; icon: any; tip: string }> = {
-  menses:     { label: 'Menses',     color: '#EF4444', icon: 'water-outline',    tip: 'Moderate volume today. Iron + hydration help.' },
-  follicular: { label: 'Follicular', color: '#22C55E', icon: 'leaf-outline',     tip: 'Strongest training window — push intensity.' },
-  ovulation:  { label: 'Ovulation',  color: '#EAB308', icon: 'sparkles-outline', tip: 'Peak performance phase — good day for PRs.' },
-  luteal:     { label: 'Luteal',     color: '#A78BFA', icon: 'moon-outline',     tip: 'Slight dip is normal. Sleep + hydration matter more.' },
+  menses:     { label: 'Menses',     color: '#EF4444', icon: 'water-outline',    tip: 'Some people prefer a lighter start here. Hydration and iron-rich meals can help.' },
+  follicular: { label: 'Follicular', color: '#22C55E', icon: 'leaf-outline',     tip: 'Energy often feels steadier here. Normal training is fine if you feel good.' },
+  ovulation:  { label: 'Ovulation',  color: '#EAB308', icon: 'sparkles-outline', tip: 'Some people feel sharp here. A normal or harder session can make sense if it feels good.' },
+  luteal:     { label: 'Luteal',     color: '#A78BFA', icon: 'moon-outline',     tip: 'Sleep, hydration, and pacing matter more for many people here.' },
   unknown:    { label: 'Unknown',    color: '#9CA3AF', icon: 'help-circle-outline', tip: 'Log a period in Apple Health to see phase.' },
 };
 

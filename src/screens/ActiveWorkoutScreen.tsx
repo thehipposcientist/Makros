@@ -181,6 +181,12 @@ function getTargetSetCount(targetSets: unknown): number {
   return 3;
 }
 
+function parseDisplaySetIndex(label: string | null | undefined): number {
+  const match = String(label ?? '').match(/set\s+(\d+)/i);
+  const parsed = match ? Number(match[1]) : 1;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed - 1 : 0;
+}
+
 function AnimatedBarFill({ pct, color, delay = 0 }: { pct: number; color: string; delay?: number }) {
   const anim = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -634,7 +640,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         // always reads the freshest set — warmupSteps may get
         // replaced when the AI warmup resolves a beat after mount).
         const pushActive = () => pushWorkoutToWatch(workout as any, {
-          dateISO: new Date().toISOString().slice(0, 10),
+          dateISO: dateKey(new Date()),
           status: 'active',
           sessionId: watchSessionId.current,
           warmupSteps: warmupStepsRef.current,
@@ -727,7 +733,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               try {
                 const { pushWorkoutToWatch } = await import('../utils/watchSync');
                 await pushWorkoutToWatch(workout as any, {
-                  dateISO: new Date().toISOString().slice(0, 10),
+                  dateISO: dateKey(new Date()),
                   status: 'active',
                   sessionId: watchSessionId.current,
                   warmupSteps: warmupStepsRef.current,
@@ -1405,7 +1411,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const summary: WorkoutPostSummary = {
           focus: workout.focus ?? 'Workout',
           duration_seconds: Math.round(((Date.now() - (startTime ?? Date.now())) / 1000)),
-          date: new Date().toISOString().slice(0, 10),
+          date: dateKey(new Date()),
           exercises: exercises.map(e => ({
             name: e.name,
             equipment: (e as any).equipment ?? null,
@@ -1895,7 +1901,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           updateRestActivity(liveActivityIdRef.current, {
             setNumber: setsLogged,
             totalSets: getTargetSetCount(ex.targetSets),
-            nextSetRecommendation: `${rec.weightLbs} lbs × ${rec.reps}`,
+            nextSetRecommendation: `${rec.weightLbs} lbs x ${rec.reps}`,
             exerciseName: ex.name,
             themeColorHex: theme.colors.primary,
           }).catch(() => undefined);
@@ -2169,23 +2175,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           await endRestActivity(liveActivityIdRef.current);
           liveActivityIdRef.current = null;
         }
+        const nextTarget = restNextTargetRef.current ?? 'Next set';
+        const nextCue = restCueRef.current;
+        const currentExercise = exercisesRef.current.find(ex => ex.name === exerciseName);
         const id = await startRestActivity({
           exerciseName,
-          setNumber: 0,
-          totalSets: 0,
+          setNumber: parseDisplaySetIndex(nextTarget),
+          totalSets: getTargetSetCount(currentExercise?.targetSets),
           endDateMs: Date.now() + seconds * 1000,
-          nextSetRecommendation: 'Computing…',
+          nextSetRecommendation: nextCue ? `${nextTarget} - ${nextCue}` : nextTarget,
           themeColorHex: theme.colors.primary,
           workoutId: `w_${workout.focus}_${Date.now()}`,
         });
         liveActivityIdRef.current = id;
-        // Diagnostic: on FIRST rest of the workout only, show an alert with
-        // the result so we can debug "why isn't the lock-screen card
-        // appearing". Suppresses itself on subsequent sets.
+        // Diagnostic: on the first rest only, log why the native bridge
+        // refused to start. Do not alert mid-workout.
         if (!liveActivityDiagShownRef.current) {
           liveActivityDiagShownRef.current = true;
           const diag = getLastStartDiagnostic();
-          Alert.alert('Live Activity diagnostic', diag ?? 'no diagnostic captured');
+          if (diag && !diag.startsWith('ok')) {
+            console.warn('[ActiveWorkout] Live Activity diagnostic:', diag);
+          }
         }
       } catch (e) {
         console.warn('[ActiveWorkout] Live Activity start failed (non-fatal):', e);
@@ -2752,7 +2762,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Push completed status immediately so the watch exits active state.
     import('../utils/watchSync').then(({ pushWorkoutToWatch }) =>
       pushWorkoutToWatch(workout as any, {
-        dateISO: new Date().toISOString().slice(0, 10),
+        dateISO: dateKey(new Date()),
         status: 'completed',
         sessionId: watchSessionId.current,
       }).catch(() => {}),
@@ -3322,7 +3332,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
         <TouchableOpacity style={styles.cancelBtn} onPress={() => Alert.alert(
           'Cancel Workout', 'Your progress will be lost.',
-          [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { clearRestState(); AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {}); AsyncStorage.removeItem('activeWatchSessionId').catch(() => {}); import('../utils/watchSync').then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(workout as any, { dateISO: new Date().toISOString().slice(0, 10), status: 'skipped', sessionId: watchSessionId.current }).catch(() => {})).catch(() => {}); onCancel(); } }]
+          [{ text: 'Keep Going', style: 'cancel' }, { text: 'Cancel', style: 'destructive', onPress: () => { clearRestState(); AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {}); AsyncStorage.removeItem('activeWatchSessionId').catch(() => {}); import('../utils/watchSync').then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(workout as any, { dateISO: dateKey(new Date()), status: 'skipped', sessionId: watchSessionId.current }).catch(() => {})).catch(() => {}); onCancel(); } }]
         )}>
           <Text style={styles.cancelBtnText}>X</Text>
         </TouchableOpacity>

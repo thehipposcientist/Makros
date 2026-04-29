@@ -68,14 +68,14 @@ def test_beginner_stays_simple() -> None:
     _ok("beginner: 1-3d → full_body, 4-6d → upper_lower")
 
 
-def test_intermediate_muscle_gain_picks_ppl_at_3_days() -> None:
-    print("\n[test] intermediate muscle_gain 3d → PPL")
+def test_intermediate_muscle_gain_stays_full_body_at_3_days() -> None:
+    print("\n[test] intermediate muscle_gain 3d → full body")
     inputs = PlannerInputs(
         goal="muscle_gain", days_per_week=3, experience="intermediate",
         equipment_slugs=("barbell", "dumbbells", "flat_bench", "squat_rack"),
     )
     split = pick_split(inputs)
-    assert split == SPLIT_PPL, f"got {split}"
+    assert split == SPLIT_FULL_BODY, f"got {split}"
     _ok(f"3-day muscle_gain intermediate → {split}")
 
 
@@ -1032,7 +1032,7 @@ def test_propagate_session_targets_no_history_is_noop() -> None:
 
 
 def test_strength_plan_uses_lower_reps() -> None:
-    print("\n[test] strength bucket prescribes 4-6 reps on primary compounds")
+    print("\n[test] strength bucket prescribes 3-5 reps on primary compounds")
     inputs = PlannerInputs(
         goal="strength", days_per_week=3, experience="intermediate",
         equipment_slugs=("barbell", "dumbbells", "flat_bench", "squat_rack", "weight_plates"),
@@ -1042,11 +1042,11 @@ def test_strength_plan_uses_lower_reps() -> None:
     found_low_rep = False
     for d in plan["workout_plan"]["days"]:
         for e in d["exercises"]:
-            if e.get("_role") == "primary" and "4-6" in e["reps"]:
+            if e.get("_role") == "primary" and "3-5" in e["reps"]:
                 found_low_rep = True
                 break
-    assert found_low_rep, "no primary compound got 4-6 reps under strength bucket"
-    _ok("primary compounds got 4-6 reps")
+    assert found_low_rep, "no primary compound got 3-5 reps under strength bucket"
+    _ok("primary compounds got 3-5 reps")
 
 
 def test_ul_forced_even_lift_days_fat_loss_6d() -> None:
@@ -1084,7 +1084,7 @@ if __name__ == "__main__":
     print("=" * 60)
     cases = [
         test_beginner_stays_simple,
-        test_intermediate_muscle_gain_picks_ppl_at_3_days,
+        test_intermediate_muscle_gain_stays_full_body_at_3_days,
         test_muscle_gain_4_days_is_upper_lower,
         test_strength_intermediate_4_days_is_upper_lower,
         test_fat_loss_5_days_is_NOT_full_body,

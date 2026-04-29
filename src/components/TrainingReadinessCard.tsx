@@ -350,7 +350,7 @@ export default function TrainingReadinessCard({
       }}>
         <Ionicons name="flash-outline" size={16} color={tc.textMuted} />
         <Text style={{ flex: 1, fontSize: 12, color: tc.textSecondary }}>
-          Connect Apple Health and log a meal to see today's readiness.
+          Apple Health is optional. Readiness gets better with sleep, HRV, and meal data, but the plan still works without it.
         </Text>
       </View>
     );
@@ -536,6 +536,9 @@ export default function TrainingReadinessCard({
           <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 4 }}>
             DRIVERS
           </Text>
+          <Text style={{ fontSize: 10, color: tc.textMuted, lineHeight: 13, marginBottom: 6 }}>
+            Biggest drivers: last night's sleep, HRV trend, muscle recovery, nutrition, resting HR, and yesterday's load.
+          </Text>
           {/* Per-pillar descriptions so users understand what each row
               means — particularly "Yesterday", which was confusing
               users ("what is yesterday?"). The description renders as
@@ -593,7 +596,7 @@ export default function TrainingReadinessCard({
 
           {!hasAppleHealth && (
             <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6, fontStyle: 'italic' }}>
-              Connect Apple Health for sleep + HRV signals.
+              Apple Health is optional. Connect it anytime for sleep + HRV signals.
             </Text>
           )}
           {prep.insights.length > 1 && (

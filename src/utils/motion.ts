@@ -8,7 +8,8 @@
  * Accessibility: all animated components should check
  * `useReducedMotion()` and skip/shorten animations when true.
  */
-import { Easing } from 'react-native';
+import { useEffect, useState } from 'react';
+import { AccessibilityInfo, Easing } from 'react-native';
 
 // ── Spring configs ──────────────────────────────────────────────
 // Named after their feel, not their use case, so they compose freely.
@@ -49,4 +50,28 @@ export const MAX_STAGGER_MS = 400;
 
 export function staggerDelay(index: number, base = BASE_STAGGER_MS): number {
   return Math.min(index * base, MAX_STAGGER_MS);
+}
+
+export function useReducedMotion(): boolean {
+  const [reducedMotionEnabled, setReducedMotionEnabled] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    AccessibilityInfo.isReduceMotionEnabled()
+      .then((enabled) => {
+        if (mounted) setReducedMotionEnabled(enabled);
+      })
+      .catch(() => undefined);
+
+    const sub = AccessibilityInfo.addEventListener('reduceMotionChanged', (enabled) => {
+      setReducedMotionEnabled(enabled);
+    });
+
+    return () => {
+      mounted = false;
+      sub.remove();
+    };
+  }, []);
+
+  return reducedMotionEnabled;
 }

@@ -31,8 +31,10 @@ function getNative(): any {
   if (loadAttempted) return null;
   loadAttempted = true;
   try {
-    const mod = require('../../modules/thallo-live-activity');
-    nativeModule = mod?.default ?? mod ?? null;
+    const mod = require('thallo-live-activity');
+    nativeModule = mod && Object.prototype.hasOwnProperty.call(mod, 'default')
+      ? mod.default
+      : mod ?? null;
     return nativeModule;
   } catch (e) {
     console.warn('[liveActivity] native module not available:', e);
@@ -57,12 +59,12 @@ export function getLastStartDiagnostic(): string | null {
 export async function startRestActivity(state: RestActivityState): Promise<string | null> {
   const n = getNative();
   if (!n) {
-    _lastStartDiagnostic = 'native module not loaded (require returned null)';
+    _lastStartDiagnostic = 'ThalloLiveActivity native module not loaded. Install a fresh native iOS build; OTA/JS reload cannot add ActivityKit.';
     return null;
   }
   if (!n.startActivity) {
     const keys = Object.keys(n).slice(0, 10).join(', ');
-    _lastStartDiagnostic = `startActivity missing from native module. Available keys: [${keys}]`;
+    _lastStartDiagnostic = `ThalloLiveActivity loaded without startActivity. Available keys: [${keys}]. Rebuild/reinstall the native iOS app.`;
     return null;
   }
   if (n.areActivitiesEnabled && !n.areActivitiesEnabled()) {

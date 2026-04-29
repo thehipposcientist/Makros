@@ -53,7 +53,7 @@ from typing import Optional
 #   - Adjacency / rotation rules change
 #   - Injury-pattern block list or dislike filter changes
 # Cosmetic copy / logging tweaks don't need a bump.
-PLANNER_VERSION = "2026.04.24.02"
+PLANNER_VERSION = "2026.04.29.01"
 
 logger = logging.getLogger(__name__)
 
@@ -1026,6 +1026,33 @@ _GOALS_PREFERRING_HYBRID_CARDIO = frozenset({
 })
 
 
+_CARDIO_PROMOTION_STIMULUS_EXCLUSIONS = frozenset({
+    DayArchetype.LIFT_UPPER_HEAVY,
+    DayArchetype.LIFT_LOWER_HEAVY,
+    DayArchetype.LIFT_PUSH_HEAVY,
+    DayArchetype.LIFT_PULL_HEAVY,
+    DayArchetype.LIFT_LEGS_HEAVY,
+    DayArchetype.LIFT_FULL_BODY_STRENGTH,
+    DayArchetype.LIFT_STRENGTH_MAINTENANCE,
+})
+
+
+def _can_promote_to_plus_cardio(
+    archetype: DayArchetype,
+    allowed: frozenset[DayArchetype],
+    *,
+    allow_stimulus_loss: bool = False,
+) -> bool:
+    """True when adding a cardio finisher won't erase a planned heavy
+    stimulus. PLUS_CARDIO archetypes don't preserve the original
+    strength/hypertrophy/volume suffix, so avoid promoting heavy days
+    when a non-heavy lift can carry the finisher instead."""
+    if not allow_stimulus_loss and archetype in _CARDIO_PROMOTION_STIMULUS_EXCLUSIONS:
+        return False
+    hybrid = _HYBRID_PAIR.get(archetype)
+    return hybrid is not None and hybrid in allowed
+
+
 # Direct hybrid injection — goal × days table. Used for pure-lifting
 # modes (muscle_gain, strength, general_health) that don't emit
 # dedicated cardio days. For those goals we directly promote N lift
@@ -1068,12 +1095,19 @@ def _inject_hybrid_cardio(
     # Candidate indices: lift days with a mappable hybrid pair in the
     # profile's allowed set. Exclude legs. Sort by index so we visit
     # early days first (plans typically show Monday first).
-    def _can_promote(i: int) -> bool:
-        a = out[i]
-        hybrid = _HYBRID_PAIR.get(a)
-        return hybrid is not None and hybrid in profile.allowed_archetypes
-
-    promotable = [i for i in range(len(out)) if _can_promote(i)]
+    preferred = [
+        i for i in range(len(out))
+        if _can_promote_to_plus_cardio(out[i], profile.allowed_archetypes)
+    ]
+    fallback = [
+        i for i in range(len(out))
+        if i not in preferred
+        and _can_promote_to_plus_cardio(
+            out[i], profile.allowed_archetypes,
+            allow_stimulus_loss=True,
+        )
+    ]
+    promotable = preferred + fallback
     if not promotable:
         return out
 
@@ -1162,8 +1196,18 @@ def _promote_same_day_cardio(
         for offset in (-1, 1, -2, 2):
             ni = ci + offset
             if 0 <= ni < len(out):
-                if out[ni] in _HYBRID_PAIR and _HYBRID_PAIR[out[ni]] in profile.allowed_archetypes:
+                if _can_promote_to_plus_cardio(out[ni], profile.allowed_archetypes):
                     candidates.append((ni, out[ni]))
+        if not candidates:
+            for offset in (-1, 1, -2, 2):
+                ni = ci + offset
+                if 0 <= ni < len(out):
+                    if _can_promote_to_plus_cardio(
+                        out[ni],
+                        profile.allowed_archetypes,
+                        allow_stimulus_loss=True,
+                    ):
+                        candidates.append((ni, out[ni]))
         if not candidates:
             continue
         lift_idx, lift_a = candidates[0]
@@ -2420,6 +2464,20 @@ def _rotate_recipe_to_avoid_recent(
             except KeyError:
                 return None
     else:
+        expanded_recent: list[str] = []
+        for token in recent:
+            expanded_recent.append(token)
+            # U/L and PPL lower-body labels are semantically equivalent
+            # for recovery spacing even though their split families differ.
+            # If a user just completed "Lower", a subsequent PPL recipe
+            # should avoid starting with "Legs"; likewise "Legs" should
+            # protect an Upper/Lower "Lower" day.
+            if token == "lower":
+                expanded_recent.append("legs")
+            elif token == "legs":
+                expanded_recent.append("lower")
+        recent = list(dict.fromkeys(expanded_recent))
+
         def _day_bucket(archetype: DayArchetype) -> str | None:
             return _archetype_bucket(archetype)
 

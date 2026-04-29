@@ -30,8 +30,8 @@
       "supportsTablet": false,
       "infoPlist": {
         "NSCameraUsageDescription": "Thallo uses the camera to scan food barcodes and take food photos for nutrition tracking.",
-        "NSHealthShareUsageDescription": "Thallo reads your resting heart rate, steps, workouts, sleep, and active energy from Apple Health to calculate your fitness score and recovery status.",
-        "NSHealthUpdateUsageDescription": "Thallo saves your completed workouts to Apple Health so they appear in your health timeline.",
+        "NSHealthShareUsageDescription": "Thallo reads your sleep, resting heart rate, heart rate variability, steps, workouts, weight, and active energy from Apple Health so you can see readiness, recovery, and progress trends in the app.",
+        "NSHealthUpdateUsageDescription": "Thallo writes your completed workouts to Apple Health so they appear alongside your other activity.",
         "ITSAppUsesNonExemptEncryption": false,
         "NSSupportsLiveActivities": true,
         "NSSupportsLiveActivitiesFrequentUpdates": true,

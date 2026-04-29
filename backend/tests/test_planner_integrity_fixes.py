@@ -1051,18 +1051,29 @@ def _count_category(recipe, category: str) -> int:
     return sum(1 for a in recipe if ARCHETYPE_META[a].category == category)
 
 
+def _count_cardio_components(recipe) -> int:
+    from app.services.workout.archetypes import ARCHETYPE_META
+    return sum(
+        1 for a in recipe
+        if a.value.endswith("_plus_cardio")
+        or ARCHETYPE_META[a].category in ("cond", "hybrid")
+    )
+
+
 def test_stimulus_ratio_muscle_gain_ul_6d_is_hypertrophy_biased() -> None:
-    """muscle_gain on UL 6d must be 2 heavy + 4 hypertrophy (was 4H+2Hy
-    before the audit — too CNS-dense for a hypertrophy goal)."""
-    print("\n[test] muscle_gain UL 6d = 2 heavy + 4 hypertrophy")
+    """muscle_gain on UL 6d must be 2 heavy + 4 non-heavy hypertrophy
+    exposures. PLUS_CARDIO counts as non-heavy here because the lift
+    work still follows the muscle-gain prescription; the enum only
+    changes to carry the finisher."""
+    print("\n[test] muscle_gain UL 6d = 2 heavy + 4 hypertrophy-equivalent")
     from app.services.workout.goal_profiles import goal_profile_for
     from app.services.workout.weekly_recipe import generate_weekly_recipe
     profile = goal_profile_for("muscle_gain")
     recipe = generate_weekly_recipe(profile, 6, lifting_split="upper_lower")
     n_heavy = _count_heavy(recipe)
-    n_hyper = _count_hyper(recipe)
+    n_hyper = _count_hyper(recipe) + sum(1 for a in recipe if a.value.endswith("_plus_cardio"))
     assert n_heavy == 2, f"muscle_gain UL 6d expected 2 heavy, got {n_heavy}: {[a.value for a in recipe]}"
-    assert n_hyper == 4, f"muscle_gain UL 6d expected 4 hypertrophy, got {n_hyper}: {[a.value for a in recipe]}"
+    assert n_hyper == 4, f"muscle_gain UL 6d expected 4 hypertrophy-equivalent, got {n_hyper}: {[a.value for a in recipe]}"
     _ok(f"muscle_gain UL 6d = {n_heavy}H + {n_hyper}Hy")
 
 
@@ -1075,9 +1086,9 @@ def test_stimulus_ratio_muscle_gain_ppl_6d_is_balanced_alternating() -> None:
     profile = goal_profile_for("muscle_gain")
     recipe = generate_weekly_recipe(profile, 6, lifting_split="ppl")
     n_heavy = _count_heavy(recipe)
-    n_volume = _count_volume(recipe)
+    n_volume = _count_volume(recipe) + sum(1 for a in recipe if a.value.endswith("_plus_cardio"))
     assert n_heavy == 3, f"muscle_gain PPL 6d expected 3 heavy, got {n_heavy}: {[a.value for a in recipe]}"
-    assert n_volume == 3, f"muscle_gain PPL 6d expected 3 volume, got {n_volume}: {[a.value for a in recipe]}"
+    assert n_volume == 3, f"muscle_gain PPL 6d expected 3 volume-equivalent, got {n_volume}: {[a.value for a in recipe]}"
     # Assert no 3-in-a-row heavies.
     for i in range(2, len(recipe)):
         triple = [_classify_lift(recipe[j].value) == "heavy" for j in (i - 2, i - 1, i)]
@@ -1125,22 +1136,22 @@ def test_stimulus_ratio_strength_ul_6d_allows_cluster() -> None:
 
 
 def test_stimulus_ratio_body_recomp_ul_6d_is_hypertrophy_biased() -> None:
-    """body_recomp on UL 6d (lifting+cardio mode) gets 5 lifts + 1
-    cardio. The 5 lifts must be 2 heavy + 3 hypertrophy — NOT
-    4 heavy + 1 hypertrophy (the old behavior)."""
-    print("\n[test] body_recomp UL 6d = 2 heavy + 3 hypertrophy + 1 cardio")
+    """body_recomp on UL 6d (lifting+cardio mode) gets 6 lift slots with
+    1 same-day cardio component. The lift stimulus must stay biased away
+    from heavy work — NOT 4 heavy + 1 hypertrophy (the old behavior)."""
+    print("\n[test] body_recomp UL 6d = <=2 heavy + 1 cardio component")
     from app.services.workout.goal_profiles import goal_profile_for
     from app.services.workout.weekly_recipe import generate_weekly_recipe
     profile = goal_profile_for("body_recomp")
     recipe = generate_weekly_recipe(profile, 6, lifting_split="upper_lower")
     n_heavy = _count_heavy(recipe)
-    n_cond = _count_category(recipe, "cond")
+    n_cond = _count_cardio_components(recipe)
     assert n_heavy <= 2, (
         f"body_recomp UL 6d expected <=2 heavy, got {n_heavy}: "
         f"{[a.value for a in recipe]}"
     )
     assert n_cond == 1, (
-        f"body_recomp UL 6d expected exactly 1 cardio, got {n_cond}: "
+        f"body_recomp UL 6d expected exactly 1 cardio component, got {n_cond}: "
         f"{[a.value for a in recipe]}"
     )
     _ok(f"body_recomp UL 6d heavy={n_heavy} cond={n_cond}")
@@ -1154,7 +1165,7 @@ def test_stimulus_ratio_fat_loss_ul_6d_gets_2_cardio() -> None:
     from app.services.workout.weekly_recipe import generate_weekly_recipe
     profile = goal_profile_for("fat_loss")
     recipe = generate_weekly_recipe(profile, 6, lifting_split="upper_lower")
-    n_cond = _count_category(recipe, "cond") + _count_category(recipe, "hybrid")
+    n_cond = _count_cardio_components(recipe)
     assert n_cond == 2, (
         f"fat_loss UL 6d expected 2 cardio days, got {n_cond}: "
         f"{[a.value for a in recipe]}"

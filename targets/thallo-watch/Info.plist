@@ -33,9 +33,9 @@
   <!-- HealthKit usage descriptions — watchOS requires both read + share
        strings for HKWorkoutSession. -->
   <key>NSHealthShareUsageDescription</key>
-  <string>Thallo reads your heart rate during workouts so you can see your live rate and zone on the watch.</string>
+  <string>Thallo reads your heart rate during workouts so you can see live heart-rate and zone updates on your watch.</string>
   <key>NSHealthUpdateUsageDescription</key>
-  <string>Thallo writes your completed workouts to Apple Health so they appear in the Fitness app.</string>
+  <string>Thallo writes your completed workouts to Apple Health so they appear in the Fitness app alongside your other sessions.</string>
   <!-- Speech recognition + microphone — used by the speech-to-meal feature
        so users can dictate what they ate and log it from the watch. -->
   <key>NSSpeechRecognitionUsageDescription</key>

@@ -288,6 +288,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
         </TouchableOpacity>
       </View>
 
+      <FadeInView key={activeTab} duration={240} slideDistance={8} style={{ flex: 1 }}>
       {activeTab === 'activity' ? (
         <SocialFeedView
           authToken={authToken}
@@ -513,6 +514,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
               </View>
             </ScrollView>
           )}
+      </FadeInView>
 
       {/* Opt-in nudge */}
       <Modal

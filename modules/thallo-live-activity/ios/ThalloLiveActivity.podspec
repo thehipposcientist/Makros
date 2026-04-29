@@ -10,7 +10,7 @@ Pod::Spec.new do |s|
   s.license        = 'MIT'
   s.author         = 'Thallo'
   s.homepage       = 'https://github.com/sawyerhannel/Makros'
-  s.platforms      = { :ios => '16.2' }
+  s.platforms      = { :ios => '15.1' }
   s.swift_version  = '5.9'
   s.source         = { :git => '' }
   s.static_framework = true

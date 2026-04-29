@@ -10,6 +10,7 @@ import Foundation
 // Swift compiler links them by module-qualified name. We redeclare the
 // struct here so the main app target can encode/decode activities.
 
+@available(iOS 16.2, *)
 public struct RestTimerAttributes: ActivityAttributes {
     public typealias RestTimerState = ContentState
 
@@ -25,6 +26,20 @@ public struct RestTimerAttributes: ActivityAttributes {
     public var workoutId: String
 }
 
+private func doubleValue(_ value: Any?, fallback: Double) -> Double {
+    if let value = value as? Double { return value }
+    if let value = value as? Int { return Double(value) }
+    if let value = value as? NSNumber { return value.doubleValue }
+    return fallback
+}
+
+private func intValue(_ value: Any?, fallback: Int) -> Int {
+    if let value = value as? Int { return value }
+    if let value = value as? Double { return Int(value) }
+    if let value = value as? NSNumber { return value.intValue }
+    return fallback
+}
+
 public class ThalloLiveActivityModule: Module {
     public func definition() -> ModuleDefinition {
         Name("ThalloLiveActivityModule")
@@ -35,10 +50,10 @@ public class ThalloLiveActivityModule: Module {
             guard ActivityAuthorizationInfo().areActivitiesEnabled else { return nil }
 
             let state = RestTimerAttributes.ContentState(
-                endDateMs: (payload["endDateMs"] as? Double) ?? 0,
+                endDateMs: doubleValue(payload["endDateMs"], fallback: Date().addingTimeInterval(60).timeIntervalSince1970 * 1000),
                 exerciseName: (payload["exerciseName"] as? String) ?? "Exercise",
-                setNumber: (payload["setNumber"] as? Int) ?? 0,
-                totalSets: (payload["totalSets"] as? Int) ?? 0,
+                setNumber: intValue(payload["setNumber"], fallback: 0),
+                totalSets: intValue(payload["totalSets"], fallback: 0),
                 nextSetRecommendation: (payload["nextSetRecommendation"] as? String) ?? "",
                 themeColorHex: (payload["themeColorHex"] as? String) ?? "#15C7B8"
             )
@@ -64,10 +79,10 @@ public class ThalloLiveActivityModule: Module {
             guard #available(iOS 16.2, *) else { return false }
             for activity in Activity<RestTimerAttributes>.activities where activity.id == activityId {
                 let state = RestTimerAttributes.ContentState(
-                    endDateMs: (payload["endDateMs"] as? Double) ?? 0,
+                    endDateMs: doubleValue(payload["endDateMs"], fallback: activity.content.state.endDateMs),
                     exerciseName: (payload["exerciseName"] as? String) ?? activity.content.state.exerciseName,
-                    setNumber: (payload["setNumber"] as? Int) ?? activity.content.state.setNumber,
-                    totalSets: (payload["totalSets"] as? Int) ?? activity.content.state.totalSets,
+                    setNumber: intValue(payload["setNumber"], fallback: activity.content.state.setNumber),
+                    totalSets: intValue(payload["totalSets"], fallback: activity.content.state.totalSets),
                     nextSetRecommendation: (payload["nextSetRecommendation"] as? String) ?? activity.content.state.nextSetRecommendation,
                     themeColorHex: (payload["themeColorHex"] as? String) ?? activity.content.state.themeColorHex
                 )

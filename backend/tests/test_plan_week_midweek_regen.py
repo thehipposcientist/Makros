@@ -575,17 +575,18 @@ def test_dpw_increase_4_to_5_midweek():
 
 def test_dpw_decrease_6_to_4_midweek():
     today = date.today()
-    monday = today - timedelta(days=1)
-    pw, days = _build_week(monday, locked_indexes=(0,), rest_indexes=(6,))
+    pw, days = _build_week(today, locked_indexes=(0,), rest_indexes=(6,))
     pw.days_per_week = 6
+    removed_dow = days[1].day_date.weekday()
+    reduced_pattern = [dow for dow in range(7) if dow != removed_dow][:4]
     with _patch_get_week_days(days):
         fresh = [{"focus": "X"}] * 4
         week_manager.regenerate_remaining_days(
-            FakeSession(), pw, fresh, training_day_pattern=[0, 2, 3, 5],
+            FakeSession(), pw, fresh, training_day_pattern=reduced_pattern,
             new_days_per_week=4,
         )
     assert pw.days_per_week == 4
-    # Tuesday (day 1) was training in old, now rest
+    # The next unlocked future day was training in old 6d, now rest.
     assert days[1].is_rest is True
 
 

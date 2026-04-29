@@ -8,10 +8,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName, DailyNutritionPlan } from '../types';
-import { buildGroceryList, formatGroceryText, GroceryRow } from '../utils/groceryList';
+import { buildGroceryList, formatGroceryQuantity, formatGroceryText, GroceryCategory, GroceryRow } from '../utils/groceryList';
 
-const CHECKED_KEY = 'groceryChecked_v1';
-const REMOVED_KEY = 'groceryRemoved_v1';
+const CHECKED_KEY = 'groceryChecked_v2';
+const REMOVED_KEY = 'groceryRemoved_v2';
 
 interface Props {
   visible: boolean;
@@ -43,31 +43,73 @@ export default function GroceryListModal({ visible, onClose, plansByDate, themeN
     return buildGroceryList(plans);
   }, [plansByDate, visible]);
 
+  const planSignature = useMemo(
+    () => allRows.map(r => `${r.name}|${r.quantity}|${r.unit}|${r.category}`).join('||'),
+    [allRows],
+  );
+
   const rows = useMemo(() => allRows.filter(r => !removed[r.name]), [allRows, removed]);
   const removedCount = useMemo(() => allRows.filter(r => removed[r.name]).length, [allRows, removed]);
+  const groupedRows = useMemo(() => {
+    const groups = new Map<GroceryCategory, GroceryRow[]>();
+    for (const row of rows) {
+      const list = groups.get(row.category) ?? [];
+      list.push(row);
+      groups.set(row.category, list);
+    }
+    return ['Produce', 'Protein', 'Dairy & Eggs', 'Grains & Bakery', 'Pantry', 'Frozen', 'Drinks', 'Supplements', 'Other']
+      .map(category => ({ category: category as GroceryCategory, rows: groups.get(category as GroceryCategory) ?? [] }))
+      .filter(section => section.rows.length > 0);
+  }, [rows]);
 
   useEffect(() => {
     if (!visible) return;
     AsyncStorage.getItem(CHECKED_KEY).then(raw => {
-      if (raw) { try { setChecked(JSON.parse(raw)); } catch {} }
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          setChecked(parsed[planSignature] ?? {});
+        } catch {
+          setChecked({});
+        }
+      } else {
+        setChecked({});
+      }
     });
     AsyncStorage.getItem(REMOVED_KEY).then(raw => {
-      if (raw) { try { setRemoved(JSON.parse(raw)); } catch {} }
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          setRemoved(parsed[planSignature] ?? {});
+        } catch {
+          setRemoved({});
+        }
+      } else {
+        setRemoved({});
+      }
     });
-  }, [visible]);
+  }, [visible, planSignature]);
 
   const toggle = useCallback((name: string) => {
     setChecked(prev => {
       const next = { ...prev, [name]: !prev[name] };
-      AsyncStorage.setItem(CHECKED_KEY, JSON.stringify(next)).catch(() => {});
+      AsyncStorage.getItem(CHECKED_KEY).then(raw => {
+        const all = raw ? JSON.parse(raw) : {};
+        all[planSignature] = next;
+        AsyncStorage.setItem(CHECKED_KEY, JSON.stringify(all)).catch(() => {});
+      }).catch(() => {});
       return next;
     });
-  }, []);
+  }, [planSignature]);
 
   const removeRow = useCallback((name: string) => {
     setRemoved(prev => {
       const next = { ...prev, [name]: true };
-      AsyncStorage.setItem(REMOVED_KEY, JSON.stringify(next)).catch(() => {});
+      AsyncStorage.getItem(REMOVED_KEY).then(raw => {
+        const all = raw ? JSON.parse(raw) : {};
+        all[planSignature] = next;
+        AsyncStorage.setItem(REMOVED_KEY, JSON.stringify(all)).catch(() => {});
+      }).catch(() => {});
       return next;
     });
     // If it was checked, clean that flag too — meaningless for a removed row.
@@ -75,19 +117,31 @@ export default function GroceryListModal({ visible, onClose, plansByDate, themeN
       if (!prev[name]) return prev;
       const next = { ...prev };
       delete next[name];
-      AsyncStorage.setItem(CHECKED_KEY, JSON.stringify(next)).catch(() => {});
+      AsyncStorage.getItem(CHECKED_KEY).then(raw => {
+        const all = raw ? JSON.parse(raw) : {};
+        all[planSignature] = next;
+        AsyncStorage.setItem(CHECKED_KEY, JSON.stringify(all)).catch(() => {});
+      }).catch(() => {});
       return next;
     });
-  }, []);
+  }, [planSignature]);
 
   const restoreAllRemoved = useCallback(() => {
     setRemoved({});
-    AsyncStorage.removeItem(REMOVED_KEY).catch(() => {});
-  }, []);
+    AsyncStorage.getItem(REMOVED_KEY).then(raw => {
+      const all = raw ? JSON.parse(raw) : {};
+      delete all[planSignature];
+      AsyncStorage.setItem(REMOVED_KEY, JSON.stringify(all)).catch(() => {});
+    }).catch(() => {});
+  }, [planSignature]);
 
   const clearChecks = () => {
     setChecked({});
-    AsyncStorage.removeItem(CHECKED_KEY).catch(() => {});
+    AsyncStorage.getItem(CHECKED_KEY).then(raw => {
+      const all = raw ? JSON.parse(raw) : {};
+      delete all[planSignature];
+      AsyncStorage.setItem(CHECKED_KEY, JSON.stringify(all)).catch(() => {});
+    }).catch(() => {});
   };
 
   const share = async () => {
@@ -144,69 +198,68 @@ export default function GroceryListModal({ visible, onClose, plansByDate, themeN
               <Ionicons name="basket-outline" size={36} color={tc.textMuted} />
               <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>Nothing to shop yet</Text>
               <Text style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center' }}>
-                Generate a meal plan and your grocery list will appear here automatically.
+                Generate a meal plan and the next 7 days of groceries will show up here automatically.
               </Text>
             </View>
           ) : (
             <ScrollView contentContainerStyle={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: 20 }}>
-              {rows.map((r) => {
-                const isChecked = !!checked[r.name];
-                const q = r.quantity % 1 === 0 ? String(r.quantity) : r.quantity.toFixed(1);
-                return (
-                  <TouchableOpacity
-                    key={r.name + r.unit}
-                    activeOpacity={0.7}
-                    onPress={() => toggle(r.name)}
-                    style={{
-                      flexDirection: 'row', alignItems: 'center', gap: 10,
-                      paddingVertical: 12, paddingHorizontal: 10,
-                      borderRadius: radius.md,
-                      marginBottom: 4,
-                      backgroundColor: isChecked ? tc.border + '22' : tc.surfaceRaised,
-                      opacity: isChecked ? 0.6 : 1,
-                    }}
-                  >
-                    <View style={{
-                      width: 22, height: 22, borderRadius: 6,
-                      borderWidth: 2,
-                      borderColor: isChecked ? tc.primary : tc.border,
-                      backgroundColor: isChecked ? tc.primary : 'transparent',
-                      alignItems: 'center', justifyContent: 'center',
-                    }}>
-                      {/* Contrast-aware checkmark: inherits the theme's background
-                          so it reads as a "negative" mark on the primary fill,
-                          matching whatever palette the user is in. */}
-                      {isChecked && <Ionicons name="checkmark" size={14} color={tc.background} />}
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text
+              {groupedRows.map(section => (
+                <View key={section.category} style={{ marginBottom: 10 }}>
+                  <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.4, marginBottom: 6, paddingHorizontal: 4 }}>
+                    {section.category.toUpperCase()}
+                  </Text>
+                  {section.rows.map((r) => {
+                    const isChecked = !!checked[r.name];
+                    return (
+                      <TouchableOpacity
+                        key={r.name + r.unit}
+                        activeOpacity={0.7}
+                        onPress={() => toggle(r.name)}
                         style={{
-                          fontSize: 14, fontWeight: '600',
-                          color: tc.textPrimary,
-                          textDecorationLine: isChecked ? 'line-through' : 'none',
+                          flexDirection: 'row', alignItems: 'center', gap: 10,
+                          paddingVertical: 12, paddingHorizontal: 10,
+                          borderRadius: radius.md,
+                          marginBottom: 4,
+                          backgroundColor: isChecked ? tc.border + '22' : tc.surfaceRaised,
+                          opacity: isChecked ? 0.6 : 1,
                         }}
                       >
-                        {r.name}
-                      </Text>
-                      {r.meals > 1 && (
-                        <Text style={{ fontSize: 10, color: tc.textMuted }}>Used in {r.meals} meals</Text>
-                      )}
-                    </View>
-                    <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textSecondary }}>
-                      {q}{r.unit ? ' ' + r.unit : ''}
-                    </Text>
-                    {/* Remove (x) — nested touchable with large hitSlop so a
-                        tap on the main row still toggles the check. */}
-                    <TouchableOpacity
-                      onPress={() => removeRow(r.name)}
-                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                      style={{ padding: 2 }}
-                    >
-                      <Ionicons name="close-circle" size={18} color={tc.textMuted} />
-                    </TouchableOpacity>
-                  </TouchableOpacity>
-                );
-              })}
+                        <View style={{
+                          width: 22, height: 22, borderRadius: 6,
+                          borderWidth: 2,
+                          borderColor: isChecked ? tc.primary : tc.border,
+                          backgroundColor: isChecked ? tc.primary : 'transparent',
+                          alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          {isChecked && <Ionicons name="checkmark" size={14} color={tc.background} />}
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text
+                            style={{
+                              fontSize: 14, fontWeight: '600',
+                              color: tc.textPrimary,
+                              textDecorationLine: isChecked ? 'line-through' : 'none',
+                            }}
+                          >
+                            {r.name}
+                          </Text>
+                          <Text style={{ fontSize: 10, color: tc.textMuted }}>
+                            {formatGroceryQuantity(r.quantity, r.unit)}
+                            {r.meals > 1 ? ` · used in ${r.meals} meals` : ''}
+                          </Text>
+                        </View>
+                        <TouchableOpacity
+                          onPress={() => removeRow(r.name)}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                          style={{ padding: 2 }}
+                        >
+                          <Ionicons name="close-circle" size={18} color={tc.textMuted} />
+                        </TouchableOpacity>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              ))}
               <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 16, marginTop: 6 }}>
                 {done > 0 && (
                   <TouchableOpacity

@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, Modal, ScrollView, LayoutAnimation, Platform, UIManager, Animated, ActivityIndicator } from 'react-native';
+import { View, Text, TextInput, StyleSheet, TouchableOpacity, Modal, ScrollView, Platform, UIManager, Animated, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -7,7 +7,7 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 }
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import { DailyNutritionPlan, MealSuggestion, AppThemeName } from '../types';
-import { getTheme, radius } from '../constants/theme';
+import { elevations, getTheme, radius, typography } from '../constants/theme';
 import { ensureItems, formatItemAmount } from '../utils/mealItems';
 import { computeDayInsights } from '../utils/nutritionLayers';
 import { classifyFood, computeNutritionScore, computePlanGutHealth } from '../utils/nutritionScore';
@@ -986,6 +986,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
    *  Surfaces a star icon in the header so users can save/unsave. */
   isSaved?: boolean;
 }) {
+  void onHardDelete;
   const [itemsExpanded, setItemsExpanded] = useState(true);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState(meal.meal);
@@ -1290,11 +1291,12 @@ const createStyles = (
 ) => StyleSheet.create({
   card: {
     backgroundColor: colors.surface,
-    borderRadius: radius.lg,
+    borderRadius: 22,
     marginBottom: 16,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: colors.border,
+    ...elevations.card,
   },
 
   // ── Body ─────────────────────────────────────────────────────────────────────
@@ -1304,12 +1306,9 @@ const createStyles = (
   // (used by the day-card flow to label "Today" / "Tomorrow"). Replaces
   // the old top-of-card header bar.
   titleSubtle: {
-    fontSize: 11,
-    fontWeight: '700',
+    ...typography.label,
     color: colors.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    marginBottom: 8,
+    marginBottom: 10,
   },
 
   // Inline "+ Add Meal" affordance at the bottom of the meal list,
@@ -1333,31 +1332,33 @@ const createStyles = (
 
   // ── Modal card section ────────────────────────────────────────────────────────
   modalCard: {
-    borderRadius: radius.lg,
+    borderRadius: 18,
     borderWidth: 1,
-    padding: 14,
+    padding: 16,
     marginBottom: 12,
   },
 
   // ── Macro grid ────────────────────────────────────────────────────────────────
   macrosGrid: {
     flexDirection: 'row',
-    paddingVertical: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
     marginBottom: 14,
     gap: 2,
+    backgroundColor: section.soft,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: section.strong + '20',
   },
   macroTracker: { flex: 1, alignItems: 'center', gap: 3 },
   macroTrackerLabel: {
-    fontSize: 9,
-    fontWeight: '700',
+    ...typography.micro,
     color: colors.textSecondary,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
   },
   macroTrackerValues: { flexDirection: 'row', alignItems: 'baseline', gap: 2 },
-  macroActual:  { fontSize: 14, fontWeight: '800' },
-  macroSep:     { fontSize: 10, color: colors.textMuted },
-  macroTarget:  { fontSize: 10, color: colors.textMuted, fontWeight: '500' },
+  macroActual:  { ...typography.cardTitle },
+  macroSep:     { ...typography.micro, color: colors.textMuted },
+  macroTarget:  { ...typography.micro, color: colors.textMuted },
   macroBarTrack: {
     width: '100%', height: 3,
     backgroundColor: colors.border,
@@ -1365,15 +1366,15 @@ const createStyles = (
     overflow: 'hidden',
   },
   macroBarFill:   { height: 3, borderRadius: 2 },
-  macroRemaining: { fontSize: 9, fontWeight: '500' },
+  macroRemaining: { ...typography.micro },
 
   // ── Meals ────────────────────────────────────────────────────────────────────
   meals: { gap: 10, marginBottom: 14 },
 
   mealItem: {
     backgroundColor: colors.surfaceRaised,
-    borderRadius: radius.md,
-    padding: 12,
+    borderRadius: 16,
+    padding: 14,
     borderWidth: 1,
     borderColor: section.strong + '2A',
     gap: 6,
@@ -1427,24 +1428,24 @@ const createStyles = (
   checkboxDone: { backgroundColor: section.strong, borderColor: section.strong },
   checkmark:    { fontSize: 12, color: '#fff', fontWeight: '800' },
 
-  mealName:     { fontSize: 16, fontWeight: '700', color: colors.textPrimary },
+  mealName:     { ...typography.sectionTitle, color: colors.textPrimary },
   mealNameDone: { textDecorationLine: 'line-through', color: colors.textSecondary },
 
   mealFoodsDetail: { gap: 3, marginTop: 6, paddingLeft: 32 },
   mealFoodRow:     { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
-  mealFoodName:    { fontSize: 12, color: colors.textSecondary, lineHeight: 17 },
+  mealFoodName:    { ...typography.body, color: colors.textSecondary, lineHeight: 17 },
   mealFoodsDone:   { color: colors.textMuted },
 
   recipeBox: {
     backgroundColor: colors.background,
-    borderRadius: radius.sm,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     padding: 10,
     marginTop: 4,
   },
-  recipeLabel: { fontSize: 10, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4 },
-  recipeText:  { fontSize: 12, color: colors.textPrimary, lineHeight: 18 },
+  recipeLabel: { ...typography.micro, color: colors.textSecondary, marginBottom: 4 },
+  recipeText:  { ...typography.body, color: colors.textPrimary, lineHeight: 18 },
 
   mealBadges: { flexDirection: 'row', gap: 6, flexWrap: 'wrap', marginTop: 2 },
 
@@ -1470,15 +1471,15 @@ const createStyles = (
 
   pill: {
     backgroundColor: colors.background,
-    borderRadius: radius.sm,
+    borderRadius: 10,
     borderWidth: 1,
     paddingHorizontal: 8,
     paddingVertical: 4,
     alignItems: 'center',
     minWidth: 44,
   },
-  pillValue: { fontSize: 13, fontWeight: '700' },
-  pillLabel: { fontSize: 9, color: colors.textMuted, fontWeight: '500', marginTop: 1 },
+  pillValue: { ...typography.bodyStrong },
+  pillLabel: { ...typography.micro, color: colors.textMuted, marginTop: 1 },
 
   // ── Nutrition details inline link (muted, supplementary) ────────────────
   microBtn: {

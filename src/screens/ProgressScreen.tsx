@@ -21,7 +21,7 @@ import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
-import { readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
+import { APPLE_HEALTH_PERMISSION_COPY, readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import WeeklyCheckinModal from '../components/WeeklyCheckinModal';
 import WeeklyCheckinCard from '../components/WeeklyCheckinCard';
@@ -40,7 +40,7 @@ import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint } from '../services/api';
-import { colors, getTheme, radius } from '../constants/theme';
+import { colors, elevations, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
 
 interface ProgressScreenProps {
@@ -2202,32 +2202,44 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
 
             const handleConnect = async () => {
-              setHealthConnecting(true);
-              try { await persistAppleHealthEnabled(true); } catch {}
-              setHealthEnabled(true);
-              try {
-                const granted = await requestHealthPermissions();
-                const fresh = await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
-                if (fresh) {
-                  setHealthSummary(fresh);
-                  saveHealthSummary(fresh).catch(() => null);
-                }
-                const hasAny = fresh && (
-                  fresh.restingHeartRate != null || fresh.avgSteps7d != null ||
-                  fresh.lastNightSleepHours != null ||
-                  fresh.activeEnergy7d != null
-                );
-                if (granted && !hasAny) {
-                  Alert.alert('No data yet', 'Apple Health is connected but no data came back. Open iPhone Settings → Privacy & Security → Health → Thallo and enable the categories you want to share.');
-                } else if (!granted) {
-                  const err = getLastHealthKitError();
-                  Alert.alert('HealthKit not available', `iOS error: ${err ?? 'unknown'}\n\nThis usually means the provisioning profile doesn't include HealthKit.`);
-                }
-              } catch (e: any) {
-                Alert.alert('Apple Health error', String(e?.message ?? e));
-              } finally {
-                setHealthConnecting(false);
-              }
+              Alert.alert(
+                APPLE_HEALTH_PERMISSION_COPY.title,
+                APPLE_HEALTH_PERMISSION_COPY.body,
+                [
+                  { text: 'Not now', style: 'cancel' },
+                  {
+                    text: 'Continue',
+                    onPress: async () => {
+                      setHealthConnecting(true);
+                      try {
+                        const granted = await requestHealthPermissions();
+                        try { await persistAppleHealthEnabled(granted); } catch {}
+                        setHealthEnabled(granted);
+                        const fresh = await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
+                        if (fresh) {
+                          setHealthSummary(fresh);
+                          saveHealthSummary(fresh).catch(() => null);
+                        }
+                        const hasAny = fresh && (
+                          fresh.restingHeartRate != null || fresh.avgSteps7d != null ||
+                          fresh.lastNightSleepHours != null ||
+                          fresh.activeEnergy7d != null
+                        );
+                        if (granted && !hasAny) {
+                          Alert.alert('Connected — waiting for data', 'Apple Health is connected. If this card stays empty, open iPhone Settings -> Privacy & Security -> Health -> Thallo and turn on the categories you want to share.');
+                        } else if (!granted) {
+                          const err = getLastHealthKitError();
+                          Alert.alert('Apple Health not connected', `${APPLE_HEALTH_PERMISSION_COPY.denied}\n\n${err ?? ''}`.trim());
+                        }
+                      } catch (e: any) {
+                        Alert.alert('Apple Health error', String(e?.message ?? e));
+                      } finally {
+                        setHealthConnecting(false);
+                      }
+                    },
+                  },
+                ],
+              );
             };
 
             const handleOpenSettings = () => {
@@ -2243,7 +2255,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Ionicons name="heart-outline" size={36} color={tc.primary} />
                     <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary, marginTop: 8 }}>Apple Health</Text>
                     <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6, marginBottom: 14 }}>
-                      Connect to see heart rate, sleep stages, HRV, steps, and more.
+                      Optional sync for sleep, HRV, resting heart rate, steps, workouts, weight, and active energy. Thallo also writes completed workouts back to Apple Health.
                     </Text>
                     <TouchableOpacity
                       style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 12, paddingHorizontal: 32 }}
@@ -2266,7 +2278,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Ionicons name="cloud-offline-outline" size={32} color={tc.textMuted} />
                     <Text style={{ fontSize: 14, fontWeight: '600', color: tc.textPrimary, marginTop: 8 }}>Connected — no data yet</Text>
                     <Text style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 17, marginTop: 4, marginBottom: 12 }}>
-                      Your Watch may not have synced, or permission categories are off.
+                      Thallo still works without this data. When Apple Health has something to share, this card will fill in automatically.
                     </Text>
                     <TouchableOpacity
                       style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: 24 }}
@@ -2295,7 +2307,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <View style={[styles.vitalsHeader, { marginBottom: 4 }]}>
                   <Ionicons name="heart-outline" size={16} color={tc.primary} />
                   <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Apple Health</Text>
-                  <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>7-day snapshot</Text>
+                  <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>Optional 7-day snapshot</Text>
                 </View>
                 {vitalsRow('pulse-outline', 'Resting HR', hs!.restingHeartRate, 'bpm')}
                 {vitalsRow('analytics-outline', 'HRV', hs!.hrvAvg, 'ms')}
@@ -2412,6 +2424,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     </Text>
                   </View>
                 </View>
+                <Text style={{ fontSize: 10, color: tc.textMuted, lineHeight: 13, marginBottom: 10 }}>
+                  Biggest drivers: total sleep, deep and REM sleep, overnight wake-ups, and HRV when it's available.
+                </Text>
 
                 {/* Compact calibration progress (only while building baseline). */}
                 {!isPersonalized && (
@@ -3510,32 +3525,34 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   container: { flex: 1, backgroundColor: colors.background },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 16, paddingTop: 56, paddingBottom: 14,
+    paddingHorizontal: 16, paddingTop: 56, paddingBottom: 16,
     borderBottomWidth: 1, borderBottomColor: colors.border,
   },
-  backBtn: { fontSize: 15, color: colors.primary, fontWeight: '600', width: 60 },
-  title:   { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
+  backBtn: { ...typography.bodyStrong, color: colors.primary, width: 60 },
+  title:   { ...typography.screenTitle, color: colors.textPrimary },
 
   tabs: {
     flexDirection: 'row', gap: 2,
-    backgroundColor: colors.background, borderRadius: 999,
-    padding: 3, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border,
-    marginHorizontal: 16, marginTop: 8, marginBottom: 4,
+    backgroundColor: colors.surface, borderRadius: 999,
+    padding: 4, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border,
+    marginHorizontal: 16, marginTop: 10, marginBottom: 8,
+    ...elevations.subtle,
   },
-  tab:           { flex: 1, paddingVertical: 6, borderRadius: 999, alignItems: 'center' },
-  tabActive:     { backgroundColor: colors.primary + '22' },
-  tabText:       { fontSize: 10, fontWeight: '500', color: colors.textSecondary, letterSpacing: 0.7, textTransform: 'uppercase', opacity: 0.55 },
+  tab:           { flex: 1, paddingVertical: 9, borderRadius: 999, alignItems: 'center' },
+  tabActive:     { backgroundColor: colors.primary + '1C' },
+  tabText:       { ...typography.label, color: colors.textSecondary, opacity: 0.6 },
   tabTextActive: { color: colors.primary, fontWeight: '700', opacity: 1 },
 
   center:  { flex: 1, justifyContent: 'center', alignItems: 'center' },
   // Bottom padding clears the fixed 5-tab bottom nav bar (~57 px +
   // safe area). Otherwise the bottom of the content (sign-out,
   // delete-last-entry, etc.) sits under the tab bar.
-  content: { padding: 16, paddingBottom: 140 },
+  content: { padding: 16, paddingBottom: 140, paddingTop: 12 },
 
   sectionLabel: {
-    fontSize: 11, fontWeight: '700', color: colors.textSecondary,
-    textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 12,
+    ...typography.label,
+    color: colors.textSecondary,
+    marginBottom: 12,
   },
 
   emptyBox:  { alignItems: 'center', paddingTop: 60, gap: 12 },
@@ -3569,18 +3586,19 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
 
   prCard: {
     flexDirection: 'row', alignItems: 'center',
-    backgroundColor: colors.surface, borderRadius: radius.md,
+    backgroundColor: colors.surface, borderRadius: radius.lg,
     padding: 14, marginBottom: 8,
     borderWidth: 1, borderColor: colors.border,
     borderLeftWidth: 3, borderLeftColor: colors.primary,
+    ...elevations.subtle,
   },
   prLeft:   { flex: 1 },
-  prName:   { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 3 },
-  prMeta:   { fontSize: 11, color: colors.textMuted },
+  prName:   { ...typography.cardTitle, color: colors.textPrimary, marginBottom: 3 },
+  prMeta:   { ...typography.micro, color: colors.textMuted },
   prRight:  { alignItems: 'flex-end' },
   prWeight: { fontSize: 22, fontWeight: '800', color: colors.primary },
-  prUnit:   { fontSize: 11, color: colors.textSecondary, marginTop: -4 },
-  prReps:   { fontSize: 12, color: colors.textMuted, marginTop: 2 },
+  prUnit:   { ...typography.micro, color: colors.textSecondary, marginTop: -4 },
+  prReps:   { ...typography.micro, color: colors.textMuted, marginTop: 2 },
 
   insightsCard: {
     backgroundColor: colors.surface,
@@ -3598,11 +3616,12 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
 
   weightCard: {
     backgroundColor: colors.surface,
-    borderRadius: radius.md,
+    borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
     padding: 14,
     marginBottom: 12,
+    ...elevations.card,
   },
   weightCardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   weightTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
@@ -3636,11 +3655,12 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
 
   graphCard: {
     backgroundColor: colors.surface,
-    borderRadius: radius.md,
+    borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
     padding: 14,
     marginBottom: 12,
+    ...elevations.card,
   },
   graphHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 },
   graphTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
@@ -3653,9 +3673,10 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   graphBarLabel: { fontSize: 10, color: colors.textSecondary },
 
   sessionCard: {
-    backgroundColor: colors.surface, borderRadius: radius.md,
+    backgroundColor: colors.surface, borderRadius: radius.lg,
     padding: 14, marginBottom: 10,
     borderWidth: 1, borderColor: colors.border,
+    ...elevations.subtle,
   },
   sessionHeader: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 6 },
   sessionFocus:  { fontSize: 15, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
@@ -3696,12 +3717,13 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   // ── Fitness Score Card ──
   fitnessScoreCard: {
     backgroundColor: colors.surface,
-    borderRadius: radius.lg,
+    borderRadius: 20,
     borderWidth: 1,
     borderColor: colors.border,
     padding: 16,
     marginBottom: 16,
     gap: 12,
+    ...elevations.card,
   },
   shareCardLogo: {
     width: 180,
@@ -3803,15 +3825,16 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   // ── Apple Health vitals card (Body Check tab) ──
   vitalsCard: {
     backgroundColor: colors.surface,
-    borderRadius: radius.lg,
+    borderRadius: 20,
     padding: 16,
     marginBottom: 14,
     borderWidth: 1,
     borderColor: colors.border,
+    ...elevations.card,
   },
   vitalsHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 },
-  vitalsTitle: { fontSize: 14, fontWeight: '700' },
-  vitalsSubtitle: { fontSize: 11, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginLeft: 'auto' },
+  vitalsTitle: { ...typography.cardTitle },
+  vitalsSubtitle: { ...typography.micro, marginLeft: 'auto' },
   vitalsGrid: { flexDirection: 'row', flexWrap: 'wrap' },
   vitalsCell: { width: '33.333%', paddingVertical: 8, alignItems: 'center' },
   vitalsValue: { fontSize: 18, fontWeight: '700' },

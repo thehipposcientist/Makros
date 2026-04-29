@@ -31,7 +31,7 @@ struct RestTimerWidget: Widget {
                         Text(context.state.exerciseName)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                        Text("Set \(context.state.setNumber) of \(context.state.totalSets)")
+                        Text("Set \(context.state.setNumber + 1) of \(context.state.totalSets)")
                             .font(.subheadline.bold())
                     }
                 }

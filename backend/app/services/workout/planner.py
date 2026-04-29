@@ -942,6 +942,23 @@ def prescribe_sets_reps(
     elif exercise.get("default_tracking_mode") == "distance":
         reps = "20-30 yds"
 
+    # Focus-volume bump: hypertrophy users who choose a focused muscle
+    # get one extra set on primary/secondary exercises that actually
+    # train that muscle. Broader volume targets and accessory backfill
+    # handle the rest of the week; this keeps the main movements honest
+    # without leaking extra fatigue into deficit/endurance goals.
+    if bucket == "muscle_gain" and role in ("primary", "secondary"):
+        try:
+            from .focus_profiles import get_focus_profile
+            focus = get_focus_profile(inputs.focused_muscle)
+            if focus is not None:
+                trained = {exercise.get("primary_muscle") or ""}
+                trained.update(exercise.get("secondary_muscles") or [])
+                if focus.muscle in trained:
+                    sets = min(5, sets + 1)
+        except Exception:
+            pass
+
     # ── Beginner cap: never more than 3 working sets per exercise ─────
     if inputs.experience == "beginner":
         sets = min(sets, 3)

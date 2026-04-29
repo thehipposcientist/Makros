@@ -161,7 +161,7 @@ export default function PreparednessCard({
       }}>
         <Ionicons name="flash-outline" size={16} color={tc.textMuted} />
         <Text style={{ flex: 1, fontSize: 12, color: tc.textSecondary }}>
-          Connect Apple Health and log a meal to see today's readiness.
+          Apple Health is optional. Readiness gets better with sleep, HRV, and meal data, but your plan still works without it.
         </Text>
       </View>
     );
@@ -257,7 +257,7 @@ export default function PreparednessCard({
           )}
           {result.missing.length > 0 && (
             <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6, fontStyle: 'italic' }}>
-              Missing: {result.missing.join(', ')} — connect Apple Health for a more accurate score.
+              Missing: {result.missing.join(', ')} — Apple Health is optional, but it adds sleep and heart-rate context here.
             </Text>
           )}
         </View>

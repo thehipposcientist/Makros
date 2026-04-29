@@ -8,14 +8,15 @@
  *   </FadeInView>
  */
 import React, { useEffect, useRef } from 'react';
-import { Animated, ViewStyle } from 'react-native';
+import { Animated, Easing, StyleProp, ViewStyle } from 'react-native';
+import { TIMING_STANDARD, useReducedMotion } from '../utils/motion';
 
 interface Props {
   children: React.ReactNode;
   delay?: number;
   duration?: number;
   slideDistance?: number;
-  style?: ViewStyle;
+  style?: StyleProp<ViewStyle>;
 }
 
 export default function FadeInView({
@@ -25,29 +26,50 @@ export default function FadeInView({
   slideDistance = 12,
   style,
 }: Props) {
+  const reducedMotion = useReducedMotion();
   const opacity = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(slideDistance)).current;
+  const scale = useRef(new Animated.Value(0.985)).current;
 
   useEffect(() => {
+    if (reducedMotion) {
+      opacity.setValue(1);
+      translateY.setValue(0);
+      scale.setValue(1);
+      return;
+    }
+
+    opacity.setValue(0);
+    translateY.setValue(slideDistance);
+    scale.setValue(0.985);
+
     const timer = setTimeout(() => {
       Animated.parallel([
         Animated.timing(opacity, {
           toValue: 1,
           duration,
+          easing: TIMING_STANDARD.easing,
           useNativeDriver: true,
         }),
         Animated.timing(translateY, {
           toValue: 0,
           duration,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(scale, {
+          toValue: 1,
+          duration: Math.max(220, duration - 20),
+          easing: Easing.out(Easing.cubic),
           useNativeDriver: true,
         }),
       ]).start();
     }, delay);
     return () => clearTimeout(timer);
-  }, []);
+  }, [delay, duration, opacity, reducedMotion, scale, slideDistance, translateY]);
 
   return (
-    <Animated.View style={[style, { opacity, transform: [{ translateY }] }]}>
+    <Animated.View style={[style, { opacity, transform: [{ translateY }, { scale }] }]}>
       {children}
     </Animated.View>
   );

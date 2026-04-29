@@ -1,3 +1,5 @@
+import { Platform, TextStyle, ViewStyle } from 'react-native';
+
 export type AppThemeName =
   | 'midnight' | 'ocean'    | 'amethyst' | 'scarlet'
   | 'ember'    | 'wine'     | 'obsidian'
@@ -882,3 +884,97 @@ export const spacing = {
   xl: 20,
   xxl: 24,
 } as const;
+
+const FONT_SANS = Platform.select({
+  ios: 'Avenir Next',
+  android: 'sans-serif',
+  default: 'System',
+});
+
+const FONT_SANS_MEDIUM = Platform.select({
+  ios: 'Avenir Next',
+  android: 'sans-serif-medium',
+  default: 'System',
+});
+
+const FONT_SANS_BOLD = Platform.select({
+  ios: 'Avenir Next',
+  android: 'sans-serif-bold',
+  default: 'System',
+});
+
+export const typography = {
+  hero: {
+    fontFamily: FONT_SANS_BOLD,
+    fontSize: 28,
+    lineHeight: 32,
+    letterSpacing: -0.7,
+  } satisfies TextStyle,
+  screenTitle: {
+    fontFamily: FONT_SANS_BOLD,
+    fontSize: 20,
+    lineHeight: 24,
+    letterSpacing: -0.35,
+  } satisfies TextStyle,
+  sectionTitle: {
+    fontFamily: FONT_SANS_BOLD,
+    fontSize: 17,
+    lineHeight: 22,
+    letterSpacing: -0.25,
+  } satisfies TextStyle,
+  cardTitle: {
+    fontFamily: FONT_SANS_BOLD,
+    fontSize: 15,
+    lineHeight: 20,
+    letterSpacing: -0.15,
+  } satisfies TextStyle,
+  body: {
+    fontFamily: FONT_SANS,
+    fontSize: 13,
+    lineHeight: 19,
+    letterSpacing: 0.05,
+  } satisfies TextStyle,
+  bodyStrong: {
+    fontFamily: FONT_SANS_MEDIUM,
+    fontSize: 13,
+    lineHeight: 19,
+    letterSpacing: 0.05,
+  } satisfies TextStyle,
+  label: {
+    fontFamily: FONT_SANS_MEDIUM,
+    fontSize: 11,
+    lineHeight: 14,
+    letterSpacing: 0.9,
+    textTransform: 'uppercase',
+  } satisfies TextStyle,
+  micro: {
+    fontFamily: FONT_SANS_MEDIUM,
+    fontSize: 10,
+    lineHeight: 13,
+    letterSpacing: 0.35,
+  } satisfies TextStyle,
+};
+
+export const elevations = {
+  card: {
+    shadowColor: '#020617',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.18,
+    shadowRadius: 24,
+    elevation: 10,
+  } satisfies ViewStyle,
+  floating: {
+    shadowColor: '#020617',
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.24,
+    shadowRadius: 28,
+    elevation: 14,
+  } satisfies ViewStyle,
+  subtle: {
+    shadowColor: '#020617',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.12,
+    shadowRadius: 14,
+    elevation: 6,
+  } satisfies ViewStyle,
+};
