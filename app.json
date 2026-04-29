@@ -40,7 +40,7 @@
       "entitlements": {
         "com.apple.developer.healthkit": true
       },
-      "buildNumber": "13"
+      "buildNumber": "140"
     },
     "android": {
       "package": "com.thallo.app",

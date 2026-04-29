@@ -2534,7 +2534,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             // and the ref carries the freshest schedule + plan.
             const refState = rePushStateRef.current;
             const liveSchedule = refState.schedule as any[];
-            const today = liveSchedule?.[0]?.workout ?? refState.workoutPlan?.days?.[0];
+            const todayISO = todayKey();
+            const todayScheduleItem = liveSchedule?.find((s: any) => dateKey(s.date) === todayISO);
+            const today = todayScheduleItem?.workout ?? refState.workoutPlan?.days?.[0];
             console.log('[watch cmd] start_workout — todayFocus=', today?.focus);
             if (today) {
               // Immediately stamp active state so pull_state/reachability
@@ -2567,7 +2569,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           } else if (command === 'skip_workout') {
             const refState = rePushStateRef.current;
             const liveSchedule = refState.schedule as any[];
-            const today = liveSchedule?.[0]?.workout ?? refState.workoutPlan?.days?.[0];
+            const todayISOSkip = todayKey();
+            const todayScheduleItemSkip = liveSchedule?.find((s: any) => dateKey(s.date) === todayISOSkip);
+            const today = todayScheduleItemSkip?.workout ?? refState.workoutPlan?.days?.[0];
             if (today) watchCmdHandlersRef.current.skip(today.focus);
           } else if (command === 'watch_log') {
             // Watch-side `wlog(...)` forwards Swift print lines so they
