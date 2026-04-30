@@ -2680,8 +2680,26 @@ export async function getRecoveryFlags(
   });
 }
 
-// Hydration — daily log + target (half bodyweight in oz by default).
-export async function getHydration(token: string): Promise<{ date: string; ounces: number; target_ounces: number }> {
+// Hydration — daily log + target. The backend computes a target that
+// reflects weight + sex (base), planned/actual workout minutes (sweat
+// replacement), today's logged protein (kidney filtration), and any
+// alcohol logged (diuretic). `breakdown` exposes each contribution in oz
+// so the UI can explain the number — e.g. "104 oz = 96 base + 16 workout
+// − 8 you didn't drink yet today." All breakdown fields are integers.
+export interface HydrationBreakdown {
+  base: number;
+  activity: number;
+  protein: number;
+  alcohol: number;
+}
+export interface HydrationStatus {
+  date: string;
+  ounces: number;
+  target_ounces: number;
+  /** Optional — older app builds may not surface this. */
+  breakdown?: HydrationBreakdown;
+}
+export async function getHydration(token: string): Promise<HydrationStatus> {
   return request('/meals/hydration', { headers: { Authorization: `Bearer ${token}` } });
 }
 

@@ -37,7 +37,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
-  readHealthSummary, isHealthKitAvailable, getWorkoutHrSummary,
+  readHealthSummary, isHealthKitAvailable, summarizeWorkoutZone2,
 } from './appleHealth';
 import type { HealthSummary } from '../types';
 
@@ -230,33 +230,21 @@ async function compute(opts: { age?: number | null }): Promise<HealthDataSummary
     return { ...emptySummary(), hkAvailable: true };
   }
 
-  // Derive zone-2 minutes from workout HR summaries when zones are
-  // available. Fallback: if no HR data, treat workouts with subtype
-  // "run"/"walk"/"hike"/"ride" of moderate duration as steady cardio
-  // → counts toward Z2. Keeps the flag meaningful for users who don't
-  // have a Watch.
+  // Derive Zone 2 from workout HR summaries when available. Fallback:
+  // if no HR data, count steady cardio of 20+ min as Z2 so the signal
+  // still works for users without Watch HR samples.
   const workouts: any[] = Array.isArray(raw.workoutDetails) ? raw.workoutDetails : [];
   let totalCardioMinutes = 0;
   let totalZone2Minutes = 0;
-  // Expanded cardio regex — older version only matched run/walk/hike/bike
-  // /cycle/row/swim/elliptical/spin which silently dropped HK names like
-  // "Cardio", "Stair Climber", "Cross Training", "Cardio Dance", and most
-  // sports. Users would do an hour of cardio and see Z2 stuck at 0.
-  const cardioRx = /run|walk|hike|bik|cycl|row|swim|ellipt|spin|stair|cross[\s-]?train|\bcardio\b|aerobic|jog|treadmill|dance|tennis|pickleball|paddle|soccer|basketball|box|kickbox|martial/i;
-  const excludeRx = /hiit|interval|tabata|sprint|yoga|pilates|stretch|flex|core|strength|weight|lift/i;
-  for (const w of workouts) {
-    const mins = Number(w.duration ?? 0);
-    if (!mins) continue;
-    const name = String(w.activityName ?? '');
-    if (cardioRx.test(name) && !excludeRx.test(name)) {
-      totalCardioMinutes += mins;
-      // Heuristic Z2 fallback: steady cardio of 20+ min likely spans
-      // Z2. Already filtered out HIIT/intervals/strength via excludeRx.
-      if (mins >= 20) {
-        totalZone2Minutes += mins;
-      }
-    }
+  const z2Summaries = await Promise.all(
+    workouts.map((w) => summarizeWorkoutZone2(w, opts.age ?? null).catch(() => null)),
+  );
+  for (const z2 of z2Summaries) {
+    if (!z2) continue;
+    totalCardioMinutes += z2.cardioMinutes;
+    totalZone2Minutes += z2.zone2Minutes;
   }
+  const totalWorkoutMinutes = workouts.reduce((sum, w) => sum + (Number(w.duration ?? 0) || 0), 0);
 
   // Weight slope: need historical weightEntries to compute a proper
   // EMA slope. For the aggregator we expose null and let the review
@@ -267,19 +255,19 @@ async function compute(opts: { age?: number | null }): Promise<HealthDataSummary
     dateISO: new Date().toISOString().slice(0, 10),
     computedAtMs: Date.now(),
     hkAvailable: true,
-    steps: raw.stepsToday ?? null,
+    steps: (raw as any).stepsToday ?? null,
     sleepMinutes: raw.lastNightSleepHours != null ? Math.round(raw.lastNightSleepHours * 60) : null,
     restingHeartRate: raw.restingHeartRate ?? null,
     hrv: (raw as any).hrvAvg ?? null,
-    workoutMinutes: typeof (raw as any).workoutMinutesToday === 'number' ? (raw as any).workoutMinutesToday : null,
+    workoutMinutes: totalWorkoutMinutes > 0 ? Math.round(totalWorkoutMinutes) : null,
     cardioMinutes: totalCardioMinutes > 0 ? totalCardioMinutes : null,
     zone2Minutes: totalZone2Minutes > 0 ? totalZone2Minutes : null,
-    activeEnergyKcal: raw.activeEnergyToday ?? null,
+    activeEnergyKcal: (raw as any).activeEnergyToday ?? null,
     weightLbs: (raw as any).weightLbs ?? null,
     vo2Max: raw.vo2Max ?? null,
     weekly: {
       avgSteps: raw.avgSteps7d ?? null,
-      avgSleepHours: raw.lastNightSleepHours ?? null,
+      avgSleepHours: raw.avgSleepHours7d ?? null,
       avgRestingHr: raw.restingHeartRate ?? null,
       totalCardioMinutes,
       totalZone2Minutes,

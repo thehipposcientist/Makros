@@ -66,31 +66,31 @@ public class ThalloWatchBridgeModule: Module {
         }
 
         AsyncFunction("syncWorkout") { (payload: [String: Any]) -> Bool in
-            return self.sessionHolder.sendContext(["workout": payload])
+            return self.sessionHolder.sendContext(["workout": payload], realtimeKind: "workout")
         }
 
         AsyncFunction("syncTheme") { (palette: [String: Any]) -> Bool in
-            return self.sessionHolder.sendContext(["theme": palette])
+            return self.sessionHolder.sendContext(["theme": palette], realtimeKind: "theme")
         }
 
         AsyncFunction("syncMeals") { (payload: [String: Any]) -> Bool in
-            return self.sessionHolder.sendContext(["meals": payload])
+            return self.sessionHolder.sendContext(["meals": payload], realtimeKind: "meals")
         }
 
         AsyncFunction("syncSupplements") { (payload: [String: Any]) -> Bool in
-            return self.sessionHolder.sendContext(["supplements": payload])
+            return self.sessionHolder.sendContext(["supplements": payload], realtimeKind: "supplements")
         }
 
         AsyncFunction("syncSleep") { (payload: [String: Any]) -> Bool in
-            return self.sessionHolder.sendContext(["sleep": payload])
+            return self.sessionHolder.sendContext(["sleep": payload], realtimeKind: "sleep")
         }
 
         AsyncFunction("syncReadiness") { (payload: [String: Any]) -> Bool in
-            return self.sessionHolder.sendContext(["readiness": payload])
+            return self.sessionHolder.sendContext(["readiness": payload], realtimeKind: "readiness")
         }
 
         AsyncFunction("syncWeight") { (payload: [String: Any]) -> Bool in
-            return self.sessionHolder.sendContext(["weight": payload])
+            return self.sessionHolder.sendContext(["weight": payload], realtimeKind: "weight")
         }
 
         // Push parsed meal items to the watch for review after speech transcription.
@@ -136,6 +136,8 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     private var queuedCommands: [[String: Any]] = []
     private var pendingContext: [String: Any] = [:]
     private var pendingMessages: [[String: Any]] = []
+    private var recentCommandIds: [String] = []
+    private var recentCommandIdSet: Set<String> = []
 
     func setUserId(_ id: String?) { self.userId = id }
 
@@ -221,21 +223,24 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     }
 
     @discardableResult
-    func sendContext(_ dict: [String: Any]) -> Bool {
+    func sendContext(_ dict: [String: Any], realtimeKind: String? = nil) -> Bool {
         guard WCSession.isSupported() else { return false }
         let s = WCSession.default
         let cleaned = Self.stripNulls(dict)
         guard s.activationState == .activated else {
             for (k, v) in cleaned { pendingContext[k] = v }
+            logDiag("sendContext.pending", [
+                "keys": cleaned.keys.sorted().joined(separator: ","),
+            ])
             s.activate()
             return true
         }
         flushPendingOutbound()
-        return sendContextActivated(cleaned, session: s)
+        return sendContextActivated(cleaned, session: s, realtimeKind: realtimeKind)
     }
 
     @discardableResult
-    private func sendContextActivated(_ cleaned: [String: Any], session s: WCSession) -> Bool {
+    private func sendContextActivated(_ cleaned: [String: Any], session s: WCSession, realtimeKind: String? = nil) -> Bool {
         do {
             var merged = s.applicationContext
             for (k, v) in cleaned { merged[k] = v }
@@ -245,18 +250,55 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
                 merged.removeValue(forKey: "userId")
             }
             try s.updateApplicationContext(merged)
+            logDiag("sendContext.updated", [
+                "keys": cleaned.keys.sorted().joined(separator: ","),
+                "bytes": approximateBytes(cleaned),
+            ])
+            if s.isReachable {
+                let realtime = realtimeMessage(for: cleaned, kind: realtimeKind)
+                logDiag("sendContext.realtime", [
+                    "keys": cleaned.keys.sorted().joined(separator: ","),
+                    "kind": realtimeKind ?? "",
+                ])
+                _ = sendMessageActivated(realtime, session: s)
+            }
             return true
         } catch {
             os_log("[wc-bridge] updateApplicationContext failed: %{public}@", log: wcLog, type: .error, "\(error)")
+            logDiag("sendContext.failed", [
+                "keys": cleaned.keys.sorted().joined(separator: ","),
+                "error": error.localizedDescription,
+            ])
             var fallback = cleaned
             stampUserId(&fallback)
             if s.isReachable {
-                s.sendMessage(fallback, replyHandler: nil, errorHandler: nil)
+                _ = sendMessageActivated(fallback, session: s)
                 return true
             }
             s.transferUserInfo(fallback)
             return true
         }
+    }
+
+    private func realtimeMessage(for cleaned: [String: Any], kind: String?) -> [String: Any] {
+        guard let kind, cleaned.count == 1, let payload = cleaned[kind] else {
+            var stamped = cleaned
+            stampUserId(&stamped)
+            return stamped
+        }
+        var msg: [String: Any] = [
+            "kind": kind,
+            "payload": payload,
+        ]
+        stampUserId(&msg)
+        return msg
+    }
+
+    private func approximateBytes(_ dict: [String: Any]) -> Int {
+        guard JSONSerialization.isValidJSONObject(dict),
+              let data = try? JSONSerialization.data(withJSONObject: dict)
+        else { return -1 }
+        return data.count
     }
 
     @discardableResult
@@ -280,6 +322,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         if s.isReachable {
             s.sendMessage(cleaned, replyHandler: nil) { err in
                 os_log("[wc-bridge] sendMessage failed: %{public}@", log: wcLog, type: .error, err.localizedDescription)
+                s.transferUserInfo(cleaned)
             }
             return true
         }
@@ -398,6 +441,17 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             os_log("[wc-bridge] dispatchCommand: not a command (kind=%{public}@)", log: wcLog, type: .default, (msg["kind"] as? String) ?? "<nil>")
             return
         }
+        if let commandId = msg["commandId"] as? String, !commandId.isEmpty {
+            if recentCommandIdSet.contains(commandId) {
+                os_log("[wc-bridge] duplicate command ignored=%{public}@", log: wcLog, type: .default, cmd)
+                logDiag("dispatchCommand.duplicate", [
+                    "command": cmd,
+                    "commandId": commandId,
+                ])
+                return
+            }
+            rememberCommandId(commandId)
+        }
         var payload = msg
         payload.removeValue(forKey: "kind")
         payload.removeValue(forKey: "command")
@@ -414,6 +468,17 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
                 }
                 os_log("[wc-bridge] queued command=%{public}@ until JS listener attaches", log: wcLog, type: .default, cmd)
             }
+        }
+    }
+
+    private func rememberCommandId(_ commandId: String) {
+        recentCommandIds.append(commandId)
+        recentCommandIdSet.insert(commandId)
+        if recentCommandIds.count > 100 {
+            let overflow = recentCommandIds.count - 100
+            let dropped = recentCommandIds.prefix(overflow)
+            for id in dropped { recentCommandIdSet.remove(id) }
+            recentCommandIds.removeFirst(overflow)
         }
     }
 }

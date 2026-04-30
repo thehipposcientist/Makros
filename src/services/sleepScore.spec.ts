@@ -12,7 +12,7 @@
 // Cases covered (per the patch spec):
 //   1. Low deep + high REM should score lower than high deep + low REM
 //      (deep is weighted ~2× REM, so the trade favors deep).
-//   2. Missing stage data must NOT tank the score (neutral fallback).
+//   2. Missing stage data must NOT tank the score (neutral-conservative fallback).
 //   3. Low deep on a 7+ hour night triggers the deep-sleep insight +
 //      a sub-max deepSleep pillar (absolute-minutes floor).
 //   4. >60 min awake reduces the awakeFragmentation pillar.
@@ -85,11 +85,11 @@ console.log('\n[case] Missing stage data → neutral fallback, score stays sane'
     stages: null,
   }))!;
   expect(noStages.score >= 60, `no-stages score=${noStages.score} should remain >= 60 (was ${withStages.score} with full stages)`);
-  // deepSleep neutral fallback = round(10 * 0.6) = 6
-  expect(noStages.pillars.deepSleep === 6, `no-stages deepSleep pillar = ${noStages.pillars.deepSleep}, expected 6`);
-  // REM neutral fallback = round(5 * 0.6) = 3
+  // deepSleep neutral-conservative fallback = round(10 * 0.5) = 5
+  expect(noStages.pillars.deepSleep === 5, `no-stages deepSleep pillar = ${noStages.pillars.deepSleep}, expected 5`);
+  // REM neutral-conservative fallback = round(5 * 0.5) = 3
   expect(noStages.pillars.remSleep === 3, `no-stages remSleep pillar = ${noStages.pillars.remSleep}, expected 3`);
-  // awakeFragmentation neutral fallback (stages.awake also missing) = round(5 * 0.6) = 3
+  // awakeFragmentation neutral fallback (stages.awake also missing) = round(5 * 0.5) = 3
   expect(noStages.pillars.awakeFragmentation === 3, `no-stages awakeFrag pillar = ${noStages.pillars.awakeFragmentation}, expected 3`);
 }
 
@@ -106,6 +106,8 @@ console.log('\n[case] Low deep on a long night triggers the deep-sleep insight +
     `30-min deep on 7.5h → deepSleep pillar ${lowDeep.pillars.deepSleep} should be ≤ 4 (strong penalty band)`);
   expect(lowDeep.insights.some(s => s.toLowerCase().includes('deep sleep was very low')),
     `expected a "deep sleep was very low" insight; got: ${JSON.stringify(lowDeep.insights)}`);
+  expect(lowDeep.score < 85,
+    `30-min deep on 7.5h should not rate Excellent; got score=${lowDeep.score}`);
 }
 
 console.log('\n[case] Short night → no absolute floor; deep ratio drives scoring');
@@ -122,6 +124,8 @@ console.log('\n[case] Short night → no absolute floor; deep ratio drives scori
   }))!;
   expect(shortNightGoodRatio.pillars.deepSleep === 10,
     `5h with 20% deep ratio → deepSleep pillar should be max=10, got ${shortNightGoodRatio.pillars.deepSleep}`);
+  expect(shortNightGoodRatio.score <= 59,
+    `5h should cap below Good even with a good deep ratio; got score=${shortNightGoodRatio.score}`);
 }
 
 
@@ -142,6 +146,25 @@ console.log('\n[case] >60 min awake → fragmentation pillar drops + insight sur
     fragmentedNight.insights.some(s => s.toLowerCase().includes('mid-sleep wake') || s.toLowerCase().includes('awake')),
     `expected a fragmentation insight; got: ${JSON.stringify(fragmentedNight.insights)}`,
   );
+}
+
+
+// ─── Case 4b: duration-only data can't look excellent ───────────────────────
+console.log('\n[case] Duration-only sleep data caps below Good/Excellent');
+{
+  const durationOnly = scoreSleepMVP(baseInput({
+    inBedMinutes: null,
+    deepSleepHours: null,
+    remSleepHours: null,
+    hrvMs: null,
+    spo2Percent: null,
+    respiratoryRate: null,
+    stages: null,
+  }))!;
+  expect(durationOnly.score <= 69,
+    `duration-only score should cap at Fair-ish, got ${durationOnly.score}`);
+  expect(durationOnly.insights.some(s => s.toLowerCase().includes('only sleep duration')),
+    `expected limited-data insight; got: ${JSON.stringify(durationOnly.insights)}`);
 }
 
 

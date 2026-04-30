@@ -7,10 +7,12 @@ Last synced from app state: 2026-04-29
 - **Bridge**: `modules/thallo-watch-bridge/` (phone) ↔ `targets/thallo-watch/ConnectivityStore.swift` (watch).
 
 **Outbound (phone → watch):**
-`pushWorkoutToWatch`, `pushMealsToWatch`, `pushSupplementsToWatch`, `pushThemeToWatch`, `pushProgressToWatch` (per-set updates). `pushProgressToWatch` now carries both rest-timer deltas and the latest live recommendation text so the watch can refresh next-set guidance during rest. All routed through `applicationContext` with fallback to `transferUserInfo` on duplicate-payload errors.
+`pushWorkoutToWatch`, `pushMealsToWatch`, `pushSupplementsToWatch`, `pushThemeToWatch`, `pushProgressToWatch` (per-set updates). `pushProgressToWatch` now carries both rest-timer deltas and the latest live recommendation text so the watch can refresh next-set guidance during rest. Full snapshots are dual-path: they update `applicationContext` for cold-start persistence and, when reachable, also send an immediate `sendMessage` mirror. `sendMessage` failures fall back to `transferUserInfo`.
 
 **Inbound (watch → phone):**
 `start_workout`, `skip_workout`, `cancel_workout`, `end_workout`, `log_set`, `toggle_meal`, `toggle_supplement`, `take_all_supplements`, `pull_state`.
+
+Watch commands carry a `commandId`; the phone bridge de-dupes recent IDs so `sendMessage` fallback to `transferUserInfo` cannot double-apply a set log or end command.
 
 **Pull-on-wake handshake:**
 Watch fires `pull_state` on `WCSession.activate` + `sessionReachabilityDidChange(reachable=true)` + SwiftUI `scenePhase == .active`. Phone responds with fresh full snapshot.

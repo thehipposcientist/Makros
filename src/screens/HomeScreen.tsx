@@ -3069,6 +3069,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setTodayDone(done);
     if (done) {
       setCompletedDates(prev => { const next = new Set(prev); next.add(today); return next; });
+      // Suppress today's workout reminder so the user isn't pinged after
+      // training. WEEKLY reminder for this weekday is re-scheduled inside
+      // cancelTodayWorkoutReminder so next week still fires.
+      import('../utils/workoutReminders')
+        .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
+        .catch(() => undefined);
     }
 
     // Load today's stored workout summary
@@ -4184,6 +4190,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }
             if (w.date === today) {
               setTodayDone(true);
+              import('../utils/workoutReminders')
+                .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
+                .catch(() => undefined);
             }
           }
           console.log(`[handleAskTrainer] logged ${resp.logged_workouts.length} workout session(s) from chat`);
@@ -4910,7 +4919,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     await persistDayState(today, { skipped_focus: focus });
     await saveSkipToHistory(today, focus, reason);
-  }, [skipReasonFocus, selectedSkipReason, customSkipReason, skipType, persistDayState, scheduleRaw]);
+    // Suppress today's workout reminder — user explicitly opted out.
+    import('../utils/workoutReminders')
+      .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
+      .catch(() => undefined);
+
+    // Push today's workout to tomorrow when user selects "push".
+    if (type === 'push' && todayScheduleItem?.workout) {
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const tomorrowStr = dateKey(tomorrow);
+      import('../services/api')
+        .then(({ patchPlanDayWorkout }) => patchPlanDayWorkout(authToken, tomorrowStr, todayScheduleItem.workout))
+        .catch(() => undefined); // 409 = tomorrow locked, silently no-op
+    }
+
+    // When skipping due to illness, reduce today's calorie/protein targets.
+    const reasonLower = (customSkipReason.trim() || selectedSkipReason || '').toLowerCase();
+    const isSick = reasonLower.includes('sick') || reasonLower === 'feeling sick';
+    if (isSick) {
+      const todayPlan = nutritionPlansByDate[today];
+      if (todayPlan?.targets) {
+        const adjusted: typeof todayPlan = {
+          ...todayPlan,
+          targets: {
+            ...todayPlan.targets,
+            calories: Math.round(todayPlan.targets.calories * 0.85),
+            protein: Math.round(todayPlan.targets.protein * 0.80),
+          },
+        };
+        await persistDayState(today, { nutrition_plan: adjusted });
+        setNutritionPlansByDate(prev => ({ ...prev, [today]: adjusted }));
+      }
+    }
+  }, [skipReasonFocus, selectedSkipReason, customSkipReason, skipType, persistDayState, scheduleRaw, authToken, nutritionPlansByDate]);
 
   const handleUnskipDay = useCallback(async (date: string) => {
     setSkippedDates(prev => {

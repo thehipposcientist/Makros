@@ -17,7 +17,7 @@ Single source of truth for all Apple Health reads in the client.
 **Behavior:**
 - 30-min stale window, in-flight dedup.
 - `null` = unknown / `0` = known-zero.
-- Z2 fallback: no HR-zone data → treats steady cardio ≥20 min as Z2.
+- Z2: prefer real HR zone samples when present; fallback treats steady cardio ≥20 min as Z2 when HR-zone data is unavailable.
 
 **Migration status:** ProgressScreen migrated to `getHealthDataSummary`. Remaining direct `readHealthSummary` callers (HomeScreen, ActiveWorkoutScreen) can migrate file-by-file — the aggregator wraps the same fn so callers keep working.
 

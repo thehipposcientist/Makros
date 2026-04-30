@@ -433,7 +433,11 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         var body = payload
         body["kind"] = "command"
         body["command"] = command
-        body["tsMs"] = Date().timeIntervalSince1970 * 1000
+        let tsMs = Date().timeIntervalSince1970 * 1000
+        body["tsMs"] = tsMs
+        if command != "watch_log" {
+            body["commandId"] = "\(command)-\(Int(tsMs))-\(UUID().uuidString)"
+        }
         guard session.activationState == .activated else {
             if command != "watch_log" {
                 print("[watch] sendCommand(\(command)) — not activated, queueing")
@@ -466,6 +470,10 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             }
             session.sendMessage(body, replyHandler: nil) { [weak self] err in
                 print("[watch] sendMessage(\(command)) error: \(err.localizedDescription)")
+                if command != "watch_log" {
+                    session.transferUserInfo(body)
+                    HeartRateStore.saveDiag("→ \(command) fallback transfer")
+                }
                 DispatchQueue.main.async {
                     self?.lastError = err.localizedDescription
                     HeartRateStore.saveDiag("→ \(command) ERR: \(err.localizedDescription.prefix(40))")

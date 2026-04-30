@@ -49,6 +49,11 @@ export interface PreparednessResult {
   label: 'Primed' | 'Ready' | 'Moderate' | 'Fatigued';
   pillars: PreparednessPillars;
   insights: string[];
+  /** Concrete, actionable suggestions when a pillar comes back weak.
+   *  Surfaced in the readiness card so a poor sleep score isn't just a
+   *  flat statement of fact — the user sees what to do about it
+   *  ("Train lighter today, dim screens 30 min before bed tonight..."). */
+  recommendations: string[];
   missing: string[]; // which inputs were missing (for UI hints)
   /** Number of pillars that received real input data (max 6). UI uses
    *  this to show e.g. "62 · 3/6 signals" so the user understands the
@@ -237,12 +242,48 @@ export function scorePreparedness(input: PreparednessInput): PreparednessResult 
     label,
     pillars: { sleep, hrv, fatigue, nutrition, restingHr, yesterdayStrain },
     insights: insights.slice(0, 4),
+    recommendations: buildRecoveryRecommendations({
+      sleep, hrv, fatigue, nutrition, restingHr, yesterdayStrain,
+    }, present),
     missing,
     signalsPresent,
     signalsTotal: 5, // sleep, hrv, fatigue, nutrition, rhr (strain not user-driven)
     raw,
     maxPossible,
   };
+}
+
+/** Concrete actions a user can take when a pillar comes back weak.
+ *  Each branch only fires when the pillar received REAL data (so we don't
+ *  recommend "sleep more" because no Apple Health = score 0). Caps at 4
+ *  total to keep the card scannable. Sleep tips lead because it's the
+ *  pillar with the largest weight (30/100) and the most actionable. */
+function buildRecoveryRecommendations(
+  pillars: PreparednessPillars,
+  present: Record<string, boolean>,
+): string[] {
+  const recs: string[] = [];
+
+  // Sleep — pillar max is 30, "below par" threshold from insights is < 55%
+  // of max, so surface tips at the same cutoff (sleep < 17/30).
+  if (present.sleep && pillars.sleep < 17) {
+    recs.push('Train lighter today — keep RPE under 7 and skip max effort sets.');
+    recs.push('Tonight: 7+ hrs in a cool, dark room. No caffeine after 2pm and dim screens 30 min before bed.');
+  }
+  // HRV well below baseline — body is stressed, recovery is the play.
+  if (present.hrv && pillars.hrv < 10) {
+    recs.push('HRV says recover — swap intervals for steady cardio, hydrate, prioritize protein.');
+  }
+  // Fatigue — accumulated muscle load is high.
+  if (present.fatigue && pillars.fatigue < 10) {
+    recs.push('Reduce volume today (3 sets instead of 4) or shift to active recovery / mobility.');
+  }
+  // Nutrition pillar is 0-15. Tips when meaningfully under-fueled.
+  if (present.nutrition && pillars.nutrition < 7) {
+    recs.push('Hit calorie + protein target before training — undereating compounds the fatigue.');
+  }
+
+  return recs.slice(0, 4);
 }
 
 function ageHrvReference(age: number | null): number {

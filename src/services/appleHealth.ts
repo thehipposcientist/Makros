@@ -235,7 +235,119 @@ export interface DailySnapshot {
   weightLbs: number | null;
 }
 
-const _CARDIO_RX = /run|walk|hike|bik|cycl|row|swim|ellipt|spin/i;
+export interface WorkoutZone2Summary {
+  name: string;
+  durationMin: number;
+  cardioMinutes: number;
+  zone2Minutes: number;
+  counted: boolean;
+  reason?: string;
+  source: 'heart_rate' | 'heuristic' | 'none';
+}
+
+const _CARDIO_ACTIVITY_RX = /run|walk|hike|bik|cycl|row|swim|ellipt|spin|stair|cross[\s-]?train|\bcardio\b|aerobic|jog|treadmill|dance|tennis|pickleball|paddle|soccer|basketball|box|kickbox|martial|hiit|interval|tabata|sprint/i;
+const _NON_STEADY_RX = /hiit|interval|tabata|sprint/i;
+const _NON_CARDIO_RX = /yoga|pilates|stretch|flex|core|strength|weight|lift/i;
+
+function _workoutName(w: any): string {
+  return String(w?.activityName ?? w?.name ?? 'Workout');
+}
+
+function _workoutDuration(w: any): number {
+  return Math.max(0, Number(w?.duration ?? w?.durationMin ?? 0) || 0);
+}
+
+function _workoutWindow(w: any): { startMs: number; endMs: number } | null {
+  const startMs = new Date(w?.startDate ?? w?.startedAtISO ?? 0).getTime();
+  const endMs = new Date(w?.endDate ?? w?.endedAtISO ?? 0).getTime();
+  return startMs > 0 && endMs > startMs ? { startMs, endMs } : null;
+}
+
+function _positiveZoneMinutes(zones: unknown): boolean {
+  return Array.isArray(zones) && zones.some((x) => typeof x === 'number' && x > 0);
+}
+
+/** Summarize an Apple Health workout for cardio + Zone 2 rollups.
+ *  Prefer real HR samples when present. Fallback uses activity name +
+ *  duration, so users without Watch HR still get sensible Z2 credit
+ *  for steady cardio. */
+export async function summarizeWorkoutZone2(
+  workout: any,
+  age: number | null = null,
+): Promise<WorkoutZone2Summary | null> {
+  const durationMin = _workoutDuration(workout);
+  if (durationMin <= 0) return null;
+
+  const name = _workoutName(workout);
+  const isNonCardio = _NON_CARDIO_RX.test(name);
+  const isCardio = _CARDIO_ACTIVITY_RX.test(name) && !isNonCardio;
+  const window = _workoutWindow(workout);
+
+  if (!isNonCardio && window) {
+    const hr = await getWorkoutHrSummary(window.startMs, window.endMs, age).catch(() => null);
+    const zones = hr?.zoneMinutes;
+    if (_positiveZoneMinutes(zones)) {
+      const actualZ2 = Math.max(0, Math.min(durationMin, Number(zones?.[1] ?? 0) || 0));
+      const zoneTotal = (zones ?? []).reduce((sum, z) => sum + (Number(z) || 0), 0);
+      const cardioMinutes = isCardio ? durationMin : Math.min(durationMin, zoneTotal || durationMin);
+      return {
+        name,
+        durationMin,
+        cardioMinutes,
+        zone2Minutes: Math.round(actualZ2 * 10) / 10,
+        counted: actualZ2 > 0,
+        reason: actualZ2 > 0 ? 'HR zone data' : 'no Z2 HR time',
+        source: 'heart_rate',
+      };
+    }
+  }
+
+  if (!isCardio) {
+    return {
+      name,
+      durationMin,
+      cardioMinutes: 0,
+      zone2Minutes: 0,
+      counted: false,
+      reason: isNonCardio ? 'not steady cardio' : 'not cardio',
+      source: 'none',
+    };
+  }
+
+  if (_NON_STEADY_RX.test(name)) {
+    return {
+      name,
+      durationMin,
+      cardioMinutes: durationMin,
+      zone2Minutes: 0,
+      counted: false,
+      reason: 'high-intensity / excluded',
+      source: 'heuristic',
+    };
+  }
+
+  if (durationMin < 20) {
+    return {
+      name,
+      durationMin,
+      cardioMinutes: durationMin,
+      zone2Minutes: 0,
+      counted: false,
+      reason: 'under 20 min',
+      source: 'heuristic',
+    };
+  }
+
+  return {
+    name,
+    durationMin,
+    cardioMinutes: durationMin,
+    zone2Minutes: durationMin,
+    counted: true,
+    reason: 'steady cardio >= 20 min',
+    source: 'heuristic',
+  };
+}
 
 function _sumSamplesInWindow(samples: any[], startMs: number, endMs: number): number {
   if (!Array.isArray(samples)) return 0;
@@ -292,10 +404,10 @@ export async function readDailySnapshot(dayStartMs: number, dayEndMs: number): P
         const mins = Number(w.duration ?? 0);
         if (!mins) continue;
         workoutMinutes += mins;
-        const name = String(w.activityName ?? '');
-        if (_CARDIO_RX.test(name)) {
-          cardioMinutes += mins;
-          if (mins >= 20 && !/hiit|interval|tabata/i.test(name)) zone2Minutes += mins;
+        const z2 = await summarizeWorkoutZone2(w, null);
+        if (z2) {
+          cardioMinutes += z2.cardioMinutes;
+          zone2Minutes += z2.zone2Minutes;
         }
       }
     }
@@ -392,7 +504,7 @@ export interface WorkoutHrSummary {
 export async function getWorkoutHrSummary(
   startMs: number,
   endMs: number,
-  age: number | null,
+  age: number | null = null,
 ): Promise<WorkoutHrSummary | null> {
   const mod = getModule();
   if (!mod || typeof mod.getHeartRate !== 'function') return null;
@@ -732,7 +844,7 @@ export async function loadSleepHistory(): Promise<NightRecord[]> {
  *  Keyed on the waking date so today's score uses today's row. Auth
  *  token is read fresh from AsyncStorage so callers don't need to pass it. */
 async function pushNightlySleepToBackend(input: {
-  stages: SleepStages;
+  stages: SleepStages | null;
   inBedMinutes: number | null;
   hrvMs: number | null;
   rhr: number | null;

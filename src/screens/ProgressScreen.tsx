@@ -30,7 +30,7 @@ import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
-import { APPLE_HEALTH_PERMISSION_COPY, readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
+import { APPLE_HEALTH_PERMISSION_COPY, readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory, summarizeWorkoutZone2 } from '../services/appleHealth';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import BodyMeasurementsModal from '../components/BodyMeasurementsModal';
 import Zone2TargetCard from '../components/Zone2TargetCard';
@@ -219,6 +219,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [gutHealthWindow, setGutHealthWindow] = useState<import('../services/api').GutHealthWindow | null>(null);
   const [paceHistory, setPaceHistory] = useState<PaceHistoryPoint[]>([]);
   const paceLoadedRef = useRef(false);
+  const [appleHealthZone2Minutes, setAppleHealthZone2Minutes] = useState<number | null>(null);
+  const [zone2DetectedWorkouts, setZone2DetectedWorkouts] = useState<Array<{ name: string; durationMin: number; counted: boolean; reason?: string }>>([]);
 
   // ─── Exercise property lookup maps ────────────────────────────────────────
   // Built from workout history — prefers structured fields from the planner
@@ -419,12 +421,25 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         // weekly coaching, readiness) get the same cached value
         // without re-querying HealthKit. Falls back to direct
         // readHealthSummary if the aggregator returns null.
+        const age = userProfile.physicalStats?.age ?? null;
         const { getHealthDataSummary } = await import('../services/healthDataSummary');
-        const agg = await getHealthDataSummary({ age: userProfile.physicalStats?.age ?? null });
+        const agg = await getHealthDataSummary({ age });
+        setAppleHealthZone2Minutes(agg?.zone2Minutes ?? null);
         const fresh = agg?.raw ?? await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
         if (fresh) {
           setHealthSummary(fresh);
           saveHealthSummary(fresh).catch(() => null);
+          const rows = await Promise.all(
+            (fresh.workoutDetails ?? []).map((w) => summarizeWorkoutZone2(w, age).catch(() => null)),
+          );
+          setZone2DetectedWorkouts(rows
+            .filter((w): w is NonNullable<typeof w> => !!w)
+            .map((w) => ({
+              name: w.name,
+              durationMin: w.durationMin,
+              counted: w.counted,
+              reason: w.reason,
+            })));
         }
         // Nights of HRV/sleep history drive the "X/14 nights" calibration UI.
         try { setSleepHistoryCount((await loadSleepHistory()).length); } catch {}
@@ -2006,48 +2021,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
           {authToken && (() => {
-            // Build the Z2 detection list once and feed both the
-            // numeric total AND the per-workout diagnostic list to the
-            // card. Keeping the regex + counted/not-counted reasoning
-            // here so the "Why?" tooltip in the card has the truth.
-            //
-            // Cardio activities the regex catches (counts toward Z2 when
-            // 20+ min and not HIIT/intervals): run, walk, hike, bike,
-            // cycle, row, swim, elliptical, spin, stair climb, cross
-            // training, cardio (literal), aerobic, jog, treadmill,
-            // dance, plus most racquet/ball sports + boxing.
-            const CARDIO_RX = /run|walk|hike|bik|cycl|row|swim|ellipt|spin|stair|cross[\s-]?train|\bcardio\b|aerobic|jog|treadmill|dance|tennis|pickleball|paddle|soccer|basketball|box|kickbox|martial/i;
-            const EXCLUDE_RX = /hiit|interval|tabata|sprint|yoga|pilates|stretch|flex|core|strength|weight|lift/i;
-            const details = healthSummary?.workoutDetails ?? [];
-            let z2 = 0;
-            const detected: { name: string; durationMin: number; counted: boolean; reason?: string }[] = [];
-            for (const w of details) {
-              const mins = Number(w.duration ?? 0);
-              if (!mins) continue;
-              const name = String((w as any).activityName ?? (w as any).name ?? '') || 'Workout';
-              const isCardio = CARDIO_RX.test(name);
-              const isExcluded = EXCLUDE_RX.test(name);
-              const longEnough = mins >= 20;
-              let counted = false;
-              let reason: string | undefined;
-              if (!isCardio) {
-                reason = 'not cardio';
-              } else if (isExcluded) {
-                reason = 'high-intensity / excluded';
-              } else if (!longEnough) {
-                reason = 'under 20 min';
-              } else {
-                counted = true;
-                z2 += mins;
-              }
-              detected.push({ name, durationMin: mins, counted, reason });
-            }
             return (
               <Zone2TargetCard
                 authToken={authToken}
                 themeName={userProfile.themePreference}
-                appleHealthZone2={z2 > 0 ? Math.round(z2) : null}
-                detectedWorkouts={detected}
+                appleHealthZone2={appleHealthZone2Minutes}
+                detectedWorkouts={zone2DetectedWorkouts}
               />
             );
           })()}
@@ -2093,10 +2072,30 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         const granted = await requestHealthPermissions();
                         try { await persistAppleHealthEnabled(granted); } catch {}
                         setHealthEnabled(granted);
-                        const fresh = await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
+                        const age = userProfile.physicalStats?.age ?? null;
+                        const fresh = await readHealthSummary({ age });
                         if (fresh) {
                           setHealthSummary(fresh);
                           saveHealthSummary(fresh).catch(() => null);
+                          const rows = await Promise.all(
+                            (fresh.workoutDetails ?? []).map((w) => summarizeWorkoutZone2(w, age).catch(() => null)),
+                          );
+                          const cleanRows = rows.filter((w): w is NonNullable<typeof w> => !!w);
+                          setAppleHealthZone2Minutes(cleanRows.reduce((sum, w) => sum + w.zone2Minutes, 0) || null);
+                          setZone2DetectedWorkouts(cleanRows.map((w) => ({
+                            name: w.name,
+                            durationMin: w.durationMin,
+                            counted: w.counted,
+                            reason: w.reason,
+                          })));
+                        }
+                        if (granted) {
+                          import('../services/healthDataSummary')
+                            .then(({ backfillSnapshotsToBackend, refreshHealthDataSummary }) => {
+                              refreshHealthDataSummary({ age }).catch(() => null);
+                              backfillSnapshotsToBackend(30).catch(() => null);
+                            })
+                            .catch(() => null);
                         }
                         const hasAny = fresh && (
                           fresh.restingHeartRate != null || fresh.avgSteps7d != null ||

@@ -5,6 +5,41 @@
 
 import Foundation
 
+private extension KeyedDecodingContainer {
+    func decodeFlexibleIntIfPresent(forKey key: Key) -> Int? {
+        if let v = try? decodeIfPresent(Int.self, forKey: key) { return v }
+        if let v = try? decodeIfPresent(Double.self, forKey: key), v.isFinite { return Int(v.rounded()) }
+        if let s = try? decodeIfPresent(String.self, forKey: key) {
+            let cleaned = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let i = Int(cleaned) { return i }
+            if let d = Double(cleaned), d.isFinite { return Int(d.rounded()) }
+        }
+        return nil
+    }
+
+    func decodeFlexibleDoubleIfPresent(forKey key: Key) -> Double? {
+        if let v = try? decodeIfPresent(Double.self, forKey: key), v.isFinite { return v }
+        if let v = try? decodeIfPresent(Int.self, forKey: key) { return Double(v) }
+        if let s = try? decodeIfPresent(String.self, forKey: key) {
+            let cleaned = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let d = Double(cleaned), d.isFinite { return d }
+        }
+        return nil
+    }
+
+    func decodeFlexibleStringIfPresent(forKey key: Key) -> String? {
+        if let s = try? decodeIfPresent(String.self, forKey: key) {
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let i = try? decodeIfPresent(Int.self, forKey: key) { return String(i) }
+        if let d = try? decodeIfPresent(Double.self, forKey: key), d.isFinite {
+            return d.rounded() == d ? String(Int(d)) : String(d)
+        }
+        return nil
+    }
+}
+
 // ─── Workout ─────────────────────────────────────────────────────────
 
 struct WatchExercise: Codable, Identifiable, Equatable {
@@ -20,6 +55,42 @@ struct WatchExercise: Codable, Identifiable, Equatable {
     /// — shown as a badge on the active card so the user knows to
     /// dial intensity up or down for that slot. Optional for back-compat.
     let slotRole: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, sets, reps, restSeconds, equipment, plannedTargetWeightLbs, recommendation, slotRole
+    }
+
+    init(
+        name: String,
+        sets: Int,
+        reps: String,
+        restSeconds: Int,
+        equipment: String?,
+        plannedTargetWeightLbs: Double?,
+        recommendation: String?,
+        slotRole: String?
+    ) {
+        self.name = name
+        self.sets = sets
+        self.reps = reps
+        self.restSeconds = restSeconds
+        self.equipment = equipment
+        self.plannedTargetWeightLbs = plannedTargetWeightLbs
+        self.recommendation = recommendation
+        self.slotRole = slotRole
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = c.decodeFlexibleStringIfPresent(forKey: .name) ?? "Exercise"
+        self.sets = max(1, c.decodeFlexibleIntIfPresent(forKey: .sets) ?? 1)
+        self.reps = c.decodeFlexibleStringIfPresent(forKey: .reps) ?? ""
+        self.restSeconds = max(0, c.decodeFlexibleIntIfPresent(forKey: .restSeconds) ?? 60)
+        self.equipment = c.decodeFlexibleStringIfPresent(forKey: .equipment)
+        self.plannedTargetWeightLbs = c.decodeFlexibleDoubleIfPresent(forKey: .plannedTargetWeightLbs)
+        self.recommendation = c.decodeFlexibleStringIfPresent(forKey: .recommendation)
+        self.slotRole = c.decodeFlexibleStringIfPresent(forKey: .slotRole)
+    }
 }
 
 /// Lifecycle state of today's workout — the watch renders different
@@ -60,6 +131,58 @@ struct WatchWorkout: Codable, Equatable {
     /// non-empty, ConnectivityStore rejects workouts that don't match
     /// the currently stored userId, preventing cross-account leakage.
     let userId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case focus, durationMinutes, dateISO, status, sessionId, readiness, readinessLabel, exercises, warmupSteps, syncedAtMs, userId
+    }
+
+    init(
+        focus: String,
+        durationMinutes: Int,
+        dateISO: String,
+        status: WatchWorkoutStatus,
+        sessionId: String?,
+        readiness: Int?,
+        readinessLabel: String?,
+        exercises: [WatchExercise],
+        warmupSteps: [String]?,
+        syncedAtMs: Double,
+        userId: String?
+    ) {
+        self.focus = focus
+        self.durationMinutes = durationMinutes
+        self.dateISO = dateISO
+        self.status = status
+        self.sessionId = sessionId
+        self.readiness = readiness
+        self.readinessLabel = readinessLabel
+        self.exercises = exercises
+        self.warmupSteps = warmupSteps
+        self.syncedAtMs = syncedAtMs
+        self.userId = userId
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.focus = c.decodeFlexibleStringIfPresent(forKey: .focus) ?? "Workout"
+        self.durationMinutes = max(0, c.decodeFlexibleIntIfPresent(forKey: .durationMinutes) ?? 0)
+        self.dateISO = c.decodeFlexibleStringIfPresent(forKey: .dateISO) ?? String(ISO8601DateFormatter().string(from: Date()).prefix(10))
+        if let status = try? c.decodeIfPresent(WatchWorkoutStatus.self, forKey: .status) {
+            self.status = status
+        } else if let raw = c.decodeFlexibleStringIfPresent(forKey: .status),
+                  let status = WatchWorkoutStatus(rawValue: raw.lowercased()) {
+            self.status = status
+        } else {
+            self.status = .scheduled
+        }
+        self.sessionId = c.decodeFlexibleStringIfPresent(forKey: .sessionId)
+        self.readiness = c.decodeFlexibleIntIfPresent(forKey: .readiness)
+        self.readinessLabel = c.decodeFlexibleStringIfPresent(forKey: .readinessLabel)
+        self.exercises = (try? c.decodeIfPresent([WatchExercise].self, forKey: .exercises)) ?? []
+        self.warmupSteps = try? c.decodeIfPresent([String].self, forKey: .warmupSteps)
+        self.syncedAtMs = c.decodeFlexibleDoubleIfPresent(forKey: .syncedAtMs) ?? Date().timeIntervalSince1970 * 1000
+        self.userId = c.decodeFlexibleStringIfPresent(forKey: .userId)
+    }
 }
 
 // ─── Meals ───────────────────────────────────────────────────────────

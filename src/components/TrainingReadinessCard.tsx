@@ -134,6 +134,31 @@ function musclesForFocus(focus: string | null | undefined): string[] {
   return [];
 }
 
+// Mirror of `buildRecoveryRecommendations` in services/preparedness.ts, used
+// when the server-driven path returns just pillar values (no recovery copy).
+// Keeps the two paths visually identical so a user doesn't see different
+// advice depending on whether the network call succeeded.
+function derivePillarRecommendations(
+  pillars: PreparednessResult['pillars'],
+  present: Record<string, boolean>,
+): string[] {
+  const recs: string[] = [];
+  if (present.sleep && pillars.sleep < 17) {
+    recs.push('Train lighter today — keep RPE under 7 and skip max effort sets.');
+    recs.push('Tonight: 7+ hrs in a cool, dark room. No caffeine after 2pm and dim screens 30 min before bed.');
+  }
+  if (present.hrv && pillars.hrv < 10) {
+    recs.push('HRV says recover — swap intervals for steady cardio, hydrate, prioritize protein.');
+  }
+  if (present.fatigue && pillars.fatigue < 10) {
+    recs.push('Reduce volume today (3 sets instead of 4) or shift to active recovery / mobility.');
+  }
+  if (present.nutrition && pillars.nutrition < 7) {
+    recs.push('Hit calorie + protein target before training — undereating compounds the fatigue.');
+  }
+  return recs.slice(0, 4);
+}
+
 interface Props {
   authToken: string;
   themeName?: AppThemeName;
@@ -266,11 +291,25 @@ export default function TrainingReadinessCard({
             yesterdayStrain: get('Yesterday', 5),
           };
         };
+        const serverPillars = pillarFromFactors(serverResp.factors);
+        // Re-derive recommendations on the client even when the server
+        // path drives the score. The server response intentionally doesn't
+        // ship recovery copy — it's UI surface, not signal — so we compute
+        // it from the resolved pillar values that came back. Keeps the
+        // server-vs-local-fallback paths visually consistent.
+        const serverPresent: Record<string, boolean> = {};
+        if (!serverResp.missing.includes('sleep')) serverPresent.sleep = true;
+        if (!serverResp.missing.includes('hrv')) serverPresent.hrv = true;
+        if (!serverResp.missing.includes('fatigue')) serverPresent.fatigue = true;
+        if (!serverResp.missing.includes('nutrition')) serverPresent.nutrition = true;
+        if (!serverResp.missing.includes('rhr')) serverPresent.restingHr = true;
+        const serverRecs = derivePillarRecommendations(serverPillars, serverPresent);
         displayResult = {
           score: displayScore,
           label: displayLabel,
-          pillars: pillarFromFactors(serverResp.factors),
+          pillars: serverPillars,
           insights: [],
+          recommendations: serverRecs,
           missing: serverResp.missing,
           signalsPresent: serverResp.signals_present,
           signalsTotal: serverResp.signals_total,
@@ -604,6 +643,34 @@ export default function TrainingReadinessCard({
             <View style={{ marginTop: 6, gap: 3 }}>
               {prep.insights.slice(1).map((line, i) => (
                 <Text key={i} style={{ fontSize: 11, color: tc.textSecondary, lineHeight: 15 }}>• {line}</Text>
+              ))}
+            </View>
+          )}
+
+          {/* Recovery recommendations — actionable copy when a pillar comes
+              back weak. Sleep tips lead because it's the largest pillar
+              (30/100) AND the most actionable signal a poor score gives us.
+              Card hides automatically when every pillar is healthy. */}
+          {prep.recommendations && prep.recommendations.length > 0 && (
+            <View style={{
+              marginTop: 12,
+              padding: 10,
+              borderRadius: radius.md,
+              backgroundColor: tc.primary + '0F',
+              borderWidth: 1,
+              borderColor: tc.primary + '33',
+            }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                <Ionicons name="bulb-outline" size={14} color={tc.primary} />
+                <Text style={{ fontSize: 11, fontWeight: '800', color: tc.primary, letterSpacing: 0.5, textTransform: 'uppercase' }}>
+                  Recovery focus
+                </Text>
+              </View>
+              {prep.recommendations.map((rec, i) => (
+                <View key={i} style={{ flexDirection: 'row', gap: 6, marginBottom: 4 }}>
+                  <Text style={{ fontSize: 11, color: tc.primary, lineHeight: 15 }}>•</Text>
+                  <Text style={{ flex: 1, fontSize: 11, color: tc.textPrimary, lineHeight: 15 }}>{rec}</Text>
+                </View>
               ))}
             </View>
           )}

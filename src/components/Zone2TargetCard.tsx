@@ -105,9 +105,9 @@ export default function Zone2TargetCard({ authToken, themeName, appleHealthZone2
 
       {/* "Why?" expander — surfaces the per-workout breakdown so users
           can see exactly why a session they did didn't credit toward Z2.
-          Most common gotcha: the workout was logged as Strength (no
-          cardio_style set) or HK named it something the regex doesn't
-          recognize ("Mixed Cardio", "Cardio Dance"). */}
+          Most common gotcha: the workout was logged as Strength or
+          HealthKit had no HR samples and the activity name wasn't a
+          steady-cardio type. */}
       {detectedWorkouts && detectedWorkouts.length > 0 && (
         <TouchableOpacity
           onPress={() => setShowWhy(!showWhy)}
@@ -147,7 +147,7 @@ export default function Zone2TargetCard({ authToken, themeName, appleHealthZone2
             </View>
           ))}
           <Text style={{ fontSize: 9, color: tc.textMuted, marginTop: 2 }}>
-            Counts toward Z2: steady cardio ≥ 20 min where the activity isn't intervals/HIIT. If a session you did isn't here, log it under Cardio with a steady or easy style.
+            Counts toward Z2: real HR zone minutes when available; otherwise steady cardio ≥ 20 min where the activity isn't intervals/HIIT. If a session you did isn't here, log it under Cardio with a steady or easy style.
           </Text>
         </View>
       )}

@@ -616,14 +616,103 @@ def log_hydration(
     return {"date": str(d), "ounces": plan["_hydration_oz"]}
 
 
+def _compute_hydration_target_oz(
+    weight_lbs: float | None,
+    gender: "Gender | None",
+    workout_minutes_today: float = 0.0,
+    protein_g_today: float = 0.0,
+    alcohol_servings_today: float = 0.0,
+) -> tuple[int, dict]:
+    """Evidence-based daily hydration target in fluid ounces, plus a
+    breakdown of which signals contributed so the UI can explain "why
+    your number is what it is."
+
+    The previous formula was just `weight_lbs / 2` — a popular gym-bro rule
+    that's a rough approximation of 30 ml/kg but breaks at the extremes
+    (a 100 lb person doesn't need only 50 oz; a 350 lb person doesn't need
+    175 oz). This version layers four evidence-supported signals:
+
+      1. **Bodyweight × sex** — base rate aligned to IOM / National
+         Academies total-water guidance (~3.7 L men, ~2.7 L women). Males
+         default higher because of greater lean mass and sweat rate.
+      2. **Activity** — sweat replacement, ~16 oz per 30 min of training.
+         Caller passes MAX(planned, actually-completed) minutes so a user
+         who trained extra (or unplanned) gets the bump.
+      3. **Protein-heavy diet** — kidneys process nitrogen waste with water.
+         Active users at >1 g/lb consumed get +8 oz; >1.5 g/lb (very high)
+         gets +16 oz. No bonus until the user actually eats the protein —
+         the target reflects today's load, not a target.
+      4. **Alcohol** — net diuretic. +12 oz per standard drink already
+         logged today, capped at +36 oz so the recommendation doesn't
+         become punitive on a heavy night.
+
+    Output: (target_ounces, breakdown_dict). Breakdown keys: `base`,
+    `activity`, `protein`, `alcohol` — each in oz, all integers. UI can
+    render them as a stack or expose on tap.
+
+    Pre-bonus base is clamped to [64, 140] — floor matches IOM lower bound
+    for healthy adults at rest; ceiling guards against dilutional
+    hyponatremia for very heavy users where the linear scaling would
+    otherwise suggest dangerous amounts. Bonuses are added AFTER the cap
+    because the science supports the additional needs they represent.
+    """
+    from app.enums import Gender as _Gender
+
+    weight = weight_lbs if (weight_lbs and weight_lbs > 0) else 150.0
+    # 0.52 oz/lb ≈ 35 ml/kg (men), 0.45 oz/lb ≈ 30 ml/kg (women).
+    if gender == _Gender.MALE:
+        oz_per_lb = 0.52
+    elif gender == _Gender.FEMALE:
+        oz_per_lb = 0.45
+    else:
+        oz_per_lb = 0.48
+    base = max(64.0, min(140.0, weight * oz_per_lb))
+
+    # Activity bonus — capped at +48 oz so a 90-min session doesn't push
+    # the total to hyponatremia territory; anything beyond that should be
+    # paired with electrolytes anyway.
+    activity_bonus = min(48.0, max(0.0, workout_minutes_today / 30.0) * 16.0)
+
+    # Protein bonus — keyed off TODAY'S CONSUMED protein, not target. Means
+    # the recommendation rises as the user logs heavy-protein meals during
+    # the day rather than asking them to drink ahead of an aspirational
+    # number. Threshold is per-pound bodyweight so it scales with user size.
+    protein_bonus = 0.0
+    if protein_g_today and weight > 0:
+        per_lb = protein_g_today / weight
+        if per_lb >= 1.5:
+            protein_bonus = 16.0
+        elif per_lb >= 1.0:
+            protein_bonus = 8.0
+
+    # Alcohol bonus — diuretic effect. Capped at +36 oz so a binge doesn't
+    # explode the recommendation; capping is also defensive (heavy intake
+    # has bigger problems than fluid balance).
+    alcohol_bonus = min(36.0, max(0.0, alcohol_servings_today) * 12.0)
+
+    target = round(base + activity_bonus + protein_bonus + alcohol_bonus)
+    breakdown = {
+        "base": round(base),
+        "activity": round(activity_bonus),
+        "protein": round(protein_bonus),
+        "alcohol": round(alcohol_bonus),
+    }
+    return target, breakdown
+
+
 @router.get("/hydration")
 def get_hydration(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Today's logged ounces + suggested target derived from weight."""
+    """Today's logged ounces + a per-day target that reflects the user's
+    weight, sex, planned + actual workout minutes, today's protein intake,
+    and any alcohol logged. See `_compute_hydration_target_oz` for the
+    formula and breakdown."""
     from datetime import date as _date
-    from app.models import UserProfile
+    from app.models import (
+        UserProfile, PlanDay, WorkoutCompletion, DailyNutritionMetrics,
+    )
     d = _date.today()
     state = db.exec(
         select(UserDayState)
@@ -637,9 +726,70 @@ def get_hydration(
         except Exception:
             oz = 0.0
     profile = db.exec(select(UserProfile).where(UserProfile.user_id == current_user.id)).first()
-    # Target: half bodyweight in oz (mirrors client hydration.ts).
-    target_oz = round((profile.weight_lbs / 2.0) if profile else 64.0)
-    return {"date": str(d), "ounces": round(oz, 1), "target_ounces": target_oz}
+
+    # Workout minutes — use MAX(planned, actual). Morning user gets the
+    # bump from the planned session; evening user who ran 90 min unplanned
+    # still gets credit. Skip rest days entirely so the target stays
+    # honest on off days.
+    planned_minutes = 0.0
+    try:
+        plan_day = db.exec(
+            select(PlanDay)
+            .where(PlanDay.user_id == current_user.id)
+            .where(PlanDay.day_date == d)
+        ).first()
+        if plan_day and plan_day.workout_json and not plan_day.is_rest:
+            wj = plan_day.workout_json or {}
+            planned_minutes = float(
+                wj.get("session_minutes")
+                or wj.get("duration_minutes")
+                or 0
+            )
+    except Exception:
+        pass
+    actual_minutes = 0.0
+    try:
+        completed = db.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == current_user.id)
+            .where(WorkoutCompletion.workout_date == d)
+        ).all()
+        actual_minutes = sum((c.duration_seconds or 0) / 60.0 for c in completed)
+    except Exception:
+        pass
+    workout_minutes = max(planned_minutes, actual_minutes)
+
+    # Diet signals — protein consumed today (drives kidney filtration load)
+    # and alcohol servings (diuretic). Both are computed by the meal
+    # pipeline and stored on DailyNutritionMetrics; missing rows just zero
+    # out the bonuses.
+    protein_today = 0.0
+    alcohol_today = 0.0
+    try:
+        metrics = db.exec(
+            select(DailyNutritionMetrics)
+            .where(DailyNutritionMetrics.user_id == current_user.id)
+            .where(DailyNutritionMetrics.metric_date == d)
+        ).first()
+        if metrics:
+            protein_today = float((metrics.plant_protein_g or 0) + (metrics.animal_protein_g or 0))
+            alcohol_today = float(metrics.alcohol_servings or 0)
+    except Exception:
+        pass
+
+    target_oz, breakdown = _compute_hydration_target_oz(
+        weight_lbs=profile.weight_lbs if profile else None,
+        gender=profile.gender if profile else None,
+        workout_minutes_today=workout_minutes,
+        protein_g_today=protein_today,
+        alcohol_servings_today=alcohol_today,
+    )
+    return {
+        "date": str(d),
+        "ounces": round(oz, 1),
+        "target_ounces": target_oz,
+        "breakdown": breakdown,
+    }
 
 
 @router.get("/score")

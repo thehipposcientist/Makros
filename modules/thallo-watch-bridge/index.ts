@@ -3,6 +3,8 @@
 // Phone → Watch:
 //   • syncWorkout({focus, durationMinutes, exercises}) — ships today's
 //     workout to the paired watch. Re-called whenever the plan changes.
+//     Native writes persistent applicationContext and mirrors over
+//     sendMessage when reachable so start/rejoin transitions are immediate.
 //   • syncTheme({...palette}) — pushes the user's current theme colors.
 //   • updateProgress({exerciseIndex, setNumber, restRemainingSec,
 //                     recommendation}) — live mid-workout updates.
@@ -21,6 +23,7 @@ export type WatchExercise = {
   equipment?: string | null;
   plannedTargetWeightLbs?: number | null;
   recommendation?: string | null;
+  slotRole?: string | null;
 };
 
 export type WatchWorkoutStatus = 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest';
