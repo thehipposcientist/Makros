@@ -640,6 +640,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           status: 'active',
           sessionId: watchSessionId.current,
           warmupSteps: warmupStepsRef.current,
+          reason: 'active_snapshot',
         }).catch(() => {});
         // Initial push on mount.
         pushActive();
@@ -738,6 +739,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   status: 'active',
                   sessionId: watchSessionId.current,
                   warmupSteps: warmupStepsRef.current,
+                  reason: 'pull_state',
                 });
               } catch { /* bridge optional */ }
             })();
@@ -2766,6 +2768,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         dateISO: dateKey(new Date()),
         status: 'skipped',
         sessionId: watchSessionId.current,
+        reason: 'skip',
       }).catch(() => {}))
       .catch(() => {});
     onCancel();
@@ -2812,6 +2815,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         dateISO: dateKey(new Date()),
         status: 'completed',
         sessionId: watchSessionId.current,
+        reason: 'complete',
       }).catch(() => {}),
     ).catch(() => {});
     // Snapshot the exact WorkoutDay the user just finished so plan
@@ -3365,6 +3369,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 dateISO: dateKey(new Date()),
                 status: 'skipped',
                 sessionId: watchSessionId.current,
+                reason: 'skip',
               }).catch(() => {}))
               .catch(() => {});
             onCancel();

@@ -291,6 +291,7 @@ import LegalDisclosureModal from '../src/components/LegalDisclosureModal';
 import { colors, getTheme, radius } from '../src/constants/theme';
 import { LEGAL_VERSION, SUPPORT_EMAIL } from '../src/constants/legal';
 import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, todayKey, isAppleHealthEnabled, setAppleHealthEnabled } from '../src/utils/workoutHistory';
+import { workoutSessionToLoggedPayload } from '../src/utils/workoutLogPayload';
 import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
 
 /** Stamp startWeightLbs + goalStartedAt when a goal is first set or changes. */
@@ -1023,7 +1024,14 @@ export default function Index() {
               await saveWorkoutSession(session);
               // Sync to backend so getWorkoutStatus() sees it
               const sessionDate = s.date || new Date(session.date).toISOString().slice(0, 10);
-              await logWorkoutDone(authToken, sessionDate, session.focus, session.durationSeconds).catch(e =>
+              const exercisesPayload = workoutSessionToLoggedPayload(session);
+              await logWorkoutDone(
+                authToken,
+                sessionDate,
+                session.focus,
+                session.durationSeconds,
+                exercisesPayload.length > 0 ? exercisesPayload : undefined,
+              ).catch(e =>
                 console.warn('[onboarding] logWorkoutDone failed for', sessionDate, e),
               );
             }

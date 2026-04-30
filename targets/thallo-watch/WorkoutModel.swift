@@ -185,6 +185,33 @@ struct WatchWorkout: Codable, Equatable {
     }
 }
 
+struct WatchWorkoutEnvelope: Codable, Equatable {
+    let schemaVersion: Int
+    let channel: String
+    let eventId: String
+    let revision: Double
+    let reason: String?
+    let sentAtMs: Double
+    let userId: String?
+    let workout: WatchWorkout
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, channel, eventId, revision, reason, sentAtMs, userId, workout
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.workout = try c.decode(WatchWorkout.self, forKey: .workout)
+        self.schemaVersion = c.decodeFlexibleIntIfPresent(forKey: .schemaVersion) ?? 1
+        self.channel = c.decodeFlexibleStringIfPresent(forKey: .channel) ?? "workout"
+        self.revision = c.decodeFlexibleDoubleIfPresent(forKey: .revision) ?? self.workout.syncedAtMs
+        self.eventId = c.decodeFlexibleStringIfPresent(forKey: .eventId) ?? "legacy-\(Int(self.revision))"
+        self.reason = c.decodeFlexibleStringIfPresent(forKey: .reason)
+        self.sentAtMs = c.decodeFlexibleDoubleIfPresent(forKey: .sentAtMs) ?? self.workout.syncedAtMs
+        self.userId = c.decodeFlexibleStringIfPresent(forKey: .userId) ?? self.workout.userId
+    }
+}
+
 // ─── Meals ───────────────────────────────────────────────────────────
 
 /// A single AI-parsed food item pushed back to the watch for review

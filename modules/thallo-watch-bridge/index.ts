@@ -1,10 +1,10 @@
 // Thin JS wrapper around ThalloWatchBridgeModule (native Swift).
 //
 // Phone → Watch:
-//   • syncWorkout({focus, durationMinutes, exercises}) — ships today's
-//     workout to the paired watch. Re-called whenever the plan changes.
-//     Native writes persistent applicationContext and mirrors over
-//     sendMessage when reachable so start/rejoin transitions are immediate.
+//   • syncWorkout(<WatchWorkoutEnvelope>) — ships today's workout snapshot
+//     to the paired watch. Native writes persistent applicationContext and
+//     mirrors over sendMessage when reachable so start/rejoin transitions
+//     are immediate.
 //   • syncTheme({...palette}) — pushes the user's current theme colors.
 //   • updateProgress({exerciseIndex, setNumber, restRemainingSec,
 //                     recommendation}) — live mid-workout updates.
@@ -49,6 +49,28 @@ export type WatchWorkoutPayload = {
    *  that arrive after a user switch before the context is re-keyed. */
   userId?: string | null;
   syncedAtMs: number;
+};
+
+export type WatchWorkoutSyncReason =
+  | 'home_snapshot'
+  | 'active_snapshot'
+  | 'pull_state'
+  | 'reachability'
+  | 'start_echo'
+  | 'complete'
+  | 'skip'
+  | 'clear'
+  | 'unknown';
+
+export type WatchWorkoutEnvelope = {
+  schemaVersion: 2;
+  channel: 'workout';
+  eventId: string;
+  revision: number;
+  reason: WatchWorkoutSyncReason;
+  sentAtMs: number;
+  userId?: string | null;
+  workout: WatchWorkoutPayload;
 };
 
 export type WatchMealItem = {
@@ -170,7 +192,7 @@ export const WatchBridge = {
     try { native.setUserId(id); } catch {}
   },
 
-  async syncWorkout(payload: WatchWorkoutPayload): Promise<boolean> {
+  async syncWorkout(payload: WatchWorkoutEnvelope | WatchWorkoutPayload): Promise<boolean> {
     if (!native) return false;
     try { return await native.syncWorkout(payload); } catch { return false; }
   },

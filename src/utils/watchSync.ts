@@ -11,7 +11,9 @@
 
 import {
   WatchBridge,
+  WatchWorkoutEnvelope,
   WatchWorkoutPayload,
+  WatchWorkoutSyncReason,
   WatchWorkoutStatus,
   WatchPalette,
   WatchProgress,
@@ -30,6 +32,8 @@ import { getTheme } from '../constants/theme';
 export { WatchBridge };
 
 const WATCH_SYNC_STATUS_KEY = 'watch_sync_status_v1';
+const WATCH_WORKOUT_SCHEMA_VERSION = 2 as const;
+let workoutRevisionSequence = 0;
 
 export type WatchSyncSnapshot = {
   surface: string;
@@ -83,6 +87,26 @@ function positiveInt(value: unknown, fallback: number): number {
 
 function nullableString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function nextWorkoutRevision(nowMs: number = Date.now()): number {
+  workoutRevisionSequence = (workoutRevisionSequence + 1) % 1000;
+  return nowMs * 1000 + workoutRevisionSequence;
+}
+
+function workoutEventId(revision: number): string {
+  return `workout-${Math.floor(revision)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function defaultWorkoutReason(status: WatchWorkoutStatus): WatchWorkoutSyncReason {
+  switch (status) {
+    case 'active': return 'active_snapshot';
+    case 'completed': return 'complete';
+    case 'skipped': return 'skip';
+    case 'rest': return 'home_snapshot';
+    case 'scheduled':
+    default: return 'home_snapshot';
+  }
 }
 
 async function getStoredUserId(): Promise<string | null> {
@@ -183,6 +207,35 @@ export function buildWatchWorkoutPayload(
   };
 }
 
+export function buildWatchWorkoutEnvelope(
+  workout: WatchWorkoutPayload,
+  opts: {
+    reason?: WatchWorkoutSyncReason;
+    userId?: string | null;
+    revision?: number;
+    sentAtMs?: number;
+  } = {},
+): WatchWorkoutEnvelope {
+  const sentAtMs = opts.sentAtMs ?? Date.now();
+  const revision = opts.revision ?? nextWorkoutRevision(sentAtMs);
+  const userId = opts.userId !== undefined ? opts.userId : workout.userId ?? null;
+  const normalizedWorkout: WatchWorkoutPayload = {
+    ...workout,
+    userId,
+    syncedAtMs: workout.syncedAtMs ?? sentAtMs,
+  };
+  return {
+    schemaVersion: WATCH_WORKOUT_SCHEMA_VERSION,
+    channel: 'workout',
+    eventId: workoutEventId(revision),
+    revision,
+    reason: opts.reason ?? defaultWorkoutReason(workout.status),
+    sentAtMs,
+    userId,
+    workout: normalizedWorkout,
+  };
+}
+
 export function buildWatchPalette(themeName: AppThemeName | undefined): WatchPalette {
   const t = getTheme(themeName).colors;
   const fallback = { success: '#59D98E', warning: '#FFB454', error: '#FF5D73' };
@@ -237,6 +290,7 @@ export async function pushWorkoutToWatch(
     readinessLabel?: string | null;
     warmupSteps?: string[];
     userId?: string | null;
+    reason?: WatchWorkoutSyncReason;
   },
 ): Promise<boolean> {
   // Resolve userId: caller can pass it explicitly; otherwise fall back to
@@ -250,6 +304,7 @@ export async function pushWorkoutToWatch(
     await recordWatchSync('workout', false, 'bridge_unavailable');
     return false;
   }
+  const envelope = buildWatchWorkoutEnvelope(payload, { reason: opts.reason, userId });
   // Surface payload shape + size so we can spot the case where the
   // merged WCSession applicationContext gets too large to enqueue
   // (256KB hard cap). When updateApplicationContext throws on iOS, the
@@ -258,16 +313,18 @@ export async function pushWorkoutToWatch(
   // doesn't" if a single oversized exercise list pushes the merged
   // dict past the limit.
   let payloadBytes = 0;
-  try { payloadBytes = JSON.stringify(payload).length; } catch {}
+  try { payloadBytes = JSON.stringify(envelope).length; } catch {}
   wsLog('pushWorkoutToWatch', {
     status: opts.status,
+    reason: envelope.reason,
+    revision: envelope.revision,
     focus: payload.focus,
     exercises: payload.exercises?.length ?? 0,
     bytes: payloadBytes,
     userId: userId?.slice(0, 4),
   });
-  const ok = await WatchBridge.syncWorkout(payload);
-  await recordWatchSync('workout', !!ok, `${opts.status} ex=${payload.exercises?.length ?? 0} b=${payloadBytes}`);
+  const ok = await WatchBridge.syncWorkout(envelope);
+  await recordWatchSync('workout', !!ok, `${envelope.reason}/${opts.status} ex=${payload.exercises?.length ?? 0} b=${payloadBytes}`);
   return ok;
 }
 
@@ -458,7 +515,7 @@ export async function clearWatchData(): Promise<void> {
   // this payload, bypassing the syncedAtMs ordering guard. Safe to leave in
   // applicationContext — the watch tracks the last processed timestamp and
   // ignores repeated delivers of the same value.
-  await WatchBridge.syncWorkout({
+  const clearWorkout = {
     focus: 'Rest',
     durationMinutes: 0,
     dateISO: localDateISO(),
@@ -467,9 +524,15 @@ export async function clearWatchData(): Promise<void> {
     readiness: null,
     readinessLabel: null,
     exercises: [],
+    userId: '',
     syncedAtMs: now,
     clearWorkoutMs: now,
-  } as any).catch(() => {});
+  } as WatchWorkoutPayload & { clearWorkoutMs: number };
+  await WatchBridge.syncWorkout(buildWatchWorkoutEnvelope(clearWorkout, {
+    reason: 'clear',
+    sentAtMs: now,
+    userId: '',
+  })).catch(() => {});
   await WatchBridge.syncMeals({
     dateISO: localDateISO(),
     targets: { calories: 0, proteinG: 0, carbsG: 0, fatG: 0 },

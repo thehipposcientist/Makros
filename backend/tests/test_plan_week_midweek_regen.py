@@ -774,9 +774,14 @@ def test_workout_idx_continues_past_locked_days():
     """workout_idx should NOT skip when iterating past locked training days
     (it does increment for them so the next unlocked training day pulls
     the right index from fresh_workout_days)."""
-    today = date.today()
+    class WednesdayDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 4, 29)
+
+    today = WednesdayDate.today()
     pw, days = _build_week(today - timedelta(days=2), locked_indexes=(0, 1))
-    with _patch_get_week_days(days):
+    with patch.object(week_manager, "date", WednesdayDate), _patch_get_week_days(days):
         # 5 fresh days for 5-day-a-week pattern, but past 2 training days are locked.
         # So workout_idx starts at 2 for today onwards.
         fresh = [{"focus": "F0"}, {"focus": "F1"}, {"focus": "F2"}, {"focus": "F3"}, {"focus": "F4"}]
@@ -872,6 +877,30 @@ def test_lock_day_does_not_force_status():
     # status only changes when explicitly passed
     assert pd.status == "planned"
     assert pd.locked is True
+
+
+def test_completion_match_rejects_extra_cardio_on_lift_day():
+    pd = FakePlanDay(
+        day_date=date.today(),
+        workout_json={"focus": "Push", "exercises": []},
+    )
+    assert week_manager._completion_matches_plan_day(pd, "Walking") is False
+
+
+def test_completion_match_allows_matching_focus_family():
+    pd = FakePlanDay(
+        day_date=date.today(),
+        workout_json={"focus": "Push + Cardio", "exercises": []},
+    )
+    assert week_manager._completion_matches_plan_day(pd, "Chest") is True
+
+
+def test_completion_match_allows_cardio_day_import():
+    pd = FakePlanDay(
+        day_date=date.today(),
+        workout_json={"focus": "Cardio", "exercises": []},
+    )
+    assert week_manager._completion_matches_plan_day(pd, "Running") is True
 
 
 # ─── Section 10: Edge cases ──────────────────────────────────────────────────

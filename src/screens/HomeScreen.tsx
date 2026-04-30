@@ -48,6 +48,7 @@ import {
   savePreservedCompletedWorkout,
   deleteWorkoutSession,
 } from '../utils/workoutHistory';
+import { workoutSessionToLoggedPayload } from '../utils/workoutLogPayload';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
 import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan } from '../utils/mealItems';
@@ -2068,6 +2069,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           sessionId: activeSessionId,
           readiness: unifiedPrepScore,
           readinessLabel: unifiedPrepLabel,
+          reason: 'home_snapshot',
         });
         await pushThemeToWatch(userProfile?.themePreference);
         const todayPlan = nutritionPlansByDate[todayISO]
@@ -2352,6 +2354,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               sessionId: reachSid,
               readiness: s.readinessScore?.score ?? null,
               readinessLabel: s.readinessScore?.label ?? null,
+              reason: 'reachability',
             }).catch(() => {});
             await pushThemeToWatch(s.themePreference).catch(() => {});
             const todayPlan = s.nutritionPlansByDate[todayISO]
@@ -2654,6 +2657,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   sessionId: pullSid,
                   readiness: s.readinessScore?.score ?? null,
                   readinessLabel: s.readinessScore?.label ?? null,
+                  reason: 'pull_state',
                 }).catch(() => {});
                 await pushThemeToWatch(s.themePreference).catch(() => {});
                 const todayPlan = s.nutritionPlansByDate[todayISO]
@@ -2748,6 +2752,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     sessionId,
                     readiness: s.readinessScore?.score ?? null,
                     readinessLabel: s.readinessScore?.label ?? null,
+                    reason: 'start_echo',
                   }).catch(() => {});
                 } catch { /* non-fatal */ }
               })();
@@ -2852,6 +2857,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   dateISO: skipISO,
                   status: 'skipped',
                   sessionId: null,
+                  reason: 'skip',
                 });
               } catch { /* non-fatal */ }
               try {
@@ -4186,7 +4192,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             };
             await saveWorkoutSession(session);
             if (authToken) {
-              logWorkoutDone(authToken, w.date, session.focus, session.durationSeconds).catch(() => null);
+              const exercisesPayload = workoutSessionToLoggedPayload(session);
+              logWorkoutDone(
+                authToken,
+                w.date,
+                session.focus,
+                session.durationSeconds,
+                exercisesPayload.length > 0 ? exercisesPayload : undefined,
+              ).catch(() => null);
             }
             if (w.date === today) {
               setTodayDone(true);
@@ -7797,6 +7810,30 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         visible={showLiveTracker}
         onClose={() => setShowLiveTracker(false)}
         themeName={userProfile.themePreference}
+        onSave={async (session) => {
+          await saveWorkoutSession(session);
+          if (authToken) {
+            try {
+              await logWorkoutDone(
+                authToken,
+                dateKey(new Date(session.date)),
+                session.focus,
+                session.durationSeconds,
+                undefined,
+                session.manualActivity ? {
+                  category: session.manualActivity.category,
+                  subtype: session.manualActivity.subtype,
+                  intensity: session.manualActivity.intensity,
+                  source: session.manualActivity.source,
+                  cardioStyle: session.manualActivity.cardioStyle,
+                  distanceMiles: session.manualActivity.distanceMiles,
+                  caloriesBurned: session.manualActivity.caloriesBurned,
+                  avgHeartRate: session.manualActivity.avgHeartRate,
+                } : undefined,
+              );
+            } catch {}
+          }
+        }}
         onSaved={() => {
           // Bump history so the streak / recent-sessions widgets pick
           // up the new row without needing a tab switch.

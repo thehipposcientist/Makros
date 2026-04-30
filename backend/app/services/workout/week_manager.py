@@ -163,6 +163,37 @@ def start_day(db: Session, plan_day: PlanDay) -> PlanDay:
     return lock_day(db, plan_day, reason="started", status="started")
 
 
+def _completion_matches_plan_day(plan_day: PlanDay, focus_label: str) -> bool:
+    """Return true when a completion is plausibly the scheduled workout.
+
+    Users can log extra activity on a planned day: a walk, sauna, sport, or
+    imported Apple Health session should count for fatigue without marking
+    the scheduled lift complete. Exact focus match wins; otherwise compare
+    normalized focus families so "Chest" can satisfy "Push", "Running" can
+    satisfy a cardio day, etc.
+    """
+    if plan_day.is_rest or not isinstance(plan_day.workout_json, dict):
+        return False
+    planned = str(plan_day.workout_json.get("focus") or "").strip()
+    completed = str(focus_label or "").strip()
+    if not planned or not completed:
+        return False
+
+    def _clean(value: str) -> str:
+        return " ".join(value.lower().replace("_", " ").split())
+
+    if _clean(planned) == _clean(completed):
+        return True
+
+    try:
+        from app.services.workout.focus_normalize import normalize_focus_to_family
+        planned_family = normalize_focus_to_family(planned)
+        completed_family = normalize_focus_to_family(completed)
+        return bool(planned_family and completed_family and planned_family == completed_family)
+    except Exception:
+        return False
+
+
 def patch_day_workout(
     db: Session,
     plan_day: PlanDay,
@@ -313,6 +344,8 @@ def lock_day_on_complete(
         )
     ).first()
     if not plan_day or plan_day.locked:
+        return plan_day
+    if not _completion_matches_plan_day(plan_day, focus_label):
         return plan_day
     return complete_day(db, plan_day)
 

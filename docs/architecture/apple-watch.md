@@ -1,6 +1,6 @@
 # Apple Watch — Architecture
 
-Last synced from app state: 2026-04-29
+Last synced from app state: 2026-04-30
 
 ## Bidirectional Sync via WCSession
 
@@ -8,6 +8,10 @@ Last synced from app state: 2026-04-29
 
 **Outbound (phone → watch):**
 `pushWorkoutToWatch`, `pushMealsToWatch`, `pushSupplementsToWatch`, `pushThemeToWatch`, `pushProgressToWatch` (per-set updates). `pushProgressToWatch` now carries both rest-timer deltas and the latest live recommendation text so the watch can refresh next-set guidance during rest. Full snapshots are dual-path: they update `applicationContext` for cold-start persistence and, when reachable, also send an immediate `sendMessage` mirror. `sendMessage` failures fall back to `transferUserInfo`.
+
+Workout snapshots use a v2 envelope:
+`{ schemaVersion: 2, channel: "workout", eventId, revision, reason, sentAtMs, userId, workout }`.
+The bridge stores it under `workoutEnvelope` and also writes a legacy top-level `workout` copy for older watch builds. The watch prefers `workoutEnvelope`, orders by monotonic `revision`, rejects mismatched `userId`, and only falls back to legacy `workout` when no valid envelope is present.
 
 **Inbound (watch → phone):**
 `start_workout`, `skip_workout`, `cancel_workout`, `end_workout`, `log_set`, `toggle_meal`, `toggle_supplement`, `take_all_supplements`, `pull_state`.
@@ -20,6 +24,7 @@ Watch fires `pull_state` on `WCSession.activate` + `sessionReachabilityDidChange
 **Key implementation decisions:**
 - `isPaired` silent gate **REMOVED** — it dropped payloads during transient unpaired states. Now only `isAvailable()` (platform support) gates pushes.
 - `clearWatchData()` on sign-out pushes empty workout/meals/supplements payloads (user-switch wipe).
+- Workout clear is an explicit envelope `reason: "clear"` so stale completed/active payloads cannot rehydrate after logout or account switch.
 
 ## Watch App Pages
 

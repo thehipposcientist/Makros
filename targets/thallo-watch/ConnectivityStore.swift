@@ -2,7 +2,8 @@
 // from the paired phone and keeps them in sync.
 //
 // Message shapes the phone sends:
-//   { kind: "workout",  payload: <WatchWorkout JSON> }
+//   { kind: "workoutEnvelope", payload: <WatchWorkoutEnvelope JSON> }
+//   { kind: "workout",         payload: <WatchWorkout JSON> } // legacy
 //   { kind: "theme",    payload: <WatchPalette JSON> }
 //   { kind: "progress", set: Int, restRemainingSec: Int?,
 //                       heartRate: Int?, recommendation: String? }
@@ -33,6 +34,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
 
     private let session: WCSession?
     private static let userIdKey = "thallo.watchUserId"
+    private static let lastWorkoutRevisionKey = "thallo.lastWorkoutRevision"
     private var queuedCommands: [[String: Any]] = []
 
     private override init() {
@@ -95,6 +97,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         UserDefaults.standard.removeObject(forKey: "thallo.hrDiagList")
         UserDefaults.standard.removeObject(forKey: "thallo.lastAbsorb")
         UserDefaults.standard.removeObject(forKey: "thallo.lastClearWorkoutMs")
+        UserDefaults.standard.removeObject(forKey: Self.lastWorkoutRevisionKey)
     }
 
     // ─── WCSessionDelegate ──────────────────────────────────────────
@@ -173,62 +176,9 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             handleUserSwitch(incomingUserId)
         }
 
-        if let w = ctx["workout"] as? [String: Any] {
-            // clearWorkoutMs: phone embeds this on account-switch clears so the
-            // watch discards the old workout before absorbing the new payload,
-            // bypassing the syncedAtMs ordering guard. Idempotent — the timestamp
-            // tracks the last processed clear so re-delivers are no-ops.
-            if let clearMs = w["clearWorkoutMs"] as? Double {
-                let lastCleared = UserDefaults.standard.double(forKey: "thallo.lastClearWorkoutMs")
-                if clearMs > lastCleared {
-                    HeartRateStore.saveDiag("rcv clearWorkoutMs → nil workout")
-                    HeartRateStore.saveLastAbsorb("clearWorkoutMs → nil")
-                    workout = nil
-                    UserDefaults.standard.set(clearMs, forKey: "thallo.lastClearWorkoutMs")
-                }
-            }
-            // Capture the dict's shape BEFORE the JSONSerialization round-trip
-            // so we can tell what arrived even if serialization fails.
-            let wKeys = w.keys.sorted().joined(separator: ",")
-            let exerciseCount = (w["exercises"] as? [Any])?.count ?? -1
-            if let data = try? JSONSerialization.data(withJSONObject: w) {
-                let decoder = JSONDecoder()
-                do {
-                    let decoded = try decoder.decode(WatchWorkout.self, from: data)
-                    // Reject only if userId is explicitly present AND wrong.
-                    // Missing userId (legacy/transitional payloads) passes through.
-                    let stored = currentUserId ?? ""
-                    let wUserId = decoded.userId ?? ""
-                    if !stored.isEmpty && !wUserId.isEmpty && wUserId != stored {
-                        let msg = "rejected: userId \(wUserId.prefix(4))≠\(stored.prefix(4))"
-                        HeartRateStore.saveDiag("rejected workout: userId \(wUserId.prefix(4))≠stored \(stored.prefix(4))")
-                        HeartRateStore.saveLastAbsorb(msg)
-                    } else if workout == nil || decoded.syncedAtMs >= (workout?.syncedAtMs ?? 0) {
-                        let msg = "accepted status=\(decoded.status) ex=\(decoded.exercises.count)"
-                        HeartRateStore.saveDiag("rcv workout accepted status=\(decoded.status) sid=\(decoded.sessionId?.prefix(8) ?? "nil") ex=\(decoded.exercises.count)")
-                        HeartRateStore.saveLastAbsorb(msg)
-                        self.workout = decoded
-                    } else {
-                        HeartRateStore.saveDiag("rcv workout stale syncedAtMs")
-                        HeartRateStore.saveLastAbsorb("stale syncedAtMs (rejected)")
-                    }
-                } catch {
-                    let msg = "decode FAIL keys=[\(wKeys)] ex=\(exerciseCount) err=\(error.localizedDescription.prefix(60))"
-                    HeartRateStore.saveDiag("workout decode FAIL keys=[\(wKeys)] ex=\(exerciseCount) err=\(error)")
-                    HeartRateStore.saveLastAbsorb(msg)
-                }
-            } else {
-                // Plug the silent gap: JSONSerialization.data returned nil.
-                // This usually means the dict contains non-plist values
-                // (NaN/Infinity NSNumber, custom Swift class, etc).
-                let msg = "JSONser FAILED keys=[\(wKeys)] ex=\(exerciseCount)"
-                HeartRateStore.saveDiag("workout JSONser FAILED keys=[\(wKeys)] ex=\(exerciseCount)")
-                HeartRateStore.saveLastAbsorb(msg)
-            }
-        } else if ctx.keys.contains("workout") {
-            let msg = "workout key wrong type: \(type(of: ctx["workout"]))"
-            HeartRateStore.saveDiag("workout key present but not a dict: \(type(of: ctx["workout"]))")
-            HeartRateStore.saveLastAbsorb(msg)
+        let envelopeHandled = absorbWorkoutEnvelope(ctx["workoutEnvelope"])
+        if !envelopeHandled {
+            absorbLegacyWorkout(ctx)
         }
         if let m = ctx["meals"] as? [String: Any] {
             if let data = try? JSONSerialization.data(withJSONObject: m),
@@ -277,6 +227,133 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         }
     }
 
+    private func absorbWorkoutEnvelope(_ raw: Any?) -> Bool {
+        guard let raw = raw else { return false }
+        guard let dict = raw as? [String: Any] else {
+            HeartRateStore.saveDiag("workoutEnvelope key present but not a dict")
+            HeartRateStore.saveLastAbsorb("workoutEnvelope wrong type")
+            return false
+        }
+        let keys = dict.keys.sorted().joined(separator: ",")
+        let exerciseCount = ((dict["workout"] as? [String: Any])?["exercises"] as? [Any])?.count ?? -1
+        guard let data = try? JSONSerialization.data(withJSONObject: dict) else {
+            HeartRateStore.saveDiag("workoutEnvelope JSONser FAILED keys=[\(keys)]")
+            HeartRateStore.saveLastAbsorb("envelope JSONser FAILED")
+            return false
+        }
+        do {
+            let envelope = try JSONDecoder().decode(WatchWorkoutEnvelope.self, from: data)
+            guard envelope.channel == "workout" else {
+                HeartRateStore.saveDiag("ignored workoutEnvelope channel=\(envelope.channel)")
+                HeartRateStore.saveLastAbsorb("ignored envelope channel")
+                return true
+            }
+
+            handleUserSwitch(envelope.userId)
+
+            let lastRevision = UserDefaults.standard.double(forKey: Self.lastWorkoutRevisionKey)
+            if envelope.revision < lastRevision {
+                HeartRateStore.saveDiag("rcv workoutEnvelope stale rev=\(Int(envelope.revision)) last=\(Int(lastRevision))")
+                HeartRateStore.saveLastAbsorb("stale envelope rev (rejected)")
+                return true
+            }
+
+            if envelope.reason == "clear" {
+                workout = nil
+                UserDefaults.standard.set(envelope.revision, forKey: Self.lastWorkoutRevisionKey)
+                HeartRateStore.saveDiag("rcv workoutEnvelope clear rev=\(Int(envelope.revision))")
+                HeartRateStore.saveLastAbsorb("clear envelope → nil")
+                return true
+            }
+
+            let stored = currentUserId ?? ""
+            let workoutUserId = envelope.workout.userId ?? envelope.userId ?? ""
+            if !stored.isEmpty && !workoutUserId.isEmpty && workoutUserId != stored {
+                let msg = "rejected: userId \(workoutUserId.prefix(4))≠\(stored.prefix(4))"
+                HeartRateStore.saveDiag("rejected workoutEnvelope: userId \(workoutUserId.prefix(4))≠stored \(stored.prefix(4))")
+                HeartRateStore.saveLastAbsorb(msg)
+                return true
+            }
+
+            self.workout = envelope.workout
+            UserDefaults.standard.set(envelope.revision, forKey: Self.lastWorkoutRevisionKey)
+            let msg = "accepted env \(envelope.reason ?? "unknown") status=\(envelope.workout.status) ex=\(envelope.workout.exercises.count)"
+            HeartRateStore.saveDiag("rcv workoutEnvelope accepted rev=\(Int(envelope.revision)) reason=\(envelope.reason ?? "nil") status=\(envelope.workout.status) sid=\(envelope.workout.sessionId?.prefix(8) ?? "nil") ex=\(envelope.workout.exercises.count)")
+            HeartRateStore.saveLastAbsorb(msg)
+            return true
+        } catch {
+            let msg = "envelope decode FAIL keys=[\(keys)] ex=\(exerciseCount) err=\(error.localizedDescription.prefix(60))"
+            HeartRateStore.saveDiag("workoutEnvelope decode FAIL keys=[\(keys)] ex=\(exerciseCount) err=\(error)")
+            HeartRateStore.saveLastAbsorb(msg)
+            return false
+        }
+    }
+
+    private func absorbLegacyWorkout(_ ctx: [String: Any]) {
+        guard let w = ctx["workout"] as? [String: Any] else {
+            if ctx.keys.contains("workout") {
+                HeartRateStore.saveDiag("workout key present but not a dict")
+                HeartRateStore.saveLastAbsorb("workout key wrong type")
+            }
+            return
+        }
+
+        if let clearMs = flexibleDouble(w["clearWorkoutMs"]) {
+            let lastCleared = UserDefaults.standard.double(forKey: "thallo.lastClearWorkoutMs")
+            if clearMs > lastCleared {
+                HeartRateStore.saveDiag("rcv clearWorkoutMs → nil workout")
+                HeartRateStore.saveLastAbsorb("clearWorkoutMs → nil")
+                workout = nil
+                UserDefaults.standard.set(clearMs, forKey: "thallo.lastClearWorkoutMs")
+            }
+        }
+
+        let wKeys = w.keys.sorted().joined(separator: ",")
+        let exerciseCount = (w["exercises"] as? [Any])?.count ?? -1
+        guard let data = try? JSONSerialization.data(withJSONObject: w) else {
+            let msg = "JSONser FAILED keys=[\(wKeys)] ex=\(exerciseCount)"
+            HeartRateStore.saveDiag("workout JSONser FAILED keys=[\(wKeys)] ex=\(exerciseCount)")
+            HeartRateStore.saveLastAbsorb(msg)
+            return
+        }
+
+        do {
+            let decoded = try JSONDecoder().decode(WatchWorkout.self, from: data)
+            let stored = currentUserId ?? ""
+            let wUserId = decoded.userId ?? ""
+            if !stored.isEmpty && !wUserId.isEmpty && wUserId != stored {
+                let msg = "rejected: userId \(wUserId.prefix(4))≠\(stored.prefix(4))"
+                HeartRateStore.saveDiag("rejected workout: userId \(wUserId.prefix(4))≠stored \(stored.prefix(4))")
+                HeartRateStore.saveLastAbsorb(msg)
+            } else if workout == nil || decoded.syncedAtMs >= (workout?.syncedAtMs ?? 0) {
+                let msg = "accepted legacy status=\(decoded.status) ex=\(decoded.exercises.count)"
+                HeartRateStore.saveDiag("rcv legacy workout accepted status=\(decoded.status) sid=\(decoded.sessionId?.prefix(8) ?? "nil") ex=\(decoded.exercises.count)")
+                HeartRateStore.saveLastAbsorb(msg)
+                self.workout = decoded
+            } else {
+                HeartRateStore.saveDiag("rcv legacy workout stale syncedAtMs")
+                HeartRateStore.saveLastAbsorb("stale legacy syncedAtMs (rejected)")
+            }
+        } catch {
+            let msg = "decode FAIL keys=[\(wKeys)] ex=\(exerciseCount) err=\(error.localizedDescription.prefix(60))"
+            HeartRateStore.saveDiag("workout decode FAIL keys=[\(wKeys)] ex=\(exerciseCount) err=\(error)")
+            HeartRateStore.saveLastAbsorb(msg)
+        }
+    }
+
+    private func flexibleDouble(_ value: Any?) -> Double? {
+        if let d = value as? Double, d.isFinite { return d }
+        if let i = value as? Int { return Double(i) }
+        if let n = value as? NSNumber {
+            let d = n.doubleValue
+            return d.isFinite ? d : nil
+        }
+        if let s = value as? String, let d = Double(s.trimmingCharacters(in: .whitespacesAndNewlines)), d.isFinite {
+            return d
+        }
+        return nil
+    }
+
     private func absorbMessage(_ msg: [String: Any]) {
         guard let kind = msg["kind"] as? String else {
             // No kind key — this is a context-style push that arrived via
@@ -297,6 +374,10 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             return ctx
         }
         switch kind {
+        case "workoutEnvelope":
+            if let payload = msg["payload"] as? [String: Any] {
+                absorbContext(ctxWith("workoutEnvelope", payload))
+            }
         case "workout":
             if let payload = msg["payload"] as? [String: Any] {
                 absorbContext(ctxWith("workout", payload))

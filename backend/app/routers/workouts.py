@@ -1244,9 +1244,11 @@ def mark_workout_complete(
          Powers home screen + continuity rotation + calendar.
       2. `WorkoutSession` + `WorkoutExercise` + `ExerciseSet` rows, IF
          the mobile app included the optional `exercises` field. These
-         give downstream systems (plan_review, progression engine,
+      give downstream systems (plan_review, progression engine,
          analytics) real per-set history instead of just a duration.
     """
+    plan_lock_focus_label = body.focus_label
+
     # Defensive guard: reject completions that have NO sets logged AND
     # no duration AND aren't a manual activity (cardio / sport / etc).
     # This blocks phantom completions from a stray watch end-workout
@@ -1533,6 +1535,7 @@ def mark_workout_complete(
                             f"(avg_reps={avg_reps:.1f})"
                         )
                         completion_row.stimulus = derived_stimulus
+            plan_lock_focus_label = completion_row.focus_label or plan_lock_focus_label
             db.add(completion_row)
     except Exception as e:
         logger.info(f"[workouts/complete] muscle fatigue resolution failed (non-fatal): {e}")
@@ -1564,7 +1567,7 @@ def mark_workout_complete(
     # Auto-lock the corresponding PlanDay if the weekly model is active.
     try:
         from app.services.workout.week_manager import lock_day_on_complete
-        lock_day_on_complete(db, current_user.id, body.workout_date, body.focus_label)
+        lock_day_on_complete(db, current_user.id, body.workout_date, plan_lock_focus_label)
     except Exception as e:
         logger.debug(f"[workouts/complete] plan_day lock failed (non-fatal): {e}")
 

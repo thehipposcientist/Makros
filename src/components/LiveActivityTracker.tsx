@@ -24,7 +24,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import {
   AppThemeName, WorkoutSession,
-  ActivityCategory, ActivityIntensity, CardioStyle,
+  ActivityCategory, CardioStyle,
 } from '../types';
 import { isHealthKitAvailable, getLatestHeartRate, getWorkoutHrSummary, getAppleWorkoutCaloriesForWindow } from '../services/appleHealth';
 import LogActivityModal, { LogActivityPrefill } from './LogActivityModal';
@@ -37,6 +37,9 @@ interface Props {
   /** Optional — called after the save completes so the parent can
    *  refresh history / fatigue. */
   onSaved?: () => void;
+  /** Optional canonical persistence path. When provided by the parent,
+   *  it should save locally and sync the completion to the backend. */
+  onSave?: (session: WorkoutSession) => Promise<void>;
   /** Strength picks (Push / Pull / Legs / Strength / etc) don't fit
    *  the cardio stopwatch model — they need an exercise picker + per-
    *  set logging. When this callback is provided, the strength rows
@@ -96,7 +99,7 @@ function fmtElapsed(seconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
-export default function LiveActivityTracker({ visible, onClose, themeName, onSaved, onStartStrengthWorkout }: Props) {
+export default function LiveActivityTracker({ visible, onClose, themeName, onSaved, onSave, onStartStrengthWorkout }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const insets = useSafeAreaInsets();
@@ -287,7 +290,11 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   };
 
   const handleSaveConfirmed = async (session: WorkoutSession) => {
-    await saveWorkoutSession(session);
+    if (onSave) {
+      await onSave(session);
+    } else {
+      await saveWorkoutSession(session);
+    }
     reset();
     onClose();
     onSaved?.();

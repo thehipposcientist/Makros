@@ -66,7 +66,17 @@ public class ThalloWatchBridgeModule: Module {
         }
 
         AsyncFunction("syncWorkout") { (payload: [String: Any]) -> Bool in
-            return self.sessionHolder.sendContext(["workout": payload], realtimeKind: "workout")
+            let cleaned = _SessionHolder.stripNulls(payload)
+            if let workout = cleaned["workout"] as? [String: Any] {
+                // v2 workout sync ships a versioned envelope. Keep the legacy
+                // top-level workout key in applicationContext so older watch
+                // builds can still render today's session after a phone update.
+                return self.sessionHolder.sendContext([
+                    "workoutEnvelope": cleaned,
+                    "workout": workout,
+                ], realtimeKind: "workoutEnvelope")
+            }
+            return self.sessionHolder.sendContext(["workout": cleaned], realtimeKind: "workout")
         }
 
         AsyncFunction("syncTheme") { (palette: [String: Any]) -> Bool in
@@ -281,7 +291,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     }
 
     private func realtimeMessage(for cleaned: [String: Any], kind: String?) -> [String: Any] {
-        guard let kind, cleaned.count == 1, let payload = cleaned[kind] else {
+        guard let kind, let payload = cleaned[kind] else {
             var stamped = cleaned
             stampUserId(&stamped)
             return stamped
