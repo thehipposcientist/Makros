@@ -27,7 +27,7 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 - **Trigger**: chat drawer on ActiveWorkoutScreen (Pro-gated).
 - **Endpoint**: `POST /ai/workout-question`.
 - **Model**: `MODEL_CHAT` (default `gpt-4o-mini`).
-- **Context** (narrow): current workout + activeExerciseName + currentSetNumber + loggedSets.
+- **Context**: current workout + activeExerciseName + currentSetNumber + loggedSets + serverContext (active injuries, recent completed workouts, last 3 matching exercise histories when available).
 - **Scope**: form cues, load/rep adjustment, pain caution, immediate substitutions. Redirects nutrition/lifestyle to Home Trainer.
 - **Response**: `{answer, quick_cues, adjustment, safety_note}`.
 - **Persistence**: none — display-only.
@@ -48,7 +48,7 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 
 - **File**: `routers/ai/quick_intents.py`.
 - **Wired**: runs `match_intent(q)` BEFORE the fast path in `ask_trainer_question`.
-- **12 intents**: `time_limited`, `slept_badly`, `too_sore`, `missed_workout`, `more_cardio`, `less_cardio`, `deload`, `more_core`, `hard_tomorrow`, `losing_too_fast`, `strength_dropping`, `hungrier`.
+- **13 intents**: `time_limited`, `slept_badly`, `too_sore`, `missed_workout`, `travel_mode`, `more_cardio`, `less_cardio`, `deload`, `more_core`, `hard_tomorrow`, `losing_too_fast`, `strength_dropping`, `hungrier`.
 - **Output**: matches `TrainerQuestionResponse` with a structured `action` dict the client can apply without another AI call.
 - Falls through to LLM path on any miss or handler exception.
 
@@ -72,25 +72,14 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 
 ## Known Context Gaps (Home Trainer)
 
-1. No readiness / fatigue — can't answer "should I do legs today?"
-2. No coach memory — every chat starts fresh.
-3. No weight trend slope / EMA.
-4. No active `UserFlag` rows.
-5. No Nutrition Score / Recovery Flags / logged-today meals.
-6. No goal timeline ETA math.
-7. Not gated by `decision_rules.gate()` — can return dangerous deltas.
-8. No `AIDecision` row written — trainer can't look back.
-
-**In-Workout Coach gaps:**
-9. No exercise history — "go heavier?" without knowing last session's weight.
-10. No injury context from Home Trainer chat.
+1. Not gated by `decision_rules.gate()` — plan/macro deltas rely on prompt constraints + client approval instead of the check-in safety gate.
+2. No `AIDecision` row written for Home Trainer plan updates — check-in decisions are persisted, chat decisions are not.
 
 **Other:**
-11. Meal routine protection (`isRoutine=true`) not highlighted to trainer.
+3. Meal routine protection (`isRoutine=true`) is prompt-enforced, but not represented as a dedicated server-side routine-protection block.
 
 ## Recommended AI Improvements
 
-- Pass `readiness_score`, `top_fatigued_muscles`, `active_flags`, `coach_memory` (last 3 decisions + open commitment), `nutrition_signals`, `timeline_progress`, `actual_logged_today` to Home Trainer context.
 - Apply `decision_rules.gate()` to Home Trainer responses.
 - Persist Home Trainer decisions as `AIDecision` rows when `updated_*` fields are returned.
 - Move long system prompts out of f-strings into `backend/app/prompts/*.md` files loaded at startup.

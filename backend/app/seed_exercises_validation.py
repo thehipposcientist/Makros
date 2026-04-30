@@ -149,7 +149,7 @@ def validate_exercise_seed(
                 continue
             # Bench is special — accept any bench variant.
             if required_slug == "flat_bench":
-                if not any(s in eq_slugs for s in ("flat_bench", "adjustable_bench", "incline_bench")):
+                if not any(s in eq_slugs for s in ("flat_bench", "adjustable_bench", "incline_bench", "decline_bench")):
                     report.missing_required_support += 1
                     report.warn(
                         f"'{e.get('slug')}' has '{token}' in name but no bench in equipment"

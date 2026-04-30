@@ -2968,7 +2968,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               {mealAverages && mealAverages.days_with_data >= 2 && (
                 <View style={{ marginBottom: 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
                   <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>
-                    MACROS ({mealAverages.days_with_data}-DAY AVG)
+                    MACROS (LOGGED-DAY AVG)
                   </Text>
                   <View style={{ flexDirection: 'row', gap: 6 }}>
                     {[
@@ -2984,7 +2984,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     ))}
                   </View>
                   <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6 }}>
-                    {Math.round(mealAverages.avg_meals_per_day)} meals/day avg · {mealAverages.total_meals_logged} total logged
+                    {mealAverages.days_with_data} logged day{mealAverages.days_with_data === 1 ? '' : 's'} in last {mealAverages.window_days} · {Math.round(mealAverages.avg_meals_per_day)} meals/day · {mealAverages.total_meals_logged} total
                   </Text>
                 </View>
               )}

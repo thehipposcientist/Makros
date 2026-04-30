@@ -734,6 +734,7 @@ def get_nutrition_score(
         NutritionIndicators, compute_nutrition_score,
         compute_overall_health_score, compute_weekly_trend,
     )
+    from app.services.workout.goals import effective_goal_id
 
     today = date.today()
     goal = "body_recomp"  # default
@@ -742,7 +743,7 @@ def get_nutrition_score(
             select(UserGoal).where(UserGoal.user_id == current_user.id, UserGoal.is_active == True)
         ).first()
         if active_goal:
-            goal = active_goal.goal_type.value
+            goal = effective_goal_id(active_goal)
     except Exception:
         pass
 

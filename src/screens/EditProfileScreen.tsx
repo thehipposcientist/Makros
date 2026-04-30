@@ -31,7 +31,9 @@ import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, THEME_PICKER_ORDER, colors, getTheme, radius, resolveThemeName } from '../constants/theme';
 import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult, getCalorieRanges, CalorieRanges } from '../services/api';
 import {
-  LAUNCH_GOALS, GOAL_CATEGORIES, goalCategory,
+  LAUNCH_GOALS, GOAL_CATEGORIES, ENDURANCE_EVENT_GOALS, goalCategory,
+  isEnduranceEventGoal,
+  launchGoalIdFor,
 } from '../constants/goalConfig';
 import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
 import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
@@ -333,13 +335,14 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const { width: screenWidth } = useWindowDimensions();
 
   // Goal (hierarchical)
-  const [selectedGoal, setSelectedGoal] = useState<string>(profile.goalSelection?.primaryGoal ?? profile.goal);
+  const initialGoal = profile.goalSelection?.primaryGoal ?? profile.goal;
+  const [selectedGoal, setSelectedGoal] = useState<string>(initialGoal);
   // Initialize the carousel index to the user's currently-selected goal
   // so the page lands on their actual goal — not the first card. Without
   // this, opening the goal editor always showed "Build muscle" at the top
   // even if the user had picked something else, which read as a bug.
   const [goalScrollIdx, setGoalScrollIdx] = useState<number>(() => {
-    const idx = LAUNCH_GOALS.findIndex(g => g.id === (profile.goalSelection?.primaryGoal ?? profile.goal));
+    const idx = LAUNCH_GOALS.findIndex(g => g.id === launchGoalIdFor(initialGoal));
     return idx >= 0 ? idx : 0;
   });
   const goalCarouselRef = useRef<ScrollView>(null);
@@ -351,7 +354,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // resolve so the offset math is correct on first render.
   useEffect(() => {
     if (mode !== 'goal') return;
-    const idx = LAUNCH_GOALS.findIndex(g => g.id === selectedGoal);
+    const idx = LAUNCH_GOALS.findIndex(g => g.id === launchGoalIdFor(selectedGoal));
     if (idx < 0) return;
     const timer = setTimeout(() => {
       goalCarouselRef.current?.scrollTo({
@@ -377,7 +380,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [goalMatchLoading, setGoalMatchLoading] = useState(false);
   const [goalMatchReason, setGoalMatchReason] = useState<string | null>(null);
   const selectedRegion = 'balanced';
-  // Advanced-goal UI removed — only the 8 launch goals are exposed.
+  // Advanced-goal UI removed — only the main launch goals are exposed.
   const [pace, setPace] = useState<GoalPace>(profile.goalDetails.pace);
   const [targetWeight, setTargetWeight] = useState<string>(
     profile.goalDetails.targetWeightLbs ? String(profile.goalDetails.targetWeightLbs) : ''
@@ -1640,7 +1643,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             OR PICK ONE DIRECTLY
           </Text>
           {(() => {
-            const activeGoalCategory = goalCategory(selectedGoal);
+            const visibleSelectedGoal = launchGoalIdFor(selectedGoal);
+            const activeGoalCategory = goalCategory(visibleSelectedGoal) ?? goalCategory(selectedGoal);
             const launchGoalCategories = GOAL_CATEGORIES
               .map(cat => ({ ...cat, count: LAUNCH_GOALS.filter(g => g.category === cat.id).length }))
               .filter(cat => cat.count > 0);
@@ -1709,7 +1713,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           >
             {LAUNCH_GOALS.map((g, gIdx) => {
               const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
-              const active = selectedGoal === g.id;
+              const active = launchGoalIdFor(selectedGoal) === g.id;
               return (
                 <PressableScale
                   key={g.id}
@@ -1804,7 +1808,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </View>
         </Modal>
 
-        {/* Advanced goals section removed — only the 8 launch goals are
+        {/* Advanced goals section removed — only the main launch goals are
             exposed to users now. The full PRIMARY_GOALS list is still
             defined in goalConfig.ts so profile values saved before the
             cull still resolve correctly. */}
@@ -1885,6 +1889,30 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           return (
             <View style={styles.section}>
               <Text style={styles.sectionLabel}>{label}</Text>
+              {cat === 'cardio_endurance' && (
+                <View style={[styles.chips, { marginBottom: 10 }]}>
+                  {ENDURANCE_EVENT_GOALS.map(opt => {
+                    const active = selectedGoal === opt.id
+                      || (opt.id === 'improve_cardio' && !isEnduranceEventGoal(selectedGoal));
+                    return (
+                      <TouchableOpacity
+                        key={opt.id}
+                        activeOpacity={0.75}
+                        style={[styles.chip, active && styles.chipActive]}
+                        onPress={() => {
+                          setSelectedGoal(opt.id);
+                          setSelectedModifiers([]);
+                          setPace('moderate');
+                          setTargetEvent(opt.targetEvent);
+                        }}>
+                        <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                          {opt.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
               <TextInput
                 style={styles.textField}
                 value={targetEvent}

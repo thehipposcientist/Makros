@@ -1,5 +1,6 @@
 import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { goalCategory } from '../constants/goalConfig';
 
 const LOCAL_BACKEND_IP = '192.168.1.246'; // your dev machine's LAN IP
 
@@ -255,11 +256,12 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
     const data = await request<any>('/profile/me', {
       headers: { Authorization: `Bearer ${token}` },
     });
+    const goalTrack = data.goal.goal_track ?? data.goal.goal_type;
     // Map backend snake_case → frontend UserProfile shape
     return {
       firstName:  data.first_name ?? undefined,
       lastName:   data.last_name ?? undefined,
-      goal:       data.goal.goal_type,
+      goal:       goalTrack,
       goalDetails: {
         pace:             data.goal.pace,
         targetWeightLbs:  data.goal.target_weight_lbs ?? undefined,
@@ -992,7 +994,28 @@ function mapGoalToBackendType(frontendGoal: string | undefined | null): string {
     longevity:               'maintain',
     healthy_lifestyle:       'maintain',
   };
-  return map[g] ?? 'maintain';
+  if (map[g]) return map[g];
+
+  const category = goalCategory(g);
+  if (category === 'fat_loss') return 'fat_loss';
+  if (category === 'strength') return 'strength';
+  if (category === 'cardio_endurance') return 'endurance';
+  if (category === 'athletic_performance') return 'athletic_performance';
+  if (category === 'muscle_physique') {
+    if (g === 'body_recomp') return 'body_recomp';
+    if (g === 'maintain_physique') return 'maintain';
+    return 'muscle_gain';
+  }
+  if (category === 'health_longevity') {
+    if (['maintain_mobility', 'improve_mobility', 'improve_flexibility'].includes(g)) return 'flexibility';
+    if (['stress_exercise', 'low_stress_training'].includes(g)) return 'stress_relief';
+    return 'maintain';
+  }
+  if (category === 'lifestyle_consistency') {
+    if (g === 'low_stress_training') return 'stress_relief';
+    return 'maintain';
+  }
+  return 'maintain';
 }
 
 export async function syncOnboarding(token: string, profile: import('../types').UserProfile) {
@@ -1014,6 +1037,7 @@ export async function syncOnboarding(token: string, profile: import('../types').
       },
       goal: {
         goal_type:         mappedGoal,
+        goal_track:        profile.goal,
         pace:              profile.goalDetails.pace,
         target_weight_lbs: profile.goalDetails.targetWeightLbs ?? null,
         timeline_weeks:    profile.goalDetails.timelineWeeks ?? null,

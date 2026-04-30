@@ -12,6 +12,7 @@ from typing import Optional
 from sqlmodel import Session, select
 
 from app.models import PlanWeek, PlanDay, WorkoutPlan, NutritionPlan, WorkoutCompletion, UserProfile, UserPreferences
+from app.services.workout.goals import effective_goal_id
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
@@ -540,7 +541,7 @@ def auto_renew_week(
             UserGoal.is_active == True,
         )
     ).first()
-    goal = active_goal.goal_type.value if active_goal else "body_recomp"
+    goal = effective_goal_id(active_goal)
     goal_pace = active_goal.pace.value if active_goal and active_goal.pace else None
     days_per_week = int(getattr(prefs, "days_per_week", None) or getattr(profile, "days_per_week", 4) or 4)
     session_minutes = int(getattr(prefs, "workout_duration_minutes", None) or getattr(profile, "workout_duration_minutes", 45) or 45)

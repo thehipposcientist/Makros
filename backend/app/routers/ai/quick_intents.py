@@ -63,8 +63,8 @@ _INTENT_PATTERNS: list[tuple[str, list[str]]] = [
     ("too_sore",           [r"too sore", r"really sore", r"sore as", r"my (legs|arms|body).*sore", r"can'?t move"]),
     ("missed_workout",     [r"missed (my |a )?workout", r"skipped (yesterday|today|my workout)", r"didn'?t work out"]),
     ("travel_mode",        [r"travel(ing)?", r"vacation", r"out of town", r"hotel", r"pause.*(week|workouts?|training)", r"take.*week.*off"]),
-    ("more_cardio",        [r"more cardio", r"add.*cardio", r"want.*cardio"]),
-    ("less_cardio",        [r"less cardio", r"reduce.*cardio", r"cut.*cardio"]),
+    ("less_cardio",        [r"less cardio", r"reduce.*cardio", r"cut.*cardio", r"want.*less.*cardio", r"don'?t want.*more.*cardio", r"no more cardio", r"avoid.*cardio"]),
+    ("more_cardio",        [r"more cardio", r"add.*cardio", r"want.*(?:more|extra|additional).*cardio", r"increase.*cardio"]),
     ("deload",             [r"deload", r"need.*rest week", r"need a break", r"feel (burnt ?out|fried|overtraining)"]),
     ("more_core",          [r"more (core|abs)", r"add.*(core|abs)", r"want.*(core|abs).*work"]),
     ("hard_tomorrow",      [r"hard workout tomorrow", r"big (day|workout) tomorrow", r"tomorrow.*(hard|heavy|big)"]),
@@ -103,13 +103,13 @@ def _h_time_limited(q: str, _p: dict) -> IntentResponse:
     return IntentResponse(
         intent="time_limited",
         answer=(
-            f"Got it — {mins} minutes today. I'll trim today's workout to fit: "
-            "warmup dropped, accessories cut, keep the main compounds at "
-            "the planned load. Swipe to today's card and tap 'Switch Day' "
-            "→ 'Shorten' to apply, or I'll apply it for you."
+            f"Got it — {mins} minutes today. For today's active workout, keep the main compounds "
+            "at the planned load, skip long warmups, and cut accessories first. If this should be "
+            f"your normal cap going forward, Apply will set future generated weeks to ~{mins} minutes."
         ),
         action_items=[
-            f"Shorten today's workout to ~{mins} minutes",
+            f"Today: keep compounds and cut accessories to fit ~{mins} minutes",
+            f"Future: set generated workouts to ~{mins} minutes",
             "Keep main compounds, drop accessories + core finisher",
         ],
         needs_plan_update=True,

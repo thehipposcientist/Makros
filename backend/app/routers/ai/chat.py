@@ -82,7 +82,7 @@ def ask_trainer_question(
     is_nutritionist = body.mode == "nutritionist"
 
     # ── Structured quick-action intent router (deterministic, no AI) ──────────
-    # Catches 12 common asks (only 30 min, too sore, deload, etc) and
+    # Catches common asks (only 30 min, too sore, deload, travel, etc) and
     # returns canned responses + structured action dicts. Runs BEFORE
     # the simple-knowledge fast path so "I slept badly" doesn't get
     # treated as a general knowledge question.
@@ -110,6 +110,8 @@ def ask_trainer_question(
         and not any(kw in _q_lower for kw in (
             "swap", "replace", "change", "update", "modify", "switch",
             "my plan", "my workout", "my meal", "my diet", "my macro",
+            "calorie", "calories", "kcal", "macro", "macros", "protein",
+            "carb", "carbs", "fat",
             "log", "track", "record", "injury", "hurt", "pain",
             "tomorrow", "today", "yesterday", "this week", "next week",
             "day 1", "day 2", "day 3", "day 4", "day 5", "day 6", "day 7",
@@ -791,10 +793,112 @@ def ask_trainer_question(
 
 
 
+def _workout_coach_server_context(
+    user_id: int,
+    db,
+    *,
+    active_exercise_name: str | None,
+) -> dict:
+    """Compact DB context for the in-workout coach.
+
+    This is additive only: if history is sparse or a lookup fails, the
+    caller simply sends the live workout payload it already had.
+    """
+    from sqlmodel import select
+    from app.models import (
+        ExerciseSet,
+        UserPreferences,
+        WorkoutCompletion,
+        WorkoutExercise,
+        WorkoutSession,
+    )
+
+    out: dict = {}
+
+    prefs = db.exec(
+        select(UserPreferences).where(UserPreferences.user_id == user_id)
+    ).first()
+    injuries = list(getattr(prefs, "injuries", None) or []) if prefs else []
+    if injuries:
+        out["injuries"] = injuries[:8]
+
+    completions = db.exec(
+        select(WorkoutCompletion)
+        .where(WorkoutCompletion.user_id == user_id)
+        .order_by(WorkoutCompletion.workout_date.desc())
+        .limit(5)
+    ).all()
+    if completions:
+        out["recentCompletedWorkouts"] = [
+            {
+                "date": c.workout_date.isoformat(),
+                "focus": c.focus_label,
+                "feeling": c.feeling,
+                "intensity": c.intensity,
+                "sorenessAreas": c.soreness_areas or [],
+            }
+            for c in completions
+        ]
+
+    name = (active_exercise_name or "").strip().lower()
+    if not name:
+        return out
+
+    sessions = db.exec(
+        select(WorkoutSession)
+        .where(WorkoutSession.user_id == user_id)
+        .order_by(WorkoutSession.workout_date.desc())
+        .limit(12)
+    ).all()
+    history: list[dict] = []
+    for session in sessions:
+        exercises = db.exec(
+            select(WorkoutExercise).where(WorkoutExercise.session_id == session.id)
+        ).all()
+        match = next(
+            (
+                ex for ex in exercises
+                if (ex.name or "").strip().lower() == name
+            ),
+            None,
+        )
+        if not match:
+            continue
+        sets = db.exec(
+            select(ExerciseSet)
+            .where(ExerciseSet.workout_exercise_id == match.id)
+            .order_by(ExerciseSet.set_number.asc())
+        ).all()
+        logged_sets = [
+            {
+                "setNumber": s.set_number,
+                "reps": s.actual_reps,
+                "weightLbs": s.actual_weight_lbs,
+                "rir": s.actual_rir,
+            }
+            for s in sets
+            if s.actual_reps is not None or s.actual_weight_lbs is not None
+        ]
+        if not logged_sets:
+            continue
+        history.append({
+            "date": session.workout_date.isoformat(),
+            "focus": session.focus,
+            "sets": logged_sets[:6],
+        })
+        if len(history) >= 3:
+            break
+
+    if history:
+        out["recentExerciseHistory"] = history
+    return out
+
+
 @router.post("/workout-question")
 def ask_workout_question(
     body: WorkoutCoachQuestionRequest,
     current_user: User = Depends(get_current_user),
+    db=Depends(__import__('app.database', fromlist=['get_session']).get_session),
 ):
     """Workout-session scoped coach Q&A focused on form, pain flags, and
     execution cues.
@@ -821,6 +925,16 @@ def ask_workout_question(
         "currentSetNumber": body.currentSetNumber,
         "loggedSets": body.loggedSets or [],
     }
+    try:
+        extra_context = _workout_coach_server_context(
+            current_user.id,
+            db,
+            active_exercise_name=body.activeExerciseName,
+        )
+        if extra_context:
+            context_blob["serverContext"] = extra_context
+    except Exception as e:
+        logger.debug(f"[workout-question] server-context enrichment failed (non-fatal): {e}")
 
     # Build the latest user-turn content. When an image is present,
     # switch to multipart vision format so gpt-4o-mini can see the
@@ -870,6 +984,8 @@ def ask_workout_question(
                 "load/rep adjustment, pain/injury caution, and immediate substitutions. "
                 "If the user asks unrelated nutrition/lifestyle topics, reply briefly and suggest "
                 "using Ask Trainer from Home for broader planning. "
+                "Use serverContext.injuries and serverContext.recentExerciseHistory when relevant; "
+                "never recommend loading through pain or ignoring an active injury. "
                 "When a photo is attached, comment on what you can actually see — joint angles, "
                 "bar path, foot position — and avoid claiming form details the photo doesn't show. "
                 "Return JSON only."
@@ -896,5 +1012,3 @@ def ask_workout_question(
         raise HTTPException(status_code=502, detail="AI returned invalid JSON")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Workout question failed: {str(e)}")
-
-

@@ -4266,7 +4266,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           recentDays: progress.recentDays,
           recentHistory: progress.workoutHistory,
         },
-        conversation: nextChat.slice(-6),
+        // Send only prior turns; the current user message is already
+        // carried as `question` and duplicating it in history muddies
+        // follow-up handling.
+        conversation: activeChat.slice(-6),
         image_base64: imageToSend?.base64 ?? undefined,
         mime_type: 'image/jpeg',
         userContext,
@@ -12468,6 +12471,7 @@ const styles = StyleSheet.create({
     padding: 12,
     borderRadius: radius.md,
     borderWidth: 1,
+    borderTopWidth: 0,
   },
 
   groceryCard: {

@@ -772,14 +772,34 @@ _WGER_EQUIPMENT_MAP: dict[str, str] = {
     "kettlebell":      "kettlebell",
     "bench":           "flat_bench",
     "incline bench":   "adjustable_bench",
+    "decline bench":   "decline_bench",
     "pull-up bar":     "pull_up_bar",
     "ez-curl bar":     "ez_curl_bar",
     "swiss ball":      "swiss_ball",
+    "stability ball":  "swiss_ball",
     "ab wheel":        "ab_wheel",
     "cable":           "cable_machine",
     "bands":           "resistance_bands",
     "resistance band": "resistance_bands",
+    "mini band":       "mini_band",
+    "foam roller":     "foam_roller",
+    "step":            "step_platform",
+    "step platform":   "step_platform",
+    "sliders":         "slider_discs",
+    "slider discs":    "slider_discs",
+    "medicine ball":   "medicine_ball",
+    "sandbag":         "sandbag",
+    "sled":            "sled",
+    "agility ladder":  "agility_ladder",
+    "cones":           "training_cones",
     "machine":         "leverage_machines",
+    "seated row":      "seated_row_machine",
+    "seated row machine": "seated_row_machine",
+    "preacher bench":  "preacher_bench",
+    "pec deck":        "pec_deck_machine",
+    "hyperextension bench": "hyperextension_bench",
+    "captain's chair": "captain_chair",
+    "ghd":             "ghd",
     "trx":             "suspension_trainer",
 }
 
@@ -1480,22 +1500,8 @@ def scan_equipment_photo(
     image_data_url = f"data:{_fmime};base64,{_fb64}"
     client = OpenAI(api_key=api_key)
 
-    known_equipment = [
-        "Pull-up bar", "Resistance bands", "Yoga mat", "Jump rope", "Foam roller",
-        "Ab wheel", "Dip bars", "Suspension trainer",
-        "Dumbbells", "Adjustable dumbbells", "Barbell", "Kettlebell", "EZ curl bar", "Weight plates",
-        "Trap bar", "Medicine ball",
-        "Flat bench", "Adjustable bench", "Incline bench",
-        "Squat rack", "Power rack", "Landmine attachment",
-        "Cable machine", "Leg press", "Lat pulldown", "Chest press machine",
-        "Seated row machine", "Leg extension", "Leg curl machine",
-        "Shoulder press machine", "Hip abduction machine", "Hip adduction machine",
-        "Smith machine", "Hack squat machine", "Assisted pull-up machine",
-        "Treadmill", "Stationary bike", "Elliptical", "Rowing machine",
-        "Stair climber", "Assault bike", "Swimming pool", "Battle ropes",
-        "Outdoor bike", "SkiErg", "VersaClimber", "Heavy bag", "Ruck pack",
-        "Plyo box (24\"+)", "Sled",
-    ]
+    from app.seed_exercises_data import SEED_EQUIPMENT
+    known_equipment = [entry["name"] for entry in SEED_EQUIPMENT]
 
     _eq_messages = [
         {

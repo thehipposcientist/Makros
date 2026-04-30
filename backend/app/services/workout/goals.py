@@ -8,8 +8,8 @@ backed by tests.
 
 Supported set after this pass (see `supported_goal_ids`):
     fat_loss, muscle_gain, body_recomp, strength, endurance,
-    athletic_performance, hyrox, toning (alias → fat_loss),
-    maintain (alias → general_health).
+    athletic_performance, hyrox, general_health, toning
+    (alias → fat_loss), maintain (alias → general_health).
 
 Dropped from the exposed set:
     flexibility, stress_relief — these require a mobility / low-
@@ -136,6 +136,14 @@ _GOAL_REGISTRY: list[GoalDefinition] = [
         ),
     ),
     GoalDefinition(
+        user_id="general_health",
+        bucket="general_health",
+        label="General Health",
+        icon="leaf-outline",
+        description="Balanced strength, cardio, and mobility for long-term health",
+        notes="Balanced moderate training. Uses the maintain-mode profile.",
+    ),
+    GoalDefinition(
         user_id="toning",
         bucket="fat_loss",
         label="Tone & Define",
@@ -206,8 +214,10 @@ _LEGACY_ALIASES: dict[str, str] = {
     "build_arms":            "muscle_gain",
     "build_shoulders":       "muscle_gain",
     "hypertrophy":           "muscle_gain",
+    "maintain_physique":     "general_health",
     # Strength synonyms
     "build_strength":        "strength",
+    "increase_overall":      "strength",
     "powerlifting":          "strength",
     "strength_training":     "strength",
     "get_stronger":          "strength",
@@ -217,6 +227,8 @@ _LEGACY_ALIASES: dict[str, str] = {
     "improve_squat":         "strength",
     "improve_ohp":           "strength",
     "improve_pullups":       "strength",
+    "improve_grip":          "strength",
+    "explosive_strength":    "strength",
     "functional_strength":   "strength",
     "relative_strength":     "strength",
     # Endurance synonyms — goalConfig.ts has a long list under
@@ -235,11 +247,27 @@ _LEGACY_ALIASES: dict[str, str] = {
     "train_marathon":        "endurance",
     "sprint_speed":          "endurance",
     "interval_perf":         "endurance",
+    "hiking_endurance":      "endurance",
+    "cycling_endurance":     "endurance",
+    "rowing_endurance":      "endurance",
+    "swimming_endurance":    "endurance",
+    "work_capacity":         "endurance",
     "run_faster":            "endurance",
     "marathon":              "endurance",
     # Athletic synonyms
     "sport_performance":     "athletic_performance",
     "improve_athleticism":   "athletic_performance",
+    "improve_speed":         "athletic_performance",
+    "improve_agility":       "athletic_performance",
+    "improve_power":         "athletic_performance",
+    "improve_vertical":      "athletic_performance",
+    "improve_acceleration":  "athletic_performance",
+    "improve_cod":           "athletic_performance",
+    "improve_coordination":  "athletic_performance",
+    "improve_balance":       "athletic_performance",
+    "offseason_training":    "athletic_performance",
+    "inseason_maintenance":  "athletic_performance",
+    "return_to_sport":       "athletic_performance",
     # Body recomp synonyms
     "body_recomposition":    "body_recomp",
     "recomp":                "body_recomp",
@@ -257,7 +285,31 @@ _LEGACY_ALIASES: dict[str, str] = {
     "longevity":             "general_health",
     "healthy_aging":         "general_health",
     "heart_health":          "general_health",
+    "metabolic_health":      "general_health",
+    "improve_energy":        "general_health",
+    "daily_function":        "general_health",
+    "stay_active":           "general_health",
+    "improve_posture":       "general_health",
+    "bone_health":           "general_health",
+    "joint_health":          "general_health",
+    "build_consistency":     "general_health",
+    "beginner_fitness":      "general_health",
+    "get_back_in_shape":     "general_health",
+    "quick_workouts":        "general_health",
+    "busy_schedule":         "general_health",
+    "home_fitness":          "general_health",
     "travel_training":       "general_health",
+    "minimal_equipment":     "general_health",
+    "habit_building":        "general_health",
+    "sustainable_routine":   "general_health",
+    # Mobility / recovery aliases. These resolve to the general-health
+    # bucket for shared volume/nutrition code, while goal_profile_for
+    # routes them to dedicated mobility/recovery planner modes.
+    "maintain_mobility":     "flexibility",
+    "improve_mobility":      "flexibility",
+    "improve_flexibility":   "flexibility",
+    "stress_exercise":       "stress_relief",
+    "low_stress_training":   "stress_relief",
 }
 
 
@@ -286,18 +338,31 @@ def resolve_goal(goal: Optional[str]) -> GoalDefinition:
         return _BY_ID[canonical]
     # Substring fallback for free-form goals that didn't land in either
     # table. Matches the keyword-scan the old `_goal_bucket` used to do.
-    if "cardio" in g or "endurance" in g or "run" in g or "marathon" in g:
+    if (
+        "cardio" in g or "endurance" in g or "run" in g
+        or "marathon" in g or "stamina" in g or "capacity" in g
+    ):
         return _BY_ID["endurance"]
     if "hyrox" in g or "hybrid race" in g or "deka" in g:
         return _BY_ID["hyrox"]
-    if "athletic" in g or "sport" in g:
+    if (
+        "athletic" in g or "sport" in g or "agility" in g
+        or "speed" in g or "power" in g or "vertical" in g
+        or "acceleration" in g or "coordination" in g or "balance" in g
+    ):
         return _BY_ID["athletic_performance"]
     if "muscle" in g or "hypertrophy" in g or "bulk" in g:
         return _BY_ID["muscle_gain"]
-    if "strength" in g or "powerlift" in g:
+    if "strength" in g or "powerlift" in g or "1rm" in g or "grip" in g:
         return _BY_ID["strength"]
     if "fat" in g or "lose" in g or "cut" in g or "lean" in g:
         return _BY_ID["fat_loss"]
+    if (
+        "health" in g or "aging" in g or "active" in g or "posture" in g
+        or "mobility" in g or "flexibility" in g or "stress" in g
+        or "consistency" in g or "beginner" in g or "habit" in g
+    ):
+        return _BY_ID["general_health"]
     return _BY_ID["body_recomp"]
 
 
@@ -305,17 +370,29 @@ def goal_bucket(goal: Optional[str]) -> str:
     """Canonical planner bucket for `goal`. Single source of truth —
     every planner branch should call this, never roll its own mapping.
 
-    Some aliases map directly to a bucket id that isn't itself a
-    registered goal (e.g. `general_health` — the bucket exists in
-    `goal_profiles._PROFILE_TABLE` but is not a user-facing goal in
-    the registry). For those we return the aliased bucket verbatim
-    so `pick_split` and `goal_profile_for` agree."""
-    if goal:
-        g = str(goal).strip().lower()
-        canonical = _LEGACY_ALIASES.get(g)
-        if canonical in {"general_health"}:
-            return canonical
+    Alias and substring handling lives in `resolve_goal`, so split
+    selection, prescriptions, and profile lookup all agree."""
     return resolve_goal(goal).bucket
+
+
+def effective_goal_id(goal_row: object | None, fallback: str = "body_recomp") -> str:
+    """Return the richest planner goal id available on a stored UserGoal.
+
+    `goal_type` is intentionally a small legacy enum for API stability,
+    while `goal_track` preserves specific deterministic tracks such as
+    `train_5k`, `hyrox`, or `low_stress_training`.
+    """
+    if goal_row is None:
+        return fallback
+    track = getattr(goal_row, "goal_track", None)
+    if isinstance(track, str) and track.strip():
+        return track.strip().lower()
+    goal_type = getattr(goal_row, "goal_type", None)
+    if hasattr(goal_type, "value"):
+        return str(goal_type.value).strip().lower()
+    if goal_type:
+        return str(goal_type).strip().lower()
+    return fallback
 
 
 def is_goal_supported(goal: Optional[str]) -> bool:

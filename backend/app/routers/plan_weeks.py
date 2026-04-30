@@ -34,6 +34,7 @@ from app.services.workout.week_manager import (
     default_training_pattern,
     auto_renew_week,
 )
+from app.services.workout.goals import effective_goal_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/plans", tags=["plan-weeks"])
@@ -323,7 +324,7 @@ def start_new_week(
             UserGoal.is_active == True,
         )
     ).first()
-    goal = active_goal.goal_type.value if active_goal else "body_recomp"
+    goal = effective_goal_id(active_goal)
     goal_pace = active_goal.pace.value if active_goal and active_goal.pace else None
     days_per_week = int(getattr(prefs, "days_per_week", None) or getattr(profile, "days_per_week", 4) or 4)
     session_minutes = int(getattr(prefs, "workout_duration_minutes", None) or getattr(profile, "workout_duration_minutes", 45) or 45)
@@ -1021,7 +1022,7 @@ def review_and_apply(
             UserGoal.is_active == True,
         )
     ).first()
-    current_goal = active_goal.goal_type.value if active_goal else pw.goal
+    current_goal = effective_goal_id(active_goal, fallback=pw.goal)
 
     equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     owned_slugs = _resolve_owned_equipment_slugs(equipment)
@@ -1277,7 +1278,7 @@ def adapt_remaining(
             UserGoal.is_active == True,
         )
     ).first()
-    current_goal = active_goal.goal_type.value if active_goal else pw.goal
+    current_goal = effective_goal_id(active_goal, fallback=pw.goal)
 
     equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     owned_slugs = _resolve_owned_equipment_slugs(equipment)
@@ -1380,7 +1381,7 @@ def regenerate_remaining(
             UserGoal.is_active == True,
         )
     ).first()
-    current_goal = active_goal.goal_type.value if active_goal else pw.goal
+    current_goal = effective_goal_id(active_goal, fallback=pw.goal)
 
     new_dpw = body.new_days_per_week or pw.days_per_week
     new_split = body.new_preferred_split or pw.preferred_split
@@ -1423,7 +1424,7 @@ def regenerate_remaining(
             UserGoal.is_active == True,
         )
     ).first()
-    current_goal = active_goal.goal_type.value if active_goal else pw.goal
+    current_goal = effective_goal_id(active_goal, fallback=pw.goal)
 
     inputs = PlannerInputs(
         goal=current_goal,

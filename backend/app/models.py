@@ -77,6 +77,7 @@ class UserGoal(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     goal_type: GoalType = Field(sa_column=Column(SAEnum(GoalType), nullable=False))
+    goal_track: str | None = Field(default=None)
     pace: GoalPace = Field(sa_column=Column(SAEnum(GoalPace), nullable=False))
     target_weight_lbs: float | None = Field(default=None)
     timeline_weeks: int | None = Field(default=None)
@@ -1492,6 +1493,7 @@ class ProfileUpsert(SQLModel):
 
 class GoalUpsert(SQLModel):
     goal_type: GoalType
+    goal_track: str | None = None
     pace: GoalPace
     target_weight_lbs: float | None = None
     timeline_weeks: int | None = None

@@ -335,6 +335,9 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const [eatenAt, setEatenAt] = useState<Date>(() =>
     parseMealDateTime((meal as any)._consumedAt ?? (meal as any).consumed_at, dateKey),
   );
+  const [mealTimeExpanded, setMealTimeExpanded] = useState(false);
+  const eatenAtLabel = useMemo(() => eatenAt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }), [eatenAt]);
+  const eatenAtDateLabel = useMemo(() => eatenAt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }), [eatenAt]);
   // `new_meal` (legacy: `new_extra`) is the sentinel for an unsaved meal
   // being created via the "Add Meal" button. Anything else is an existing
   // meal at index N. The flag isn't read directly anymore — naming is
@@ -353,6 +356,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       setShowInstructions(false);
       setMealName(meal.meal ?? '');
       setEatenAt(parseMealDateTime((meal as any)._consumedAt ?? (meal as any).consumed_at, dateKey));
+      setMealTimeExpanded(false);
     }
   }, [visible, meal, dateKey]);
 
@@ -973,12 +977,53 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
 
         {mode === 'day' && (
           <View style={{ paddingHorizontal: 16, marginTop: 8 }}>
-            <MealTimeSelector
-              value={eatenAt}
-              mealDate={dateKey}
-              colors={colors}
-              onChange={setEatenAt}
-            />
+            <TouchableOpacity
+              activeOpacity={0.82}
+              onPress={() => {
+                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                setMealTimeExpanded(prev => !prev);
+              }}
+              style={{
+                borderRadius: 14,
+                borderWidth: 1,
+                borderColor: colors.border,
+                backgroundColor: colors.surface,
+                paddingHorizontal: 12,
+                paddingVertical: 10,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 10,
+              }}>
+              <View style={{
+                width: 34,
+                height: 34,
+                borderRadius: 17,
+                backgroundColor: colors.primary + '18',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}>
+                <Ionicons name="time-outline" size={18} color={colors.primary} />
+              </View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={{ fontSize: 10, fontWeight: '800', letterSpacing: 0, color: colors.textMuted }}>
+                  EATEN AT
+                </Text>
+                <Text numberOfLines={1} ellipsizeMode="tail" style={{ fontSize: 15, fontWeight: '900', color: colors.textPrimary, marginTop: 1 }}>
+                  {eatenAtLabel} · {eatenAtDateLabel}
+                </Text>
+              </View>
+              <Ionicons name={mealTimeExpanded ? 'chevron-up' : 'chevron-down'} size={18} color={colors.textMuted} />
+            </TouchableOpacity>
+            {mealTimeExpanded && (
+              <View style={{ marginTop: 8 }}>
+                <MealTimeSelector
+                  value={eatenAt}
+                  mealDate={dateKey}
+                  colors={colors}
+                  onChange={setEatenAt}
+                />
+              </View>
+            )}
           </View>
         )}
 

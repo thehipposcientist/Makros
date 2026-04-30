@@ -53,7 +53,7 @@ from typing import Optional
 #   - Adjacency / rotation rules change
 #   - Injury-pattern block list or dislike filter changes
 # Cosmetic copy / logging tweaks don't need a bump.
-PLANNER_VERSION = "2026.04.29.01"
+PLANNER_VERSION = "2026.04.30.01"
 
 logger = logging.getLogger(__name__)
 
@@ -542,6 +542,54 @@ def _endurance_recipe(profile: GoalProfile, days: int) -> list[DayArchetype]:
     if days >= 3:
         out.append(DayArchetype.LIFT_STRENGTH_MAINTENANCE)
     return out
+
+
+_RUNNING_EVENT_PATTERNS: dict[str, dict[int, list[DayArchetype]]] = {
+    "endurance_5k": {
+        1: [DayArchetype.COND_INTERVALS_SHORT],
+        2: [DayArchetype.COND_INTERVALS_SHORT, DayArchetype.COND_ZONE2],
+        3: [DayArchetype.COND_INTERVALS_SHORT, DayArchetype.COND_TEMPO, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        4: [DayArchetype.COND_INTERVALS_SHORT, DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        5: [DayArchetype.COND_INTERVALS_SHORT, DayArchetype.COND_ZONE2, DayArchetype.COND_INTERVALS_LONG, DayArchetype.COND_TEMPO, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        6: [DayArchetype.COND_INTERVALS_SHORT, DayArchetype.COND_ZONE2, DayArchetype.COND_INTERVALS_LONG, DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        7: [DayArchetype.COND_INTERVALS_SHORT, DayArchetype.COND_ZONE2, DayArchetype.COND_INTERVALS_LONG, DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.LIFT_STRENGTH_MAINTENANCE, DayArchetype.RECOVERY_EASY],
+    },
+    "endurance_10k": {
+        1: [DayArchetype.COND_TEMPO],
+        2: [DayArchetype.COND_INTERVALS_LONG, DayArchetype.COND_ZONE2],
+        3: [DayArchetype.COND_TEMPO, DayArchetype.COND_ZONE2, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        4: [DayArchetype.COND_INTERVALS_LONG, DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        5: [DayArchetype.COND_ZONE2, DayArchetype.COND_INTERVALS_LONG, DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        6: [DayArchetype.COND_ZONE2, DayArchetype.COND_INTERVALS_LONG, DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.COND_ZONE2, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        7: [DayArchetype.COND_ZONE2, DayArchetype.COND_INTERVALS_LONG, DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.COND_ZONE2, DayArchetype.LIFT_STRENGTH_MAINTENANCE, DayArchetype.RECOVERY_EASY],
+    },
+    "endurance_half": {
+        1: [DayArchetype.COND_ZONE2],
+        2: [DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO],
+        3: [DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        4: [DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.COND_ZONE2, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        5: [DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.COND_ZONE2, DayArchetype.COND_INTERVALS_LONG, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        6: [DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.COND_ZONE2, DayArchetype.COND_ZONE2, DayArchetype.COND_INTERVALS_LONG, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        7: [DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.COND_ZONE2, DayArchetype.COND_ZONE2, DayArchetype.COND_INTERVALS_LONG, DayArchetype.LIFT_STRENGTH_MAINTENANCE, DayArchetype.RECOVERY_EASY],
+    },
+    "endurance_marathon": {
+        1: [DayArchetype.COND_ZONE2],
+        2: [DayArchetype.COND_ZONE2, DayArchetype.RECOVERY_EASY],
+        3: [DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        4: [DayArchetype.COND_ZONE2, DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        5: [DayArchetype.COND_ZONE2, DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.COND_ZONE2, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        6: [DayArchetype.COND_ZONE2, DayArchetype.RECOVERY_EASY, DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.COND_ZONE2, DayArchetype.LIFT_STRENGTH_MAINTENANCE],
+        7: [DayArchetype.COND_ZONE2, DayArchetype.RECOVERY_EASY, DayArchetype.COND_ZONE2, DayArchetype.COND_TEMPO, DayArchetype.COND_ZONE2, DayArchetype.LIFT_STRENGTH_MAINTENANCE, DayArchetype.MOBILITY_FLOW],
+    },
+}
+
+
+def _running_event_recipe(profile: GoalProfile, days: int) -> list[DayArchetype]:
+    """Race-distance endurance templates with distinct deterministic bias."""
+    pattern = _RUNNING_EVENT_PATTERNS.get(profile.planner_mode)
+    if not pattern:
+        return _endurance_recipe(profile, days)
+    return list(pattern.get(days) or pattern[max(pattern)])
 
 
 # ── Athletic mode ───────────────────────────────────────────────────
@@ -2744,6 +2792,8 @@ def generate_weekly_recipe(
         recipe = _lifting_plus_cardio_recipe(profile, days, lifting_split or "upper_lower", user_chose_split=user_chose_split, priority_region=priority_region)
     elif mode == "endurance":
         recipe = _endurance_recipe(profile, days)
+    elif mode in _RUNNING_EVENT_PATTERNS:
+        recipe = _running_event_recipe(profile, days)
     elif mode == "athletic":
         recipe = _athletic_recipe(profile, days)
     elif mode == "hyrox":

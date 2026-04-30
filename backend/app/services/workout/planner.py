@@ -317,6 +317,18 @@ def weekly_set_targets(inputs: PlannerInputs) -> dict[str, int]:
 # ─── Layer 5 — Exercise selection engine ─────────────────────────────────────
 
 
+def _expanded_owned_equipment(owned: set[str]) -> set[str]:
+    """Expand equivalent equipment slugs used by seed requirements."""
+    expanded = set(owned)
+    if "adjustable_dumbbells" in expanded:
+        expanded.add("dumbbells")
+    if "adjustable_bench" in expanded:
+        expanded.update({"flat_bench", "incline_bench", "decline_bench"})
+    if "incline_bench" in expanded or "decline_bench" in expanded:
+        expanded.add("adjustable_bench")
+    return expanded
+
+
 def _equipment_satisfied(exercise: dict, owned: set[str]) -> bool:
     """True if the user can actually do this exercise with what they own.
 
@@ -327,6 +339,7 @@ def _equipment_satisfied(exercise: dict, owned: set[str]) -> bool:
         be owned (so a "dumbbells" bucket exercise where the dumbbell is
         `required=False` doesn't sneak through for an empty-equipment user).
     """
+    owned = _expanded_owned_equipment(owned)
     eq_entries = exercise.get("equipment") or []
     bucket = exercise.get("equipment_bucket")
 
@@ -479,9 +492,19 @@ _PRIMARY_LOAD_TIER = {
     "hack_squat_machine": 2,
     "machine_row_station": 2,
     "pec_deck_machine": 2,
+    "preacher_bench": 2,
+    "belt_squat_machine": 2,
+    "hip_thrust_machine": 2,
+    "pullover_machine": 2,
+    "ab_crunch_machine": 2,
+    "tibialis_raise_machine": 2,
+    "standing_calf_raise_machine": 2,
+    "seated_calf_raise_machine": 2,
     "leg_extension_machine": 2,
     "leg_curl_machine": 2,
     "shoulder_press_machine": 2,
+    "sandbag": 2,
+    "medicine_ball": 2,
     "cable_machine": 1,
 }
 

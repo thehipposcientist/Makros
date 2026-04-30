@@ -94,6 +94,124 @@ def test_legacy_ids_resolve_to_correct_bucket() -> None:
         _ok(f"{legacy_id:22s} → {got}")
 
 
+def test_frontend_primary_goal_ids_have_backend_buckets() -> None:
+    """Mirror the current `PRIMARY_GOALS` ids from goalConfig.ts.
+
+    The frontend exposes many specific goal tracks, but the deterministic
+    planner intentionally normalizes them into a smaller set of buckets.
+    This catches accidental body_recomp fallthrough when a new goal id is
+    added without a backend alias.
+    """
+    print("\n[test] current frontend primary goal ids resolve intentionally")
+    from app.services.workout.goals import goal_bucket
+
+    expected_by_bucket = {
+        "muscle_gain": {
+            "build_muscle", "lean_bulk", "gain_weight",
+            "improve_aesthetics", "build_glutes", "build_upper_body",
+            "build_lower_body", "build_arms", "build_shoulders",
+        },
+        "fat_loss": {
+            "lose_fat", "get_lean", "cut", "preserve_muscle_cutting",
+        },
+        "strength": {
+            "build_strength", "increase_overall", "improve_1rm",
+            "powerlifting", "improve_squat", "improve_bench",
+            "improve_deadlift", "improve_ohp", "improve_pullups",
+            "improve_grip", "functional_strength", "explosive_strength",
+            "relative_strength",
+        },
+        "endurance": {
+            "improve_cardio", "improve_conditioning", "aerobic_base",
+            "improve_vo2", "increase_stamina", "running_fitness",
+            "train_5k", "train_10k", "train_half", "train_marathon",
+            "sprint_speed", "interval_perf", "hiking_endurance",
+            "cycling_endurance", "rowing_endurance", "swimming_endurance",
+            "work_capacity",
+        },
+        "athletic_performance": {
+            "improve_athleticism", "improve_speed", "improve_agility",
+            "improve_power", "improve_vertical", "improve_acceleration",
+            "improve_cod", "improve_coordination", "improve_balance",
+            "sport_performance", "offseason_training",
+            "inseason_maintenance", "return_to_sport",
+        },
+        "hyrox": {"hyrox"},
+        "body_recomp": {"body_recomp"},
+        "general_health": {
+            "maintain_physique", "general_health", "longevity",
+            "healthy_aging", "heart_health", "metabolic_health",
+            "improve_energy", "daily_function", "stay_active",
+            "maintain_mobility", "improve_mobility",
+            "improve_flexibility", "improve_posture", "bone_health",
+            "joint_health", "stress_exercise", "build_consistency",
+            "beginner_fitness", "get_back_in_shape", "quick_workouts",
+            "busy_schedule", "home_fitness", "travel_training",
+            "low_stress_training", "minimal_equipment", "habit_building",
+            "sustainable_routine", "maintain",
+        },
+    }
+    expected = {
+        gid: bucket
+        for bucket, ids in expected_by_bucket.items()
+        for gid in ids
+    }
+    assert len(expected) == 86, f"expected mirror should include 86 ids, got {len(expected)}"
+    for gid, want in sorted(expected.items()):
+        got = goal_bucket(gid)
+        assert got == want, f"{gid} → {got} (want {want})"
+    accidental = [
+        gid for gid, want in expected.items()
+        if gid != "body_recomp" and want != "body_recomp" and goal_bucket(gid) == "body_recomp"
+    ]
+    assert not accidental, f"accidental body_recomp fallbacks: {accidental}"
+    _ok(f"{len(expected)} frontend goal ids resolve to explicit planner buckets")
+
+
+def test_mobility_and_recovery_goal_tracks_keep_special_profiles() -> None:
+    """Mobility/stress micro-goals share the general-health bucket for
+    nutrition and volume math, but must still use dedicated recipe modes."""
+    print("\n[test] mobility/recovery goal tracks keep special planner profiles")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.goals import goal_bucket
+
+    expectations = {
+        "maintain_mobility": "mobility",
+        "improve_mobility": "mobility",
+        "improve_flexibility": "mobility",
+        "stress_exercise": "recovery",
+        "low_stress_training": "recovery",
+    }
+    for gid, mode in expectations.items():
+        assert goal_bucket(gid) == "general_health", f"{gid} bucket drifted"
+        profile = goal_profile_for(gid)
+        assert profile.planner_mode == mode, f"{gid} → {profile.planner_mode} (want {mode})"
+    _ok("mobility aliases use mobility mode; stress aliases use recovery mode")
+
+
+def test_effective_goal_id_prefers_rich_track() -> None:
+    """Stored goals keep a legacy enum for contracts and a rich track
+    for deterministic plan shape. Plan builders must use the rich track."""
+    print("\n[test] effective goal id prefers goal_track over goal_type")
+    from app.services.workout.goals import effective_goal_id
+
+    class Enumish:
+        value = "endurance"
+
+    class GoalRow:
+        goal_track = "train_10k"
+        goal_type = Enumish()
+
+    class LegacyGoalRow:
+        goal_track = None
+        goal_type = Enumish()
+
+    assert effective_goal_id(GoalRow()) == "train_10k"
+    assert effective_goal_id(LegacyGoalRow()) == "endurance"
+    assert effective_goal_id(None) == "body_recomp"
+    _ok("goal_track wins; legacy rows fall back to goal_type")
+
+
 def test_unknown_goal_falls_back_gracefully() -> None:
     """An unknown goal id must never crash — it falls back to
     body_recomp (our 'no strong opinion' default)."""
@@ -235,6 +353,45 @@ def test_endurance_plan_includes_one_strength_day_at_3plus() -> None:
     assert cats2.count("lift") == 0, f"got categories={cats2}"
     assert cats2.count("cond") == 2, f"got categories={cats2}"
     _ok(f"4d={cats} | 2d={cats2}")
+
+
+def test_running_event_tracks_have_distinct_deterministic_recipes() -> None:
+    """5K / 10K / half / marathon are not just labels on generic
+    endurance. They use distance-specific deterministic archetype mixes."""
+    print("\n[test] running event tracks have distinct deterministic recipes")
+    from collections import Counter
+
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.planner import PlannerInputs, generate_workout_plan
+    from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
+
+    full_eq = tuple(e["slug"] for e in SEED_EQUIPMENT) + ("bodyweight",)
+    tracks = ("train_5k", "train_10k", "train_half", "train_marathon")
+
+    archetypes: dict[str, tuple[str, ...]] = {}
+    for track in tracks:
+        profile = goal_profile_for(track, days_per_week=5)
+        assert profile.planner_mode.startswith("endurance_"), (track, profile.planner_mode)
+        plan = generate_workout_plan(
+            PlannerInputs(
+                goal=track,
+                days_per_week=5,
+                experience="intermediate",
+                equipment_slugs=full_eq,
+                rng_seed=19,
+            ),
+            SEED_EXERCISES,
+        )["workout_plan"]
+        archetypes[track] = tuple(day["archetype"] for day in plan["days"])
+
+    assert len(set(archetypes.values())) == len(tracks), archetypes
+    counts = {track: Counter(seq) for track, seq in archetypes.items()}
+    assert counts["train_5k"]["cond_intervals_short"] >= 1, archetypes["train_5k"]
+    assert counts["train_10k"]["cond_intervals_long"] >= 1, archetypes["train_10k"]
+    assert counts["train_half"]["cond_zone2"] >= 2, archetypes["train_half"]
+    assert counts["train_marathon"]["cond_zone2"] > counts["train_5k"]["cond_zone2"], archetypes
+    assert counts["train_marathon"]["cond_intervals_short"] == 0, archetypes["train_marathon"]
+    _ok("5K, 10K, half, marathon emit distinct race-specific archetypes")
 
 
 def test_athletic_plan_mixes_strength_and_conditioning() -> None:
@@ -458,10 +615,14 @@ def _run_all() -> int:
         test_unsupported_goals_resolve_but_are_hidden,
         test_aliases_share_canonical_bucket,
         test_legacy_ids_resolve_to_correct_bucket,
+        test_frontend_primary_goal_ids_have_backend_buckets,
+        test_mobility_and_recovery_goal_tracks_keep_special_profiles,
+        test_effective_goal_id_prefers_rich_track,
         test_unknown_goal_falls_back_gracefully,
         test_supported_goals_produce_distinct_splits,
         test_endurance_plan_is_mostly_cardio,
         test_endurance_plan_includes_one_strength_day_at_3plus,
+        test_running_event_tracks_have_distinct_deterministic_recipes,
         test_athletic_plan_mixes_strength_and_conditioning,
         test_toning_alias_plan_matches_fat_loss_plan,
         test_fat_loss_and_muscle_gain_have_different_rep_schemes,

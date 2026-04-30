@@ -96,6 +96,20 @@ def _ensure_user_recovery_columns() -> None:
         print(f"[migration] user recovery columns add failed (non-fatal): {e}")
 
 
+def _ensure_user_goal_track_column() -> None:
+    """Persist rich frontend goal ids alongside the legacy GoalType enum."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE user_goals "
+                "ADD COLUMN IF NOT EXISTS goal_track VARCHAR"
+            ))
+    except Exception as e:
+        print(f"[migration] user_goals goal_track add failed (non-fatal): {e}")
+
+
 def _ensure_workout_completion_stimulus_column() -> None:
     """Add the `stimulus` column to workout_completions if missing."""
     if engine.dialect.name != "postgresql":
@@ -1235,6 +1249,7 @@ def create_db_and_tables():
     _ensure_user_preferences_equipment_settings_column()
     _ensure_coach_apply_state_columns()
     _ensure_user_recovery_columns()
+    _ensure_user_goal_track_column()
     _ensure_exercise_tracking_mode_column()
     _ensure_exercise_video_id_column()
     _ensure_food_metadata_classifier_v2_columns()

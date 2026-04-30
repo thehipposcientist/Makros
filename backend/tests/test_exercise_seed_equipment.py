@@ -173,25 +173,23 @@ def test_strength_load_settings_snap_to_available_weights() -> None:
 def test_scan_equipment_list_covers_new_equipment_names() -> None:
     print("\n[test] equipment scan allowlist covers new canonical equipment names")
     source = Path(__file__).parents[1] / "app" / "routers" / "ai" / "scanning.py"
-    tree = ast.parse(source.read_text())
-    known_equipment = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if getattr(target, "id", None) == "known_equipment":
-                    known_equipment = ast.literal_eval(node.value)
-                    break
-        if known_equipment is not None:
-            break
-    assert isinstance(known_equipment, list), "known_equipment not found"
+    text = source.read_text()
+    assert 'known_equipment = [entry["name"] for entry in SEED_EQUIPMENT]' in text
+
+    from app.seed_exercises_data import SEED_EQUIPMENT
+    known_equipment = [entry["name"] for entry in SEED_EQUIPMENT]
     required = {
         "Adjustable dumbbells",
+        "Mini band (loop)",
+        "Swiss / stability ball",
+        "Step platform (low)",
         "Outdoor bike",
         "SkiErg",
         "VersaClimber",
         "Heavy bag",
         "Ruck pack",
         "Plyo box (24\"+)",
+        "Sandbag",
     }
     missing = required - set(known_equipment)
     assert not missing, f"scan allowlist missing: {sorted(missing)}"

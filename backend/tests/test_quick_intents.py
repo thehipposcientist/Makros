@@ -1,6 +1,6 @@
 """Pure-function tests for quick_intents.
 
-Each of the 12 intents needs at least one match pattern and one
+Each intent needs at least one match pattern and one
 non-match (false-positive guard). Cheap regression coverage.
 
 Run manually from inside the backend container:
@@ -23,6 +23,7 @@ def test_positive_matches():
         ("slept badly last night", "slept_badly"),
         ("i'm too sore to lift", "too_sore"),
         ("missed my workout yesterday", "missed_workout"),
+        ("pause my workouts for 5 days of travel", "travel_mode"),
         ("can we add more cardio", "more_cardio"),
         ("less cardio please", "less_cardio"),
         ("need a deload week", "deload"),
@@ -55,7 +56,7 @@ def test_handlers_return_actions():
     print("[test] handlers return structured actions")
     for intent in (
         "time_limited", "slept_badly", "too_sore", "missed_workout",
-        "more_cardio", "less_cardio", "deload", "more_core",
+        "travel_mode", "more_cardio", "less_cardio", "deload", "more_core",
         "hard_tomorrow", "losing_too_fast", "strength_dropping",
     ):
         resp = handle_intent(intent, "test prompt")
@@ -78,9 +79,22 @@ def test_time_limited_extracts_minutes():
     print("  ✓ extracted 25 min")
 
 
+def test_less_cardio_wins_over_broad_want_cardio():
+    print("[test] less-cardio phrasing does not route to more_cardio")
+    cases = [
+        "i want less cardio",
+        "i don't want more cardio",
+        "no more cardio next week",
+    ]
+    for q in cases:
+        got = match_intent(q)
+        assert_eq(got, "less_cardio", f"\"{q}\" → less_cardio")
+
+
 if __name__ == "__main__":
     test_positive_matches()
     test_no_false_positives()
     test_handlers_return_actions()
     test_time_limited_extracts_minutes()
+    test_less_cardio_wins_over_broad_want_cardio()
     print("\n✅ test_quick_intents.py PASSED")

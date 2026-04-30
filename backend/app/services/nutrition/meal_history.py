@@ -153,17 +153,51 @@ def log_meal_from_plan(
                     "consumed_at": existing.consumed_at.isoformat() if existing.consumed_at else None,
                 }
 
-    meal = Meal(
-        user_id=user_id,
-        meal_date=meal_date,
-        meal_type=resolved_type,
-        name=meal_data.get("meal", "Checked meal"),
-        source=resolved_source,
-        notes=None,
-        consumed_at=consumed_at or datetime.now(timezone.utc),
-    )
-    db.add(meal)
-    db.flush()  # get meal.id
+    replace_target = None
+    if source == "plan_check" and existing_meals:
+        same_name = [m for m in existing_meals if _normalize_meal_text(m.name) == incoming_name]
+        if len(same_name) == 1:
+            replace_target = same_name[0]
+        elif len(existing_meals) == 1:
+            replace_target = existing_meals[0]
+
+    if replace_target is None and source == "plan_check":
+        cross_source_meals = db.exec(
+            select(Meal)
+            .where(Meal.user_id == user_id)
+            .where(Meal.meal_date == meal_date)
+            .where(Meal.meal_type == resolved_type)
+            .order_by(col(Meal.created_at).desc())
+            .limit(10)
+        ).all()
+        if cross_source_meals:
+            same_name = [m for m in cross_source_meals if _normalize_meal_text(m.name) == incoming_name]
+            if len(same_name) == 1:
+                replace_target = same_name[0]
+            elif len(cross_source_meals) == 1:
+                replace_target = cross_source_meals[0]
+
+    if replace_target is not None:
+        old_items = db.exec(select(MealItem).where(MealItem.meal_id == replace_target.id)).all()
+        for item in old_items:
+            db.delete(item)
+        replace_target.name = meal_data.get("meal", "Checked meal")
+        replace_target.consumed_at = consumed_at or replace_target.consumed_at or datetime.now(timezone.utc)
+        db.add(replace_target)
+        db.flush()
+        meal = replace_target
+    else:
+        meal = Meal(
+            user_id=user_id,
+            meal_date=meal_date,
+            meal_type=resolved_type,
+            name=meal_data.get("meal", "Checked meal"),
+            source=resolved_source,
+            notes=None,
+            consumed_at=consumed_at or datetime.now(timezone.utc),
+        )
+        db.add(meal)
+        db.flush()  # get meal.id
 
     # Build a name→food_id index so items can be linked to the food
     # library. Without this link, downstream code (gut_health metrics,
@@ -372,7 +406,7 @@ def get_rolling_averages(user_id: int, window: int = 7, *, db: Session) -> dict:
     """
     from app.models import Meal, MealItem
 
-    cutoff = date.today() - timedelta(days=window)
+    cutoff = date.today() - timedelta(days=window - 1)
     meals = db.exec(
         select(Meal)
         .where(Meal.user_id == user_id)

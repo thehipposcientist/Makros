@@ -483,6 +483,75 @@ _SPECIAL_PROFILES: dict[str, GoalProfile] = {
 }
 
 
+def _running_event_profile(
+    *,
+    mode: str,
+    label: str,
+    mix: TrainingMix,
+    anchors: tuple[DayArchetype, ...],
+    notes: str,
+) -> GoalProfile:
+    endurance = _PROFILE_TABLE["endurance"]
+    return GoalProfile(
+        bucket="endurance",
+        label=label,
+        mix=mix,
+        allowed_archetypes=endurance.allowed_archetypes,
+        anchor_archetypes=anchors,
+        planner_mode=mode,
+        stable_lifts=False,
+        notes=notes,
+    )
+
+
+_RUNNING_EVENT_PROFILES: dict[str, GoalProfile] = {
+    "train_5k": _running_event_profile(
+        mode="endurance_5k",
+        label="5K Training",
+        mix=TrainingMix(strength=0.08, conditioning=0.72, mobility=0.10, recovery=0.10),
+        anchors=(
+            DayArchetype.COND_INTERVALS_SHORT,
+            DayArchetype.COND_TEMPO,
+            DayArchetype.COND_ZONE2,
+        ),
+        notes="Race-specific 5K plan: speed intervals + tempo, with light strength support.",
+    ),
+    "train_10k": _running_event_profile(
+        mode="endurance_10k",
+        label="10K Training",
+        mix=TrainingMix(strength=0.08, conditioning=0.70, mobility=0.10, recovery=0.12),
+        anchors=(
+            DayArchetype.COND_INTERVALS_LONG,
+            DayArchetype.COND_TEMPO,
+            DayArchetype.COND_ZONE2,
+        ),
+        notes="Race-specific 10K plan: threshold work, longer intervals, and aerobic volume.",
+    ),
+    "train_half": _running_event_profile(
+        mode="endurance_half",
+        label="Half Marathon Training",
+        mix=TrainingMix(strength=0.08, conditioning=0.68, mobility=0.12, recovery=0.12),
+        anchors=(
+            DayArchetype.COND_ZONE2,
+            DayArchetype.COND_TEMPO,
+            DayArchetype.COND_INTERVALS_LONG,
+        ),
+        notes="Half-marathon plan: aerobic volume first, tempo second, strength maintenance kept short.",
+    ),
+    "train_marathon": _running_event_profile(
+        mode="endurance_marathon",
+        label="Marathon Training",
+        mix=TrainingMix(strength=0.06, conditioning=0.70, mobility=0.12, recovery=0.12),
+        anchors=(
+            DayArchetype.COND_ZONE2,
+            DayArchetype.COND_TEMPO,
+            DayArchetype.RECOVERY_EASY,
+        ),
+        notes="Marathon plan: easy aerobic volume dominates, with tempo and recovery protected.",
+    ),
+}
+
+
 def goal_profile_for(
     goal: Optional[str],
     experience: str = "intermediate",
@@ -501,6 +570,9 @@ def goal_profile_for(
     so the signature is stable when we start tuning."""
     gid = (goal or "").strip().lower()
 
+    if gid in _RUNNING_EVENT_PROFILES:
+        return _RUNNING_EVENT_PROFILES[gid]
+
     # Special planner modes (flexibility, stress_relief) short-circuit
     # the normal bucket lookup because they don't map to a lifting
     # bucket — their profile IS a different planner mode. Also catch
@@ -510,6 +582,7 @@ def goal_profile_for(
         "improve_mobility": "flexibility",
         "maintain_mobility": "flexibility",
         "stress_exercise": "stress_relief",
+        "low_stress_training": "stress_relief",
     }
     # Goals that should route to a specific PROFILE TABLE entry
     # (not a special profile). These are goal ids that the bucket
@@ -541,4 +614,5 @@ def profile_table_for_audit() -> dict[str, GoalProfile]:
     """Read-only view for audit tests."""
     merged = dict(_PROFILE_TABLE)
     merged.update(_SPECIAL_PROFILES)
+    merged.update(_RUNNING_EVENT_PROFILES)
     return merged

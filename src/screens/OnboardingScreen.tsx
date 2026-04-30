@@ -57,8 +57,10 @@ import {
 } from '../utils/strengthEquipmentSettings';
 import { dynamicTextProps } from '../utils/dynamicType';
 import {
-  LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES,
+  LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, ENDURANCE_EVENT_GOALS,
   goalCategory,
+  isEnduranceEventGoal,
+  launchGoalIdFor,
 } from '../constants/goalConfig';
 
 const logo = require('../../assets/images/thallo-logo-white.png');
@@ -276,7 +278,7 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
     id: 'home_basic',
     label: 'Home (Basic)',
     description: 'Adjustable DBs + bands',
-    items: ['Adjustable dumbbells', 'Resistance bands', 'Pull-up bar', 'Yoga mat', 'Jump rope', 'Foam roller'],
+    items: ['Adjustable dumbbells', 'Resistance bands (tube)', 'Mini band (loop)', 'Pull-up bar', 'Yoga mat', 'Jump rope', 'Foam roller'],
   },
   {
     id: 'home_full',
@@ -285,7 +287,8 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
     items: [
       'Dumbbells', 'Barbell', 'Kettlebell', 'Weight plates',
       'Flat bench', 'Squat rack', 'Pull-up bar',
-      'Resistance bands', 'Yoga mat', 'Foam roller', 'Ab wheel',
+      'Resistance bands (tube)', 'Mini band (loop)', 'Swiss / stability ball',
+      'Yoga mat', 'Foam roller', 'Ab wheel',
     ],
   },
   {
@@ -297,7 +300,7 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
       'Cable machine', 'Leg press', 'Leg extension', 'Leg curl machine',
       'Lat pulldown', 'Chest press machine', 'Seated row machine',
       'Shoulder press machine', 'Hip abduction machine', 'Hip adduction machine',
-      'Smith machine',
+      'Smith machine', 'Assisted pull-up machine', 'Pec deck machine',
       'Treadmill', 'Stationary bike', 'Elliptical',
     ],
   },
@@ -307,14 +310,18 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
     description: 'Full gym access',
     items: [
       'Dumbbells', 'Barbell', 'Kettlebell', 'EZ curl bar', 'Weight plates', 'Trap bar',
-      'Flat bench', 'Adjustable bench', 'Squat rack', 'Power rack',
+      'Flat bench', 'Adjustable bench', 'Incline bench', 'Decline bench', 'Squat rack', 'Power rack',
       'Cable machine', 'Leg press', 'Leg extension', 'Leg curl machine',
       'Lat pulldown', 'Chest press machine', 'Seated row machine',
       'Shoulder press machine', 'Hip abduction machine', 'Hip adduction machine',
       'Smith machine', 'Hack squat machine', 'Assisted pull-up machine',
+      'Pec deck machine', 'Preacher curl bench', 'Hyperextension bench',
+      'Standing calf raise machine', 'Seated calf raise machine',
+      'Lateral raise machine', 'Belt squat machine', 'Hip thrust machine',
       'Ab wheel', 'Dip bars', 'Pull-up bar', 'Landmine attachment',
       'Treadmill', 'Stationary bike', 'Elliptical',
-      'Rowing machine', 'Stair climber', 'Assault bike', 'Battle ropes', 'Plyo box',
+      'Rowing machine', 'Stair climber', 'Assault bike', 'Battle ropes',
+      'Plyo box (24"+)', 'Step platform (low)', 'Medicine ball', 'Sandbag',
     ],
   },
   {
@@ -323,8 +330,8 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
     description: 'Barbells + cardio',
     items: [
       'Barbell', 'Dumbbells', 'Kettlebell', 'Weight plates',
-      'Pull-up bar', 'Dip bars', 'Plyo box', 'Jump rope',
-      'Rowing machine', 'Assault bike', 'Battle ropes', 'Medicine ball', 'Ab wheel',
+      'Pull-up bar', 'Dip bars', 'Plyo box (24"+)', 'Jump rope',
+      'Rowing machine', 'Assault bike', 'Battle ropes', 'Medicine ball', 'Sandbag', 'Sled', 'Ab wheel',
     ],
   },
 ];
@@ -609,7 +616,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   // (covers both initial load and navigating back from a later step).
   useEffect(() => {
     if (currentStepKey !== 'goal') return;
-    const idx = LAUNCH_GOALS.findIndex(g => g.id === selectedGoal);
+    const idx = LAUNCH_GOALS.findIndex(g => g.id === launchGoalIdFor(selectedGoal));
     if (idx < 0) return;
     const timer = setTimeout(() => {
       goalCarouselRef.current?.scrollTo({ x: idx * (screenWidth * 0.82 + 12), animated: false });
@@ -625,7 +632,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       setSelectedModifiers([]);
       setSelectedRegion('balanced');
     }
-    const idx = LAUNCH_GOALS.findIndex(g => g.id === goalId);
+    const idx = LAUNCH_GOALS.findIndex(g => g.id === launchGoalIdFor(goalId));
     if (idx >= 0) {
       goalCarouselRef.current?.scrollTo({ x: idx * (screenWidth * 0.82 + 12), animated: true });
       LayoutAnimation.configureNext({ duration: 220, update: { type: 'spring', springDamping: 0.75 } });
@@ -895,7 +902,9 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   // ─── Step renderers ─────────────────────────────────────────────────────────
 
   const renderGoalStep = () => {
-    const selectedDef = PRIMARY_GOALS.find(g => g.id === selectedGoal);
+    const visibleSelectedGoal = launchGoalIdFor(selectedGoal);
+    const selectedDef = PRIMARY_GOALS.find(g => g.id === selectedGoal)
+      ?? PRIMARY_GOALS.find(g => g.id === visibleSelectedGoal);
     const activeGoalCategory = selectedDef?.category ?? goalCategory(selectedGoal);
     const launchGoalCategories = GOAL_CATEGORIES
       .map(cat => ({ ...cat, count: LAUNCH_GOALS.filter(g => g.category === cat.id).length }))
@@ -1044,7 +1053,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         >
           {LAUNCH_GOALS.map((g) => {
             const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
-            const active = selectedGoal === g.id;
+            const active = visibleSelectedGoal === g.id;
             return (
               <PressableScale
                 key={g.id}
@@ -1085,6 +1094,35 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           ))}
         </View>
         </View>
+
+        {visibleSelectedGoal === 'improve_cardio' && (
+          <View style={{ marginTop: 16 }}>
+            <Text style={styles.fieldLabel}>Race focus</Text>
+            <View style={styles.foodChips}>
+              {ENDURANCE_EVENT_GOALS.map(opt => {
+                const active = selectedGoal === opt.id
+                  || (opt.id === 'improve_cardio' && !isEnduranceEventGoal(selectedGoal));
+                return (
+                  <TouchableOpacity
+                    key={opt.id}
+                    activeOpacity={0.75}
+                    style={[styles.foodChip, active && styles.foodChipActive]}
+                    onPress={() => {
+                      setSelectedGoal(opt.id);
+                      setSelectedModifiers([]);
+                      setPace('moderate');
+                      setTargetEvent(opt.targetEvent);
+                    }}
+                  >
+                    <Text style={[styles.foodChipText, active && styles.foodChipTextActive]}>
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+        )}
 
         {/* Pace — shown inline on the goal step itself whenever the user
             picks a pace-aware goal (fat loss / bulk / body-recomp / tone).
@@ -1248,6 +1286,31 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             <Text style={styles.fieldLabel}>
               Target goal <Text style={styles.optional}>(optional)</Text>
             </Text>
+            {cat === 'cardio_endurance' && (
+              <View style={[styles.foodChips, { marginBottom: 10 }]}>
+                {ENDURANCE_EVENT_GOALS.map(opt => {
+                  const active = selectedGoal === opt.id
+                    || (opt.id === 'improve_cardio' && !isEnduranceEventGoal(selectedGoal));
+                  return (
+                    <TouchableOpacity
+                      key={opt.id}
+                      activeOpacity={0.75}
+                      style={[styles.foodChip, active && styles.foodChipActive]}
+                      onPress={() => {
+                        setSelectedGoal(opt.id);
+                        setSelectedModifiers([]);
+                        setPace('moderate');
+                        setTargetEvent(opt.targetEvent);
+                      }}
+                    >
+                      <Text style={[styles.foodChipText, active && styles.foodChipTextActive]}>
+                        {opt.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
             <TextInput
               style={styles.input}
               placeholder={eventPlaceholder}

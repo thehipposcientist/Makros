@@ -90,7 +90,7 @@ export const PRIMARY_GOALS: PrimaryGoalDef[] = [
   { id: 'train_5k',             label: 'Train for a 5K',            category: 'cardio_endurance', description: 'Couch to 5K or PR your time. Structured plan building from walk/run intervals to continuous 5K runs.',  launch: false },
   { id: 'train_10k',            label: 'Train for a 10K',           category: 'cardio_endurance', description: 'Build endurance for a solid 10K. Includes long runs, tempo work, and recovery sessions.',  launch: false },
   { id: 'train_half',           label: 'Train for a Half Marathon', category: 'cardio_endurance', description: '12-16 week half marathon build-up with progressive long runs, speed work, and taper.',  launch: false },
-  { id: 'train_marathon',       label: 'Train for a Marathon',      category: 'cardio_endurance', description: '16-20 week marathon plan. Long runs up to 20 miles, nutrition strategy, and race-day pacing.',  launch: true },
+  { id: 'train_marathon',       label: 'Train for a Marathon',      category: 'cardio_endurance', description: '16-20 week marathon plan. Long runs up to 20 miles, nutrition strategy, and race-day pacing.',  launch: false },
   { id: 'sprint_speed',         label: 'Improve Sprint Speed',      category: 'cardio_endurance', description: 'Short sprints (10-100m), hill sprints, and plyometrics. Builds top-end speed and acceleration.',  launch: false },
   { id: 'interval_perf',        label: 'Improve Interval Performance', category: 'cardio_endurance', description: 'HIIT-focused: Tabata, EMOM, and interval circuits. Better recovery between bursts of effort.',  launch: false },
   { id: 'hiking_endurance',     label: 'Improve Hiking Endurance',  category: 'cardio_endurance', description: 'Incline treadmill, stair climber, weighted vest walks, and leg endurance. Go longer on the trail with less fatigue.',  launch: false },
@@ -149,22 +149,29 @@ export const PRIMARY_GOALS: PrimaryGoalDef[] = [
 
 // ─── Quick-launch goals (shown prominently in onboarding step 1) ─────────────
 
-export const PRODUCTIZED_GOAL_TRACK_IDS = [
-  'train_5k',
-  'train_10k',
-  'aerobic_base',
-  'powerlifting',
-  'improve_bench',
-  'improve_squat',
-  'build_glutes',
-  'build_upper_body',
-  'healthy_aging',
-  'travel_training',
-] as const;
+export const PRODUCTIZED_GOAL_TRACK_IDS = [] as const;
 
 const PRODUCTIZED_GOAL_TRACK_SET = new Set<string>(PRODUCTIZED_GOAL_TRACK_IDS);
 
 export const LAUNCH_GOALS = PRIMARY_GOALS.filter(g => g.launch || PRODUCTIZED_GOAL_TRACK_SET.has(g.id));
+
+export const ENDURANCE_EVENT_GOALS = [
+  { id: 'improve_cardio',   label: 'General',  targetEvent: '' },
+  { id: 'train_5k',         label: '5K',       targetEvent: '5K' },
+  { id: 'train_10k',        label: '10K',      targetEvent: '10K' },
+  { id: 'train_half',       label: 'Half',     targetEvent: 'Half marathon' },
+  { id: 'train_marathon',   label: 'Marathon', targetEvent: 'Marathon' },
+] as const;
+
+const ENDURANCE_EVENT_GOAL_SET = new Set<string>(ENDURANCE_EVENT_GOALS.map(g => g.id));
+
+export function isEnduranceEventGoal(goalId: string): boolean {
+  return ENDURANCE_EVENT_GOAL_SET.has(goalId);
+}
+
+export function launchGoalIdFor(goalId: string): string {
+  return isEnduranceEventGoal(goalId) ? 'improve_cardio' : goalId;
+}
 
 // ─── Goal → Category lookup ──────────────────────────────────────────────────
 

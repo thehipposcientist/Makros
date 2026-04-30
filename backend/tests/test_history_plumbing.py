@@ -275,6 +275,70 @@ def test_log_meal_from_plan_persists_consumed_at() -> None:
     _ok("consumed_at is stored and returned")
 
 
+def test_log_meal_from_plan_replaces_edited_meal_items() -> None:
+    """Editing a checked meal should update its nutrition row instead of
+    inserting a second same-slot meal that inflates rolling averages."""
+    print("\n[test] log_meal_from_plan replaces edited meal items")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, Meal, MealItem  # noqa: F401
+    import app.models  # noqa: F401
+    from app.enums import MealType
+    from app.services.nutrition.meal_history import log_meal_from_plan
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date(2026, 4, 29)
+    with Session(engine) as s:
+        u = User(email="meal-edit@example.com", username="mealedit", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        initial = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_0",
+            meal_data={
+                "meal": "Greek Yogurt Bowl",
+                "items": [
+                    {"name": "Greek Yogurt", "quantity": 1, "unit": "cup", "calories": 180, "protein": 20, "carbs": 8, "fat": 4},
+                ],
+            },
+            consumed_at=datetime(2026, 4, 29, 12, 45, tzinfo=timezone.utc),
+            db=s,
+        )
+        edited = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_0",
+            meal_data={
+                "meal": "Greek Yogurt Bowl",
+                "items": [
+                    {"name": "Greek Yogurt", "quantity": 1.5, "unit": "cup", "calories": 270, "protein": 30, "carbs": 12, "fat": 6},
+                ],
+            },
+            consumed_at=datetime(2026, 4, 29, 13, 30, tzinfo=timezone.utc),
+            db=s,
+        )
+
+        meals = s.exec(
+            select(Meal)
+            .where(Meal.user_id == u.id)
+            .where(Meal.meal_date == meal_date)
+            .where(Meal.meal_type == MealType.BREAKFAST)
+        ).all()
+        assert edited["id"] == initial["id"], edited
+        assert len(meals) == 1, meals
+        items = s.exec(select(MealItem).where(MealItem.meal_id == meals[0].id)).all()
+        assert len(items) == 1, items
+        assert items[0].calories == 270, items[0].calories
+        assert items[0].protein_g == 30, items[0].protein_g
+    _ok("edited meal replaces prior items without duplicate meal rows")
+
+
 def test_hydration_get_reads_requested_date() -> None:
     """Past-day hydration should be readable by explicit log_date, not
     hard-wired to today's row."""
@@ -319,6 +383,7 @@ cases = [
     test_build_nutrition_context_calls_meal_history_with_db,
     test_format_for_prompt_includes_meal_history_lines,
     test_log_meal_from_plan_persists_consumed_at,
+    test_log_meal_from_plan_replaces_edited_meal_items,
     test_hydration_get_reads_requested_date,
 ]
 
