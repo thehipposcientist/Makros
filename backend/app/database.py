@@ -188,6 +188,10 @@ def _ensure_coach_apply_state_columns() -> None:
                 "ADD COLUMN IF NOT EXISTS core_frequency_per_week INTEGER"
             ))
             conn.execute(text(
+                "ALTER TABLE user_preferences "
+                "ADD COLUMN IF NOT EXISTS injuries JSONB"
+            ))
+            conn.execute(text(
                 "ALTER TABLE user_coaching_state "
                 "ADD COLUMN IF NOT EXISTS deload_until_date DATE"
             ))

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager, Easing } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager, Easing, FlatList } from 'react-native';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -216,6 +216,140 @@ interface ExerciseLibraryItem {
   video_id?: string | null;
   movement_pattern?: string | null;
 }
+
+const ExerciseLibraryRow = React.memo(function ExerciseLibraryRow({
+  item,
+  themeColors,
+  workoutPalette,
+  onOpen,
+  onPlayVideo,
+}: {
+  item: ExerciseLibraryItem;
+  themeColors: any;
+  workoutPalette: any;
+  onOpen: (item: ExerciseLibraryItem) => void;
+  onPlayVideo: (item: ExerciseLibraryItem) => void;
+}) {
+  const thumb = exerciseThumbSmall(item as any);
+  return (
+    <TouchableOpacity
+      accessibilityRole="button"
+      accessibilityLabel={`Open ${item.name} exercise details`}
+      style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, flexDirection: 'row', gap: 12, alignItems: 'center' }]}
+      activeOpacity={0.8}
+      onPress={() => onOpen(item)}
+    >
+      {thumb ? (
+        <TouchableOpacity
+          activeOpacity={0.7}
+          onPress={(e) => {
+            e.stopPropagation();
+            onPlayVideo(item);
+          }}
+          accessibilityRole="button"
+          accessibilityLabel={`Play form video for ${item.name}`}
+        >
+          <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 2, borderColor: themeColors.border, position: 'relative' }}>
+            <Image source={{ uri: thumb }} style={{ width: 48, height: 48 }} resizeMode="cover" />
+            <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
+              <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
+                <Ionicons name="play" size={10} color="#fff" style={{ marginLeft: 1 }} />
+              </View>
+            </View>
+          </View>
+        </TouchableOpacity>
+      ) : (
+        <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: workoutPalette.soft, alignItems: 'center', justifyContent: 'center' }}>
+          <Ionicons name="barbell-outline" size={20} color={workoutPalette.strong} />
+        </View>
+      )}
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]} numberOfLines={1}>{item.name}</Text>
+        <Text style={[styles.libraryItemMeta, { color: workoutPalette.strong }]} numberOfLines={1}>
+          {humanizeToken(item.primary_muscle)}
+          {Array.isArray(item.secondary_muscles) && item.secondary_muscles.length
+            ? ` · also hits ${item.secondary_muscles.map(humanizeToken).join(', ')}`
+            : ''}
+        </Text>
+        {Array.isArray((item as any).gear) && (item as any).gear.length > 0 ? (
+          <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }} numberOfLines={1}>
+            {((item as any).gear as Array<{ name: string }>).map(g => g.name).slice(0, 2).join(', ')}
+          </Text>
+        ) : null}
+      </View>
+      <Ionicons name="chevron-forward" size={16} color={themeColors.textMuted} />
+    </TouchableOpacity>
+  );
+});
+
+const MuscleLibraryRow = React.memo(function MuscleLibraryRow({
+  muscle,
+  themeColors,
+  muscleFatigue,
+  onOpen,
+}: {
+  muscle: MuscleEntry;
+  themeColors: any;
+  muscleFatigue?: Record<string, number>;
+  onOpen: (muscle: MuscleEntry) => void;
+}) {
+  const fatigueKeyFor: Record<string, string> = {
+    lats: 'back',
+    traps: 'back',
+    deltoids: 'shoulders',
+  };
+  const fatigueKey = fatigueKeyFor[muscle.id] ?? muscle.id;
+  const fatigueRaw = muscleFatigue?.[fatigueKey];
+  const recovery = fatigueRaw == null
+    ? null
+    : Math.max(0, Math.min(100, Math.round(100 - fatigueRaw * 100)));
+  const fatigueLabel = recovery == null ? null
+    : recovery >= 70 ? 'Fresh'
+    : recovery >= 40 ? 'Moderate'
+    : 'Fatigued';
+  const fatigueColor = recovery == null ? themeColors.textMuted
+    : recovery >= 70 ? themeColors.success
+    : recovery >= 40 ? themeColors.warning
+    : themeColors.error;
+
+  return (
+    <TouchableOpacity
+      accessibilityRole="button"
+      accessibilityLabel={`Open ${muscle.commonName} muscle guide`}
+      style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}
+      activeOpacity={0.8}
+      onPress={() => onOpen(muscle)}
+    >
+      <View style={styles.muscleItemRow}>
+        <View style={[styles.muscleItemEmoji, { backgroundColor: muscle.tagColor + '18', borderRadius: 14, width: 52, height: 52 }]}>
+          {muscle.emoji ? (
+            <Text style={{ fontSize: 28 }}>{muscle.emoji}</Text>
+          ) : (
+            <Ionicons name={(muscle.icon || 'body-outline') as any} size={24} color={muscle.tagColor} />
+          )}
+        </View>
+        <View style={styles.muscleItemBody}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Text style={[styles.libraryItemName, { color: themeColors.textPrimary, flexShrink: 1 }]} numberOfLines={1}>
+              {muscle.commonName}
+            </Text>
+            {fatigueLabel && (
+              <View style={{ paddingHorizontal: 7, paddingVertical: 2, borderRadius: 8, backgroundColor: fatigueColor + '22' }}>
+                <Text style={{ fontSize: 10, fontWeight: '800', color: fatigueColor, letterSpacing: 0.4 }}>
+                  {fatigueLabel.toUpperCase()}
+                </Text>
+              </View>
+            )}
+          </View>
+          <Text style={[styles.libraryItemMeta, { color: muscle.tagColor }]} numberOfLines={1}>
+            {muscle.name} · {muscle.bodyRegion}
+          </Text>
+          <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]} numberOfLines={2}>{muscle.shortDescription}</Text>
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+});
 
 const DAY_NAMES   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1276,6 +1410,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const renderedWorkoutSubTab = useDeferredValue(workoutSubTab);
   const [workoutHistoryList, setWorkoutHistoryList] = useState<WorkoutSession[]>([]);
   const [workoutHistorySummaries, setWorkoutHistorySummaries] = useState<any[]>([]);
+  const workoutHistoryBundlePromiseRef = useRef<Promise<{
+    history: WorkoutSession[];
+    summaries: any[];
+    preserved: Awaited<ReturnType<typeof loadPreservedCompletedWorkouts>>;
+  }> | null>(null);
+  const loadWorkoutHistoryBundle = useCallback(() => {
+    if (workoutHistoryBundlePromiseRef.current) return workoutHistoryBundlePromiseRef.current;
+    const promise = Promise.all([
+      loadWorkoutHistory(),
+      loadWorkoutSummaries(),
+      loadPreservedCompletedWorkouts(),
+    ])
+      .then(([history, summaries, preserved]) => ({ history, summaries, preserved }))
+      .finally(() => {
+        workoutHistoryBundlePromiseRef.current = null;
+      });
+    workoutHistoryBundlePromiseRef.current = promise;
+    return promise;
+  }, []);
   const [expandedWorkoutHistoryId, setExpandedWorkoutHistoryId] = useState<string | null>(null);
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros' | 'history'>('plan');
   const [viewingFriend, setViewingFriend] = useState<import('../services/api').SocialDigestFriend | null>(null);
@@ -1881,10 +2034,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // finish + save). Also pulls workout summaries so session cards can
   // show motivation / achievements / feedback like the old Progress tab.
   useEffect(() => {
-    Promise.all([loadWorkoutHistory(), loadWorkoutSummaries()])
-      .then(([h, s]) => { setWorkoutHistoryList(h); setWorkoutHistorySummaries(s); })
+    loadWorkoutHistoryBundle()
+      .then(({ history, summaries }) => { setWorkoutHistoryList(history); setWorkoutHistorySummaries(summaries); })
       .catch(() => {});
-  }, [planRefreshKey]);
+  }, [loadWorkoutHistoryBundle, planRefreshKey]);
 
   // Library sub-tab state sync. When the user leaves the Workout tab
   // (bottom tab change) while parked on Library and later returns,
@@ -3110,8 +3263,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setSkippedDates(skipped);
     setCheckedMealsByDate(checkMap);
 
-    // Load skip reasons + completed dates from local history
-    const history = await loadWorkoutHistory();
+    // Load skip reasons, completed dates, summaries, and preserved
+    // completions through one shared in-flight read so mount effects do not
+    // parse the same AsyncStorage blobs several times.
+    const { history, summaries, preserved } = await loadWorkoutHistoryBundle();
     const completed = new Set<string>();
     for (const s of history) {
       if (s.skipped && s.skipReason && !reasonMap[s.date]) reasonMap[s.date] = s.skipReason;
@@ -3148,12 +3303,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         .catch(() => undefined);
     }
 
-    // Load today's stored workout summary
-    const summaries = await loadWorkoutSummaries();
     const todaySummaryEntry = summaries.find(s => s.date.startsWith(today)) ?? null;
     setTodaySummary(todaySummaryEntry);
 
-    setPreservedWorkouts(await loadPreservedCompletedWorkouts());
+    setPreservedWorkouts(preserved);
 
     if (authToken) {
       try {
@@ -3865,13 +4018,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     Alert.alert('Saved', `${ex.name} added to your exercise library.`);
   }, [userProfile, onProfileUpdate]);
 
-  const exerciseMuscleOptions = Array.from(
+  const exerciseMuscleOptions = useMemo(() => Array.from(
     new Set(exerciseLibrary.map((item) => item.primary_muscle).filter(Boolean) as string[])
-  ).sort((a, b) => humanizeToken(a).localeCompare(humanizeToken(b)));
+  ).sort((a, b) => humanizeToken(a).localeCompare(humanizeToken(b))), [exerciseLibrary]);
 
-  const exerciseEquipmentOptions = Array.from(
+  const exerciseEquipmentOptions = useMemo(() => Array.from(
     new Set(exerciseLibrary.map((item) => item.equipment).filter(Boolean) as string[])
-  ).sort((a, b) => humanizeToken(a).localeCompare(humanizeToken(b)));
+  ).sort((a, b) => humanizeToken(a).localeCompare(humanizeToken(b))), [exerciseLibrary]);
 
   const filteredExerciseLibrary = useMemo(() => exerciseLibrary.filter((item) => {
     const search = deferredExerciseSearch.trim().toLowerCase();
@@ -5260,6 +5413,38 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     },
     [],
   );
+  const openLibraryExercise = useCallback((item: ExerciseLibraryItem) => {
+    setSelectedExercise(item);
+  }, []);
+  const playLibraryExerciseVideo = useCallback((item: ExerciseLibraryItem) => {
+    openExerciseVideo(item.name, {
+      equipment: (item as any).gear?.[0]?.name ?? (item as any).equipment ?? null,
+      primary_muscle: (item as any).primary_muscle ?? null,
+      movement_pattern: (item as any).movement_pattern ?? null,
+    });
+  }, [openExerciseVideo]);
+  const openLibraryMuscle = useCallback((muscle: MuscleEntry) => {
+    setSelectedMuscle(muscle);
+  }, []);
+  const renderExerciseLibraryItem = useCallback(({ item }: { item: ExerciseLibraryItem }) => (
+    <ExerciseLibraryRow
+      item={item}
+      themeColors={themeColors}
+      workoutPalette={workoutPalette}
+      onOpen={openLibraryExercise}
+      onPlayVideo={playLibraryExerciseVideo}
+    />
+  ), [openLibraryExercise, playLibraryExerciseVideo, themeColors, workoutPalette]);
+  const renderMuscleLibraryItem = useCallback(({ item }: { item: MuscleEntry }) => (
+    <MuscleLibraryRow
+      muscle={item}
+      themeColors={themeColors}
+      muscleFatigue={readinessScore?.muscleFatigue}
+      onOpen={openLibraryMuscle}
+    />
+  ), [openLibraryMuscle, readinessScore?.muscleFatigue, themeColors]);
+  const exerciseLibraryKeyExtractor = useCallback((item: ExerciseLibraryItem) => String(item.id ?? item.name), []);
+  const muscleLibraryKeyExtractor = useCallback((item: MuscleEntry) => item.id, []);
 
   // MUST be called BEFORE any conditional return — hooks have to fire
   // in the same order every render. The previous version sat below
@@ -8809,313 +8994,196 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               exerciseLibraryLoading ? (
                 <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
               ) : (
-                <ScrollView contentContainerStyle={styles.libraryList}>
-                  <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 18 }}>
-                    <SearchInput
-                      containerStyle={{ flex: 1 }}
-                      value={exerciseSearch}
-                      onChangeText={(t) => { setExerciseSearch(t); if (!t) setAiExerciseResults([]); }}
-                      placeholder="Search exercises, muscles, or equipment"
-                      placeholderTextColor={themeColors.textMuted}
-                      style={[styles.librarySearchInput, { marginBottom: 0, backgroundColor: themeColors.background, borderColor: themeColors.border, color: themeColors.textPrimary }]}
-                      returnKeyType="search"
-                      onSubmitEditing={handleAiExerciseSearch}
-                    />
-                    {exerciseSearch.trim().length > 1 && authToken && (
-                      <TouchableOpacity
-                        style={{ backgroundColor: workoutPalette.strong, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, opacity: aiExerciseLoading ? 0.6 : 1 }}
-                        onPress={handleAiExerciseSearch}
-                        disabled={aiExerciseLoading}>
-                        {aiExerciseLoading
-                          ? <ActivityIndicator size="small" color="#fff" />
-                          : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>AI Search</Text>}
-                      </TouchableOpacity>
-                    )}
-                  </View>
+                <FlatList
+                  style={styles.libraryVirtualList}
+                  contentContainerStyle={styles.libraryList}
+                  data={filteredExerciseLibrary}
+                  keyExtractor={exerciseLibraryKeyExtractor}
+                  renderItem={renderExerciseLibraryItem}
+                  keyboardShouldPersistTaps="handled"
+                  initialNumToRender={14}
+                  maxToRenderPerBatch={10}
+                  windowSize={7}
+                  removeClippedSubviews={Platform.OS !== 'web'}
+                  ListHeaderComponent={(
+                    <>
+                      <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 18 }}>
+                        <SearchInput
+                          containerStyle={{ flex: 1 }}
+                          value={exerciseSearch}
+                          onChangeText={(t) => { setExerciseSearch(t); if (!t) setAiExerciseResults([]); }}
+                          placeholder="Search exercises, muscles, or equipment"
+                          placeholderTextColor={themeColors.textMuted}
+                          style={[styles.librarySearchInput, { marginBottom: 0, backgroundColor: themeColors.background, borderColor: themeColors.border, color: themeColors.textPrimary }]}
+                          returnKeyType="search"
+                          onSubmitEditing={handleAiExerciseSearch}
+                        />
+                        {exerciseSearch.trim().length > 1 && authToken && (
+                          <TouchableOpacity
+                            style={{ backgroundColor: workoutPalette.strong, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, opacity: aiExerciseLoading ? 0.6 : 1 }}
+                            onPress={handleAiExerciseSearch}
+                            disabled={aiExerciseLoading}>
+                            {aiExerciseLoading
+                              ? <ActivityIndicator size="small" color="#fff" />
+                              : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>AI Search</Text>}
+                          </TouchableOpacity>
+                        )}
+                      </View>
 
-                  {/* If the local library has nothing, nudge the user toward
-                      AI search — same pattern as the food search in
-                      MealEditModal. */}
-                  {exerciseSearch.trim().length > 1
-                    && filteredExerciseLibrary.length === 0
-                    && aiExerciseResults.length === 0
-                    && !aiExerciseLoading
-                    && authToken && (
-                    <TouchableOpacity
-                      style={{ backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: workoutPalette.strong + '55', borderRadius: 10, padding: 14, marginBottom: 12, alignItems: 'center' }}
-                      onPress={handleAiExerciseSearch}>
-                      <Text style={{ color: themeColors.textPrimary, fontSize: 14, fontWeight: '600' }}>
-                        No local matches for "{exerciseSearch.trim()}"
-                      </Text>
-                      <Text style={{ color: workoutPalette.strong, fontSize: 13, fontWeight: '700', marginTop: 4 }}>
-                        Tap AI Search to find it →
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-
-                  {aiExerciseResults.length > 0 && (
-                    <View style={{ marginBottom: 16 }}>
-                      <Text style={[styles.libraryItemName, { color: themeColors.textMuted, fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }]}>AI Results</Text>
-                      {aiExerciseResults.map((ex, i) => {
-                        const alreadySaved = (userProfile?.customExercises ?? []).some(c => c.name.toLowerCase() === ex.name.toLowerCase());
-                        return (
-                          <View key={`${ex.name}-${i}`} style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: workoutPalette.strong + '55', borderWidth: 1.5 }]}>
-                            <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{ex.name}</Text>
-                            <Text style={[styles.libraryItemMeta, { color: workoutPalette.strong }]}>
-                              {ex.primary_muscle} · {ex.equipment} · {ex.sets}×{ex.reps}
-                            </Text>
-                            <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]}>{ex.why}</Text>
-                            {ex.form_cues?.length > 0 && (
-                              <Text style={[styles.libraryItemDesc, { color: themeColors.textMuted, marginTop: 4, fontSize: 12 }]}>
-                                Cues: {ex.form_cues.join(' · ')}
-                              </Text>
-                            )}
-                            <TouchableOpacity
-                              style={{ marginTop: 10, alignSelf: 'flex-start', backgroundColor: alreadySaved ? themeColors.border : workoutPalette.strong, paddingVertical: 8, paddingHorizontal: 14, borderRadius: 8 }}
-                              onPress={() => handleSaveAiExerciseToLibrary(ex)}
-                              disabled={alreadySaved}>
-                              <Text style={{ color: alreadySaved ? themeColors.textMuted : '#fff', fontWeight: '700', fontSize: 13 }}>
-                                {alreadySaved ? '✓ In Library' : '+ Save to Library'}
-                              </Text>
-                            </TouchableOpacity>
-                          </View>
-                        );
-                      })}
-                    </View>
-                  )}
-
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={styles.libraryFilterRow}>
-                    <TouchableOpacity
-                      accessibilityRole="button"
-                      accessibilityLabel="Show all muscle filters"
-                      style={[styles.libraryFilterChip, exerciseMuscleFilter === 'all' && styles.libraryFilterChipActive]}
-                      onPress={() => setExerciseMuscleFilter('all')}>
-                      <Text style={[styles.libraryFilterText, exerciseMuscleFilter === 'all' && styles.libraryFilterTextActive]}>All Muscles</Text>
-                    </TouchableOpacity>
-                    {exerciseMuscleOptions.map((muscle) => (
-                      <TouchableOpacity
-                        key={muscle}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Filter exercises by ${humanizeToken(muscle)}`}
-                        style={[styles.libraryFilterChip, exerciseMuscleFilter === muscle && styles.libraryFilterChipActive]}
-                        onPress={() => setExerciseMuscleFilter(muscle)}>
-                        <Text style={[styles.libraryFilterText, exerciseMuscleFilter === muscle && styles.libraryFilterTextActive]}>{humanizeToken(muscle)}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </ScrollView>
-
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={styles.libraryFilterRow}>
-                    <TouchableOpacity
-                      accessibilityRole="button"
-                      accessibilityLabel="Show all equipment filters"
-                      style={[styles.libraryFilterChip, exerciseEquipmentFilter === 'all' && styles.libraryFilterChipActive]}
-                      onPress={() => setExerciseEquipmentFilter('all')}>
-                      <Text style={[styles.libraryFilterText, exerciseEquipmentFilter === 'all' && styles.libraryFilterTextActive]}>All Equipment</Text>
-                    </TouchableOpacity>
-                    {exerciseEquipmentOptions.map((equipment) => (
-                      <TouchableOpacity
-                        key={equipment}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Filter exercises by ${humanizeToken(equipment)}`}
-                        style={[styles.libraryFilterChip, exerciseEquipmentFilter === equipment && styles.libraryFilterChipActive]}
-                        onPress={() => setExerciseEquipmentFilter(equipment)}>
-                        <Text style={[styles.libraryFilterText, exerciseEquipmentFilter === equipment && styles.libraryFilterTextActive]}>{humanizeToken(equipment)}</Text>
-                      </TouchableOpacity>
-                    ))}
-                  </ScrollView>
-
-                  <View style={styles.libraryResultRow}>
-                    <Text style={[styles.libraryResultText, { color: themeColors.textMuted }]}>
-                      {filteredExerciseLibrary.length} result{filteredExerciseLibrary.length === 1 ? '' : 's'}
-                      {exerciseMuscleFilter !== 'all' ? ` · ${humanizeToken(exerciseMuscleFilter)}` : ''}
-                      {exerciseEquipmentFilter !== 'all' ? ` · ${humanizeToken(exerciseEquipmentFilter)}` : ''}
-                    </Text>
-                    {(exerciseSearch || exerciseMuscleFilter !== 'all' || exerciseEquipmentFilter !== 'all') && (
-                      <TouchableOpacity
-                        accessibilityRole="button"
-                        accessibilityLabel="Clear exercise search and filters"
-                        onPress={() => {
-                          setExerciseSearch('');
-                          setExerciseMuscleFilter('all');
-                          setExerciseEquipmentFilter('all');
-                          setAiExerciseResults([]);
-                        }}>
-                        <Text style={[styles.libraryResultClear, { color: workoutPalette.strong }]}>Clear</Text>
-                      </TouchableOpacity>
-                    )}
-                  </View>
-
-                  {filteredExerciseLibrary.length === 0 ? (
-                    <Text style={[styles.libraryEmptyText, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textMuted }]}>No exercises match the current search and filters.</Text>
-                  ) : filteredExerciseLibrary.map((ex) => {
-                    // YouTube thumbnail when the exercise has a curated
-                    // video_id; otherwise placeholder icon. wger static
-                    // images are no longer used — consistent video-tile
-                    // look across every surface that shows an exercise.
-                    const _thumb = exerciseThumbSmall(ex as any);
-                    return (
-                    <TouchableOpacity
-                      key={String(ex.id ?? ex.name)}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Open ${ex.name} exercise details`}
-                      style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, flexDirection: 'row', gap: 12, alignItems: 'center' }]}
-                      activeOpacity={0.8}
-                      onPress={() => setSelectedExercise(ex)}>
-                      {_thumb ? (
-                        /* Thumbnail is a separate tap target — tapping
-                           it launches the form-video modal directly so
-                           users can preview without first opening the
-                           detail page. */
+                      {exerciseSearch.trim().length > 1
+                        && filteredExerciseLibrary.length === 0
+                        && aiExerciseResults.length === 0
+                        && !aiExerciseLoading
+                        && authToken && (
                         <TouchableOpacity
-                          activeOpacity={0.7}
-                          onPress={(e) => {
-                            e.stopPropagation();
-                            openExerciseVideo(ex.name, {
-                              equipment: (ex as any).gear?.[0]?.name ?? (ex as any).equipment ?? null,
-                              primary_muscle: (ex as any).primary_muscle ?? null,
-                              movement_pattern: (ex as any).movement_pattern ?? null,
-                            });
-                          }}
-                          accessibilityRole="button"
-                          accessibilityLabel={`Play form video for ${ex.name}`}
-                        >
-                          <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: themeColors.surface, overflow: 'hidden', borderWidth: 2, borderColor: themeColors.border, position: 'relative' }}>
-                            <Image source={{ uri: _thumb }} style={{ width: 48, height: 48 }} resizeMode="cover" />
-                            <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' }}>
-                              <View style={{ width: 18, height: 18, borderRadius: 9, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center' }}>
-                                <Ionicons name="play" size={10} color="#fff" style={{ marginLeft: 1 }} />
-                              </View>
-                            </View>
-                          </View>
+                          style={{ backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: workoutPalette.strong + '55', borderRadius: 10, padding: 14, marginBottom: 12, alignItems: 'center' }}
+                          onPress={handleAiExerciseSearch}>
+                          <Text style={{ color: themeColors.textPrimary, fontSize: 14, fontWeight: '600' }}>
+                            No local matches for "{exerciseSearch.trim()}"
+                          </Text>
+                          <Text style={{ color: workoutPalette.strong, fontSize: 13, fontWeight: '700', marginTop: 4 }}>
+                            Tap AI Search to find it →
+                          </Text>
                         </TouchableOpacity>
-                      ) : (
-                        <View style={{ width: 48, height: 48, borderRadius: 10, backgroundColor: workoutPalette.soft, alignItems: 'center', justifyContent: 'center' }}>
-                          <Ionicons name="barbell-outline" size={20} color={workoutPalette.strong} />
+                      )}
+
+                      {aiExerciseResults.length > 0 && (
+                        <View style={{ marginBottom: 16 }}>
+                          <Text style={[styles.libraryItemName, { color: themeColors.textMuted, fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }]}>AI Results</Text>
+                          {aiExerciseResults.map((ex, i) => {
+                            const alreadySaved = (userProfile?.customExercises ?? []).some(c => c.name.toLowerCase() === ex.name.toLowerCase());
+                            return (
+                              <View key={`${ex.name}-${i}`} style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: workoutPalette.strong + '55', borderWidth: 1.5 }]}>
+                                <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]}>{ex.name}</Text>
+                                <Text style={[styles.libraryItemMeta, { color: workoutPalette.strong }]}>
+                                  {ex.primary_muscle} · {ex.equipment} · {ex.sets}x{ex.reps}
+                                </Text>
+                                <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]}>{ex.why}</Text>
+                                {ex.form_cues?.length > 0 && (
+                                  <Text style={[styles.libraryItemDesc, { color: themeColors.textMuted, marginTop: 4, fontSize: 12 }]}>
+                                    Cues: {ex.form_cues.join(' · ')}
+                                  </Text>
+                                )}
+                                <TouchableOpacity
+                                  style={{ marginTop: 10, alignSelf: 'flex-start', backgroundColor: alreadySaved ? themeColors.border : workoutPalette.strong, paddingVertical: 8, paddingHorizontal: 14, borderRadius: 8 }}
+                                  onPress={() => handleSaveAiExerciseToLibrary(ex)}
+                                  disabled={alreadySaved}>
+                                  <Text style={{ color: alreadySaved ? themeColors.textMuted : '#fff', fontWeight: '700', fontSize: 13 }}>
+                                    {alreadySaved ? '✓ In Library' : '+ Save to Library'}
+                                  </Text>
+                                </TouchableOpacity>
+                              </View>
+                            );
+                          })}
                         </View>
                       )}
-                      <View style={{ flex: 1 }}>
-                        <Text style={[styles.libraryItemName, { color: themeColors.textPrimary }]} numberOfLines={1}>{ex.name}</Text>
-                        <Text style={[styles.libraryItemMeta, { color: workoutPalette.strong }]} numberOfLines={1}>
-                          {humanizeToken(ex.primary_muscle)}
-                          {Array.isArray(ex.secondary_muscles) && ex.secondary_muscles.length
-                            ? ` · also hits ${ex.secondary_muscles.map(humanizeToken).join(', ')}`
-                            : ''}
+
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={styles.libraryFilterRow}>
+                        <TouchableOpacity
+                          accessibilityRole="button"
+                          accessibilityLabel="Show all muscle filters"
+                          style={[styles.libraryFilterChip, exerciseMuscleFilter === 'all' && styles.libraryFilterChipActive]}
+                          onPress={() => setExerciseMuscleFilter('all')}>
+                          <Text style={[styles.libraryFilterText, exerciseMuscleFilter === 'all' && styles.libraryFilterTextActive]}>All Muscles</Text>
+                        </TouchableOpacity>
+                        {exerciseMuscleOptions.map((muscle) => (
+                          <TouchableOpacity
+                            key={muscle}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Filter exercises by ${humanizeToken(muscle)}`}
+                            style={[styles.libraryFilterChip, exerciseMuscleFilter === muscle && styles.libraryFilterChipActive]}
+                            onPress={() => setExerciseMuscleFilter(muscle)}>
+                            <Text style={[styles.libraryFilterText, exerciseMuscleFilter === muscle && styles.libraryFilterTextActive]}>{humanizeToken(muscle)}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={styles.libraryFilterRow}>
+                        <TouchableOpacity
+                          accessibilityRole="button"
+                          accessibilityLabel="Show all equipment filters"
+                          style={[styles.libraryFilterChip, exerciseEquipmentFilter === 'all' && styles.libraryFilterChipActive]}
+                          onPress={() => setExerciseEquipmentFilter('all')}>
+                          <Text style={[styles.libraryFilterText, exerciseEquipmentFilter === 'all' && styles.libraryFilterTextActive]}>All Equipment</Text>
+                        </TouchableOpacity>
+                        {exerciseEquipmentOptions.map((equipment) => (
+                          <TouchableOpacity
+                            key={equipment}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Filter exercises by ${humanizeToken(equipment)}`}
+                            style={[styles.libraryFilterChip, exerciseEquipmentFilter === equipment && styles.libraryFilterChipActive]}
+                            onPress={() => setExerciseEquipmentFilter(equipment)}>
+                            <Text style={[styles.libraryFilterText, exerciseEquipmentFilter === equipment && styles.libraryFilterTextActive]}>{humanizeToken(equipment)}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </ScrollView>
+
+                      <View style={styles.libraryResultRow}>
+                        <Text style={[styles.libraryResultText, { color: themeColors.textMuted }]}>
+                          {filteredExerciseLibrary.length} result{filteredExerciseLibrary.length === 1 ? '' : 's'}
+                          {exerciseMuscleFilter !== 'all' ? ` · ${humanizeToken(exerciseMuscleFilter)}` : ''}
+                          {exerciseEquipmentFilter !== 'all' ? ` · ${humanizeToken(exerciseEquipmentFilter)}` : ''}
                         </Text>
-                        {/* Equipment (concrete gear only, no "home"
-                            bucket). Kept small and only shown when the
-                            row has space — library feels like a library,
-                            not a YouTube results page. */}
-                        {(() => {
-                          const gear = (ex as any).gear as Array<{ name: string }> | undefined;
-                          if (!gear || gear.length === 0) return null;
-                          return (
-                            <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }} numberOfLines={1}>
-                              {gear.map(g => g.name).slice(0, 2).join(', ')}
-                            </Text>
-                          );
-                        })()}
+                        {(exerciseSearch || exerciseMuscleFilter !== 'all' || exerciseEquipmentFilter !== 'all') && (
+                          <TouchableOpacity
+                            accessibilityRole="button"
+                            accessibilityLabel="Clear exercise search and filters"
+                            onPress={() => {
+                              setExerciseSearch('');
+                              setExerciseMuscleFilter('all');
+                              setExerciseEquipmentFilter('all');
+                              setAiExerciseResults([]);
+                            }}>
+                            <Text style={[styles.libraryResultClear, { color: workoutPalette.strong }]}>Clear</Text>
+                          </TouchableOpacity>
+                        )}
                       </View>
-                      <Ionicons name="chevron-forward" size={16} color={themeColors.textMuted} />
-                    </TouchableOpacity>
-                    );
-                  })}
-                </ScrollView>
+                    </>
+                  )}
+                  ListEmptyComponent={(
+                    <Text style={[styles.libraryEmptyText, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textMuted }]}>No exercises match the current search and filters.</Text>
+                  )}
+                />
               )
 
             /* ── MUSCLE LIST ──────────────────────────────────────────────────── */
             ) : (
-              <ScrollView contentContainerStyle={styles.libraryList}>
-                {/* Region filter */}
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
-                  {['all', 'Arms', 'Chest', 'Back', 'Shoulders', 'Legs', 'Glutes', 'Core'].map((region) => {
-                    const active = muscleRegionFilter === region;
-                    return (
-                      <TouchableOpacity
-                        key={region}
-                        accessibilityRole="button"
-                        accessibilityLabel={`Filter muscles by ${region === 'all' ? 'all regions' : region}`}
-                        style={[styles.libraryFilterChip, active && { backgroundColor: aiPalette.strong, borderColor: aiPalette.strong }]}
-                        onPress={() => setMuscleRegionFilter(region)}>
-                        <Text style={[styles.libraryFilterText, active && { color: '#FFFFFF' }]}>
-                          {region === 'all' ? 'All Muscles' : region}
-                        </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </ScrollView>
-
-                <Text style={[styles.libraryResultText, { color: themeColors.textMuted, marginBottom: 8 }]}>
-                  {filteredMuscleLibrary.length} muscle{filteredMuscleLibrary.length === 1 ? '' : 's'}
-                </Text>
-
-                {filteredMuscleLibrary.map((muscle) => {
-                    // Map library IDs to backend fatigue keys. Library
-                    // splits the back into lats/traps and shoulders into
-                    // deltoids; the fatigue API uses coarser buckets.
-                    const fatigueKeyFor: Record<string, string> = {
-                      lats: 'back', traps: 'back', deltoids: 'shoulders',
-                    };
-                    const fatigueKey = fatigueKeyFor[muscle.id] ?? muscle.id;
-                    const fatigueRaw = readinessScore?.muscleFatigue?.[fatigueKey];
-                    const recovery = fatigueRaw == null
-                      ? null
-                      : Math.max(0, Math.min(100, Math.round(100 - fatigueRaw * 100)));
-                    const fatigueLabel = recovery == null ? null
-                      : recovery >= 70 ? 'Fresh'
-                      : recovery >= 40 ? 'Moderate'
-                      : 'Fatigued';
-                    const fatigueColor = recovery == null ? themeColors.textMuted
-                      : recovery >= 70 ? themeColors.success
-                      : recovery >= 40 ? themeColors.warning
-                      : themeColors.error;
-                    return (
-                    <TouchableOpacity
-                      key={muscle.id}
-                      accessibilityRole="button"
-                      accessibilityLabel={`Open ${muscle.commonName} muscle guide`}
-                      style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}
-                      activeOpacity={0.8}
-                      onPress={() => setSelectedMuscle(muscle)}>
-                      <View style={styles.muscleItemRow}>
-                        {/* Emoji as the lead visual — bigger, more
-                            personality. Falls back to the legacy icon
-                            for any muscle whose data omits an emoji. */}
-                        <View style={[styles.muscleItemEmoji, { backgroundColor: muscle.tagColor + '18', borderRadius: 14, width: 52, height: 52 }]}>
-                          {muscle.emoji ? (
-                            <Text style={{ fontSize: 28 }}>{muscle.emoji}</Text>
-                          ) : (
-                            <Ionicons name={(muscle.icon || 'body-outline') as any} size={24} color={muscle.tagColor} />
-                          )}
-                        </View>
-                        <View style={styles.muscleItemBody}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                            <Text style={[styles.libraryItemName, { color: themeColors.textPrimary, flexShrink: 1 }]} numberOfLines={1}>
-                              {muscle.commonName}
+              <FlatList
+                style={styles.libraryVirtualList}
+                contentContainerStyle={styles.libraryList}
+                data={filteredMuscleLibrary}
+                keyExtractor={muscleLibraryKeyExtractor}
+                renderItem={renderMuscleLibraryItem}
+                initialNumToRender={12}
+                maxToRenderPerBatch={8}
+                windowSize={7}
+                removeClippedSubviews={Platform.OS !== 'web'}
+                ListHeaderComponent={(
+                  <>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
+                      {['all', 'Arms', 'Chest', 'Back', 'Shoulders', 'Legs', 'Glutes', 'Core'].map((region) => {
+                        const active = muscleRegionFilter === region;
+                        return (
+                          <TouchableOpacity
+                            key={region}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Filter muscles by ${region === 'all' ? 'all regions' : region}`}
+                            style={[styles.libraryFilterChip, active && { backgroundColor: aiPalette.strong, borderColor: aiPalette.strong }]}
+                            onPress={() => setMuscleRegionFilter(region)}>
+                            <Text style={[styles.libraryFilterText, active && { color: '#FFFFFF' }]}>
+                              {region === 'all' ? 'All Muscles' : region}
                             </Text>
-                            {/* Live fatigue pill — ties the educational
-                                page to the user's current training state.
-                                Only renders when we have real data. */}
-                            {fatigueLabel && (
-                              <View style={{
-                                paddingHorizontal: 7, paddingVertical: 2,
-                                borderRadius: 8, backgroundColor: fatigueColor + '22',
-                              }}>
-                                <Text style={{ fontSize: 10, fontWeight: '800', color: fatigueColor, letterSpacing: 0.4 }}>
-                                  {fatigueLabel.toUpperCase()}
-                                </Text>
-                              </View>
-                            )}
-                          </View>
-                          <Text style={[styles.libraryItemMeta, { color: muscle.tagColor }]} numberOfLines={1}>
-                            {muscle.name} · {muscle.bodyRegion}
-                          </Text>
-                          <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]} numberOfLines={2}>{muscle.shortDescription}</Text>
-                        </View>
-                      </View>
-                    </TouchableOpacity>
-                    );
-                  })}
-              </ScrollView>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </ScrollView>
+
+                    <Text style={[styles.libraryResultText, { color: themeColors.textMuted, marginBottom: 8 }]}>
+                      {filteredMuscleLibrary.length} muscle{filteredMuscleLibrary.length === 1 ? '' : 's'}
+                    </Text>
+                  </>
+                )}
+              />
             )}
           </View>
         </View>
@@ -12442,6 +12510,7 @@ const styles = StyleSheet.create({
   libraryHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 10 },
   libraryTitle: { fontSize: 17, fontWeight: '700', color: colors.textPrimary },
   libraryClose: { fontSize: 14, fontWeight: '700', color: colors.primary },
+  libraryVirtualList: { flex: 1 },
   libraryList: { paddingHorizontal: 16, paddingBottom: 28 },
   librarySearchInput: {
     borderWidth: 1,

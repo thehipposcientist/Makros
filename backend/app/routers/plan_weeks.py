@@ -39,6 +39,28 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/plans", tags=["plan-weeks"])
 
 
+def _active_injury_tokens(profile: object | None, prefs: object | None) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for source in (getattr(profile, "injuries", None), getattr(prefs, "injuries", None)):
+        if isinstance(source, str):
+            values = [source]
+        elif isinstance(source, list):
+            values = source
+        else:
+            values = []
+        for raw in values:
+            token = str(raw or "").strip()
+            if not token:
+                continue
+            key = token.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            tokens.append(token)
+    return tokens
+
+
 # ─── Request / Response schemas ───────────────────────────────────────────────
 
 
@@ -92,6 +114,10 @@ class PlanWeekCheckinSubmitRequest(BaseModel):
     motivation: int | None = None
     schedule_issue: bool = False
     note: str | None = None
+    overall_difficulty: str | None = None
+    biggest_blocker: str | None = None
+    pain_area: str | None = None
+    goal_q4: str | None = None
 
 
 class StartNewWeekRequest(BaseModel):
@@ -304,7 +330,7 @@ def start_new_week(
     experience = str(getattr(profile, "experience_level", "intermediate") or "intermediate")
     equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     preferred_split = getattr(prefs, "preferred_split", None) or getattr(profile, "preferred_split", None)
-    injuries = list(getattr(profile, "injuries", []) or [])
+    injuries = _active_injury_tokens(profile, prefs)
     disliked = list(getattr(prefs, "disliked_exercises", []) or [])
 
     owned_slugs = _resolve_owned_equipment_slugs(equipment)
@@ -620,6 +646,115 @@ def submit_plan_week_checkin(
         feedback_dict["schedule_issue"] = True
     if body.note:
         feedback_dict["note"] = body.note
+    structured_feedback = {}
+    if body.overall_difficulty:
+        structured_feedback["overall_difficulty"] = body.overall_difficulty
+    if body.biggest_blocker:
+        structured_feedback["biggest_blocker"] = body.biggest_blocker
+    if body.pain_area:
+        structured_feedback["pain_area"] = body.pain_area
+    if body.goal_q4:
+        structured_feedback["goal_q4"] = body.goal_q4
+    if structured_feedback:
+        feedback_dict["structured_weekly_answers"] = structured_feedback
+
+    structured_adjustment = None
+    structured_applied: list[dict] = []
+    if structured_feedback:
+        try:
+            from app.models import UserCoachingState, UserPreferences
+            from app.services.coach.apply_action import apply_action
+            from app.services.workout.week_checkin_logic import (
+                WeeklyCheckinAnswers,
+                compute_checkin_summary_from_review,
+                compute_checkin_recommendations,
+            )
+
+            summary = compute_checkin_summary_from_review(review)
+            answers = WeeklyCheckinAnswers(
+                overall_difficulty=body.overall_difficulty,
+                biggest_blocker=body.biggest_blocker,
+                pain_area=body.pain_area,
+                goal_q4=body.goal_q4,
+                user_decision="apply_recommendations",
+            )
+            goal_for_adjustment = str(getattr(review, "goal", None) or pw.goal or "body_recomp")
+            adj = compute_checkin_recommendations(summary, answers, goal_for_adjustment)
+            structured_adjustment = adj.to_dict()
+
+            if adj.volume_adjustment_pct != 0:
+                coaching = db.exec(
+                    select(UserCoachingState).where(UserCoachingState.user_id == current_user.id)
+                ).first()
+                if not coaching:
+                    coaching = UserCoachingState(user_id=current_user.id)
+                coaching.volume_adjustment_pct = max(-30, min(15, adj.volume_adjustment_pct))
+                coaching.updated_at = datetime.now(timezone.utc)
+                db.add(coaching)
+                structured_applied.append({
+                    "type": "volume_adjustment",
+                    "summary": f"Volume {coaching.volume_adjustment_pct:+d}% next week",
+                })
+
+            for action in adj.action_list:
+                if action.get("type") in ("noop", "descriptive_only"):
+                    continue
+                result = apply_action(db, current_user.id, action)
+                if result.applied:
+                    structured_applied.append({
+                        "type": action.get("type"),
+                        "summary": result.summary,
+                        "needs_regen": result.needs_regen,
+                    })
+
+            if body.pain_area and body.pain_area != "none":
+                prefs = db.exec(
+                    select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+                ).first()
+                if not prefs:
+                    prefs = UserPreferences(user_id=current_user.id)
+                existing = list(getattr(prefs, "injuries", []) or [])
+                existing_keys = {str(x).lower() for x in existing}
+                if body.pain_area.lower() not in existing_keys:
+                    existing.append(body.pain_area)
+                    prefs.injuries = existing
+                    prefs.updated_at = datetime.now(timezone.utc)
+                    db.add(prefs)
+                    structured_applied.append({
+                        "type": "injury_flag",
+                        "summary": f"Flagged {body.pain_area} for next week's planner.",
+                    })
+                db.add(CoachMemory(
+                    user_id=current_user.id,
+                    event_type="injury_flag",
+                    summary=f"Weekly check-in pain area: {body.pain_area}",
+                    details={"plan_week_id": plan_week_id, "pain_area": body.pain_area},
+                ))
+
+            if adj.preferred_cardio_modes:
+                db.add(CoachMemory(
+                    user_id=current_user.id,
+                    event_type="preferred_cardio_mode",
+                    summary=f"User prefers: {', '.join(adj.preferred_cardio_modes)}",
+                    details={"modes": adj.preferred_cardio_modes, "source": "plan_week_checkin"},
+                ))
+            if adj.muscle_priorities:
+                db.add(CoachMemory(
+                    user_id=current_user.id,
+                    event_type="muscle_priority",
+                    summary=f"Prioritize: {', '.join(adj.muscle_priorities)}",
+                    details={"muscles": adj.muscle_priorities, "source": "plan_week_checkin"},
+                ))
+            db.commit()
+        except Exception as e:
+            logger.warning(f"[week-checkin] structured adjustment failed: {e}")
+
+    if structured_feedback:
+        review_snapshot["structured_checkin"] = structured_feedback
+    if structured_adjustment:
+        review_snapshot["structured_adjustment"] = structured_adjustment
+    if structured_applied:
+        review_snapshot["structured_applied"] = structured_applied
 
     try:
         payload = build_weekly_payload(db, current_user.id, feedback_dict)
@@ -890,7 +1025,7 @@ def review_and_apply(
 
     equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     owned_slugs = _resolve_owned_equipment_slugs(equipment)
-    injuries = list(getattr(profile, "injuries", []) or [])
+    injuries = _active_injury_tokens(profile, prefs)
     disliked = list(getattr(prefs, "disliked_exercises", []) or [])
 
     muscle_fatigue = None
@@ -1146,7 +1281,7 @@ def adapt_remaining(
 
     equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     owned_slugs = _resolve_owned_equipment_slugs(equipment)
-    injuries = list(getattr(profile, "injuries", []) or [])
+    injuries = _active_injury_tokens(profile, prefs)
     disliked = list(getattr(prefs, "disliked_exercises", []) or [])
 
     muscle_fatigue = None
@@ -1251,7 +1386,7 @@ def regenerate_remaining(
     new_split = body.new_preferred_split or pw.preferred_split
     equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     owned_slugs = _resolve_owned_equipment_slugs(equipment)
-    injuries = list(getattr(profile, "injuries", []) or [])
+    injuries = _active_injury_tokens(profile, prefs)
     disliked = list(getattr(prefs, "disliked_exercises", []) or [])
 
     muscle_fatigue = None

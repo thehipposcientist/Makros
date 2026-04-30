@@ -896,6 +896,17 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const renderGoalStep = () => {
     const selectedDef = PRIMARY_GOALS.find(g => g.id === selectedGoal);
+    const activeGoalCategory = selectedDef?.category ?? goalCategory(selectedGoal);
+    const launchGoalCategories = GOAL_CATEGORIES
+      .map(cat => ({ ...cat, count: LAUNCH_GOALS.filter(g => g.category === cat.id).length }))
+      .filter(cat => cat.count > 0);
+    const scrollToGoalCategory = (categoryId: string) => {
+      const idx = LAUNCH_GOALS.findIndex(g => g.category === categoryId);
+      if (idx < 0) return;
+      goalCarouselRef.current?.scrollTo({ x: idx * (screenWidth * 0.82 + 12), animated: true });
+      LayoutAnimation.configureNext({ duration: 220, update: { type: 'spring', springDamping: 0.75 } });
+      setGoalScrollIdx(idx);
+    };
 
     return (
       <View style={styles.stepContainer}>
@@ -972,11 +983,46 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           )}
         </View>
 
-        {/* Launch goals — the 8 most common. Each card shows a short
+        {/* Launch goals. Each card shows a short
             description so users can compare without tapping. Selected
             card expands to full width for the full text. */}
         <View ref={carouselSectionRef}>
         <Text style={styles.sectionHeading}>Most popular</Text>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ gap: 8, paddingRight: 20 }}
+          style={{ marginHorizontal: -20, paddingHorizontal: 20, marginBottom: 12 }}
+        >
+          {launchGoalCategories.map(cat => {
+            const active = activeGoalCategory === cat.id;
+            return (
+              <TouchableOpacity
+                key={cat.id}
+                activeOpacity={0.75}
+                onPress={() => scrollToGoalCategory(cat.id)}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 6,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: radius.full,
+                  borderWidth: 1,
+                  borderColor: active ? colors.primary : colors.border,
+                  backgroundColor: active ? colors.primary + '14' : colors.surface,
+                }}>
+                <Ionicons name={cat.icon as any} size={14} color={active ? colors.primary : colors.textMuted} />
+                <Text style={{ fontSize: 12, fontWeight: '700', color: active ? colors.primary : colors.textSecondary }}>
+                  {cat.label}
+                </Text>
+                <Text style={{ fontSize: 10, fontWeight: '800', color: active ? colors.primary : colors.textMuted }}>
+                  {cat.count}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
         {/* Horizontal carousel — each card is ~80% screen width so the next
             card peeks in from the right. Snap alignment keeps it crisp. */}
         <ScrollView
@@ -996,7 +1042,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             setGoalScrollIdx(clamped);
           }}
         >
-          {LAUNCH_GOALS.map((g, gIdx) => {
+          {LAUNCH_GOALS.map((g) => {
             const catDef = GOAL_CATEGORIES.find(c => c.id === g.category);
             const active = selectedGoal === g.id;
             return (

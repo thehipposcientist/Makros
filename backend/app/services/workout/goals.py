@@ -201,6 +201,10 @@ _LEGACY_ALIASES: dict[str, str] = {
     "gain_weight":           "muscle_gain",
     "improve_aesthetics":    "muscle_gain",
     "build_glutes":          "muscle_gain",
+    "build_upper_body":      "muscle_gain",
+    "build_lower_body":      "muscle_gain",
+    "build_arms":            "muscle_gain",
+    "build_shoulders":       "muscle_gain",
     "hypertrophy":           "muscle_gain",
     # Strength synonyms
     "build_strength":        "strength",
@@ -211,6 +215,8 @@ _LEGACY_ALIASES: dict[str, str] = {
     "improve_bench":         "strength",
     "improve_deadlift":      "strength",
     "improve_squat":         "strength",
+    "improve_ohp":           "strength",
+    "improve_pullups":       "strength",
     "functional_strength":   "strength",
     "relative_strength":     "strength",
     # Endurance synonyms — goalConfig.ts has a long list under
@@ -251,6 +257,7 @@ _LEGACY_ALIASES: dict[str, str] = {
     "longevity":             "general_health",
     "healthy_aging":         "general_health",
     "heart_health":          "general_health",
+    "travel_training":       "general_health",
 }
 
 

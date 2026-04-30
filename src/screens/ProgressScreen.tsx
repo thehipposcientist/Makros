@@ -87,24 +87,62 @@ function formatDuration(seconds: number): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-/** Returns all data points for a specific exercise across history. Includes
- *  duration metrics alongside weight/volume so cardio exercises get useful charts. */
-function buildExerciseTrend(history: WorkoutSession[], exerciseName: string) {
+type ExerciseTrendPoint = {
+  label: string;
+  bestWeight: number;
+  volume: number;
+  totalDuration: number;
+};
+
+function buildExerciseTrendMap(history: WorkoutSession[]): Record<string, ExerciseTrendPoint[]> {
+  const trendMap: Record<string, ExerciseTrendPoint[]> = {};
   const sorted = [...history].sort((a, b) => +new Date(a.date) - +new Date(b.date));
-  return sorted
-    .filter(s => s.exercises.some(e => e.name.toLowerCase() === exerciseName.toLowerCase()))
-    .slice(-10)
-    .map(s => {
-      const ex = s.exercises.find(e => e.name.toLowerCase() === exerciseName.toLowerCase())!;
-      const bestWeight = ex.sets.length ? Math.max(...ex.sets.map(set => set.weightLbs)) : 0;
-      const volume = ex.sets.reduce((sum, set) => sum + set.weightLbs * set.reps, 0);
-      const totalDuration = ex.sets.reduce((sum, set) => sum + ((set as any).durationSeconds ?? 0), 0);
-      const d = new Date(s.date);
-      return { label: `${d.getMonth() + 1}/${d.getDate()}`, bestWeight, volume, totalDuration };
-    });
+  for (const session of sorted) {
+    for (const exercise of session.exercises ?? []) {
+      const key = exercise.name?.toLowerCase();
+      if (!key) continue;
+      const bestWeight = exercise.sets.length ? Math.max(...exercise.sets.map(set => set.weightLbs)) : 0;
+      const volume = exercise.sets.reduce((sum, set) => sum + set.weightLbs * set.reps, 0);
+      const totalDuration = exercise.sets.reduce((sum, set) => sum + ((set as any).durationSeconds ?? 0), 0);
+      const d = new Date(session.date);
+      const rows = trendMap[key] ?? [];
+      rows.push({ label: `${d.getMonth() + 1}/${d.getDate()}`, bestWeight, volume, totalDuration });
+      trendMap[key] = rows.length > 10 ? rows.slice(-10) : rows;
+    }
+  }
+  return trendMap;
 }
 
 const _CARDIO_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle rope|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone.?2|tempo|boxing|kickboxing|bag.?work|shadow.?box|burpee|plank|dead hang|wall sit|hollow.?hold|farmer.?carry|suitcase carry/i;
+
+const CHART_MUSCLE_BUCKETS: { id: string; label: string; matches: (m: string) => boolean }[] = [
+  { id: 'all',       label: 'All',       matches: () => true },
+  { id: 'chest',     label: 'Chest',     matches: m => m === 'chest' },
+  { id: 'back',      label: 'Back',      matches: m => m === 'back' || m === 'lats' },
+  { id: 'shoulders', label: 'Shoulders', matches: m => m === 'shoulders' || m === 'delts' || m === 'rear_delts' },
+  { id: 'arms',      label: 'Arms',      matches: m => m === 'biceps' || m === 'triceps' },
+  { id: 'quads',     label: 'Quads',     matches: m => m === 'quads' },
+  { id: 'hamstrings',label: 'Hamstrings',matches: m => m === 'hamstrings' },
+  { id: 'glutes',    label: 'Glutes',    matches: m => m === 'glutes' },
+  { id: 'calves',    label: 'Calves',    matches: m => m === 'calves' },
+  { id: 'core',      label: 'Core',      matches: m => m === 'core' || m === 'abs' || m === 'obliques' },
+];
+
+function inferChartMuscleFromName(name: string): string {
+  const n = name.toLowerCase();
+  if (_CARDIO_EXERCISE_RE.test(n)) return 'cardio';
+  if (/bench|push.?up|chest|pec|fly/.test(n)) return 'chest';
+  if (/row|pulldown|pull.?up|chin.?up|lat|deadlift|trap/.test(n)) return 'back';
+  if (/shoulder|overhead|ohp|lateral raise|rear delt|face pull/.test(n)) return 'shoulders';
+  if (/curl|bicep/.test(n)) return 'biceps';
+  if (/tricep|dip|skull/.test(n)) return 'triceps';
+  if (/squat|leg press|lunge|split squat|step.?up|extension/.test(n)) return 'quads';
+  if (/romanian|rdl|hamstring|leg curl|good morning/.test(n)) return 'hamstrings';
+  if (/hip thrust|glute|kickback|bridge/.test(n)) return 'glutes';
+  if (/calf/.test(n)) return 'calves';
+  if (/\babs?\b|crunch|plank|\bcore\b|russian twist|leg raise|sit.?up|hollow|knee raise|woodchopper/.test(n)) return 'core';
+  return '';
+}
 
 function paceSeconds(raw: string | null): number | null {
   if (!raw) return null;
@@ -154,6 +192,236 @@ function buildCardioInsights(points: PaceHistoryPoint[]) {
   ].filter((x): x is { label: string; value: string; detail: string } => Boolean(x));
 }
 
+type ProgressMilestone = {
+  key: string;
+  title: string;
+  value: string;
+  detail: string;
+  icon: any;
+  color: string;
+};
+
+type PlateauEntry = import('../services/api').PlateauEntry;
+
+type ProgressAnalyticsItem = {
+  key: string;
+  label: string;
+  value: string;
+  detail: string;
+  icon: any;
+  color: string;
+};
+
+function buildProgressMilestones(
+  history: WorkoutSession[],
+  prs: PR[],
+  summaries: StoredWorkoutSummary[],
+  paceHistory: PaceHistoryPoint[],
+  mealAverages: { window_days: number; days_with_data: number; avg_protein_g: number } | null,
+  oneRepMaxLifts: Array<{ name: string; oneRepMaxLbs: number }>,
+): ProgressMilestone[] {
+  const now = Date.now();
+  const thirtyDaysAgo = now - 30 * 86400000;
+  const completed = history.filter(s => s.completed && !s.skipped);
+  const completedDayKeys = new Set<string>();
+  for (const session of completed) {
+    completedDayKeys.add(session.date.slice(0, 10));
+  }
+  for (const summary of summaries) {
+    completedDayKeys.add(summary.date.slice(0, 10));
+  }
+  const activeDays30 = Array.from(completedDayKeys).filter(k => +new Date(`${k}T00:00:00`) >= thirtyDaysAgo).length;
+  const recentPrs = prs.filter(pr => +new Date(pr.date) >= thirtyDaysAgo);
+  const durationSource = summaries.length > 0 ? summaries : completed;
+  const totalMinutes = Math.round(durationSource.reduce((sum, s) => sum + (s.durationSeconds ?? 0), 0) / 60);
+  const cardioMiles = paceHistory.reduce((sum, p) => sum + (p.distance ?? 0), 0);
+  const topLift = oneRepMaxLifts.reduce(
+    (best, lift) => lift.oneRepMaxLbs > (best?.oneRepMaxLbs ?? 0) ? lift : best,
+    null as { name: string; oneRepMaxLbs: number } | null,
+  );
+
+  const cards: ProgressMilestone[] = [];
+  if (activeDays30 > 0) {
+    cards.push({
+      key: 'active-days',
+      title: '30-day consistency',
+      value: `${activeDays30}`,
+      detail: `active training day${activeDays30 === 1 ? '' : 's'} logged`,
+      icon: 'calendar-outline',
+      color: '#22C55E',
+    });
+  }
+  if (recentPrs.length > 0) {
+    cards.push({
+      key: 'recent-prs',
+      title: 'PR momentum',
+      value: `${recentPrs.length}`,
+      detail: 'strength records in the last 30 days',
+      icon: 'trophy-outline',
+      color: '#F59E0B',
+    });
+  }
+  if (topLift) {
+    cards.push({
+      key: 'top-lift',
+      title: 'Top strength marker',
+      value: `${Math.round(topLift.oneRepMaxLbs)} lb`,
+      detail: `${topLift.name} estimated 1RM`,
+      icon: 'barbell-outline',
+      color: '#6366F1',
+    });
+  }
+  if (mealAverages && mealAverages.days_with_data > 0) {
+    cards.push({
+      key: 'nutrition-data',
+      title: 'Nutrition signal',
+      value: `${mealAverages.days_with_data}/${mealAverages.window_days}`,
+      detail: `${Math.round(mealAverages.avg_protein_g)}g protein/day average`,
+      icon: 'nutrition-outline',
+      color: '#14B8A6',
+    });
+  }
+  if (cardioMiles > 0) {
+    cards.push({
+      key: 'cardio-base',
+      title: 'Cardio base',
+      value: `${cardioMiles.toFixed(1)} mi`,
+      detail: `${paceHistory.length} distance-based cardio log${paceHistory.length === 1 ? '' : 's'}`,
+      icon: 'pulse-outline',
+      color: '#EF4444',
+    });
+  }
+  if (cards.length < 4 && completed.length > 0) {
+    cards.push({
+      key: 'total-workouts',
+      title: 'Workout bank',
+      value: `${completed.length}`,
+      detail: totalMinutes > 0 ? `${Math.round(totalMinutes / 60)} total hours trained` : 'completed sessions',
+      icon: 'checkmark-done-outline',
+      color: '#0EA5E9',
+    });
+  }
+  return cards.slice(0, 4);
+}
+
+function buildProgressAnalytics(
+  history: WorkoutSession[],
+  summaries: StoredWorkoutSummary[],
+  prs: PR[],
+  plateaus: PlateauEntry[],
+): ProgressAnalyticsItem[] {
+  const completed = history.filter(s => s.completed && !s.skipped);
+  const activeDayKeys = new Set<string>();
+  for (const session of completed) activeDayKeys.add(session.date.slice(0, 10));
+  for (const summary of summaries) {
+    if ((summary.totalSets ?? 0) > 0) activeDayKeys.add(summary.date.slice(0, 10));
+  }
+
+  const dayKeys = Array.from(activeDayKeys).sort();
+  let bestStreak = 0;
+  let runningStreak = 0;
+  let prevTime: number | null = null;
+  for (const key of dayKeys) {
+    const t = +new Date(`${key}T00:00:00`);
+    runningStreak = prevTime != null && Math.round((t - prevTime) / 86400000) === 1 ? runningStreak + 1 : 1;
+    bestStreak = Math.max(bestStreak, runningStreak);
+    prevTime = t;
+  }
+
+  let latestStreak = 0;
+  if (dayKeys.length > 0) {
+    const localDayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    let expected = new Date(`${dayKeys[dayKeys.length - 1]}T00:00:00`);
+    for (let i = dayKeys.length - 1; i >= 0; i--) {
+      if (dayKeys[i] !== localDayKey(expected)) break;
+      latestStreak += 1;
+      expected = new Date(+expected - 86400000);
+    }
+  }
+
+  const workRows = (summaries.length > 0
+    ? summaries.map(s => ({
+        date: s.date,
+        sets: s.totalSets ?? 0,
+        minutes: Math.round((s.durationSeconds ?? 0) / 60),
+      }))
+    : completed.map(s => ({
+        date: s.date,
+        sets: s.exercises.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0),
+        minutes: Math.round((s.durationSeconds ?? 0) / 60),
+      })))
+    .filter(row => row.sets > 0 || row.minutes > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  const rows: ProgressAnalyticsItem[] = [];
+  if (bestStreak > 0) {
+    rows.push({
+      key: 'streaks',
+      label: 'Training streaks',
+      value: `${bestStreak}d`,
+      detail: latestStreak > 1 ? `latest streak ${latestStreak} days` : `${dayKeys.length} total active days`,
+      icon: 'flame-outline',
+      color: '#F59E0B',
+    });
+  }
+
+  if (workRows.length >= 2) {
+    const recent = workRows.slice(-4);
+    const previous = workRows.slice(Math.max(0, workRows.length - 8), Math.max(0, workRows.length - 4));
+    const recentAvg = recent.reduce((sum, row) => sum + row.sets, 0) / Math.max(1, recent.length);
+    const previousAvg = previous.reduce((sum, row) => sum + row.sets, 0) / Math.max(1, previous.length);
+    const deltaPct = previous.length > 0 && previousAvg > 0 ? Math.round(((recentAvg - previousAvg) / previousAvg) * 100) : null;
+    rows.push({
+      key: 'volume-trend',
+      label: 'Volume trend',
+      value: deltaPct == null ? `${Math.round(recentAvg)} sets` : `${deltaPct >= 0 ? '+' : ''}${deltaPct}%`,
+      detail: previous.length > 0 ? 'last 4 sessions vs previous 4' : 'average sets in recent sessions',
+      icon: 'analytics-outline',
+      color: deltaPct != null && deltaPct < 0 ? '#EF4444' : '#22C55E',
+    });
+  }
+
+  const now = Date.now();
+  const thirtyDaysAgo = now - 30 * 86400000;
+  const recentPrs = prs.filter(pr => +new Date(pr.date) >= thirtyDaysAgo);
+  if (recentPrs.length > 0) {
+    rows.push({
+      key: 'recent-records',
+      label: 'Records',
+      value: `${recentPrs.length}`,
+      detail: 'PRs in the last 30 days',
+      icon: 'trophy-outline',
+      color: '#6366F1',
+    });
+  }
+
+  if (plateaus.length > 0) {
+    const deloadCount = plateaus.filter(p => p.suggestion === 'deload').length;
+    rows.push({
+      key: 'plateau-watch',
+      label: 'Plateau watch',
+      value: `${plateaus.length}`,
+      detail: deloadCount > 0 ? `${deloadCount} may need a deload` : 'exercises flat over the review window',
+      icon: 'alert-circle-outline',
+      color: '#F59E0B',
+    });
+  }
+
+  if (rows.length < 4 && completed.length > 0) {
+    const sessions30 = completed.filter(s => +new Date(s.date) >= thirtyDaysAgo).length;
+    rows.push({
+      key: 'sessions-30',
+      label: 'Sessions',
+      value: `${sessions30}`,
+      detail: 'completed in the last 30 days',
+      icon: 'checkmark-done-outline',
+      color: '#0EA5E9',
+    });
+  }
+
+  return rows.slice(0, 4);
+}
+
 /**
  * AnimatedChartBar — "draw-in" a chart bar from height 0 → target over
  * ~800ms on mount / when the target changes significantly. Staggered by
@@ -190,7 +458,7 @@ function AnimatedChartBar({
 
 export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, themeName, noHeader = false, nutritionPlan }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
-  const styles = createStyles(tc);
+  const styles = useMemo(() => createStyles(tc), [themeName]);
   const meta = useMetaData();
   const [tab, setTab] = useState<'health' | 'body' | 'prs' | 'charts'>('health');
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
@@ -253,6 +521,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [muscleBalance, setMuscleBalance] = useState<import('../services/api').MuscleBalanceResult | null>(null);
   const [muscleBalanceExpanded, setMuscleBalanceExpanded] = useState(false);
   const [nutritionGutExpanded, setNutritionGutExpanded] = useState(false);
+  const [mealInsightPatterns, setMealInsightPatterns] = useState<Record<string, any> | null>(null);
   const [weekSummaryExpanded, setWeekSummaryExpanded] = useState(false);
   const [proteinBreakdown, setProteinBreakdown] = useState<import('../services/api').ProteinBreakdown | null>(null);
   const [proteinBreakdownExpanded, setProteinBreakdownExpanded] = useState(false);
@@ -297,8 +566,77 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     return map;
   }, [history]);
 
+  const exerciseTrendMap = useMemo(() => buildExerciseTrendMap(history), [history]);
+  const chartablePrsMemo = useMemo(
+    () => prs.filter(pr => (exerciseTrendMap[pr.exerciseName.toLowerCase()] ?? []).length >= 2),
+    [exerciseTrendMap, prs],
+  );
+  const activeChartBucket = useMemo(
+    () => CHART_MUSCLE_BUCKETS.find(b => b.id === chartMuscleFilter) ?? CHART_MUSCLE_BUCKETS[0],
+    [chartMuscleFilter],
+  );
+  const filteredChartPrs = useMemo(() => chartablePrsMemo.filter(pr => {
+    if (chartMuscleFilter === 'all') return true;
+    const muscle = exerciseMuscleMap[pr.exerciseName.toLowerCase()] || inferChartMuscleFromName(pr.exerciseName);
+    return activeChartBucket.matches(muscle);
+  }), [activeChartBucket, chartMuscleFilter, chartablePrsMemo, exerciseMuscleMap]);
+  const selectedExerciseTrend = useMemo(
+    () => selectedExercise ? (exerciseTrendMap[selectedExercise.toLowerCase()] ?? []) : [],
+    [exerciseTrendMap, selectedExercise],
+  );
+  const cardioInsightsMemo = useMemo(() => buildCardioInsights(paceHistory), [paceHistory]);
+  const paceExerciseGroups = useMemo(() => {
+    const groups = new Map<string, PaceHistoryPoint[]>();
+    for (const point of paceHistory) {
+      groups.set(point.exercise, [...(groups.get(point.exercise) ?? []), point]);
+    }
+    return Array.from(groups.entries()).map(([name, points]) => {
+      const distancePoints = points.filter(p => p.distance != null);
+      const distances = distancePoints.map(p => p.distance!);
+      return {
+        name,
+        points,
+        distancePoints,
+        maxDistance: Math.max(...distances, 0.1),
+      };
+    });
+  }, [paceHistory]);
+  const cardioBestsMemo = useMemo(() => paceExerciseGroups.map(({ name, points }) => {
+    const bestDist = points.reduce((best, p) => p.distance != null && p.distance > (best ?? 0) ? p.distance : best, null as number | null);
+    const ptsWithPace = points.filter(p => p.pace);
+    const lastPace = ptsWithPace.length > 0 ? ptsWithPace[ptsWithPace.length - 1].pace : null;
+    const bestDur = points.reduce((best, p) => p.duration_seconds != null && p.duration_seconds > (best ?? 0) ? p.duration_seconds : best, null as number | null);
+    const extraKeys = Array.from(new Set(points.flatMap(p => p.metrics ? Object.keys(p.metrics) : [])));
+    const extraBests: Record<string, string> = {};
+    extraKeys.forEach(k => {
+      const vals = points.filter(p => p.metrics?.[k]).map(p => parseFloat(p.metrics![k])).filter(v => !isNaN(v));
+      if (vals.length) extraBests[k] = String(Math.max(...vals));
+    });
+    return { name, bestDist, lastPace, bestDur, extraBests, sessionCount: points.length };
+  }).filter(pr => pr.bestDist != null || pr.lastPace != null || pr.bestDur != null), [paceExerciseGroups]);
+  const progressMilestones = useMemo(
+    () => buildProgressMilestones(history, prs, summaries, paceHistory, mealAverages, oneRepMaxLifts),
+    [history, mealAverages, oneRepMaxLifts, paceHistory, prs, summaries],
+  );
+  const progressAnalytics = useMemo(
+    () => buildProgressAnalytics(history, summaries, prs, plateaus),
+    [history, plateaus, prs, summaries],
+  );
+  const prFocusOptions = useMemo(
+    () => Array.from(new Set(prs.map(p => p.sessionFocus).filter(Boolean))).sort(),
+    [prs],
+  );
+  const filteredPrsForTab = useMemo(() => {
+    const q = prSearch.trim().toLowerCase();
+    return prs.filter(pr => {
+      if (q && !pr.exerciseName.toLowerCase().includes(q)) return false;
+      if (prFocusFilter && pr.sessionFocus !== prFocusFilter) return false;
+      return true;
+    });
+  }, [prFocusFilter, prSearch, prs]);
+
   useEffect(() => {
-    if (tab === 'charts' && authToken && !paceLoadedRef.current) {
+    if ((tab === 'charts' || tab === 'prs') && authToken && !paceLoadedRef.current) {
       paceLoadedRef.current = true;
       getPaceHistory(authToken).then(r => setPaceHistory(r.points)).catch(() => {});
     }
@@ -376,6 +714,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);
       import('../services/api').then(({ getMealAverages }) =>
         getMealAverages(authToken, 14).then(setMealAverages).catch(() => null)
+      );
+      import('../services/api').then(({ getMealInsights }) =>
+        getMealInsights(authToken)
+          .then(r => setMealInsightPatterns(r.patterns ?? null))
+          .catch(() => setMealInsightPatterns(null))
       );
       import('../services/api').then(({ getMuscleBalance }) =>
         getMuscleBalance(authToken, 14).then(setMuscleBalance).catch(() => null)
@@ -695,114 +1038,48 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           ) : (
             <>
-              {/* Filter the chart exercise list by muscle bucket.
-                  Uses exerciseMuscleMap (built at component level from
-                  structured primaryMuscle fields in history) with a
-                  regex fallback for older sessions that lack the field. */}
-              {(() => {
-                // Name-based inference fallback. Order matters: more-
-                // specific patterns must come first so e.g. "leg
-                // extension" maps to quads instead of triceps, "shoulder
-                // press" maps to shoulders instead of chest.
-                // Only used when the exercise has no structured primaryMuscle field.
-                const inferMuscleFromName = (name: string): string => {
-                  const n = name.toLowerCase();
-                  if (/calf/.test(n)) return 'calves';
-                  if (/leg curl|hamstring|romanian|\brdl\b|good morning/.test(n)) return 'hamstrings';
-                  if (/glute|hip thrust|hip bridge/.test(n)) return 'glutes';
-                  if (/leg extension|squat|lunge|split squat|step.?up|leg press/.test(n)) return 'quads';
-                  if (/deadlift|\brow\b|pulldown|pull.?up|chin.?up|\blat\b|lat pull/.test(n)) return 'back';
-                  if (/lateral raise|front raise|rear delt|shoulder|overhead press|military press|arnold|upright row/.test(n)) return 'shoulders';
-                  if (/bicep|preacher|hammer curl|\bcurl\b/.test(n)) return 'biceps';
-                  if (/tricep|skull crusher|pushdown|kickback|close.?grip bench/.test(n)) return 'triceps';
-                  if (/\bdip\b/.test(n)) return 'triceps';
-                  if (/bench|chest|\bfly\b|push.?up|\bpec\b/.test(n)) return 'chest';
-                  if (/\babs?\b|crunch|plank|\bcore\b|russian twist|leg raise|sit.?up|hollow|knee raise|woodchopper/.test(n)) return 'core';
-                  return '';
-                };
-                // Prefer the structured primaryMuscle from history (via
-                // exerciseMuscleMap built at component level); only fall
-                // back to regex heuristic when the field is missing.
-                const muscleFor = (name: string): string =>
-                  exerciseMuscleMap[name.toLowerCase()] || inferMuscleFromName(name);
-
-                // Coarse muscle buckets shown as filter chips. Order
-                // is the most-likely-tapped muscles first.
-                const _MUSCLE_BUCKETS: { id: string; label: string; matches: (m: string) => boolean }[] = [
-                  { id: 'all',       label: 'All',       matches: () => true },
-                  { id: 'chest',     label: 'Chest',     matches: m => m === 'chest' },
-                  { id: 'back',      label: 'Back',      matches: m => m === 'back' || m === 'lats' },
-                  { id: 'shoulders', label: 'Shoulders', matches: m => m === 'shoulders' || m === 'delts' || m === 'rear_delts' },
-                  { id: 'arms',      label: 'Arms',      matches: m => m === 'biceps' || m === 'triceps' },
-                  { id: 'quads',     label: 'Quads',     matches: m => m === 'quads' },
-                  { id: 'hamstrings',label: 'Hamstrings',matches: m => m === 'hamstrings' },
-                  { id: 'glutes',    label: 'Glutes',    matches: m => m === 'glutes' },
-                  { id: 'calves',    label: 'Calves',    matches: m => m === 'calves' },
-                  { id: 'core',      label: 'Core',      matches: m => m === 'core' || m === 'abs' || m === 'obliques' },
-                ];
-                const activeBucket = _MUSCLE_BUCKETS.find(b => b.id === chartMuscleFilter) ?? _MUSCLE_BUCKETS[0];
-
-                // Only show PRs with enough sessions to draw a real
-                // trend (2+). buildExerciseTrend already returns the
-                // points used by the chart below — reusing it keeps the
-                // selector and the chart in sync.
-                const chartablePrs = prs.filter(pr => buildExerciseTrend(history, pr.exerciseName).length >= 2);
-                const filteredPrs = chartablePrs.filter(pr => {
-                  if (chartMuscleFilter === 'all') return true;
-                  return activeBucket.matches(muscleFor(pr.exerciseName));
-                });
-                return (
-                  <>
-                    {/* Muscle filter row */}
-                    <Text style={styles.sectionLabel}>Filter by muscle</Text>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
-                      {_MUSCLE_BUCKETS.map(b => {
-                        const active = chartMuscleFilter === b.id;
-                        return (
-                          <TouchableOpacity
-                            key={b.id}
-                            style={[styles.exerciseChip, active && styles.exerciseChipActive]}
-                            onPress={() => setChartMuscleFilter(b.id)}
-                            activeOpacity={0.75}>
-                            <Text style={[styles.exerciseChipText, active && styles.exerciseChipTextActive]}>
-                              {b.label}
-                            </Text>
-                          </TouchableOpacity>
-                        );
-                      })}
-                    </ScrollView>
-
-                    {/* Exercise selector — filtered by chosen muscle.
-                        Explicit empty state instead of silently falling
-                        back to all PRs (which made the filter look
-                        broken). */}
-                    <Text style={styles.sectionLabel}>Select exercise</Text>
-                    {filteredPrs.length === 0 ? (
-                      <Text style={{ color: tc.textMuted, fontSize: 12, marginBottom: 12 }}>
-                        {chartablePrs.length === 0
-                          ? 'Log at least 2 sessions of an exercise to chart its trend.'
-                          : `No ${activeBucket.label.toLowerCase()} exercises with enough data yet.`}
+              <Text style={styles.sectionLabel}>Filter by muscle</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+                {CHART_MUSCLE_BUCKETS.map(b => {
+                  const active = chartMuscleFilter === b.id;
+                  return (
+                    <TouchableOpacity
+                      key={b.id}
+                      style={[styles.exerciseChip, active && styles.exerciseChipActive]}
+                      onPress={() => setChartMuscleFilter(b.id)}
+                      activeOpacity={0.75}>
+                      <Text style={[styles.exerciseChipText, active && styles.exerciseChipTextActive]}>
+                        {b.label}
                       </Text>
-                    ) : (
-                      <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
-                        {filteredPrs.map((pr, i) => (
-                          <TouchableOpacity
-                            key={i}
-                            style={[styles.exerciseChip, selectedExercise === pr.exerciseName && styles.exerciseChipActive]}
-                            onPress={() => setSelectedExercise(pr.exerciseName)}>
-                            <Text style={[styles.exerciseChipText, selectedExercise === pr.exerciseName && styles.exerciseChipTextActive]}>
-                              {pr.exerciseName}
-                            </Text>
-                          </TouchableOpacity>
-                        ))}
-                      </ScrollView>
-                    )}
-                  </>
-                );
-              })()}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              <Text style={styles.sectionLabel}>Select exercise</Text>
+              {filteredChartPrs.length === 0 ? (
+                <Text style={{ color: tc.textMuted, fontSize: 12, marginBottom: 12 }}>
+                  {chartablePrsMemo.length === 0
+                    ? 'Log at least 2 sessions of an exercise to chart its trend.'
+                    : `No ${activeChartBucket.label.toLowerCase()} exercises with enough data yet.`}
+                </Text>
+              ) : (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+                  {filteredChartPrs.map((pr, i) => (
+                    <TouchableOpacity
+                      key={`${pr.exerciseName}-${i}`}
+                      style={[styles.exerciseChip, selectedExercise === pr.exerciseName && styles.exerciseChipActive]}
+                      onPress={() => setSelectedExercise(pr.exerciseName)}>
+                      <Text style={[styles.exerciseChipText, selectedExercise === pr.exerciseName && styles.exerciseChipTextActive]}>
+                        {pr.exerciseName}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
 
               {selectedExercise ? (() => {
-                const trend = buildExerciseTrend(history, selectedExercise);
+                const trend = selectedExerciseTrend;
                 if (trend.length < 2) {
                   return (
                     <View style={styles.emptyBox}>
@@ -1015,42 +1292,33 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
               )}
 
-              {paceHistory.length > 0 && (() => {
-                const cardioInsights = buildCardioInsights(paceHistory);
-                if (cardioInsights.length === 0) return null;
-                return (
-                  <View style={{ marginTop: 20 }}>
-                    <Text style={styles.sectionLabel}>Cardio Insights</Text>
-                    <View style={[styles.graphCard, { gap: 10 }]}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                        <Ionicons name="pulse-outline" size={17} color={tc.primary} />
-                        <Text style={[styles.graphTitle, { flex: 1 }]}>Endurance trend</Text>
-                      </View>
-                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                        {cardioInsights.map(item => (
-                          <View key={item.label} style={{ flexGrow: 1, flexBasis: '47%', backgroundColor: tc.surface, borderRadius: 10, borderWidth: 1, borderColor: tc.border, padding: 10 }}>
-                            <Text style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
-                            <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.4, textTransform: 'uppercase', marginTop: 2 }}>{item.label}</Text>
-                            <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 4 }} numberOfLines={2}>{item.detail}</Text>
-                          </View>
-                        ))}
-                      </View>
+              {cardioInsightsMemo.length > 0 && (
+                <View style={{ marginTop: 20 }}>
+                  <Text style={styles.sectionLabel}>Cardio Insights</Text>
+                  <View style={[styles.graphCard, { gap: 10 }]}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <Ionicons name="pulse-outline" size={17} color={tc.primary} />
+                      <Text style={[styles.graphTitle, { flex: 1 }]}>Endurance trend</Text>
+                    </View>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                      {cardioInsightsMemo.map(item => (
+                        <View key={item.label} style={{ flexGrow: 1, flexBasis: '47%', backgroundColor: tc.surface, borderRadius: 10, borderWidth: 1, borderColor: tc.border, padding: 10 }}>
+                          <Text style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
+                          <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.4, textTransform: 'uppercase', marginTop: 2 }}>{item.label}</Text>
+                          <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 4 }} numberOfLines={2}>{item.detail}</Text>
+                        </View>
+                      ))}
                     </View>
                   </View>
-                );
-              })()}
+                </View>
+              )}
 
               {/* ── Cardio Pace Progression ── */}
-              {paceHistory.length >= 2 && (() => {
-                const exerciseNames = [...new Set(paceHistory.map(p => p.exercise))];
-                return (
+              {paceHistory.length >= 2 && (
                   <View style={{ marginTop: 20 }}>
                     <Text style={styles.sectionLabel}>Cardio Pace Progression</Text>
-                    {exerciseNames.map(exName => {
-                      const pts = paceHistory.filter(p => p.exercise === exName && p.distance != null);
+                    {paceExerciseGroups.map(({ name: exName, distancePoints: pts, maxDistance: maxDist }) => {
                       if (pts.length < 2) return null;
-                      const distances = pts.map(p => p.distance!);
-                      const maxDist = Math.max(...distances, 0.1);
                       return (
                         <View key={exName} style={[styles.graphCard, { marginBottom: 10 }]}>
                           <Text style={[styles.graphTitle, { marginBottom: 8 }]}>{exName}</Text>
@@ -1079,8 +1347,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       );
                     })}
                   </View>
-                );
-              })()}
+              )}
             </>
           )}
         </ScrollView>
@@ -1161,30 +1428,71 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           )}
 
+          {progressMilestones.length > 0 && (
+            <View style={{ marginBottom: 16 }}>
+              <Text style={styles.sectionLabel}>Progress Milestones</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                {progressMilestones.map(item => (
+                  <View
+                    key={item.key}
+                    style={{
+                      flexGrow: 1,
+                      flexBasis: '47%',
+                      minHeight: 112,
+                      backgroundColor: tc.surfaceRaised,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: tc.border,
+                      padding: 12,
+                    }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                      <View style={{ width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '20' }}>
+                        <Ionicons name={item.icon} size={16} color={item.color} />
+                      </View>
+                      <Text style={{ flex: 1, fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.3, textTransform: 'uppercase' }} numberOfLines={2}>
+                        {item.title}
+                      </Text>
+                    </View>
+                    <Text style={{ fontSize: 22, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
+                    <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 4, lineHeight: 15 }} numberOfLines={2}>
+                      {item.detail}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {progressAnalytics.length > 0 && (
+            <View style={{ marginBottom: 16 }}>
+              <Text style={styles.sectionLabel}>Trend Summary</Text>
+              <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
+                {progressAnalytics.map(item => (
+                  <View key={item.key} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <View style={{ width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '1F' }}>
+                      <Ionicons name={item.icon} size={16} color={item.color} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                        {item.label}
+                      </Text>
+                      <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 2, lineHeight: 16 }}>
+                        {item.detail}
+                      </Text>
+                    </View>
+                    <Text style={{ fontSize: 19, fontWeight: '900', color: item.color }}>{item.value}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+
           {/* Cardio PRs — best distance, pace, and output per exercise type */}
-          {paceHistory.length > 0 && (() => {
-            const exerciseNames = [...new Set(paceHistory.map(p => p.exercise))];
-            const cardioPRs = exerciseNames.map(name => {
-              const pts = paceHistory.filter(p => p.exercise === name);
-              const bestDist = pts.reduce((best, p) => p.distance != null && p.distance > (best ?? 0) ? p.distance : best, null as number | null);
-              const ptsWithPace = pts.filter(p => p.pace);
-              const lastPace = ptsWithPace.length > 0 ? ptsWithPace[ptsWithPace.length - 1].pace : null;
-              const bestDur = pts.reduce((best, p) => p.duration_seconds != null && p.duration_seconds > (best ?? 0) ? p.duration_seconds : best, null as number | null);
-              const extraKeys: string[] = [];
-              pts.forEach(p => { if (p.metrics) Object.keys(p.metrics).forEach(k => { if (!extraKeys.includes(k)) extraKeys.push(k); }); });
-              const extraBests: Record<string, string> = {};
-              extraKeys.forEach(k => {
-                const vals = pts.filter(p => p.metrics?.[k]).map(p => parseFloat(p.metrics![k])).filter(v => !isNaN(v));
-                if (vals.length) extraBests[k] = String(Math.max(...vals));
-              });
-              return { name, bestDist, lastPace, bestDur, extraBests, sessionCount: pts.length };
-            }).filter(pr => pr.bestDist != null || pr.lastPace != null || pr.bestDur != null);
-            if (!cardioPRs.length) return null;
-            return (
+          {cardioBestsMemo.length > 0 && (
               <View style={{ marginBottom: 16 }}>
                 <Text style={styles.sectionLabel}>Cardio Bests</Text>
                 <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
-                  {cardioPRs.map(pr => (
+                  {cardioBestsMemo.map(pr => (
                     <View key={pr.name}>
                       <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary, marginBottom: 4 }}>{pr.name}</Text>
                       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
@@ -1222,8 +1530,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   ))}
                 </View>
               </View>
-            );
-          })()}
+          )}
 
           {/* Estimated 1RM showcase — deterministic Epley estimates
               from recent logged sessions for the main compound lifts.
@@ -1300,13 +1607,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Text style={styles.emptyBody}>Complete a workout and log your sets to start tracking personal records.</Text>
             </View>
           ) : (() => {
-            const focusOptions = Array.from(new Set(prs.map(p => p.sessionFocus).filter(Boolean))).sort();
-            const q = prSearch.trim().toLowerCase();
-            const filteredPrs = prs.filter(pr => {
-              if (q && !pr.exerciseName.toLowerCase().includes(q)) return false;
-              if (prFocusFilter && pr.sessionFocus !== prFocusFilter) return false;
-              return true;
-            });
             return (
               <>
                 <TextInput
@@ -1318,7 +1618,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   autoCorrect={false}
                   autoCapitalize="none"
                 />
-                {focusOptions.length > 1 && (
+                {prFocusOptions.length > 1 && (
                   <ScrollView
                     horizontal
                     showsHorizontalScrollIndicator={false}
@@ -1330,7 +1630,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         All
                       </Text>
                     </TouchableOpacity>
-                    {focusOptions.map(focus => {
+                    {prFocusOptions.map(focus => {
                       const active = prFocusFilter === focus;
                       return (
                         <TouchableOpacity
@@ -1346,13 +1646,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </ScrollView>
                 )}
                 <Text style={styles.sectionLabel}>
-                  {filteredPrs.length} of {prs.length} exercises tracked
+                  {filteredPrsForTab.length} of {prs.length} exercises tracked
                 </Text>
-                {filteredPrs.length === 0 ? (
+                {filteredPrsForTab.length === 0 ? (
                   <View style={styles.emptyBox}>
                     <Text style={styles.emptyBody}>No exercises match your search.</Text>
                   </View>
-                ) : filteredPrs.map((pr, i) => {
+                ) : filteredPrsForTab.map((pr, i) => {
                   // Inline Epley 1RM only for compound lifts. Showing
                   // an estimated 1RM on a 25 lb lateral raise or a
                   // 12 lb cable curl is misleading — Epley breaks
@@ -2578,6 +2878,53 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <AdherenceTrendCard authToken={authToken} themeName={themeName} />
           )}
 
+          {(() => {
+            const trends = mealInsightPatterns?.adherence_trends;
+            const recent = trends?.recent;
+            if (!trends || !recent) return null;
+            const direction = String(trends.direction ?? 'steady');
+            const trendColor = direction === 'improving'
+              ? '#22C55E'
+              : direction === 'slipping'
+                ? '#F59E0B'
+                : tc.primary;
+            const directionLabel = direction === 'improving' ? 'Improving' : direction === 'slipping' ? 'Slipping' : 'Steady';
+            const trackingDelta = Number(trends.tracking_delta_pct ?? 0);
+            const proteinDelta = trends.protein_hit_delta_pct == null ? null : Number(trends.protein_hit_delta_pct);
+            return (
+              <View style={[styles.vitalsCard, { marginTop: 0 }]}>
+                <View style={[styles.vitalsHeader, { marginBottom: 12 }]}>
+                  <Ionicons name="trending-up-outline" size={16} color={trendColor} />
+                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Nutrition Trend</Text>
+                  <Text style={{ fontSize: 11, fontWeight: '800', color: trendColor }}>{directionLabel}</Text>
+                </View>
+                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 10 }}>
+                  {[
+                    { label: 'Tracked', value: `${recent.tracking_rate_pct ?? 0}%`, delta: `${trackingDelta >= 0 ? '+' : ''}${trackingDelta}%` },
+                    { label: 'Protein', value: recent.protein_hit_pct == null ? 'n/a' : `${recent.protein_hit_pct}%`, delta: proteinDelta == null ? null : `${proteinDelta >= 0 ? '+' : ''}${proteinDelta}%` },
+                    { label: 'Calories', value: `${Math.round(recent.avg_calories ?? 0)}`, delta: `${Number(trends.calorie_delta ?? 0) >= 0 ? '+' : ''}${Math.round(Number(trends.calorie_delta ?? 0))}` },
+                  ].map(item => (
+                    <View key={item.label} style={{ flex: 1, backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingVertical: 9, paddingHorizontal: 8 }}>
+                      <Text style={{ fontSize: 17, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
+                      <Text style={{ fontSize: 9, fontWeight: '700', color: tc.textMuted, textTransform: 'uppercase', marginTop: 2 }}>
+                        {item.label}
+                      </Text>
+                      {item.delta != null && (
+                        <Text style={{ fontSize: 10, fontWeight: '800', color: trendColor, marginTop: 3 }}>
+                          {item.delta} vs prior
+                        </Text>
+                      )}
+                    </View>
+                  ))}
+                </View>
+                <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
+                  Logging streak {trends.current_logging_streak_days ?? 0} day{trends.current_logging_streak_days === 1 ? '' : 's'}
+                  {trends.current_protein_streak_days != null ? ` · Protein streak ${trends.current_protein_streak_days} day${trends.current_protein_streak_days === 1 ? '' : 's'}` : ''}
+                </Text>
+              </View>
+            );
+          })()}
+
           {/* Nutrition & Gut Facts — 7-day rolling window (facts only, no scores). */}
           {(gutHealthWindow || mealAverages) && (
             <View style={[styles.vitalsCard, { marginTop: 0 }]}>
@@ -3314,6 +3661,63 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </TouchableOpacity>
             </>
           )}
+
+          {bodyScanHistory.length > 0 && (() => {
+            const fmt = (d: Date) => `${MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
+            return (
+              <View style={[styles.bodyScanHistoryCard, { marginTop: 12 }]}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>Scan Timeline</Text>
+                  <Text style={{ fontSize: 11, color: tc.textMuted }}>{bodyScanHistory.length} saved</Text>
+                </View>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingRight: 4 }}>
+                  {bodyScanHistory.slice(0, 8).map((entry, idx) => {
+                    const d = new Date(entry.date);
+                    const prior = idx < bodyScanHistory.length - 1 ? bodyScanHistory[idx + 1] : null;
+                    const delta = prior ? (Number(entry.bodyFatPct) || 0) - (Number(prior.bodyFatPct) || 0) : null;
+                    const deltaColor = delta == null
+                      ? tc.textMuted
+                      : delta < 0 ? tc.primary : delta > 0 ? (tc.warning ?? tc.textSecondary) : tc.textMuted;
+                    return (
+                      <View
+                        key={entry.id}
+                        style={{
+                          width: 116,
+                          borderRadius: 12,
+                          borderWidth: 1,
+                          borderColor: idx === 0 ? tc.primary + '88' : tc.border,
+                          backgroundColor: idx === 0 ? tc.primary + '0F' : tc.surfaceRaised,
+                          padding: 8,
+                        }}>
+                        <View style={{
+                          height: 78,
+                          borderRadius: 9,
+                          overflow: 'hidden',
+                          backgroundColor: tc.surface,
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          marginBottom: 8,
+                        }}>
+                          {entry.photoUri ? (
+                            <Image source={{ uri: entry.photoUri }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                          ) : (
+                            <Ionicons name="body-outline" size={24} color={tc.textMuted} />
+                          )}
+                        </View>
+                        <Text style={{ fontSize: 10, fontWeight: '800', color: idx === 0 ? tc.primary : tc.textMuted, textTransform: 'uppercase' }}>
+                          {idx === 0 ? 'Latest' : fmt(d)}
+                        </Text>
+                        <Text style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary, marginTop: 2 }}>{entry.bodyFatPct}%</Text>
+                        <Text style={{ fontSize: 10, color: deltaColor, fontWeight: '800', marginTop: 2 }}>
+                          {delta == null ? 'First scan' : `${delta > 0 ? '+' : ''}${delta.toFixed(1)}% BF`}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            );
+          })()}
 
           {bodyScanHistory.length >= 2 && (() => {
             const latest = bodyScanHistory[0];

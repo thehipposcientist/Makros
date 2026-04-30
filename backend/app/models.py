@@ -94,6 +94,7 @@ class UserPreferences(SQLModel, table=True):
     equipment: list = Field(default_factory=list, sa_column=Column(JSON))
     equipment_settings: dict | None = Field(default=None, sa_column=Column(JSON))
     foods_available: list = Field(default_factory=list, sa_column=Column(JSON))
+    injuries: list = Field(default_factory=list, sa_column=Column(JSON))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

@@ -605,6 +605,56 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
     cal_days = [data["calories"] for data in daily.values() if data["meal_count"] > 0]
     avg_calories = round(sum(cal_days) / max(len(cal_days), 1), 0)
 
+    ordered_days = sorted(daily.keys())
+    midpoint = max(1, len(ordered_days) // 2)
+    previous_days = ordered_days[:midpoint]
+    recent_days = ordered_days[midpoint:]
+
+    def _adherence_window(day_keys: list[date]) -> dict:
+        logged = [daily[d] for d in day_keys if daily[d]["meal_count"] > 0]
+        protein_hits = 0
+        if protein_target:
+            protein_hits = sum(1 for data in logged if data["protein_g"] >= protein_target * 0.9)
+        return {
+            "days": len(day_keys),
+            "logged_days": len(logged),
+            "tracking_rate_pct": round(len(logged) / max(len(day_keys), 1) * 100, 0),
+            "avg_calories": round(sum(d["calories"] for d in logged) / max(len(logged), 1), 0),
+            "avg_protein_g": round(sum(d["protein_g"] for d in logged) / max(len(logged), 1), 1),
+            "protein_hit_days": protein_hits,
+            "protein_hit_pct": round(protein_hits / max(len(logged), 1) * 100, 0) if protein_target and logged else None,
+        }
+
+    recent_adherence = _adherence_window(recent_days)
+    previous_adherence = _adherence_window(previous_days)
+    tracking_delta = recent_adherence["tracking_rate_pct"] - previous_adherence["tracking_rate_pct"]
+    recent_protein_pct = recent_adherence.get("protein_hit_pct")
+    previous_protein_pct = previous_adherence.get("protein_hit_pct")
+    protein_delta = (
+        recent_protein_pct - previous_protein_pct
+        if recent_protein_pct is not None and previous_protein_pct is not None
+        else None
+    )
+    trend_signal = tracking_delta if protein_delta is None else (tracking_delta * 0.55 + protein_delta * 0.45)
+    if trend_signal >= 10:
+        direction = "improving"
+    elif trend_signal <= -10:
+        direction = "slipping"
+    else:
+        direction = "steady"
+
+    current_logging_streak = 0
+    current_protein_streak = 0
+    for d in (date.today() - timedelta(days=i) for i in range(days)):
+        data = daily.get(d)
+        if not data or data["meal_count"] == 0:
+            break
+        current_logging_streak += 1
+        if protein_target and data["protein_g"] >= protein_target * 0.9:
+            current_protein_streak += 1
+        elif protein_target:
+            break
+
     return {
         "period_days": days,
         "days_tracked": len(days_with_meals),
@@ -623,6 +673,16 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
             "processed": processed_count,
             "unknown": unknown_count,
             "whole_pct": round(whole_count / max(len(all_foods), 1) * 100, 0),
+        },
+        "adherence_trends": {
+            "direction": direction,
+            "recent": recent_adherence,
+            "previous": previous_adherence,
+            "tracking_delta_pct": round(tracking_delta, 0),
+            "protein_hit_delta_pct": round(protein_delta, 0) if protein_delta is not None else None,
+            "calorie_delta": round(recent_adherence["avg_calories"] - previous_adherence["avg_calories"], 0),
+            "current_logging_streak_days": current_logging_streak,
+            "current_protein_streak_days": current_protein_streak if protein_target else None,
         },
     }
 
@@ -684,7 +744,23 @@ def get_meal_insights(user_id: int, *, db: Session) -> list[str]:
             f"Great consistency — you tracked {tracked} of {period} days."
         )
 
-    # 5. Food quality
+    # 5. Adherence trend
+    trends = patterns.get("adherence_trends", {})
+    direction = trends.get("direction")
+    if direction == "improving":
+        insights.append(
+            f"Nutrition adherence is improving — tracking is up {trends.get('tracking_delta_pct', 0):.0f} points vs the prior week."
+        )
+    elif direction == "slipping":
+        insights.append(
+            f"Nutrition adherence is slipping — tracking is down {abs(trends.get('tracking_delta_pct', 0)):.0f} points vs the prior week."
+        )
+    elif trends.get("current_logging_streak_days", 0) >= 3:
+        insights.append(
+            f"You're on a {trends['current_logging_streak_days']}-day meal logging streak."
+        )
+
+    # 6. Food quality
     fq = patterns.get("food_quality", {})
     whole_pct = fq.get("whole_pct", 0)
     if whole_pct >= 70:

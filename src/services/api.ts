@@ -3526,6 +3526,10 @@ export interface PlanWeekCheckinSubmit {
   motivation?: number | null;
   schedule_issue?: boolean;
   note?: string | null;
+  overall_difficulty?: DifficultyRating | null;
+  biggest_blocker?: BlockerType | null;
+  pain_area?: PainArea | null;
+  goal_q4?: string | null;
 }
 
 /** Auto-generate the next 7-day week when the active PlanWeek has

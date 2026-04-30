@@ -53,6 +53,9 @@ interface Props {
 }
 
 type Scale = 1 | 2 | 3 | 4 | 5;
+type DifficultyRating = 'too_easy' | 'about_right' | 'too_hard' | 'too_time_consuming' | 'did_not_like_plan';
+type BlockerType = 'time' | 'fatigue' | 'soreness' | 'equipment' | 'motivation' | 'cardio_boring' | 'exercise_discomfort' | 'nutrition_hard' | 'none';
+type PainArea = 'none' | 'shoulder' | 'elbow_wrist' | 'low_back' | 'knee' | 'hip' | 'foot_ankle' | 'other';
 
 const SCALE_LABELS: Record<string, string[]> = {
   energy:     ['Drained', 'Low',  'OK',     'Good',  'Great'],
@@ -60,6 +63,37 @@ const SCALE_LABELS: Record<string, string[]> = {
   soreness:   ['None',    'Mild', 'Some',   'High',  'Severe'],
   motivation: ['Zero',    'Low',  'OK',     'Good',  'Fired up'],
 };
+
+const DIFFICULTY_OPTIONS: Array<{ value: DifficultyRating; label: string }> = [
+  { value: 'about_right', label: 'About right' },
+  { value: 'too_easy', label: 'Too easy' },
+  { value: 'too_hard', label: 'Too hard' },
+  { value: 'too_time_consuming', label: 'Too long' },
+  { value: 'did_not_like_plan', label: 'Did not like it' },
+];
+
+const BLOCKER_OPTIONS: Array<{ value: BlockerType; label: string }> = [
+  { value: 'none', label: 'None' },
+  { value: 'time', label: 'Time' },
+  { value: 'fatigue', label: 'Fatigue' },
+  { value: 'soreness', label: 'Soreness' },
+  { value: 'equipment', label: 'Equipment' },
+  { value: 'motivation', label: 'Motivation' },
+  { value: 'cardio_boring', label: 'Cardio bored me' },
+  { value: 'exercise_discomfort', label: 'Exercise discomfort' },
+  { value: 'nutrition_hard', label: 'Nutrition was hard' },
+];
+
+const PAIN_OPTIONS: Array<{ value: PainArea; label: string }> = [
+  { value: 'none', label: 'No pain' },
+  { value: 'shoulder', label: 'Shoulder' },
+  { value: 'elbow_wrist', label: 'Elbow/wrist' },
+  { value: 'low_back', label: 'Low back' },
+  { value: 'knee', label: 'Knee' },
+  { value: 'hip', label: 'Hip' },
+  { value: 'foot_ankle', label: 'Foot/ankle' },
+  { value: 'other', label: 'Other' },
+];
 
 export default function CoachCheckinModal({
   visible, authToken, onClose, onCompleted, themeName,
@@ -72,6 +106,9 @@ export default function CoachCheckinModal({
   const [hunger, setHunger] = useState<Scale | null>(null);
   const [soreness, setSoreness] = useState<Scale | null>(null);
   const [motivation, setMotivation] = useState<Scale | null>(null);
+  const [difficulty, setDifficulty] = useState<DifficultyRating | null>(null);
+  const [blocker, setBlocker] = useState<BlockerType | null>(null);
+  const [painArea, setPainArea] = useState<PainArea | null>(null);
   const [scheduleIssue, setScheduleIssue] = useState(false);
   const [note, setNote] = useState('');
   const [showNote, setShowNote] = useState(false);
@@ -79,6 +116,7 @@ export default function CoachCheckinModal({
   const [submitting, setSubmitting] = useState(false);
   const [response, setResponse] = useState<CoachCheckinResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [applyNotice, setApplyNotice] = useState<string | null>(null);
   // Trainer / nutritionist summary fetched from the deterministic
   // weekly review. Shown above the rating form so the check-in reads
   // as "here's what the coach saw, does this match your experience?"
@@ -105,11 +143,15 @@ export default function CoachCheckinModal({
     setHunger(null);
     setSoreness(null);
     setMotivation(null);
+    setDifficulty(null);
+    setBlocker(null);
+    setPainArea(null);
     setScheduleIssue(false);
     setNote('');
     setShowNote(false);
     setResponse(null);
     setError(null);
+    setApplyNotice(null);
   };
 
   const handleClose = () => {
@@ -130,6 +172,9 @@ export default function CoachCheckinModal({
           motivation: motivation ?? undefined,
           schedule_issue: scheduleIssue,
           note: note.trim() || undefined,
+          overall_difficulty: difficulty ?? undefined,
+          biggest_blocker: blocker ?? undefined,
+          pain_area: painArea ?? undefined,
         });
         setResponse(res as any);
         onCompleted?.(res);
@@ -180,6 +225,34 @@ export default function CoachCheckinModal({
       </Text>
     </View>
   );
+
+  function renderChipGroup<T extends string>(
+    label: string,
+    options: Array<{ value: T; label: string }>,
+    value: T | null,
+    setValue: (next: T) => void,
+  ) {
+    return (
+      <View style={styles.chipBlock}>
+        <Text style={styles.scaleLabel}>{label}</Text>
+        <View style={styles.chipRow}>
+          {options.map((option) => {
+            const active = value === option.value;
+            return (
+              <TouchableOpacity
+                key={option.value}
+                style={[styles.checkinChip, active && styles.checkinChipActive]}
+                onPress={() => setValue(option.value)}>
+                <Text style={[styles.checkinChipText, active && styles.checkinChipTextActive]}>
+                  {option.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+    );
+  }
 
   const responseColor = (type: string) => {
     switch (type) {
@@ -395,10 +468,11 @@ export default function CoachCheckinModal({
                                   <TouchableOpacity
                                     onPress={async () => {
                                       try {
-                                        const r = await applyRecommendationAction(authToken, rec.action, rec.key);
+                                        const applied = await applyRecommendationAction(authToken, rec.action, rec.key);
                                         // Show concise feedback then
                                         // remove the rec from view so
                                         // it's clear it was handled.
+                                        setApplyNotice(applied.summary || 'Applied to your next generated week.');
                                         setReview(prev => prev ? {
                                           ...prev,
                                           recommendations: prev.recommendations.filter(x => x.key !== rec.key),
@@ -426,6 +500,15 @@ export default function CoachCheckinModal({
                         }
                       </View>
                     )}
+                    {applyNotice && (
+                      <View style={[styles.deltaBlock, { marginTop: 12, marginBottom: 0, borderWidth: 1, borderColor: colors.primary + '44' }]}>
+                        <Text style={styles.deltaLabel}>Applied for next plan</Text>
+                        <Text style={styles.deltaLine}>{applyNotice}</Text>
+                        <Text style={styles.deltaFootnote}>
+                          Your current 7-day PlanWeek stays fixed; this changes the next generated week.
+                        </Text>
+                      </View>
+                    )}
                   </View>
                 ) : null}
 
@@ -439,6 +522,10 @@ export default function CoachCheckinModal({
                 {renderScale('Hunger',     'hunger',     hunger,     setHunger)}
                 {renderScale('Soreness',   'soreness',   soreness,   setSoreness)}
                 {renderScale('Motivation', 'motivation', motivation, setMotivation)}
+
+                {renderChipGroup('How did the plan feel?', DIFFICULTY_OPTIONS, difficulty, setDifficulty)}
+                {renderChipGroup('Biggest blocker', BLOCKER_OPTIONS, blocker, setBlocker)}
+                {renderChipGroup('Anything hurt?', PAIN_OPTIONS, painArea, setPainArea)}
 
                 <TouchableOpacity
                   style={[styles.toggleRow, scheduleIssue && styles.toggleRowActive]}
@@ -498,6 +585,8 @@ export default function CoachCheckinModal({
                   const flags: any[] = r.flags ?? [];
                   const overrides: string[] = r.overrides ?? [];
                   const commitments: any[] = r.commitments_json ?? [];
+                  const structuredApplied: any[] = r.review_snapshot_json?.structured_applied ?? r.review_summary?.structured_applied ?? [];
+                  const structuredAdjustment = r.review_snapshot_json?.structured_adjustment ?? r.review_summary?.structured_adjustment ?? null;
                   return (
                     <>
                       <View style={[styles.responseHeader, { borderLeftColor: responseType ? responseColor(responseType) : colors.primary }]}>
@@ -521,6 +610,9 @@ export default function CoachCheckinModal({
                               {r.applied_kcal_adjustment_total} kcal/day
                             </Text>
                           )}
+                          <Text style={styles.deltaFootnote}>
+                            Applies to the next generated plan; this week stays fixed.
+                          </Text>
                         </View>
                       )}
 
@@ -530,6 +622,23 @@ export default function CoachCheckinModal({
                           {commitments.map((c, i) => (
                             <Text key={i} style={styles.deltaLine}>• {c.label ?? c.kind}</Text>
                           ))}
+                        </View>
+                      )}
+
+                      {(structuredApplied.length > 0 || structuredAdjustment?.summary) && (
+                        <View style={styles.deltaBlock}>
+                          <Text style={styles.deltaLabel}>Check-in adjustments</Text>
+                          {structuredAdjustment?.summary ? (
+                            <Text style={styles.deltaLine}>{structuredAdjustment.summary}</Text>
+                          ) : null}
+                          {structuredApplied.map((item, i) => (
+                            <Text key={`${item.type ?? 'applied'}-${i}`} style={styles.deltaLine}>
+                              • {item.summary ?? item.type}
+                            </Text>
+                          ))}
+                          <Text style={styles.deltaFootnote}>
+                            These update your saved preferences and coach state for the next generated week.
+                          </Text>
                         </View>
                       )}
 
@@ -632,6 +741,34 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) => StyleShe
     color: colors.textMuted,
     fontSize: 12,
     marginTop: 2,
+  },
+  chipBlock: {
+    marginBottom: 20,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  checkinChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+  },
+  checkinChipActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primary + '18',
+  },
+  checkinChipText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  checkinChipTextActive: {
+    color: colors.primary,
   },
   toggleRow: {
     paddingVertical: 12,

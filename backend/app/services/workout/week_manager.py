@@ -547,7 +547,20 @@ def auto_renew_week(
     experience = str(getattr(profile, "experience_level", "intermediate") or "intermediate")
     equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     preferred_split = getattr(prefs, "preferred_split", None) or getattr(profile, "preferred_split", None)
-    injuries = list(getattr(profile, "injuries", []) or [])
+    injuries = []
+    seen_injuries = set()
+    for source in (getattr(profile, "injuries", None), getattr(prefs, "injuries", None)):
+        if isinstance(source, str):
+            values = [source]
+        elif isinstance(source, list):
+            values = source
+        else:
+            values = []
+        for raw in values:
+            token = str(raw or "").strip()
+            if token and token.lower() not in seen_injuries:
+                seen_injuries.add(token.lower())
+                injuries.append(token)
     disliked = list(getattr(prefs, "disliked_exercises", []) or [])
 
     from app.routers.ai.plans import _resolve_owned_equipment_slugs

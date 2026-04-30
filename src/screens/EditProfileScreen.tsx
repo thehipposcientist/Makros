@@ -1639,6 +1639,56 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textMuted, marginBottom: 8, letterSpacing: 0.5 }}>
             OR PICK ONE DIRECTLY
           </Text>
+          {(() => {
+            const activeGoalCategory = goalCategory(selectedGoal);
+            const launchGoalCategories = GOAL_CATEGORIES
+              .map(cat => ({ ...cat, count: LAUNCH_GOALS.filter(g => g.category === cat.id).length }))
+              .filter(cat => cat.count > 0);
+            const scrollToGoalCategory = (categoryId: string) => {
+              const idx = LAUNCH_GOALS.findIndex(g => g.category === categoryId);
+              if (idx < 0) return;
+              goalCarouselRef.current?.scrollTo({ x: idx * (screenWidth * 0.82 + 12), animated: true });
+              LayoutAnimation.configureNext({ duration: 220, update: { type: 'spring', springDamping: 0.75 } });
+              setGoalScrollIdx(idx);
+            };
+            return (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={{ gap: 8, paddingRight: 20 }}
+                style={{ marginHorizontal: -20, paddingHorizontal: 20, marginBottom: 12 }}
+              >
+                {launchGoalCategories.map(cat => {
+                  const active = activeGoalCategory === cat.id;
+                  return (
+                    <TouchableOpacity
+                      key={cat.id}
+                      activeOpacity={0.75}
+                      onPress={() => scrollToGoalCategory(cat.id)}
+                      style={{
+                        flexDirection: 'row',
+                        alignItems: 'center',
+                        gap: 6,
+                        paddingHorizontal: 12,
+                        paddingVertical: 8,
+                        borderRadius: radius.full,
+                        borderWidth: 1,
+                        borderColor: active ? tc.primary : tc.border,
+                        backgroundColor: active ? tc.primary + '14' : tc.surface,
+                      }}>
+                      <Ionicons name={cat.icon as any} size={14} color={active ? tc.primary : tc.textMuted} />
+                      <Text style={{ fontSize: 12, fontWeight: '700', color: active ? tc.primary : tc.textSecondary }}>
+                        {cat.label}
+                      </Text>
+                      <Text style={{ fontSize: 10, fontWeight: '800', color: active ? tc.primary : tc.textMuted }}>
+                        {cat.count}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            );
+          })()}
           {/* Horizontal carousel — each card is ~80% screen width */}
           <ScrollView
             ref={goalCarouselRef}

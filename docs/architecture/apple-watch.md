@@ -32,7 +32,9 @@ TabView: **Today** (workout) / **Meals** / **Supps**. Page dots always visible.
 
 **Active workout**: Digital Crown + −/+ steppers, rest timer, HR persistent chip, live recommendation text, swipe-right HR zones tab, warm-up card before first set, end + cancel + skip-exercise menu.
 
-**Phone-side HK write**: `saveWorkoutToHealth` via `modules/thallo-healthkit/ios/...::saveWorkout` wraps `HKWorkoutBuilder`. Watch-started sessions write via `HKLiveWorkoutBuilder.finishWorkout` from watch target.
+**Start behavior**: watch Start is local-first. It immediately presents `ActiveWorkoutView`, clears stale watch set state, and sends `start_workout` to the phone in the background. The phone still owns persistence and echoes an active workout snapshot, but the watch no longer waits on the phone echo or on a HealthKit workout session before tracking sets.
+
+**HealthKit**: watch tracking does not save a HealthKit workout. Heart-rate/runtime support may start opportunistically, but end/cancel discards the builder so workout history remains Thallo-authoritative.
 
 ## Active-State Persistence (#148) — IMPLEMENTED
 

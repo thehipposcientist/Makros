@@ -23,8 +23,7 @@ struct ContentView: View {
     @State private var active: Bool = false
     @StateObject private var heartRate: HeartRateStore = HeartRateStore()
     // Set to true when the user explicitly taps Start so onReceive can
-    // start HK on the phone's first active echo without the age check.
-    // Cleared when HK starts or any non-active status arrives.
+    // accept the phone's first active echo without the age check.
     @State private var watchStartPending: Bool = false
     // Show a brief "← swipe →" hint on the first launch the user
     // sees, then never again (persisted in UserDefaults). Covers the
@@ -93,16 +92,18 @@ struct ContentView: View {
         if active { return }
         // Always pull fresh state from the phone first.
         conn.requestPull()
-        // Only start HK if we already have a valid active workout.
         if let w = conn.workout, shouldResumeWorkout(w) {
-            HeartRateStore.saveDiag("pendingLaunch→start (valid session)")
-            if heartRate.running {
-                active = true
-            } else {
-                heartRate.start { active = true }
-            }
+            HeartRateStore.saveDiag("pendingLaunch→active (valid session)")
+            openActiveWorkout()
         } else {
             HeartRateStore.saveDiag("pendingLaunch: no valid active workout, waiting for pull")
+        }
+    }
+
+    private func openActiveWorkout() {
+        active = true
+        if !heartRate.running {
+            heartRate.start()
         }
     }
 
@@ -111,22 +112,18 @@ struct ContentView: View {
             ZStack {
                 theme.background.ignoresSafeArea()
                 TabView {
-                    TodayView(workout: todayWorkout, hrDiag: HeartRateStore.lastDiag(), onStart: {
+                    TodayView(workout: todayWorkout, onStart: {
                         if let w = todayWorkout, w.status == .active {
                             // Rejoin: phone already confirmed this session active.
-                            // Start HK directly and navigate — no round-trip needed.
-                            HeartRateStore.saveDiag("Rejoin tapped → starting HK")
-                            if heartRate.running {
-                                active = true
-                            } else {
-                                heartRate.start { active = true }
-                            }
+                            HeartRateStore.saveDiag("Rejoin tapped → active")
+                            openActiveWorkout()
                         } else {
-                            // Fresh start: tell the phone, wait for its status:active
-                            // echo before starting HK. The phone pushes immediately so
-                            // the delay is ~100 ms — hidden by the 3-2-1 overlay.
-                            HeartRateStore.saveDiag("Start tapped → waiting for phone echo")
+                            // Fresh start: the watch owns its active UI immediately
+                            // and tells the phone to mirror/persist in the background.
+                            HeartRateStore.saveDiag("Start tapped → active + phone command")
+                            ActiveWorkoutState.clearPersistedStore()
                             watchStartPending = true
+                            openActiveWorkout()
                             conn.sendCommand("start_workout")
                         }
                     }, onSkip: {
@@ -138,8 +135,7 @@ struct ContentView: View {
                     SleepView()
                     ReadinessView()
                     QuickStartView(onStartCustom: { category, subtype, label in
-                        // Custom workouts go through the phone too — wait for echo.
-                        HeartRateStore.saveDiag("QuickStart tapped → waiting for phone echo")
+                        HeartRateStore.saveDiag("QuickStart tapped → phone command")
                         watchStartPending = true
                         conn.sendCommand("start_custom_workout", payload: [
                             "category": category, "subtype": subtype,
@@ -171,7 +167,7 @@ struct ContentView: View {
                     hr: heartRate,
                     onEndWorkout: {
                         active = false
-                        heartRate.end()
+                        heartRate.discard()
                         conn.sendCommand("end_workout")
                         if let sid = conn.workout?.sessionId, !sid.isEmpty {
                             UserDefaults.standard.set(sid, forKey: "thallo.lastEndedSessionId")
@@ -200,11 +196,10 @@ struct ContentView: View {
             }
         }
         .onAppear {
-            heartRate.prewarmAuth()
             consumePendingLaunch()
             if let w = conn.workout, !active, shouldResumeWorkout(w) {
-                HeartRateStore.saveDiag("onAppear reconcile→start")
-                heartRate.start { active = true }
+                HeartRateStore.saveDiag("onAppear reconcile→active")
+                openActiveWorkout()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .watchWorkoutLaunch)) { _ in
@@ -219,13 +214,9 @@ struct ContentView: View {
                 if !active {
                     let pending = watchStartPending
                     if pending || shouldResumeWorkout(w) {
-                        HeartRateStore.saveDiag("rcv active → HK pending=\(pending) running=\(heartRate.running)")
+                        HeartRateStore.saveDiag("rcv active → active pending=\(pending)")
                         watchStartPending = false
-                        if heartRate.running {
-                            active = true
-                        } else {
-                            heartRate.start { active = true }
-                        }
+                        openActiveWorkout()
                     }
                 }
             case .completed, .skipped:
@@ -233,7 +224,7 @@ struct ContentView: View {
                 ActiveWorkoutState.clearPersistedStore()
                 if active {
                     active = false
-                    heartRate.end()
+                    heartRate.discard()
                 }
             case .rest, .scheduled:
                 watchStartPending = false
@@ -246,7 +237,6 @@ struct ContentView: View {
 
 private struct TodayView: View {
     let workout: WatchWorkout?
-    let hrDiag: String?
     let onStart: () -> Void
     let onSkip: () -> Void
 
@@ -262,14 +252,6 @@ private struct TodayView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 logoHeader
-                if let diag = hrDiag {
-                    Text("HK: \(diag)")
-                        .font(.system(size: 9))
-                        .foregroundColor(theme.warning)
-                        .padding(4)
-                        .background(theme.warning.opacity(0.12))
-                        .cornerRadius(4)
-                }
                 if let workout = workout {
                     workoutBody(workout)
                 } else {

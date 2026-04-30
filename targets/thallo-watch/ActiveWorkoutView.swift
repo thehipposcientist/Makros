@@ -10,8 +10,8 @@
 //                preview during rest.
 //   • HEART    — live bpm + zone.
 //
-// End workout button writes to HealthKit (HeartRateStore.end calls
-// HKWorkoutBuilder.finishWorkout) and tells the phone to finalize.
+// End workout tells the phone to finalize. The watch does not block
+// workout tracking on a HealthKit session; set logging stays local-first.
 
 import SwiftUI
 import Combine
@@ -812,8 +812,8 @@ private struct ExerciseTab: View {
             .background(theme.surfaceRaised)
             .foregroundColor(theme.error)
             .cornerRadius(10)
-            // Cancel — distinct from End. End LOGS the workout (writes
-            // to Health, saves history); Cancel DISCARDS everything so
+            // Cancel — distinct from End. End logs the workout to Thallo
+            // history; Cancel discards everything so
             // a misstart / accidental tap doesn't muddy the record.
             Button(role: .destructive) {
                 showCancelConfirm = true
@@ -881,8 +881,8 @@ private struct ExerciseTab: View {
 
     private func advanceExercise() {
         if isLastExercise {
-            // Finished the whole workout — auto-end. Phone writes to
-            // Health via HKWorkoutBuilder.finishWorkout().
+            // Finished the whole workout — auto-end. Phone owns the
+            // authoritative Thallo completion.
             onEndWorkout()
             return
         }

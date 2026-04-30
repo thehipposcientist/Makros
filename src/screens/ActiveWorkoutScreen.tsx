@@ -1,8 +1,8 @@
-import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { Fragment, useState, useEffect, useRef, useCallback, useMemo, useDeferredValue } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking, Image, Keyboard,
-  LayoutAnimation, UIManager, AppState, Animated,
+  LayoutAnimation, UIManager, AppState, Animated, FlatList,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import FadeInView from '../components/FadeInView';
@@ -34,7 +34,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle } from 'react-native-svg';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests } from '../utils/workoutHistory';
-import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow, getWorkoutHrSummary, getLatestHeartRate } from '../services/appleHealth';
+import { isHealthKitAvailable, readHealthSummary, getLatestHeartRate } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, type WorkoutPostSummary } from '../services/api';
@@ -149,6 +149,151 @@ interface ExerciseLibraryItem {
   movement_pattern?: string | null;
   description?: string;
 }
+
+type SmartSwapItem = ExerciseLibraryItem & { _overlap?: number; _swapNotes?: string[] };
+type ExerciseHistorySignal = { count: number; lastDate?: string };
+
+const SMART_SWAP_HISTORY_BONUS_MAX = 5;
+const SMART_SWAP_MAX_SCORE = MAX_SWAP_SCORE + SMART_SWAP_HISTORY_BONUS_MAX;
+
+function normalizeSwapText(raw: unknown): string {
+  return String(raw ?? '')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function exerciseHistoryKey(name: string): string {
+  return normalizeSwapText(name);
+}
+
+function extractActiveInjuryTokens(profile: any): string[] {
+  const tokens = new Set<string>();
+  const entries = Array.isArray(profile?.injuryEntries) ? profile.injuryEntries : [];
+  for (const entry of entries) {
+    if (String(entry?.status ?? '').toLowerCase() === 'resolved') continue;
+    [entry?.bodyPart, entry?.description, ...(Array.isArray(entry?.muscleGroups) ? entry.muscleGroups : [])]
+      .map(normalizeSwapText)
+      .filter(Boolean)
+      .forEach(token => tokens.add(token));
+  }
+  if (typeof profile?.injuries === 'string' && profile.injuries.trim()) {
+    normalizeSwapText(profile.injuries)
+      .split(' ')
+      .filter(Boolean)
+      .forEach(token => tokens.add(token));
+    tokens.add(normalizeSwapText(profile.injuries));
+  }
+  return Array.from(tokens);
+}
+
+function exerciseRiskText(item: ExerciseLibraryItem): string {
+  return normalizeSwapText([
+    item.name,
+    item.primary_muscle,
+    ...(item.secondary_muscles ?? []),
+    item.movement_pattern,
+    item.equipment,
+    item.description,
+  ].join(' '));
+}
+
+function candidateConflictsWithActiveInjuries(item: ExerciseLibraryItem, injuryTokens: string[]): boolean {
+  if (injuryTokens.length === 0) return false;
+  const injuries = normalizeSwapText(injuryTokens.join(' '));
+  const text = exerciseRiskText(item);
+  if (/(shoulder|rotator|neck)/.test(injuries) && /(overhead|shoulder|press|dip|upright row|snatch|jerk|lateral raise)/.test(text)) return true;
+  if (/(low back|lower back|lumbar|back)/.test(injuries) && /(deadlift|hinge|good morning|barbell row|back extension|clean|snatch)/.test(text)) return true;
+  if (/(knee|patella)/.test(injuries) && /(squat|lunge|split squat|leg press|step up|jump|sprint|running|plyo)/.test(text)) return true;
+  if (/(hip|groin)/.test(injuries) && /(deep squat|lunge|split squat|hip thrust|good morning|deadlift|hinge|sprint)/.test(text)) return true;
+  if (/(ankle|foot|achilles)/.test(injuries) && /(run|running|sprint|jump|plyo|calf|box jump|skipping|jump rope)/.test(text)) return true;
+  if (/(elbow|wrist|forearm)/.test(injuries) && /(curl|skull|extension|pushdown|dip|chin up|pull up|bench|press)/.test(text)) return true;
+  return false;
+}
+
+function buildSwapNotes(
+  item: ExerciseLibraryItem,
+  base: ExerciseLibraryItem | null,
+  historySignal: ExerciseHistorySignal | undefined,
+  injuryTokens: string[],
+): string[] {
+  const notes: string[] = [];
+  if (base?.primary_muscle && item.primary_muscle && normalizeSwapText(base.primary_muscle) === normalizeSwapText(item.primary_muscle)) {
+    notes.push('Same primary muscle');
+  } else if (base?.movement_pattern && item.movement_pattern && normalizeSwapText(base.movement_pattern) === normalizeSwapText(item.movement_pattern)) {
+    notes.push('Same pattern');
+  }
+  if (historySignal?.count) {
+    notes.push(historySignal.count > 1 ? `${historySignal.count}x logged` : 'Logged before');
+  }
+  if (injuryTokens.length > 0) {
+    notes.push('Clears injury flags');
+  }
+  notes.push('Equipment-ready');
+  return notes.slice(0, 3);
+}
+
+const ActiveExercisePickerRow = React.memo(function ActiveExercisePickerRow({
+  item,
+  swapMode,
+  stylesRef,
+  onPress,
+}: {
+  item: SmartSwapItem;
+  swapMode: boolean;
+  stylesRef: ReturnType<typeof createStyles>;
+  onPress: (item: ExerciseLibraryItem) => void;
+}) {
+  const overlap = item._overlap;
+  const overlapColor = overlap == null ? undefined
+    : overlap >= 80 ? '#22C55E'
+    : overlap >= 60 ? '#F59E0B'
+    : '#EF4444';
+  const noteColor = overlapColor ?? '#22C55E';
+  return (
+    <TouchableOpacity style={stylesRef.addExerciseItem} onPress={() => onPress(item)}>
+      <View style={{ flex: 1 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <Text style={stylesRef.addExerciseName}>{item.name}</Text>
+          {overlap != null && overlapColor && (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, backgroundColor: overlapColor + '22', borderWidth: 1, borderColor: overlapColor + '88' }}>
+              <View style={{ width: 28, height: 4, borderRadius: 2, backgroundColor: overlapColor + '33', overflow: 'hidden' }}>
+                <View style={{ width: `${overlap}%`, height: '100%', backgroundColor: overlapColor }} />
+              </View>
+              <Text style={{ fontSize: 10, fontWeight: '800', color: overlapColor }}>{overlap}%</Text>
+            </View>
+          )}
+        </View>
+        <Text style={stylesRef.addExerciseMeta}>
+          {humanizeToken(item.primary_muscle) || 'General'} · {formatEquipmentLabel(item.equipment) || 'Bodyweight'}
+          {item.is_compound != null ? (item.is_compound ? ' · Compound' : ' · Isolation') : ''}
+        </Text>
+        {swapMode && item._swapNotes && item._swapNotes.length > 0 && (
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 5, marginTop: 6 }}>
+            {item._swapNotes.map(note => (
+              <Text
+                key={note}
+                style={{
+                  fontSize: 10,
+                  fontWeight: '700',
+                  color: noteColor,
+                  backgroundColor: noteColor + '14',
+                  borderRadius: 999,
+                  paddingHorizontal: 7,
+                  paddingVertical: 3,
+                }}>
+                {note}
+              </Text>
+            ))}
+          </View>
+        )}
+      </View>
+      <Text style={stylesRef.addExerciseUse}>{swapMode ? 'Swap' : 'Add'}</Text>
+    </TouchableOpacity>
+  );
+});
 
 interface ActiveWorkoutScreenProps {
   authToken: string;
@@ -553,7 +698,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const theme = getTheme(themeName);
   const themeColors = theme.colors;
   const workoutPalette = theme.sections.workout;
-  const styles = createStyles(themeColors);
+  const styles = useMemo(() => createStyles(themeColors), [themeName]);
   const startTime = useRef(Date.now());
   // Show the 3-2-1 countdown only on a true fresh start. If we find a
   // persisted start time on mount, the user is resuming after a
@@ -643,12 +788,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }).catch(() => {});
         // Initial push on mount.
         pushActive();
-        // Launch the watch app via HealthKit so it opens directly
-        // into workout mode with extended runtime. Falls back to
-        // the reachability re-push below if HealthKit launch fails.
-        try {
-          WatchBridge.startWatchWorkout().catch(() => {});
-        } catch { /* bridge optional */ }
         // If the watch is paired but not reachable right now, the
         // Thallo watch app isn't open — show the nudge. Suppress if
         // there's no watch at all (isPaired=false) so users without
@@ -1026,6 +1165,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // filter swap candidates so users only see exercises they can
   // actually perform with their gear. Bodyweight is always available.
   const [ownedEquipment, setOwnedEquipment] = useState<string[]>([]);
+  const [activeInjuryTokens, setActiveInjuryTokens] = useState<string[]>([]);
+  const [exerciseHistorySignals, setExerciseHistorySignals] = useState<Record<string, ExerciseHistorySignal>>({});
   useEffect(() => {
     (async () => {
       try {
@@ -1034,8 +1175,34 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const prof = JSON.parse(raw);
         const eq: string[] = Array.isArray(prof?.equipment) ? prof.equipment : [];
         setOwnedEquipment(eq);
+        setActiveInjuryTokens(extractActiveInjuryTokens(prof));
       } catch { /* best-effort — fall back to empty list = bodyweight only */ }
     })();
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadWorkoutHistory()
+      .then(rows => {
+        if (cancelled) return;
+        const signals: Record<string, ExerciseHistorySignal> = {};
+        for (const session of rows) {
+          if (!session.completed || session.skipped) continue;
+          for (const ex of session.exercises ?? []) {
+            const key = exerciseHistoryKey(ex.name);
+            if (!key) continue;
+            const current = signals[key] ?? { count: 0, lastDate: undefined };
+            current.count += 1;
+            if (!current.lastDate || session.date > current.lastDate) current.lastDate = session.date;
+            signals[key] = current;
+          }
+        }
+        setExerciseHistorySignals(signals);
+      })
+      .catch(() => {
+        if (!cancelled) setExerciseHistorySignals({});
+      });
+    return () => { cancelled = true; };
   }, []);
 
   // Pre-set coach hints keyed by exercise index. Populated lazily when
@@ -1456,6 +1623,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [coachPendingPhoto, setCoachPendingPhoto] = useState<{ base64: string; mime: string } | null>(null);
   const [addExerciseModalVisible, setAddExerciseModalVisible] = useState(false);
   const [exerciseSearch, setExerciseSearch] = useState('');
+  const deferredExerciseSearch = useDeferredValue(exerciseSearch);
   const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
   const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
   const [aiExerciseResults, setAiExerciseResults] = useState<AIExerciseResult[]>([]);
@@ -2761,39 +2929,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Now includes per-exercise per-set data so the backend can build
     // real WorkoutSession + WorkoutExercise + ExerciseSet rows for
     // downstream systems (plan reviewer, progression engine, analytics).
-    // Fetch Apple Health data first so we can send it with the completion.
     let healthMetrics: { caloriesBurned?: number; hrSummary?: { avgBpm: number; maxBpm: number; zoneMinutes: number[] } } | undefined;
-    try {
-      if (isHealthKitAvailable() && await isAppleHealthEnabled()) {
-        let profileAge: number | null = null;
-        try {
-          const r = await AsyncStorage.getItem('userProfile');
-          if (r) profileAge = JSON.parse(r)?.physicalStats?.age ?? null;
-        } catch {}
-        const [watchCal, hrData] = await Promise.all([
-          getAppleWorkoutCaloriesForWindow(startTime.current, now.getTime()),
-          getWorkoutHrSummary(startTime.current, now.getTime(), profileAge),
-        ]);
-        healthMetrics = {};
-        if (watchCal != null && watchCal > 0) healthMetrics.caloriesBurned = watchCal;
-        if (hrData) healthMetrics.hrSummary = { avgBpm: hrData.avgBpm, maxBpm: hrData.maxBpm, zoneMinutes: [...hrData.zoneMinutes] };
-      }
-    } catch {}
-    // Write the completed session to Apple Health so it shows up in
-    // Fitness app + counts toward Activity rings. Best-effort —
-    // requires write authorisation; silently skipped if HK isn't
-    // available or the user hasn't granted permission.
-    try {
-      if (isHealthKitAvailable() && await isAppleHealthEnabled()) {
-        const { saveWorkoutToHealth } = await import('../services/appleHealth');
-        await saveWorkoutToHealth({
-          startedAt: new Date(startTime.current),
-          endedAt: now,
-          activityTag: workout.focus,
-          caloriesBurned: healthMetrics?.caloriesBurned ?? null,
-        });
-      }
-    } catch { /* non-fatal */ }
     try {
       if (authToken) {
         const exercisesPayload = session.exercises
@@ -3260,14 +3396,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
   }, [activeExIdx, authToken, coachInput, exercises]);
 
-  const filteredExerciseLibrary: Array<ExerciseLibraryItem & { _overlap?: number }> = (() => {
+  const swapTargetExerciseName = swapTargetIdx != null ? exercises[swapTargetIdx]?.name : null;
+  const filteredExerciseLibrary: SmartSwapItem[] = useMemo(() => {
+    const q = deferredExerciseSearch.trim().toLowerCase();
     if (swapTargetIdx != null) {
-      const targetName = exercises[swapTargetIdx]?.name;
+      const targetName = swapTargetExerciseName;
       const base = targetName ? exerciseLibrary.find(li => li.name === targetName) : undefined;
-      const q = exerciseSearch.trim().toLowerCase();
       if (!base) {
         return exerciseLibrary
           .filter(item => isExerciseUsableWithEquipment(item, ownedEquipment))
+          .filter(item => !candidateConflictsWithActiveInjuries(item, activeInjuryTokens))
           .filter(item => {
             if (!q) return true;
             return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
@@ -3275,35 +3413,60 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               .toLowerCase()
               .includes(q);
           })
+          .map(item => {
+            const historySignal = exerciseHistorySignals[exerciseHistoryKey(item.name)];
+            return {
+              ...item,
+              _swapNotes: buildSwapNotes(item, null, historySignal, activeInjuryTokens),
+            };
+          })
           .slice(0, 10);
       }
-      const scored: Array<{ item: ExerciseLibraryItem; score: number }> = [];
+      const scored: Array<{ item: ExerciseLibraryItem; score: number; historySignal?: ExerciseHistorySignal }> = [];
       for (const item of exerciseLibrary) {
         if (item.name === targetName) continue;
         if (!isExerciseUsableWithEquipment(item, ownedEquipment)) continue;
+        if (candidateConflictsWithActiveInjuries(item, activeInjuryTokens)) continue;
         if (q && ![item.name, item.primary_muscle ?? '', item.equipment ?? ''].join(' ').toLowerCase().includes(q)) continue;
         const s = scoreSwapCandidate(base, item);
         if (s <= 0) continue;
-        scored.push({ item, score: s });
+        const historySignal = exerciseHistorySignals[exerciseHistoryKey(item.name)];
+        const historyBonus = Math.min(SMART_SWAP_HISTORY_BONUS_MAX, (historySignal?.count ?? 0) * 1.25);
+        scored.push({ item, score: s + historyBonus, historySignal });
       }
-      scored.sort((a, b) => b.score - a.score);
+      scored.sort((a, b) => {
+        const scoreDelta = b.score - a.score;
+        if (scoreDelta !== 0) return scoreDelta;
+        const historyDelta = (b.historySignal?.count ?? 0) - (a.historySignal?.count ?? 0);
+        if (historyDelta !== 0) return historyDelta;
+        return a.item.name.localeCompare(b.item.name);
+      });
       return scored.slice(0, 10).map(s => ({
         ...s.item,
-        _overlap: Math.min(100, Math.round((s.score / MAX_SWAP_SCORE) * 100)),
+        _overlap: Math.min(100, Math.round((s.score / SMART_SWAP_MAX_SCORE) * 100)),
+        _swapNotes: buildSwapNotes(s.item, base, s.historySignal, activeInjuryTokens),
       }));
     }
     // Add-exercise branch (no swap target). Same equipment gate so
     // unreachable exercises stay hidden.
     return exerciseLibrary.filter(item => {
       if (!isExerciseUsableWithEquipment(item, ownedEquipment)) return false;
-      const q = exerciseSearch.trim().toLowerCase();
       if (!q) return true;
       return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
         .join(' ')
         .toLowerCase()
         .includes(q);
     });
-  })();
+  }, [activeInjuryTokens, deferredExerciseSearch, exerciseHistorySignals, exerciseLibrary, ownedEquipment, swapTargetExerciseName, swapTargetIdx]);
+  const renderExercisePickerItem = useCallback(({ item }: { item: SmartSwapItem }) => (
+    <ActiveExercisePickerRow
+      item={item}
+      swapMode={swapTargetIdx != null}
+      stylesRef={styles}
+      onPress={handleAddExercise}
+    />
+  ), [handleAddExercise, styles, swapTargetIdx]);
+  const exercisePickerKeyExtractor = useCallback((item: ExerciseLibraryItem) => String(item.id ?? item.name), []);
 
   const confirmCancelWorkout = useCallback(() => {
     Alert.alert(
@@ -5208,7 +5371,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             </View>
             {swapTargetIdx != null && (
               <Text style={{ fontSize: 11, color: themeColors.textMuted, marginBottom: 6 }}>
-                Ranked by overlap. Logged sets carry over.
+                Ranked by muscle overlap, available equipment, active injury flags, and logged history. Logged sets carry over.
               </Text>
             )}
 
@@ -5231,65 +5394,71 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             {exerciseLibraryLoading ? (
               <ActivityIndicator size="small" color={themeColors.primary} style={{ marginTop: 12 }} />
             ) : (
-              <ScrollView contentContainerStyle={styles.addExerciseList} keyboardShouldPersistTaps="handled">
-                {/* Explicit beyond-library search results. Swap mode stays
-                    local-only so replacement suggestions remain instant. */}
-                {swapTargetIdx == null && aiExerciseLoading && aiExerciseResults.length === 0 && (
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                    <ActivityIndicator size="small" color={workoutPalette.strong} />
-                    <Text style={{ fontSize: 12, color: themeColors.textMuted }}>
-                      Searching beyond your saved exercise library…
-                    </Text>
-                  </View>
-                )}
-                {swapTargetIdx == null && aiExerciseResults.length > 0 && (
-                  <View style={{ marginBottom: 14 }}>
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
-                      {exerciseSearch.trim() ? 'Results' : `Fits Your ${workout.focus} Workout`}
-                    </Text>
-                    {aiExerciseResults.map((ex, i) => (
-                      <View key={`ai-${ex.name}-${i}`} style={[styles.addExerciseItem, { flexDirection: 'column', alignItems: 'stretch', borderColor: workoutPalette.strong + '66', borderWidth: 1.5 }]}>
-                        <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
-                          {/* AI-suggested exercises come from a live
-                              search — we don't render wger static images
-                              for them to stay consistent with the rest
-                              of the app (YouTube-thumb or placeholder). */}
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.addExerciseName}>{ex.name}</Text>
-                            <Text style={styles.addExerciseMeta}>
-                              {humanizeToken(ex.primary_muscle)} · {formatEquipmentLabel(ex.equipment)} · {ex.sets}×{ex.reps}
-                            </Text>
-                          </View>
-                          {ex.source === 'wger' && (
-                            <View style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
-                              <Text style={{ fontSize: 9, fontWeight: '600', color: themeColors.textMuted }}>DB</Text>
-                            </View>
-                          )}
-                        </View>
-                        <Text style={[styles.addExerciseMeta, { marginTop: 4 }]}>{ex.why}</Text>
-                        {ex.form_cues?.length > 0 && (
-                          <Text style={[styles.addExerciseMeta, { marginTop: 4, fontSize: 11, opacity: 0.7 }]}>
-                            Cues: {ex.form_cues.join(' · ')}
-                          </Text>
-                        )}
-                        <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
-                          <TouchableOpacity
-                            style={{ flex: 1, backgroundColor: workoutPalette.strong, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
-                            onPress={() => handleAddAiExercise(ex)}>
-                            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Add</Text>
-                          </TouchableOpacity>
-                          <TouchableOpacity
-                            style={{ flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
-                            onPress={() => handleSaveAiExerciseToLibrary(ex)}>
-                            <Text style={{ color: themeColors.textPrimary, fontWeight: '700', fontSize: 13 }}>Save to library</Text>
-                          </TouchableOpacity>
-                        </View>
+              <FlatList
+                contentContainerStyle={styles.addExerciseList}
+                data={filteredExerciseLibrary}
+                keyExtractor={exercisePickerKeyExtractor}
+                renderItem={renderExercisePickerItem}
+                keyboardShouldPersistTaps="handled"
+                initialNumToRender={12}
+                maxToRenderPerBatch={8}
+                windowSize={7}
+                removeClippedSubviews={Platform.OS !== 'web'}
+                ListHeaderComponent={(
+                  <>
+                    {swapTargetIdx == null && aiExerciseLoading && aiExerciseResults.length === 0 && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                        <ActivityIndicator size="small" color={workoutPalette.strong} />
+                        <Text style={{ fontSize: 12, color: themeColors.textMuted }}>
+                          Searching beyond your saved exercise library...
+                        </Text>
                       </View>
-                    ))}
-                  </View>
+                    )}
+                    {swapTargetIdx == null && aiExerciseResults.length > 0 && (
+                      <View style={{ marginBottom: 14 }}>
+                        <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+                          {exerciseSearch.trim() ? 'Results' : `Fits Your ${workout.focus} Workout`}
+                        </Text>
+                        {aiExerciseResults.map((ex, i) => (
+                          <View key={`ai-${ex.name}-${i}`} style={[styles.addExerciseItem, { flexDirection: 'column', alignItems: 'stretch', borderColor: workoutPalette.strong + '66', borderWidth: 1.5 }]}>
+                            <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+                              <View style={{ flex: 1 }}>
+                                <Text style={styles.addExerciseName}>{ex.name}</Text>
+                                <Text style={styles.addExerciseMeta}>
+                                  {humanizeToken(ex.primary_muscle)} · {formatEquipmentLabel(ex.equipment)} · {ex.sets}x{ex.reps}
+                                </Text>
+                              </View>
+                              {ex.source === 'wger' && (
+                                <View style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
+                                  <Text style={{ fontSize: 9, fontWeight: '600', color: themeColors.textMuted }}>DB</Text>
+                                </View>
+                              )}
+                            </View>
+                            <Text style={[styles.addExerciseMeta, { marginTop: 4 }]}>{ex.why}</Text>
+                            {ex.form_cues?.length > 0 && (
+                              <Text style={[styles.addExerciseMeta, { marginTop: 4, fontSize: 11, opacity: 0.7 }]}>
+                                Cues: {ex.form_cues.join(' · ')}
+                              </Text>
+                            )}
+                            <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+                              <TouchableOpacity
+                                style={{ flex: 1, backgroundColor: workoutPalette.strong, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
+                                onPress={() => handleAddAiExercise(ex)}>
+                                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Add</Text>
+                              </TouchableOpacity>
+                              <TouchableOpacity
+                                style={{ flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
+                                onPress={() => handleSaveAiExerciseToLibrary(ex)}>
+                                <Text style={{ color: themeColors.textPrimary, fontWeight: '700', fontSize: 13 }}>Save to library</Text>
+                              </TouchableOpacity>
+                            </View>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+                  </>
                 )}
-
-                {filteredExerciseLibrary.length === 0 ? (
+                ListEmptyComponent={(
                   <>
                     <Text style={styles.coachEmpty}>
                       {swapTargetIdx != null
@@ -5304,38 +5473,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       </TouchableOpacity>
                     )}
                   </>
-                ) : filteredExerciseLibrary.map((item) => {
-                  const overlap = (item as any)._overlap as number | undefined;
-                  // Green ≥80, amber 60-79, red <60 — matches the readiness
-                  // chip convention on Switch Day picker.
-                  const overlapColor = overlap == null ? undefined
-                    : overlap >= 80 ? '#22C55E'
-                    : overlap >= 60 ? '#F59E0B'
-                    : '#EF4444';
-                  return (
-                    <TouchableOpacity key={String(item.id ?? item.name)} style={styles.addExerciseItem} onPress={() => handleAddExercise(item)}>
-                      <View style={{ flex: 1 }}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                          <Text style={styles.addExerciseName}>{item.name}</Text>
-                          {overlap != null && overlapColor && (
-                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, backgroundColor: overlapColor + '22', borderWidth: 1, borderColor: overlapColor + '88' }}>
-                              <View style={{ width: 28, height: 4, borderRadius: 2, backgroundColor: overlapColor + '33', overflow: 'hidden' }}>
-                                <View style={{ width: `${overlap}%`, height: '100%', backgroundColor: overlapColor }} />
-                              </View>
-                              <Text style={{ fontSize: 10, fontWeight: '800', color: overlapColor }}>{overlap}%</Text>
-                            </View>
-                          )}
-                        </View>
-                        <Text style={styles.addExerciseMeta}>
-                          {humanizeToken(item.primary_muscle) || 'General'} · {formatEquipmentLabel(item.equipment) || 'Bodyweight'}
-                          {item.is_compound != null ? (item.is_compound ? ' · Compound' : ' · Isolation') : ''}
-                        </Text>
-                      </View>
-                      <Text style={styles.addExerciseUse}>{swapTargetIdx != null ? 'Swap' : 'Add'}</Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
+                )}
+              />
             )}
           </View>
         </KeyboardAvoidingView>

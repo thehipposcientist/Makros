@@ -149,7 +149,22 @@ export const PRIMARY_GOALS: PrimaryGoalDef[] = [
 
 // ─── Quick-launch goals (shown prominently in onboarding step 1) ─────────────
 
-export const LAUNCH_GOALS = PRIMARY_GOALS.filter(g => g.launch);
+export const PRODUCTIZED_GOAL_TRACK_IDS = [
+  'train_5k',
+  'train_10k',
+  'aerobic_base',
+  'powerlifting',
+  'improve_bench',
+  'improve_squat',
+  'build_glutes',
+  'build_upper_body',
+  'healthy_aging',
+  'travel_training',
+] as const;
+
+const PRODUCTIZED_GOAL_TRACK_SET = new Set<string>(PRODUCTIZED_GOAL_TRACK_IDS);
+
+export const LAUNCH_GOALS = PRIMARY_GOALS.filter(g => g.launch || PRODUCTIZED_GOAL_TRACK_SET.has(g.id));
 
 // ─── Goal → Category lookup ──────────────────────────────────────────────────
 
