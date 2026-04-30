@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import BarcodeScannerModal from './BarcodeScannerModal';
+import MealTimeSelector, { parseMealDateTime } from './MealTimeSelector';
 import {
   View, Text, ScrollView, Modal, TouchableOpacity,
   StyleSheet, TextInput, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
@@ -331,6 +332,9 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   // Editable meal name. Every meal can be renamed — there are no fixed
   // slots anymore, so the recipe name IS the meal's identity.
   const [mealName, setMealName] = useState<string>(meal.meal ?? '');
+  const [eatenAt, setEatenAt] = useState<Date>(() =>
+    parseMealDateTime((meal as any)._consumedAt ?? (meal as any).consumed_at, dateKey),
+  );
   // `new_meal` (legacy: `new_extra`) is the sentinel for an unsaved meal
   // being created via the "Add Meal" button. Anything else is an existing
   // meal at index N. The flag isn't read directly anymore — naming is
@@ -348,8 +352,9 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       setInstructions(meal.instructions ?? null);
       setShowInstructions(false);
       setMealName(meal.meal ?? '');
+      setEatenAt(parseMealDateTime((meal as any)._consumedAt ?? (meal as any).consumed_at, dateKey));
     }
-  }, [visible, meal]);
+  }, [visible, meal, dateKey]);
 
 
   const fetchInstructions = async () => {
@@ -833,6 +838,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       ...(Object.keys(resummedMicros).length > 0
         ? { micronutrients: { ...(meal.micronutrients ?? {}), ...resummedMicros } }
         : {}),
+      ...(mode === 'day' ? { _consumedAt: eatenAt.toISOString() } : {}),
     };
     const synced = syncLegacyFieldsFromItems(finalMeal);
 
@@ -964,6 +970,17 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             )}
           </View>
         </View>
+
+        {mode === 'day' && (
+          <View style={{ paddingHorizontal: 16, marginTop: 8 }}>
+            <MealTimeSelector
+              value={eatenAt}
+              mealDate={dateKey}
+              colors={colors}
+              onChange={setEatenAt}
+            />
+          </View>
+        )}
 
         {/* Scope banner — tells the user what their save will affect
             BEFORE they tap save. Keeps the mental model visible so

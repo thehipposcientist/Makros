@@ -46,8 +46,8 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
       return;
     }
     const result = source === 'camera'
-      ? await ImagePicker.launchCameraAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any })
-      : await ImagePicker.launchImageLibraryAsync({ quality: 0.7, base64: true, mediaTypes: ['images'] as any });
+      ? await ImagePicker.launchCameraAsync({ quality: 0.55, base64: true, exif: false, mediaTypes: ['images'] as any })
+      : await ImagePicker.launchImageLibraryAsync({ quality: 0.55, base64: true, exif: false, mediaTypes: ['images'] as any });
     if (result.canceled || !result.assets?.[0]?.base64) return;
     setPhotoBase64(result.assets[0].base64);
     setPhotoUri(result.assets[0].uri);
@@ -66,6 +66,7 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
       setPhotoBase64(null);
       setPhotoUri(null);
       onClose();
+      Alert.alert('Shared', 'Your friends will see the workout summary in Activity.');
     } catch (e: any) {
       Alert.alert('Could not post', e?.message ?? 'Try again');
     } finally {
@@ -92,7 +93,11 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
           <View style={s.sheet}>
             {/* Header */}
             <View style={s.header}>
-              <TouchableOpacity onPress={handleClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+              <TouchableOpacity
+                onPress={handleClose}
+                accessibilityRole="button"
+                accessibilityLabel="Close workout share sheet"
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                 <Ionicons name="close" size={22} color={c.textSecondary} />
               </TouchableOpacity>
               <Text style={s.title}>Share Workout</Text>
@@ -100,6 +105,8 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
                 style={[s.postBtn, posting && { opacity: 0.5 }]}
                 onPress={handlePost}
                 disabled={posting}
+                accessibilityRole="button"
+                accessibilityLabel="Post workout to friends"
                 activeOpacity={0.85}
               >
                 {posting ? (
@@ -128,12 +135,24 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
                 returnKeyType="default"
               />
 
+              <View style={s.privacyPanel}>
+                <Ionicons name="lock-closed-outline" size={16} color={c.primary} />
+                <View style={{ flex: 1 }}>
+                  <Text style={s.privacyTitle}>Friends see workout activity only</Text>
+                  <Text style={s.privacyBody}>
+                    Shared: focus, duration, sets, exercises, optional caption/photo. Never shared: calories, macros, meals, body weight, body photos, or measurements.
+                  </Text>
+                </View>
+              </View>
+
               {/* Photo */}
               {photoUri ? (
                 <View style={s.photoContainer}>
                   <Image source={{ uri: photoUri }} style={s.photo} resizeMode="cover" />
                   <TouchableOpacity
                     style={s.photoRemove}
+                    accessibilityRole="button"
+                    accessibilityLabel="Remove selected workout photo"
                     onPress={() => { setPhotoBase64(null); setPhotoUri(null); }}
                   >
                     <Ionicons name="close-circle" size={24} color="#fff" />
@@ -141,11 +160,11 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
                 </View>
               ) : (
                 <View style={s.photoActions}>
-                  <TouchableOpacity style={s.photoBtn} onPress={() => pickPhoto('camera')} activeOpacity={0.85}>
+                  <TouchableOpacity style={s.photoBtn} onPress={() => pickPhoto('camera')} accessibilityRole="button" accessibilityLabel="Take a workout share photo" activeOpacity={0.85}>
                     <Ionicons name="camera-outline" size={20} color={c.textSecondary} />
                     <Text style={s.photoBtnText}>Camera</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={s.photoBtn} onPress={() => pickPhoto('library')} activeOpacity={0.85}>
+                  <TouchableOpacity style={s.photoBtn} onPress={() => pickPhoto('library')} accessibilityRole="button" accessibilityLabel="Choose a workout share photo from gallery" activeOpacity={0.85}>
                     <Ionicons name="image-outline" size={20} color={c.textSecondary} />
                     <Text style={s.photoBtnText}>Gallery</Text>
                   </TouchableOpacity>
@@ -249,6 +268,18 @@ const mk = (c: ReturnType<typeof getTheme>['colors']) =>
       borderRadius: radius.md, padding: 14,
       minHeight: 80, marginBottom: 16,
     },
+    privacyPanel: {
+      flexDirection: 'row',
+      gap: 10,
+      backgroundColor: c.primary + '12',
+      borderColor: c.primary + '33',
+      borderWidth: 1,
+      borderRadius: radius.md,
+      padding: 12,
+      marginBottom: 16,
+    },
+    privacyTitle: { fontSize: 12, fontWeight: '800', color: c.textPrimary, marginBottom: 3 },
+    privacyBody: { fontSize: 11, color: c.textSecondary, lineHeight: 16 },
     summaryCard: {
       backgroundColor: c.surface,
       borderColor: c.border, borderWidth: 1,

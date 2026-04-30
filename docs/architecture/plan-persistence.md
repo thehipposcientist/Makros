@@ -97,6 +97,15 @@ adjacency / fatigue. AI plan review is **permanently disabled**
 (`PLAN_REVIEW_ENABLED=0` is a no-op); regeneration goes through the
 deterministic path only.
 
+## Mid-Week Profile Edits
+
+Goal, equipment, split, duration, and days/week edits update
+`UserGoal` / `UserPreferences` immediately, but they do **not** replace the
+active `PlanWeek`. The current dated week remains the source of truth until
+auto-renew. If the user wants an immediate workout change, use the explicit
+per-day Change Focus / Swap flows, which patch only unlocked current/future
+`PlanDay` rows.
+
 ## History Plumbing
 
 - `prev_focuses` — raw focus labels from recent completions. Normalized

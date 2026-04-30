@@ -155,8 +155,25 @@ def complete_day(db: Session, plan_day: PlanDay) -> PlanDay:
     return lock_day(db, plan_day, reason="completed", status="completed")
 
 
-def skip_day(db: Session, plan_day: PlanDay) -> PlanDay:
+def skip_day(db: Session, plan_day: PlanDay, reason: str | None = None) -> PlanDay:
+    plan_day.skip_reason = (reason or "").strip() or None
     return lock_day(db, plan_day, reason="skipped", status="skipped")
+
+
+def unskip_day(db: Session, plan_day: PlanDay) -> PlanDay:
+    if plan_day.status != "skipped" or plan_day.lock_reason != "skipped":
+        return plan_day
+    now = datetime.now(timezone.utc)
+    plan_day.status = "planned"
+    plan_day.locked = False
+    plan_day.locked_at = None
+    plan_day.lock_reason = None
+    plan_day.skip_reason = None
+    plan_day.updated_at = now
+    db.add(plan_day)
+    db.commit()
+    db.refresh(plan_day)
+    return plan_day
 
 
 def start_day(db: Session, plan_day: PlanDay) -> PlanDay:
@@ -424,6 +441,8 @@ def auto_renew_week(
     avg_resting_hr: float | None = None,
     avg_steps: float | None = None,
     readiness_score: int | None = None,
+    cycle_phase: str | None = None,
+    day_of_cycle: int | None = None,
 ) -> dict:
     """Auto-generate a new week when the user's plan has expired.
 
@@ -574,6 +593,9 @@ def auto_renew_week(
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
         muscle_fatigue=muscle_fatigue,
+        cycle_phase=cycle_phase,
+        day_of_cycle=day_of_cycle,
+        load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
 
     plan = generate_workout_plan(
@@ -600,11 +622,12 @@ def auto_renew_week(
         pass
 
     today = date.today()
+    week_start = today - timedelta(days=today.weekday())
     training_pattern = default_training_pattern(days_per_week)
 
     pw = create_plan_week(
         db, user_id,
-        start_date=today,
+        start_date=week_start,
         workout_days=workout_days,
         nutrition_templates=nutrition_templates,
         training_day_pattern=training_pattern,

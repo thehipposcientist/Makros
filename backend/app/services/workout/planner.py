@@ -113,6 +113,12 @@ class PlannerInputs:
     # Resting heart rate (bpm) — used by cardio HR-zone computation so the
     # Karvonen formula can personalise zone boundaries. None = use 60 bpm default.
     resting_hr: int | None = None
+    # Optional menstrual-cycle phase, passed transiently by the phone at
+    # week creation / renewal. Never persisted by the backend. Used only
+    # to softly scale next-week volume so luteal/menses weeks don't look
+    # like unexplained under-recovery.
+    cycle_phase: str | None = None
+    day_of_cycle: int | None = None
     # Per-modality equipment capability lists, keyed by cardio modality
     # constant (e.g. "treadmill", "bike", "rower"). Each value is a list of
     # capability tokens from UserEquipmentProfile.capabilities. When present,
@@ -292,6 +298,17 @@ def weekly_set_targets(inputs: PlannerInputs) -> dict[str, int]:
             current = base[muscle]
             boosted = max(current + 2, int(round(current * 1.3)))
             base[muscle] = boosted
+
+    phase = (inputs.cycle_phase or "").lower()
+    cycle_multiplier = {
+        "menses": 0.88,
+        "luteal": 0.92,
+        "follicular": 1.03,
+        "ovulation": 1.03,
+    }.get(phase)
+    if cycle_multiplier:
+        for muscle, target in list(base.items()):
+            base[muscle] = max(4, int(round(target * cycle_multiplier)))
 
     return base
 
@@ -1793,6 +1810,11 @@ def generate_workout_plan(
         "planner_mode": profile.planner_mode,
         "goal_bucket": profile.bucket,
     }
+    if inputs.cycle_phase:
+        workout_plan_block["cycle_adjustment"] = {
+            "phase": inputs.cycle_phase,
+            "day_of_cycle": inputs.day_of_cycle,
+        }
     if focus_audit is not None:
         workout_plan_block["focus_audit"] = focus_audit
 

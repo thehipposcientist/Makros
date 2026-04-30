@@ -9,8 +9,7 @@ import FadeInView from '../components/FadeInView';
 import PressableScale from '../components/PressableScale';
 import AnimatedNumber from '../components/AnimatedNumber';
 import PRCelebrationModal from '../components/PRCelebrationModal';
-// ShareWorkoutModal hidden — will re-enable with social feed
-// import ShareWorkoutModal from '../components/ShareWorkoutModal';
+import ShareWorkoutModal from '../components/ShareWorkoutModal';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -38,7 +37,7 @@ import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary
 import { isHealthKitAvailable, readHealthSummary, getAppleWorkoutCaloriesForWindow, getWorkoutHrSummary, getLatestHeartRate } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, createSocialPost, type WorkoutPostSummary } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, type WorkoutPostSummary } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
@@ -1421,6 +1420,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [feedbackResult, setFeedbackResult] = useState<string | null>(null);
   const [shareLoading, setShareLoading] = useState(false);
+  const [showShareWorkoutModal, setShowShareWorkoutModal] = useState(false);
   const summaryCardRef = useRef<ViewShot>(null);
   const repsInputRef = useRef<TextInput>(null);
 
@@ -1442,74 +1442,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setShareLoading(false);
     }
   };
-
-  const [postingToFeed, setPostingToFeed] = useState(false);
-  // Post the just-finished workout to the friends feed. Pulls a
-  // workout_summary off the local exercises array (date + focus +
-  // total sets/reps) — never includes calories/macros/weight, which
-  // is the social privacy boundary documented in CLAUDE.md.
-  const handlePostToFriendsFeed = useCallback(async () => {
-    if (!authToken) {
-      Alert.alert('Sign in', 'You need to be signed in to post to your friends feed.');
-      return;
-    }
-    const submitPost = async (caption: string | undefined) => {
-      try {
-        setPostingToFeed(true);
-        const summary: WorkoutPostSummary = {
-          focus: workout.focus ?? 'Workout',
-          duration_seconds: Math.round((Date.now() - (startTime.current ?? Date.now())) / 1000),
-          date: dateKey(new Date()),
-          exercises: exercises.map(e => ({
-            name: e.name,
-            equipment: (e as any).equipment ?? null,
-            sets: e.sets.map(s => ({
-              reps: Number(s.reps) || 0,
-              weight_lbs: Number(s.weightLbs) || 0,
-            })),
-          })),
-          total_sets: exercises.reduce((sum, e) => sum + e.sets.length, 0),
-          total_reps: exercises.reduce(
-            (sum, e) => sum + e.sets.reduce((rs, s) => rs + (Number(s.reps) || 0), 0),
-            0,
-          ),
-          training_score: (summaryData as any)?.trainingScore ?? null,
-          training_rating: (summaryData as any)?.trainingRating ?? null,
-        };
-        await createSocialPost(authToken, {
-          caption: (caption ?? '').trim() || undefined,
-          workout_summary: summary,
-        });
-        try {
-          const f = await import('../utils/feedback');
-          f.hapticSuccess?.();
-        } catch {}
-        Alert.alert('Shared', 'Your friends will see this in their Activity tab.');
-      } catch (e: any) {
-        Alert.alert('Could not post', e?.message ?? 'Try again later.');
-      } finally {
-        setPostingToFeed(false);
-      }
-    };
-    // Alert.prompt is iOS-only. On Android, post without an inline
-    // caption — the user can add one from a future compose UI; for v1
-    // a captionless workout share is still meaningful (the summary is
-    // the headline data).
-    if (Platform.OS === 'ios' && (Alert as any).prompt) {
-      (Alert as any).prompt(
-        'Share with friends',
-        'Optional caption — your friends see the workout summary either way. (No calories, macros, or weight are ever shared.)',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Share', onPress: submitPost },
-        ],
-        'plain-text',
-        '',
-      );
-    } else {
-      submitPost(undefined);
-    }
-  }, [authToken, exercises, summaryData, workout, startTime]);
 
   const [finishModalVisible, setFinishModalVisible] = useState(false);
   const [coachModalVisible, setCoachModalVisible] = useState(false);
@@ -2901,8 +2833,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             }),
           };
         });
-        const cardioLikeFocus = /cardio|conditioning|zone\s*2|interval|hiit|run|bike|row|swim/i.test(workout.focus);
-        const pureCardioFocus = /^(cardio|conditioning|zone\s*2|short intervals|long intervals|tempo)$/i.test(workout.focus.trim());
+        const focusText = workout.focus.trim();
+        const liftPlusCardioFocus = /\+\s*cardio/i.test(focusText);
+        const cardioLikeFocus = /cardio|conditioning|zone\s*2|interval|hiit|run|bike|row|swim/i.test(focusText);
+        const pureCardioFocus = !liftPlusCardioFocus
+          && /^(cardio|conditioning|zone\s*2(?:\s*cardio)?|short intervals|long intervals|tempo)$/i.test(focusText);
         const completeResp = await logWorkoutDone(authToken, dateKey(now), workout.focus, actualDurationSeconds, exercisesPayload, {
           category: pureCardioFocus ? 'cardio' : 'strength',
           subtype: workout.focus.toLowerCase().replace(/\s+/g, '_'),
@@ -3093,6 +3028,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         (total, ex) => total + ex.sets.reduce((setTotal, set) => setTotal + (Number(set.reps) || 0), 0),
         0,
       );
+  const workoutPostSummary = useMemo<WorkoutPostSummary | null>(() => {
+    const sourceExercises = finishedSession?.exercises ?? exercises;
+    if (!sourceExercises.length) return null;
+    return {
+      focus: workout.focus ?? 'Workout',
+      duration_seconds: summaryDurationSeconds,
+      date: dateKey(new Date()),
+      exercises: sourceExercises.map(e => ({
+        name: e.name,
+        equipment: (e as any).equipment ?? null,
+        sets: e.sets.map(s => ({
+          reps: Number(s.reps) || 0,
+          weight_lbs: Number((s as any).weightLbs ?? (s as any).weight_lbs) || 0,
+        })),
+      })),
+      total_sets: summarySetCount,
+      total_reps: summaryRepCount,
+      training_score: (summaryData as any)?.trainingScore ?? null,
+      training_rating: (summaryData as any)?.trainingRating ?? null,
+    };
+  }, [exercises, finishedSession, summaryData, summaryDurationSeconds, summaryRepCount, summarySetCount, workout.focus]);
 
   const handleAskWorkoutCoach = useCallback(async () => {
     const q = coachInput.trim();
@@ -5069,13 +5025,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.summaryFeedbackBtn, { flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }]}
-                    onPress={handlePostToFriendsFeed}
-                    disabled={postingToFeed || summaryLoading}
+                    onPress={() => {
+                      if (!authToken) {
+                        Alert.alert('Sign in', 'You need to be signed in to post to friends.');
+                        return;
+                      }
+                      setShowShareWorkoutModal(true);
+                    }}
+                    disabled={summaryLoading || !workoutPostSummary}
+                    accessibilityRole="button"
+                    accessibilityLabel="Open friends share sheet"
                     activeOpacity={0.85}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <Ionicons name="people-outline" size={15} color={themeColors.textPrimary} />
                       <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
-                        {postingToFeed ? 'Sharing…' : 'Friends'}
+                        Friends
                       </Text>
                     </View>
                   </TouchableOpacity>
@@ -5089,7 +5053,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
       </Modal>
 
-      {/* ShareWorkoutModal removed — will re-enable with social feed */}
+      <ShareWorkoutModal
+        visible={showShareWorkoutModal}
+        authToken={authToken}
+        onClose={() => setShowShareWorkoutModal(false)}
+        themeName={themeName}
+        workoutSummary={workoutPostSummary}
+      />
 
       <Modal visible={coachModalVisible} transparent animationType="slide" onRequestClose={() => setCoachModalVisible(false)}>
         <KeyboardAvoidingView

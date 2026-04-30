@@ -505,6 +505,8 @@ export interface MealSuggestion {
   // `_routineId` identifies an extra pinned as a routine.
   _localId?: string;
   _routineId?: string;
+  // ISO timestamp for the "eaten at" time selected in the meal editor.
+  _consumedAt?: string;
 }
 
 export interface SupplementItem {
@@ -807,6 +809,10 @@ export interface SleepScore {
   duration: number;
   stages: SleepStages;
   hrvAvg: number | null;
+  /** Optional corroborating recovery marker used by sleep scoring when
+   *  Apple Health exposes it. Compared against personal baseline when
+   *  enough history exists. */
+  restingHeartRate?: number | null;
   respiratoryRate: number | null;
   oxygenSaturation: number | null;
   efficiency: number | null;

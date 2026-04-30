@@ -850,10 +850,26 @@ def test_complete_day_locks_with_completed_reason():
 
 def test_skip_day_locks_with_skipped_reason():
     pd = FakePlanDay(day_date=date.today())
-    week_manager.skip_day(FakeSession(), pd)
+    week_manager.skip_day(FakeSession(), pd, reason="Feeling sick")
     assert pd.locked is True
     assert pd.lock_reason == "skipped"
+    assert pd.skip_reason == "Feeling sick"
     assert pd.status == "skipped"
+
+
+def test_unskip_day_restores_manual_skip():
+    pd = FakePlanDay(
+        day_date=date.today(),
+        status="skipped",
+        locked=True,
+        lock_reason="skipped",
+    )
+    pd.skip_reason = "Feeling sick"
+    week_manager.unskip_day(FakeSession(), pd)
+    assert pd.locked is False
+    assert pd.lock_reason is None
+    assert pd.skip_reason is None
+    assert pd.status == "planned"
 
 
 def test_start_day_locks_with_started_reason():

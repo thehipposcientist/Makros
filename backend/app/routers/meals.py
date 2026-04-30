@@ -3,7 +3,7 @@ from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
-from datetime import date
+from datetime import date, datetime
 from typing import Optional
 
 from app.database import get_session
@@ -20,6 +20,7 @@ class LogCheckedBody(BaseModel):
     meal_type: str          # "meal_0", "breakfast", etc.
     meal: dict              # full MealSuggestion dict from the client
     source: Optional[str] = "plan_check"
+    consumed_at: Optional[datetime] = None
 
 
 @router.get("/grocery-list")
@@ -145,7 +146,7 @@ def create_meal(
     # (e.g. user back-logged yesterday's lunch), otherwise default to
     # now. Falling back to meal_date alone would lose time-of-day data
     # needed for fasting windows / late-eating / pre-post workout.
-    from datetime import datetime as _dt, time as _time, timezone as _tz
+    from datetime import datetime as _dt, timezone as _tz
     if getattr(body, "consumed_at", None):
         consumed_at = body.consumed_at
     else:
@@ -191,12 +192,15 @@ def update_meal(
             meal.meal_type = _MT(body["meal_type"])
         except ValueError:
             raise HTTPException(status_code=422, detail="Invalid meal_type")
-    if "consumed_at" in body and body["consumed_at"]:
-        from datetime import datetime as _dt
-        try:
-            meal.consumed_at = _dt.fromisoformat(str(body["consumed_at"]).replace("Z", "+00:00"))
-        except ValueError:
-            raise HTTPException(status_code=422, detail="Invalid consumed_at")
+    if "consumed_at" in body:
+        if body["consumed_at"] in (None, ""):
+            meal.consumed_at = None
+        else:
+            from datetime import datetime as _dt
+            try:
+                meal.consumed_at = _dt.fromisoformat(str(body["consumed_at"]).replace("Z", "+00:00"))
+            except ValueError:
+                raise HTTPException(status_code=422, detail="Invalid consumed_at")
     if "notes" in body:
         meal.notes = body["notes"]
     if "name" in body and body["name"]:
@@ -300,6 +304,7 @@ def log_checked_meal(
         meal_type=body.meal_type,
         meal_data=body.meal,
         source=body.source or "plan_check",
+        consumed_at=body.consumed_at,
         db=db,
     )
     _refresh_daily_metrics(db, current_user.id, meal_date)
@@ -452,7 +457,7 @@ def protein_breakdown_today(
     """
     from app.models import Meal, MealItem, FoodMetadata
     from app.services.nutrition.food_classifier import normalize_name as _norm
-    from sqlalchemy import func as _sa_func
+    from sqlalchemy import and_, func as _sa_func, or_
     today_d = date.today()
     rows = db.exec(
         select(MealItem, FoodMetadata)
@@ -463,7 +468,10 @@ def protein_breakdown_today(
             isouter=True,
         )
         .where(Meal.user_id == current_user.id)
-        .where(_sa_func.date(Meal.consumed_at) == today_d)
+        .where(or_(
+            _sa_func.date(Meal.consumed_at) == today_d,
+            and_(Meal.consumed_at.is_(None), Meal.meal_date == today_d),
+        ))
     ).all()
 
     plant: list[dict] = []
@@ -572,6 +580,25 @@ def daily_macros_for_day(
         stimulus=body.stimulus,
         goal_bucket=goal_bucket,
     )
+    macro_override = None
+    state = db.exec(
+        select(UserDayState)
+        .where(UserDayState.user_id == current_user.id, UserDayState.day_key == date.today())
+    ).first()
+    if state and state.macro_overrides:
+        extra_carbs = int((state.macro_overrides or {}).get("carb_bump_g") or 0)
+        if extra_carbs > 0:
+            adjusted = MacroSet(
+                calories=adjusted.calories + extra_carbs * 4,
+                protein_g=adjusted.protein_g,
+                carbs_g=adjusted.carbs_g + extra_carbs,
+                fat_g=adjusted.fat_g,
+            )
+            macro_override = {
+                "type": "carb_bump_today",
+                "carb_bump_g": extra_carbs,
+                "source": (state.macro_overrides or {}).get("source") or "coach",
+            }
     return {
         "day_type": day_type,
         "goal": goal_bucket,
@@ -579,6 +606,7 @@ def daily_macros_for_day(
         "adjusted": adjusted.to_dict(),
         "carb_delta_g": adjusted.carbs_g - base.carbs_g,
         "fat_delta_g": adjusted.fat_g - base.fat_g,
+        "macro_override": macro_override,
     }
 
 
@@ -702,18 +730,24 @@ def _compute_hydration_target_oz(
 
 @router.get("/hydration")
 def get_hydration(
+    log_date: Optional[str] = Query(default=None, description="YYYY-MM-DD, defaults to today"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Today's logged ounces + a per-day target that reflects the user's
-    weight, sex, planned + actual workout minutes, today's protein intake,
+    """Logged ounces + a per-day target for the requested date.
+
+    Defaults to today. The target reflects the user's weight, sex,
+    planned + actual workout minutes, that day's protein intake,
     and any alcohol logged. See `_compute_hydration_target_oz` for the
     formula and breakdown."""
     from datetime import date as _date
     from app.models import (
         UserProfile, PlanDay, WorkoutCompletion, DailyNutritionMetrics,
     )
-    d = _date.today()
+    try:
+        d = _date.fromisoformat(log_date) if log_date else _date.today()
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid log_date")
     state = db.exec(
         select(UserDayState)
         .where(UserDayState.user_id == current_user.id)

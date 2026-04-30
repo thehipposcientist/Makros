@@ -7,11 +7,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   View, Text, TouchableOpacity, Alert, ActivityIndicator,
-  Modal, ScrollView, StyleSheet,
+  Modal, ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme } from '../constants/theme';
-import { AppThemeName, MealSuggestion } from '../types';
+import { AppThemeName } from '../types';
+import MealTimeSelector, { defaultMealDateTime } from './MealTimeSelector';
 import * as api from '../services/api';
 
 interface Props {
@@ -244,10 +245,14 @@ function LogSavedMealModal({
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const [mealType, setMealType] = useState<string>(defaultMealTypeByHour());
+  const [consumedAt, setConsumedAt] = useState<Date>(() => defaultMealDateTime());
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (saved) setMealType(defaultMealTypeByHour());
+    if (saved) {
+      setMealType(defaultMealTypeByHour());
+      setConsumedAt(defaultMealDateTime());
+    }
   }, [saved]);
 
   const handleLog = async () => {
@@ -257,6 +262,7 @@ function LogSavedMealModal({
       const r = await api.logSavedMeal(authToken, saved.id, {
         meal_type: mealType,
         // meal_date defaults to today on the backend.
+        consumed_at: consumedAt.toISOString(),
       });
       onLogged(r.meal_id);
     } catch (e: any) {
@@ -311,6 +317,14 @@ function LogSavedMealModal({
                   </TouchableOpacity>
                 );
               })}
+            </View>
+
+            <View style={{ marginBottom: 14 }}>
+              <MealTimeSelector
+                value={consumedAt}
+                colors={tc}
+                onChange={setConsumedAt}
+              />
             </View>
 
             <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5, marginBottom: 6 }}>

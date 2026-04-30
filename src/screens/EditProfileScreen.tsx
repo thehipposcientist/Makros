@@ -1518,14 +1518,14 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           ? 'Body & Stats'
           : 'Edit Goal';
   const saveLabel = mode === 'workout'
-    ? 'Save & Update Workout'
+    ? 'Save Workout Settings'
     : mode === 'mealplan'
       ? 'Save & Update Nutrition'
       : mode === 'theme'
         ? 'Save Theme'
         : mode === 'body'
           ? 'Save Stats'
-          : 'Save & Update Plan';
+          : 'Save Goal';
 
   return (
     <View style={styles.container}>

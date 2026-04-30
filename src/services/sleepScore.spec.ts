@@ -18,7 +18,7 @@
 //   4. >60 min awake reduces the awakeFragmentation pillar.
 //   5. Bonus — verifies pillar weights sum to 100 in MVP mode.
 
-import { scoreSleepMVP, scoreSleepPersonalized } from './sleepScore';
+import { scoreSleep, scoreSleepMVP, scoreSleepPersonalized } from './sleepScore';
 import type { SleepScoreInput } from './sleepScore';
 
 function expect(cond: boolean, msg: string) {
@@ -146,10 +146,56 @@ console.log('\n[case] >60 min awake → fragmentation pillar drops + insight sur
     fragmentedNight.insights.some(s => s.toLowerCase().includes('mid-sleep wake') || s.toLowerCase().includes('awake')),
     `expected a fragmentation insight; got: ${JSON.stringify(fragmentedNight.insights)}`,
   );
+
+  const sickNight = scoreSleepMVP(baseInput({
+    inBedMinutes: 10 * 60,
+    stages: { core: 4.6, deep: 1.4, rem: 1.5, awake: 2.5, total: 7.5 },
+  }))!;
+  expect(
+    sickNight.score <= 45 && sickNight.rating === 'Poor',
+    `150-min-awake sick night should be Poor and cap near 45; got score=${sickNight.score}, rating=${sickNight.rating}`,
+  );
+  expect(
+    (sickNight.pillars.awakeFragmentation ?? 99) === 0,
+    `150-min-awake awakeFrag=${sickNight.pillars.awakeFragmentation}, expected 0`,
+  );
+
+  const roundedDownSickNight = scoreSleepMVP(baseInput({
+    inBedMinutes: Math.round((7.5 + 2.4) * 60),
+    stages: { core: 4.6, deep: 1.4, rem: 1.5, awake: 2.4, total: 7.5 },
+  }))!;
+  expect(
+    roundedDownSickNight.score <= 44 && roundedDownSickNight.rating === 'Poor',
+    `~2.5h awake after HealthKit rounding should still cap below 45; got score=${roundedDownSickNight.score}`,
+  );
 }
 
 
-// ─── Case 4b: duration-only data can't look excellent ───────────────────────
+// ─── Case 4b: fragmented + off vitals clamps harder ─────────────────────────
+console.log('\n[case] Fragmented sick night uses corroborating vitals');
+{
+  const bedtimeHistory = Array.from({ length: 15 }, () => 23 * 60);
+  const correlatedSickNight = scoreSleep(baseInput({
+    hrvMs: 34,
+    restingHeartRate: 68,
+    respiratoryRate: 18.4,
+    spo2Percent: 94,
+    hrvHistory: Array.from({ length: 15 }, () => 58),
+    rhrHistory: Array.from({ length: 15 }, () => 56),
+    respiratoryRateHistory: Array.from({ length: 15 }, () => 15),
+    spo2History: Array.from({ length: 15 }, () => 97),
+    bedtimeHistory,
+    inBedMinutes: Math.round((7.5 + 2.0) * 60),
+    stages: { core: 4.6, deep: 1.4, rem: 1.5, awake: 2.0, total: 7.5 },
+  }))!;
+  expect(
+    correlatedSickNight.score <= 39 && correlatedSickNight.rating === 'Poor',
+    `fragmented sleep with HRV/RHR/resp/SpO2 stress should cap near 39; got score=${correlatedSickNight.score}`,
+  );
+}
+
+
+// ─── Case 4c: duration-only data can't look excellent ───────────────────────
 console.log('\n[case] Duration-only sleep data caps below Good/Excellent');
 {
   const durationOnly = scoreSleepMVP(baseInput({

@@ -67,6 +67,7 @@ class ApplyResult:
     changed_fields: dict[str, Any]
     descriptive_only: bool = False
     error: str | None = None
+    undo_action: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -76,6 +77,7 @@ class ApplyResult:
             "changed_fields": self.changed_fields,
             "descriptive_only": self.descriptive_only,
             "error": self.error,
+            "undo_action": self.undo_action,
         }
 
 
@@ -106,6 +108,56 @@ def _record_memory(db: Any, user_id: int, event_type: str, summary: str, details
         summary=summary,
         details=details or {},
     ))
+
+
+def _descriptive_ack(
+    db: Any,
+    user_id: int,
+    action_type: str,
+    action: dict[str, Any],
+    rec_key: str | None,
+    summary: str,
+) -> ApplyResult:
+    _record_memory(db, user_id, "recommendation_acked",
+        f"User accepted recommendation: {action_type}",
+        {"action": action, "rec_key": rec_key})
+    db.commit()
+    return ApplyResult(
+        applied=True,
+        summary=summary,
+        needs_regen=False,
+        changed_fields={},
+        descriptive_only=True,
+    )
+
+
+def _parse_date(value: Any, fallback: date) -> date:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return fallback
+    return fallback
+
+
+def _day_state(db: Any, user_id: int, day_key: date) -> UserDayState:
+    state = db.exec(
+        select(UserDayState)
+        .where(UserDayState.user_id == user_id, UserDayState.day_key == day_key)
+    ).first()
+    if state:
+        return state
+    state = UserDayState(
+        user_id=user_id,
+        day_key=day_key,
+        meal_checks={},
+        nutrition_plan=None,
+    )
+    db.add(state)
+    db.flush()
+    return state
 
 
 def apply_action(
@@ -153,7 +205,11 @@ def apply_action(
             applied=True,
             summary=f"Updated to {target} days / week. Plan will refresh.",
             needs_regen=True,
-            changed_fields={"days_per_week": target},
+            changed_fields={
+                "days_per_week": target,
+                "days_per_week_change": {"from": old, "to": target},
+            },
+            undo_action={"type": "change_days_per_week", "value": old},
         )
 
     # ── raise_calories / lower_calories ─────────────────────────────
@@ -178,7 +234,11 @@ def apply_action(
             applied=True,
             summary=f"{verb} daily calorie target by {abs(delta)} kcal. Macros refresh on next plan check.",
             needs_regen=False,
-            changed_fields={"calorie_adjustment": state.calorie_adjustment},
+            changed_fields={
+                "calorie_adjustment": state.calorie_adjustment,
+                "calorie_adjustment_change": {"from": old, "to": state.calorie_adjustment},
+            },
+            undo_action={"type": "adjust_calorie_target", "delta": -delta},
         )
 
     # ── adjust_calorie_target (signed delta — nutrition review path) ──
@@ -203,7 +263,11 @@ def apply_action(
             applied=True,
             summary=f"{verb} daily calorie target by {abs(delta)} kcal. Takes effect on next plan check.",
             needs_regen=False,
-            changed_fields={"calorie_adjustment": state.calorie_adjustment},
+            changed_fields={
+                "calorie_adjustment": state.calorie_adjustment,
+                "calorie_adjustment_change": {"from": old, "to": state.calorie_adjustment},
+            },
+            undo_action={"type": "adjust_calorie_target", "delta": -delta},
         )
 
     # ── hold_calorie_adjustment ─────────────────────────────────────
@@ -228,18 +292,11 @@ def apply_action(
         # planner already reads UserDayState.skipped_focus on the
         # day card to override the planned archetype.
         tomorrow = date.today() + timedelta(days=1)
-        existing = db.exec(
-            select(UserDayState)
-            .where(UserDayState.user_id == user_id, UserDayState.day_key == tomorrow)
-        ).first()
-        if existing:
-            existing.skipped_focus = "recovery"
-            db.add(existing)
-        else:
-            db.add(UserDayState(
-                user_id=user_id, day_key=tomorrow, skipped_focus="recovery",
-                meal_checks={}, nutrition_plan=None,
-            ))
+        state = _day_state(db, user_id, tomorrow)
+        old = state.skipped_focus
+        state.skipped_focus = "recovery"
+        state.updated_at = datetime.now(timezone.utc)
+        db.add(state)
         _record_memory(db, user_id, "ai_apply",
             "Tomorrow swapped to active recovery via recommendation",
             {"action": action})
@@ -248,7 +305,345 @@ def apply_action(
             applied=True,
             summary="Tomorrow swapped to active recovery (walk / mobility / yoga).",
             needs_regen=False,
-            changed_fields={"day_state": str(tomorrow)},
+            changed_fields={"skipped_focus": {"date": str(tomorrow), "from": old, "to": "recovery"}},
+            undo_action={"type": "set_day_focus", "date": str(tomorrow), "skipped_focus": old},
+        )
+
+    # ── set_day_focus / clear_day_state_focuses (undo helpers) ───────
+    if action_type == "set_day_focus":
+        target_date = _parse_date(action.get("date"), date.today())
+        state = _day_state(db, user_id, target_date)
+        old = state.skipped_focus
+        state.skipped_focus = action.get("skipped_focus")
+        state.updated_at = datetime.now(timezone.utc)
+        db.add(state)
+        _record_memory(db, user_id, "ai_apply_undo",
+            f"Day focus override restored for {target_date}",
+            {"action": action, "from": old, "to": state.skipped_focus})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary=f"Restored day override for {target_date}.",
+            needs_regen=False,
+            changed_fields={"skipped_focus": {"date": str(target_date), "from": old, "to": state.skipped_focus}},
+        )
+
+    if action_type == "clear_day_state_focuses":
+        raw_dates = action.get("dates") or []
+        dates = [
+            _parse_date(d, date.today())
+            for d in raw_dates
+            if isinstance(d, (str, date))
+        ][:14]
+        changed: list[str] = []
+        for target_date in dates:
+            state = db.exec(
+                select(UserDayState)
+                .where(UserDayState.user_id == user_id, UserDayState.day_key == target_date)
+            ).first()
+            if state and state.skipped_focus is not None:
+                state.skipped_focus = None
+                state.updated_at = datetime.now(timezone.utc)
+                db.add(state)
+                changed.append(str(target_date))
+        _record_memory(db, user_id, "ai_apply_undo",
+            f"Cleared {len(changed)} paused/travel day override(s)",
+            {"action": action, "dates": changed})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary=f"Cleared {len(changed)} paused day{'' if len(changed) == 1 else 's'}.",
+            needs_regen=False,
+            changed_fields={"cleared_dates": changed},
+        )
+
+    # ── shorten_workout / set_workout_duration ──────────────────────
+    if action_type in ("shorten_workout", "set_workout_duration"):
+        if action_type == "shorten_workout" and not (action.get("minutes") or action.get("value")):
+            return _descriptive_ack(
+                db, user_id, action_type, action, rec_key,
+                "Workout duration preference noted for the next plan review.",
+            )
+        prefs = _preferences(db, user_id)
+        if not prefs:
+            return ApplyResult(applied=False, summary="No preferences row", needs_regen=False, changed_fields={}, error="no_prefs")
+        minutes = int(action.get("minutes") or action.get("value") or 0)
+        if minutes <= 0:
+            return ApplyResult(applied=False, summary="No duration provided", needs_regen=False, changed_fields={}, error="invalid_minutes")
+        minutes = max(20, min(90, minutes))
+        old = prefs.workout_duration_minutes
+        prefs.workout_duration_minutes = minutes
+        prefs.updated_at = datetime.now(timezone.utc)
+        db.add(prefs)
+        _record_memory(db, user_id, "ai_apply",
+            f"Workout duration changed from {old or 'default'} → {minutes} minutes",
+            {"action": action, "from": old, "to": minutes})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary=f"Workout duration preference set to {minutes} minutes. New weeks will use it.",
+            needs_regen=True,
+            changed_fields={"workout_duration_minutes": {"from": old, "to": minutes}},
+            undo_action=(
+                {"type": "clear_workout_duration"}
+                if old is None else {"type": "set_workout_duration", "minutes": old}
+            ),
+        )
+
+    if action_type == "clear_workout_duration":
+        prefs = _preferences(db, user_id)
+        if not prefs:
+            return ApplyResult(applied=False, summary="No preferences row", needs_regen=False, changed_fields={}, error="no_prefs")
+        old = prefs.workout_duration_minutes
+        prefs.workout_duration_minutes = None
+        prefs.updated_at = datetime.now(timezone.utc)
+        db.add(prefs)
+        _record_memory(db, user_id, "ai_apply_undo",
+            "Workout duration preference restored to profile default",
+            {"action": action, "from": old, "to": None})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary="Workout duration preference restored to your profile default.",
+            needs_regen=True,
+            changed_fields={"workout_duration_minutes": {"from": old, "to": None}},
+        )
+
+    # ── schedule_deload ─────────────────────────────────────────────
+    if action_type == "schedule_deload":
+        if not any(k in action for k in ("duration_days", "days", "end_date")):
+            return _descriptive_ack(
+                db, user_id, action_type, action, rec_key,
+                "Deload recommendation noted for the next plan review.",
+            )
+        duration_days = int(action.get("duration_days") or 7)
+        duration_days = max(3, min(14, duration_days))
+        until = date.today() + timedelta(days=duration_days)
+        state = _coaching_state(db, user_id)
+        old_until = state.deload_until_date
+        old_volume = state.volume_adjustment_pct
+        state.deload_until_date = until
+        state.volume_adjustment_pct = min(old_volume, -30)
+        state.updated_at = datetime.now(timezone.utc)
+        db.add(state)
+        _record_memory(db, user_id, "ai_apply",
+            f"Deload scheduled through {until}",
+            {"action": action, "from": str(old_until) if old_until else None, "to": str(until)})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary=f"Deload scheduled through {until}. New weeks will reduce volume.",
+            needs_regen=True,
+            changed_fields={
+                "deload_until_date": {"from": str(old_until) if old_until else None, "to": str(until)},
+                "volume_adjustment_pct": {"from": old_volume, "to": state.volume_adjustment_pct},
+            },
+            undo_action={
+                "type": "restore_deload",
+                "deload_until_date": str(old_until) if old_until else None,
+                "volume_adjustment_pct": old_volume,
+            },
+        )
+
+    if action_type == "restore_deload":
+        state = _coaching_state(db, user_id)
+        old_until = state.deload_until_date
+        old_volume = state.volume_adjustment_pct
+        target_until = action.get("deload_until_date")
+        state.deload_until_date = _parse_date(target_until, date.today()) if target_until else None
+        state.volume_adjustment_pct = int(action.get("volume_adjustment_pct") or 0)
+        state.updated_at = datetime.now(timezone.utc)
+        db.add(state)
+        _record_memory(db, user_id, "ai_apply_undo",
+            "Deload settings restored",
+            {"action": action})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary="Deload settings restored.",
+            needs_regen=True,
+            changed_fields={
+                "deload_until_date": {
+                    "from": str(old_until) if old_until else None,
+                    "to": str(state.deload_until_date) if state.deload_until_date else None,
+                },
+                "volume_adjustment_pct": {"from": old_volume, "to": state.volume_adjustment_pct},
+            },
+        )
+
+    # ── set_core_frequency ──────────────────────────────────────────
+    if action_type == "set_core_frequency":
+        if not (action.get("days_per_week") is not None or action.get("value") is not None):
+            return _descriptive_ack(
+                db, user_id, action_type, action, rec_key,
+                "Core frequency preference noted for the next plan review.",
+            )
+        prefs = _preferences(db, user_id)
+        if not prefs:
+            return ApplyResult(applied=False, summary="No preferences row", needs_regen=False, changed_fields={}, error="no_prefs")
+        days = int(action.get("days_per_week") or action.get("value") or 0)
+        if not (0 <= days <= 7):
+            return ApplyResult(applied=False, summary="Invalid core frequency", needs_regen=False, changed_fields={}, error="invalid_value")
+        old = prefs.core_frequency_per_week
+        prefs.core_frequency_per_week = days
+        prefs.updated_at = datetime.now(timezone.utc)
+        db.add(prefs)
+        _record_memory(db, user_id, "ai_apply",
+            f"Core frequency changed from {old if old is not None else 'default'} → {days} days/week",
+            {"action": action, "from": old, "to": days})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary=f"Core preference set to {days} days / week for future plans.",
+            needs_regen=True,
+            changed_fields={"core_frequency_per_week": {"from": old, "to": days}},
+            undo_action=(
+                {"type": "clear_core_frequency"}
+                if old is None else {"type": "set_core_frequency", "days_per_week": old}
+            ),
+        )
+
+    if action_type == "clear_core_frequency":
+        prefs = _preferences(db, user_id)
+        if not prefs:
+            return ApplyResult(applied=False, summary="No preferences row", needs_regen=False, changed_fields={}, error="no_prefs")
+        old = prefs.core_frequency_per_week
+        prefs.core_frequency_per_week = None
+        prefs.updated_at = datetime.now(timezone.utc)
+        db.add(prefs)
+        _record_memory(db, user_id, "ai_apply_undo",
+            "Core frequency restored to planner default",
+            {"action": action, "from": old, "to": None})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary="Core frequency restored to planner default.",
+            needs_regen=True,
+            changed_fields={"core_frequency_per_week": {"from": old, "to": None}},
+        )
+
+    # ── carb_bump_today ─────────────────────────────────────────────
+    if action_type == "carb_bump_today":
+        if not (action.get("extra_g") or action.get("carbs_g")):
+            return _descriptive_ack(
+                db, user_id, action_type, action, rec_key,
+                "Carb timing recommendation noted for today.",
+            )
+        extra_g = int(action.get("extra_g") or action.get("carbs_g") or 0)
+        if extra_g <= 0:
+            return ApplyResult(applied=False, summary="No carb bump provided", needs_regen=False, changed_fields={}, error="invalid_value")
+        extra_g = max(20, min(125, extra_g))
+        target_date = _parse_date(action.get("date"), date.today())
+        state = _day_state(db, user_id, target_date)
+        old = state.macro_overrides
+        state.macro_overrides = {
+            **(old or {}),
+            "carb_bump_g": extra_g,
+            "source": "coach",
+        }
+        state.updated_at = datetime.now(timezone.utc)
+        db.add(state)
+        _record_memory(db, user_id, "ai_apply",
+            f"Carb bump added for {target_date}: +{extra_g}g carbs",
+            {"action": action, "date": str(target_date), "from": old, "to": state.macro_overrides})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary=f"Added +{extra_g}g carbs to {target_date}'s macro adjustment.",
+            needs_regen=False,
+            changed_fields={"macro_overrides": {"date": str(target_date), "from": old, "to": state.macro_overrides}},
+            undo_action={"type": "restore_macro_override", "date": str(target_date), "macro_overrides": old},
+        )
+
+    if action_type == "restore_macro_override":
+        target_date = _parse_date(action.get("date"), date.today())
+        state = _day_state(db, user_id, target_date)
+        old = state.macro_overrides
+        state.macro_overrides = action.get("macro_overrides")
+        state.updated_at = datetime.now(timezone.utc)
+        db.add(state)
+        _record_memory(db, user_id, "ai_apply_undo",
+            f"Macro override restored for {target_date}",
+            {"action": action})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary=f"Macro override restored for {target_date}.",
+            needs_regen=False,
+            changed_fields={"macro_overrides": {"date": str(target_date), "from": old, "to": state.macro_overrides}},
+        )
+
+    # ── add_cardio_session / add_zone2_session ──────────────────────
+    if action_type in ("add_cardio_session", "add_zone2_session"):
+        if not any(k in action for k in ("minutes", "style", "count", "value", "days_per_week")):
+            return _descriptive_ack(
+                db, user_id, action_type, action, rec_key,
+                "Cardio recommendation noted for the next plan review.",
+            )
+        prefs = _preferences(db, user_id)
+        if not prefs:
+            return ApplyResult(applied=False, summary="No preferences row", needs_regen=False, changed_fields={}, error="no_prefs")
+        old = prefs.days_per_week
+        if old >= 7:
+            _record_memory(db, user_id, "recommendation_acked",
+                "User accepted more cardio, but days/week is already at 7",
+                {"action": action, "rec_key": rec_key})
+            db.commit()
+            return ApplyResult(
+                applied=True,
+                summary="Cardio preference noted. You're already at 7 days/week, so the plan won't add another day.",
+                needs_regen=False,
+                changed_fields={},
+                descriptive_only=True,
+            )
+        target = min(7, old + 1)
+        prefs.days_per_week = target
+        prefs.updated_at = datetime.now(timezone.utc)
+        db.add(prefs)
+        style = str(action.get("style") or "zone2")
+        _record_memory(db, user_id, "ai_apply",
+            f"Added one weekly training day for {style} cardio",
+            {"action": action, "from": old, "to": target})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary=f"Added one weekly training day for {style} cardio. New weeks will use {target} days/week.",
+            needs_regen=True,
+            changed_fields={"days_per_week": {"from": old, "to": target}, "cardio_style": style},
+            undo_action={"type": "change_days_per_week", "value": old},
+        )
+
+    # ── travel_mode / pause_week ────────────────────────────────────
+    if action_type in ("travel_mode", "pause_week"):
+        today = date.today()
+        start = max(_parse_date(action.get("start_date"), today), today)
+        if action.get("end_date"):
+            end = _parse_date(action.get("end_date"), start)
+            duration_days = max(1, min(14, (end - start).days + 1))
+        else:
+            duration_days = int(action.get("days") or action.get("duration_days") or 7)
+            duration_days = max(1, min(14, duration_days))
+        label = "travel" if action_type == "travel_mode" else "pause"
+        dates: list[str] = []
+        old_values: dict[str, Any] = {}
+        for offset in range(duration_days):
+            target_date = start + timedelta(days=offset)
+            state = _day_state(db, user_id, target_date)
+            old_values[str(target_date)] = state.skipped_focus
+            state.skipped_focus = label
+            state.updated_at = datetime.now(timezone.utc)
+            db.add(state)
+            dates.append(str(target_date))
+        _record_memory(db, user_id, "ai_apply",
+            f"{label.title()} mode applied for {duration_days} day(s)",
+            {"action": action, "dates": dates, "previous": old_values})
+        db.commit()
+        return ApplyResult(
+            applied=True,
+            summary=f"{label.title()} mode applied for {duration_days} day{'' if duration_days == 1 else 's'}. Your week stays fixed; those days are marked skipped.",
+            needs_regen=False,
+            changed_fields={"paused_dates": dates, "skipped_focus": label},
+            undo_action={"type": "clear_day_state_focuses", "dates": dates},
         )
 
     # ── noop ─────────────────────────────────────────────────────────
@@ -264,14 +659,8 @@ def apply_action(
         "reduce_muscle_volume": "The next plan refresh will dial back that muscle's volume.",
         "add_muscle_volume": "The next plan refresh will add sets for that muscle.",
         "hold_muscle_volume": "Holding the current volume — next plan refresh will keep it stable.",
-        "add_cardio_session": "Logged. Add a cardio session today or tomorrow when you can.",
-        "add_zone2_session": "Logged. Add an easy walk or bike ride this week.",
         "reduce_cardio": "Logged. Next plan refresh will trim cardio days.",
-        "schedule_deload": "Deload flagged for next week. The planner will cut loads + sets.",
-        "set_core_frequency": "Core frequency preference noted. Next plan refresh will adjust.",
-        "shorten_workout": "Today's workout will trim to fit your time. Use 'Switch Day' to apply.",
         "reduce_intensity": "Today's intensity will dial back. Drop top-set loads ~10-15%.",
-        "carb_bump_today": "Add ~75-100g carbs to today's macros, especially around training.",
         "raise_protein_target": "Protein target preference noted.",
         "raise_fiber_target": "Fiber target preference noted.",
         "rebalance_week": "Acknowledged — the planner will reshuffle remaining days.",

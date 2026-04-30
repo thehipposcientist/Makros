@@ -419,6 +419,12 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                     {digest && digest.you.streak >= 2 ? ` · ${digest.you.streak}-day streak` : ''}
                   </Text>
                 </View>
+                <View style={styles.privacyRow}>
+                  <Ionicons name="lock-closed-outline" size={13} color={colors.primary} />
+                  <Text style={styles.privacyText}>
+                    Private by design: friends never see calories, macros, meals, body weight, body photos, or measurements.
+                  </Text>
+                </View>
               </View>
 
               {/* Sharing toggle reminder if disabled */}
@@ -716,6 +722,16 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
     },
     youLabel: { fontSize: 11, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.5 },
     youValue: { fontSize: 13, fontWeight: '700', color: colors.textPrimary },
+    privacyRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 7,
+      marginTop: spacing.sm,
+      paddingTop: spacing.sm,
+      borderTopWidth: 1,
+      borderTopColor: colors.border,
+    },
+    privacyText: { flex: 1, fontSize: 11, color: colors.textSecondary, lineHeight: 15, fontWeight: '600' },
     section: { marginBottom: spacing.lg },
     sectionLabel: {
       fontSize: 11,

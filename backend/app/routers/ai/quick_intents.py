@@ -1,6 +1,6 @@
 """Quick-action intent router for the trainer chat.
 
-Catches 12 common user asks with deterministic handlers so the LLM
+Catches common user asks with deterministic handlers so the LLM
 doesn't have to handle them (faster + consistent + free). Falls
 through to the general trainer path when no intent matches.
 
@@ -62,6 +62,7 @@ _INTENT_PATTERNS: list[tuple[str, list[str]]] = [
     ("slept_badly",        [r"slept (bad|poor|like)", r"didn'?t sleep", r"bad sleep", r"only.*hours.*sleep", r"barely slept"]),
     ("too_sore",           [r"too sore", r"really sore", r"sore as", r"my (legs|arms|body).*sore", r"can'?t move"]),
     ("missed_workout",     [r"missed (my |a )?workout", r"skipped (yesterday|today|my workout)", r"didn'?t work out"]),
+    ("travel_mode",        [r"travel(ing)?", r"vacation", r"out of town", r"hotel", r"pause.*(week|workouts?|training)", r"take.*week.*off"]),
     ("more_cardio",        [r"more cardio", r"add.*cardio", r"want.*cardio"]),
     ("less_cardio",        [r"less cardio", r"reduce.*cardio", r"cut.*cardio"]),
     ("deload",             [r"deload", r"need.*rest week", r"need a break", r"feel (burnt ?out|fried|overtraining)"]),
@@ -172,6 +173,26 @@ def _h_missed_workout(_q: str, _p: dict) -> IntentResponse:
         ],
         needs_plan_update=True,
         action={"type": "rebalance_week", "reason": "missed_workout"},
+    )
+
+
+def _h_travel_mode(q: str, _p: dict) -> IntentResponse:
+    m = re.search(r"(\d+)\s*(day|days)", q.lower())
+    days = int(m.group(1)) if m else 7
+    days = max(1, min(14, days))
+    return IntentResponse(
+        intent="travel_mode",
+        answer=(
+            f"I can pause the next {days} day{'' if days == 1 else 's'} for travel without regenerating your week. "
+            "Those dates are marked skipped, your PlanWeek stays intact, and the next normal week picks up from your durable preferences."
+        ),
+        action_items=[
+            f"Mark the next {days} day{'' if days == 1 else 's'} as travel / paused",
+            "Keep the active 7-day plan fixed",
+            "Resume normal training after the pause",
+        ],
+        needs_plan_update=False,
+        action={"type": "travel_mode", "days": days},
     )
 
 
@@ -334,6 +355,7 @@ _INTENT_HANDLERS = {
     "slept_badly":       _h_slept_badly,
     "too_sore":          _h_too_sore,
     "missed_workout":    _h_missed_workout,
+    "travel_mode":       _h_travel_mode,
     "more_cardio":       _h_more_cardio,
     "less_cardio":       _h_less_cardio,
     "deload":            _h_deload,

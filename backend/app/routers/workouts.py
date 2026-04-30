@@ -901,6 +901,13 @@ def generate_full_week(
                     body.goal or "body_recomp",
                     equipment_owned=body.equipment,
                 )
+            elif nf_lower == "empty":
+                cdt_result.proposed_days[ex_idx] = {
+                    **cdt_result.proposed_days[ex_idx],
+                    "focus": "Empty",
+                    "exercises": [],
+                    "stimulus": None,
+                }
             else:
                 base = nf_lower.replace(" + cardio", "").strip()
                 lift_needed.append((ex_idx, proposed_focus, base))
@@ -985,26 +992,51 @@ def generate_full_week(
                 )
             ).first()
             if pw:
-                # Training PlanDay rows in calendar order → recipe index k
-                training_days = sorted(
-                    [pd for pd in db.exec(
+                plan_days = sorted(
+                    db.exec(
                         select(PlanDay).where(PlanDay.plan_week_id == pw.id)
-                    ).all() if not pd.is_rest],
+                    ).all(),
                     key=lambda pd: pd.day_index,
                 )
+                # Current PlanWeek callers send all 7 calendar rows, so
+                # changed_indices are PlanDay.day_index values. Legacy callers
+                # send only training recipe days, so keep the old training-day
+                # mapping as a fallback.
+                calendar_index_mode = (
+                    bool(body.current_days)
+                    and len(body.current_days) == len(plan_days)
+                )
+                training_days = [pd for pd in plan_days if not pd.is_rest]
                 now2 = datetime.now(timezone.utc)
                 for recipe_idx in cdt_result.changed_indices:
-                    if recipe_idx < len(training_days) and recipe_idx < len(result_days):
+                    if recipe_idx >= len(result_days):
+                        continue
+                    if calendar_index_mode:
+                        pd_row = next(
+                            (pd for pd in plan_days if pd.day_index == recipe_idx),
+                            None,
+                        )
+                    elif recipe_idx < len(training_days):
                         pd_row = training_days[recipe_idx]
-                        if not pd_row.locked:
-                            pd_row.workout_json = result_days[recipe_idx]
-                            pd_row.generation_source = "change_focus"
-                            pd_row.updated_at = now2
-                            db.add(pd_row)
+                    else:
+                        pd_row = None
+                    if not pd_row or pd_row.locked or pd_row.day_date < date.today():
+                        continue
+                    day_json = result_days[recipe_idx]
+                    focus_norm = (day_json.get("focus") or "").lower().strip()
+                    pd_row.workout_json = day_json
+                    pd_row.is_rest = (
+                        focus_norm in ("rest", "")
+                        or (not day_json.get("exercises") and focus_norm != "empty")
+                    )
+                    pd_row.generation_source = "change_focus"
+                    pd_row.updated_at = now2
+                    db.add(pd_row)
                 db.commit()
                 logger.info(
                     f"[generate-week] patched PlanDay rows user={current_user.id} "
-                    f"changed={cdt_result.changed_indices}"
+                    f"changed={cdt_result.changed_indices} "
+                    f"calendar_index_mode={calendar_index_mode}"
                 )
         except Exception as e:
             logger.warning(f"[generate-week] PlanDay patch failed (non-fatal): {e}")

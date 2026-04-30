@@ -70,6 +70,7 @@ def _seed_completions(
     cardio_style=None,
     activity_intensity=None,
     stimulus=None,
+    hr_summary=None,
 ):
     from app.models import WorkoutCompletion
     for d in dates:
@@ -80,6 +81,7 @@ def _seed_completions(
             cardio_style=cardio_style,
             activity_intensity=activity_intensity,
             stimulus=stimulus,
+            hr_summary=hr_summary,
         ))
     s.commit()
 
@@ -159,6 +161,48 @@ def test_lift_plus_cardio_counts_finisher_minutes_not_full_session():
     review = compute_weekly_review(s, u.id)
     assert review.cardio_minutes == 15.0, review.cardio_minutes
     assert review.zone2_minutes == 15.0, review.zone2_minutes
+
+
+def test_zone2_cardio_focus_counts_full_session():
+    """Generated Zone 2 Cardio days should count as full aerobic-base
+    work even if an older client saved the activity category as strength."""
+    print("\n[test] Zone 2 Cardio focus contributes full session minutes")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    s, u = _setup_user_with_goal("body_recomp")
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    _seed_completions(
+        s,
+        u.id,
+        dates=[today],
+        focus="Zone 2 Cardio",
+        duration_min=45,
+        activity_category="strength",
+    )
+    review = compute_weekly_review(s, u.id)
+    assert review.cardio_minutes == 45.0, review.cardio_minutes
+    assert review.zone2_minutes == 45.0, review.zone2_minutes
+
+
+def test_zone2_cardio_focus_uses_hr_zone_minutes_when_present():
+    """HR-zone samples still win over the focus heuristic."""
+    print("\n[test] Zone 2 Cardio uses HR zone minutes when present")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    s, u = _setup_user_with_goal("body_recomp")
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    _seed_completions(
+        s,
+        u.id,
+        dates=[today],
+        focus="Zone 2 Cardio",
+        duration_min=45,
+        activity_category="strength",
+        hr_summary={"zoneMinutes": [5, 18, 20, 2, 0]},
+    )
+    review = compute_weekly_review(s, u.id)
+    assert review.cardio_minutes == 45.0, review.cardio_minutes
+    assert review.zone2_minutes == 18.0, review.zone2_minutes
 
 
 # ── Headline ─────────────────────────────────────────────────

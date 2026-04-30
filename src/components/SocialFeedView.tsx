@@ -402,6 +402,20 @@ export default function SocialFeedView({
     </View>
     </FadeInView>
   ) : null;
+  const privacyHeader = (
+    <View style={styles.privacyStrip}>
+      <Ionicons name="shield-checkmark-outline" size={16} color={colors.primary} />
+      <Text style={styles.privacyText}>
+        Friends only see workouts, streaks, and optional shares. Calories, macros, meals, body weight, and measurements stay private.
+      </Text>
+    </View>
+  );
+  const listHeader = (
+    <>
+      {privacyHeader}
+      {myActivityHeader}
+    </>
+  );
 
   return (
     <FlatList
@@ -409,7 +423,7 @@ export default function SocialFeedView({
       keyExtractor={keyExtractor}
       renderItem={renderItem}
       contentContainerStyle={[styles.listContent, { paddingBottom: bottomPadding }]}
-      ListHeaderComponent={myActivityHeader}
+      ListHeaderComponent={listHeader}
       refreshControl={
         <RefreshControl
           refreshing={refreshing}
@@ -448,6 +462,17 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
     empty: { paddingVertical: 60, alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 28 },
     emptyTitle: { fontSize: 16, fontWeight: '700', color: c.textPrimary, marginTop: 8 },
     emptyBody: { fontSize: 13, color: c.textSecondary, textAlign: 'center', lineHeight: 18 },
+    privacyStrip: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 8,
+      backgroundColor: c.primary + '12',
+      borderColor: c.primary + '30',
+      borderWidth: 1,
+      borderRadius: radius.md,
+      padding: 12,
+    },
+    privacyText: { flex: 1, fontSize: 11, color: c.textSecondary, lineHeight: 16, fontWeight: '600' },
     card: {
       backgroundColor: c.surfaceRaised,
       borderRadius: radius.lg,

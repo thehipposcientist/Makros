@@ -35,14 +35,14 @@ class DaySlot:
     def from_dict(idx: int, d: dict, *, locked: bool = False) -> "DaySlot":
         raw_focus = (d.get("focus") or "").strip()
         nf = normalize_focus(raw_focus)
-        is_lift = nf not in NON_LIFTING_FOCUSES and nf != "" and nf != "rest"
+        is_lift = _is_lifting_focus(nf)
         return DaySlot(
             index=idx,
             focus=raw_focus,
             family=_focus_family(raw_focus) if is_lift else nf,
             locked=locked,
             is_lifting=is_lift,
-            is_rest=(nf in ("rest", "")),
+            is_rest=(nf in _REST_FOCUSES),
         )
 
 
@@ -75,6 +75,16 @@ _ADJACENCY_COLLAPSE = {
     "legs": "lower_body",
     "lower": "lower_body",
 }
+_EMPTY_FOCUSES = {"empty"}
+_REST_FOCUSES = {"rest", ""}
+
+
+def _is_lifting_focus(nf: str) -> bool:
+    return (
+        nf not in NON_LIFTING_FOCUSES
+        and nf not in _REST_FOCUSES
+        and nf not in _EMPTY_FOCUSES
+    )
 
 
 def _collapsed_family(focus: str) -> str:
@@ -93,7 +103,7 @@ def detect_conflicts(
     conflicts: list[Conflict] = []
     new_fam = _collapsed_family(new_focus)
     new_nf = normalize_focus(new_focus)
-    new_is_lift = new_nf not in NON_LIFTING_FOCUSES and new_nf not in ("rest", "")
+    new_is_lift = _is_lifting_focus(new_nf)
 
     # 1. Adjacency: back-to-back same family with neighbors
     for offset in (-1, 1):
@@ -256,7 +266,7 @@ def smart_adjust_remaining(
     ) for s in week]
 
     new_nf = normalize_focus(new_focus)
-    new_is_lift = new_nf not in NON_LIFTING_FOCUSES and new_nf not in ("rest", "")
+    new_is_lift = _is_lifting_focus(new_nf)
 
     # Mark days before changed_idx as frozen (past days).
     for s in result:
@@ -294,10 +304,15 @@ def smart_adjust_remaining(
     # Count total lifting days in the original week.
     total_lifts_original = sum(1 for s in week if s.is_lifting)
 
-    # If the user changed a lift to non-lift, one fewer lifting slot.
-    # If they changed non-lift to lift, one more.
     old_was_lift = week[changed_idx].is_lifting
-    lift_delta = (1 if new_is_lift else 0) - (1 if old_was_lift else 0)
+    # "Empty" is a blank editable workout shell, not a request to lower
+    # weekly training frequency. Keep the target lift count so smart mode
+    # can move that focus to another available future day.
+    lift_delta = (
+        0
+        if new_nf in _EMPTY_FOCUSES
+        else (1 if new_is_lift else 0) - (1 if old_was_lift else 0)
+    )
     total_lifts_target = total_lifts_original + lift_delta
 
     # Count how many lifts are already frozen.
@@ -474,6 +489,13 @@ def change_day_type(
         # Change only this day. Keep everything else as-is.
         proposed = [dict(d) for d in current_days]
         proposed[day_index] = {**proposed[day_index], "focus": new_focus}
+        if normalize_focus(new_focus) in _EMPTY_FOCUSES:
+            proposed[day_index] = {
+                **proposed[day_index],
+                "focus": "Empty",
+                "exercises": [],
+                "stimulus": None,
+            }
         return ChangeResult(
             mode="single",
             conflicts=conflicts,
@@ -505,6 +527,13 @@ def change_day_type(
                 **proposed[slot.index],
                 "focus": slot.focus,
             }
+            if normalize_focus(slot.focus) in _EMPTY_FOCUSES:
+                proposed[slot.index] = {
+                    **proposed[slot.index],
+                    "focus": "Empty",
+                    "exercises": [],
+                    "stimulus": None,
+                }
             changed_indices.append(slot.index)
             if slot.family != old_slot.family:
                 exercises_needed.append(slot.index)

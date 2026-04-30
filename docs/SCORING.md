@@ -31,28 +31,41 @@ Companion docs:
 **Range:** 0–100, returned as `{ score, rating, mode, pillars, insights }`. Returns `null` if `totalSleepHours < 0.5`.
 **Mode select:** `personalized` if `hrvHistory.length ≥ 14` AND `bedtimeHistory.length ≥ 14`; else `mvp`.
 
-### MVP mode — 5 pillars, sums to 100
+### MVP mode — 7 pillars, sums to 100 before hard caps
 
 | Pillar | Max | Logic |
 |---|---:|---|
-| Duration | 35 | 7–9h → 35 · 6.5–7 / 9–9.5 → 30 · 6–6.5 / 9.5–10 → 22 · 5–6 → 12 · else → 4 |
-| Efficiency (asleep÷inBed) | 20 | ≥0.90 → 20 · ≥0.85 → 16 · ≥0.80 → 12 · ≥0.75 → 8 · else → 3 · missing inBed → neutral 12 |
-| HRV (age-adjusted) | 20 | ratio = hrvMs / `ageHrvReference(age)`. ≥1.10 → 20 · ≥0.95 → 16 · ≥0.80 → 11 · ≥0.65 → 6 · else → 2 · missing → neutral 10 |
-| Stage composite ((deep+REM)/total) | 15 | 30–50% → 15 · 25–30 / 50–55 → 12 · 20–25 / 55–60 → 8 · 15–20 → 4 · else → 1 · missing → neutral 8 |
-| Health flags (SpO₂ + resp) | 10 | Starts at 10, **deduct only**. SpO₂ <94 → −6, <95 → −3. Resp <10 or >22 → −4, <12 or >20 → −2 |
+| Duration | 32 | 7–9h → full · 6.5–7 / 9–9.5 → 72% · 6–6.5 / 9.5–10 → 48% · 5–6 → 25% · else → 5–20% |
+| Efficiency (asleep÷inBed) | 18 | ≥0.92 → full · ≥0.88 → 85% · ≥0.83 → 65% · ≥0.78 → 42% · else → 15% · missing → 50% |
+| HRV (age-adjusted) | 20 | ratio = hrvMs / `ageHrvReference(age)`. ≥1.15 → 20 · ≥1.00 → 16 · ≥0.88 → 11 · ≥0.75 → 6 · else → 2 · missing → 8 |
+| Deep sleep | 10 | Full-length nights use absolute minutes: ≥90m full · ≥70m 75% · ≥50m 50% · else 15%. Short nights use deep/total ratio. Missing → 50% |
+| REM sleep | 5 | Ratio sweet spot 18–25% full, broad soft bands outside that range. Missing → 50% |
+| Recovery vitals | 10 | Deducts for low SpO₂, out-of-range/elevated respiratory rate, elevated resting HR vs baseline, and baseline drops/drifts when history exists |
+| Awake fragmentation | 5 | ≤20m full · ≤45m 65% · ≤75m 35% · ≤120m 10% · >120m 0 |
 
 `ageHrvReference`: <30y=70 · <40y=60 · <50y=50 · <60y=40 · 60+=32 (ms).
 
-### Personalized mode — 6 pillars, sums to 100
+### Personalized mode — 8 pillars, sums to 100 before hard caps
 
 | Pillar | Max | Difference vs MVP |
 |---|---:|---|
-| Duration | 30 | Slightly less weight (history reduces noise elsewhere) |
-| Efficiency | 20 | Same |
-| HRV vs personal baseline | 20 | ratio = hrvMs / `rollingMedian(hrvHistory)`. ≥1.10 → 20 · ≥0.98 → 16 · ≥0.90 → 12 · ≥0.80 → 7 · else → 2. Falls back to MVP HRV if baseline invalid |
+| Duration | 28 | Slightly less weight (history reduces noise elsewhere) |
+| Efficiency | 17 | Same band shape as MVP |
+| HRV vs personal baseline | 18 | ratio = hrvMs / `rollingMedian(hrvHistory)`. ≥1.10 full · ≥0.98 80% · ≥0.92 60% · ≥0.85 35% · else 10%. Falls back to age-adjusted HRV if baseline invalid |
 | **Regularity** *(new)* | 15 | Circular SD of bedtimes, handles midnight wrap. ≤30min → 15 · ≤45 → 11 · ≤60 → 7 · ≤90 → 3 · else → 0 |
-| Stage composite | 10 | Lighter — stages are noisy |
-| Health flags | 5 | Lighter, deduct-only |
+| Deep sleep | 9 | Same logic as MVP, lighter weight |
+| REM sleep | 4 | Same logic as MVP, lighter weight |
+| Recovery vitals | 5 | Lighter, deduction-style, includes RHR/resp/SpO₂ baseline drift where available |
+| Awake fragmentation | 4 | Same awake-time bands as MVP, lighter weight |
+
+### Hard caps
+Certain red-flag nights cap the final score after pillar summing so one good signal cannot hide a bad recovery night:
+
+- Short sleep: <5h caps at 45; <6h at 59; <6.5h at 69.
+- Low efficiency: <75% caps at 59; <80% at 69; <85% at 79.
+- Wake after sleep onset: ≥180m caps at 35; ≥135m at 44; ≥105m at 49; ≥75m at 59; >45m at 69.
+- Corroborating stress markers: multiple off markers (low HRV, elevated RHR vs baseline, elevated respiratory rate vs baseline, low/dropping SpO₂) cap at 49–59.
+- Fragmented sleep plus stress markers: ≥105m awake plus 2+ off markers caps at 39; ≥105m plus 1 off marker caps at 42.
 
 ### Rating bands
 ≥85 Excellent · ≥70 Good · ≥50 Fair · <50 Poor

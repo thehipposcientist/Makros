@@ -118,8 +118,8 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     restingHR, steps, sleepSamples, energySamples,
     hrvSamples, vo2Samples, respSamples, spo2Samples,
     standSamples, mindfulSamples, basalSamples,
-    lastNightSleep, lastNightHRV, lastNightResp, lastNightSpo2,
-    historySleep, historyHRV,
+    lastNightSleep, lastNightHRV, lastNightRHR, lastNightResp, lastNightSpo2,
+    historySleep, historyHRV, historyRHR, historyResp, historySpo2,
   ] = await Promise.all([
     // Log HK failures so they show up in Console.app — silent .catch()
     // made "no HR data on readiness" near-impossible to diagnose without
@@ -136,11 +136,15 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     mod.getMindfulMinutes(startMs, endMs).catch(() => []),
     mod.getBasalEnergyBurned(startMs, endMs).catch(() => []),
     mod.getSleepSamples(lastNightMs, endMs).catch(() => []),
-    mod.getHRV(lastNightMs, endMs, 20).catch(() => []),
-    mod.getRespiratoryRate(lastNightMs, endMs, 5).catch(() => []),
-    mod.getOxygenSaturation(lastNightMs, endMs, 5).catch(() => []),
+    mod.getHRV(lastNightMs, endMs, 30).catch(() => []),
+    mod.getRestingHeartRate(lastNightMs, endMs, 10).catch(() => []),
+    mod.getRespiratoryRate(lastNightMs, endMs, 20).catch(() => []),
+    mod.getOxygenSaturation(lastNightMs, endMs, 20).catch(() => []),
     mod.getSleepSamples(historyStartMs, endMs).catch(() => []),
-    mod.getHRV(historyStartMs, endMs, 200).catch(() => []),
+    mod.getHRV(historyStartMs, endMs, 300).catch(() => []),
+    mod.getRestingHeartRate(historyStartMs, endMs, 100).catch(() => []),
+    mod.getRespiratoryRate(historyStartMs, endMs, 300).catch(() => []),
+    mod.getOxygenSaturation(historyStartMs, endMs, 300).catch(() => []),
   ]);
 
   // Fetch recent Apple workouts separately (not part of the parallel set because
@@ -153,19 +157,29 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
   } catch { recentWorkouts = []; }
 
   // Build and persist nightly history (for personalized score).
-  const history = buildNightlyHistory(historySleep as SleepSample[], historyHRV as any[]);
+  const history = buildNightlyHistory(
+    historySleep as SleepSample[],
+    historyHRV as any[],
+    historyRHR as any[],
+    historyResp as any[],
+    historySpo2 as any[],
+  );
   persistSleepHistory(history).catch(() => null);
 
   // Compute last-night inBedMinutes for efficiency.
   const lastNightStages = calcSleepStages(lastNightSleep as SleepSample[]);
   const lastNightInBedMinutes = calcLastNightInBedMinutes(lastNightSleep as SleepSample[]);
+  const lastNightRhrAvg = avgValue(lastNightRHR) ?? avgValue(restingHR);
+  const lastNightRespAvg = avgValue1(lastNightResp);
+  const lastNightSpo2Avg = avgValue1(lastNightSpo2);
 
   const sleepScore = buildSleepScore({
     stages: lastNightStages,
     inBedMinutes: lastNightInBedMinutes,
     hrvAvg: avgValue(lastNightHRV),
-    respRate: avgValue(lastNightResp),
-    spo2: avgValue(lastNightSpo2),
+    rhrAvg: lastNightRhrAvg,
+    respRate: lastNightRespAvg,
+    spo2: lastNightSpo2Avg,
     age: opts.age ?? null,
     history,
   });
@@ -177,9 +191,9 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     stages: lastNightStages,
     inBedMinutes: lastNightInBedMinutes,
     hrvMs: avgValue(lastNightHRV),
-    rhr: avgValue(restingHR),
-    respRate: avgValue(lastNightResp),
-    spo2: avgValue(lastNightSpo2),
+    rhr: lastNightRhrAvg,
+    respRate: lastNightRespAvg,
+    spo2: lastNightSpo2Avg,
     sleepScore,
     lastNightSleep: lastNightSleep as SleepSample[],
   }).catch(() => null);
@@ -743,6 +757,7 @@ interface BuildScoreArgs {
   stages: SleepStages | null;
   inBedMinutes: number | null;
   hrvAvg: number | null;
+  rhrAvg: number | null;
   respRate: number | null;
   spo2: number | null;
   age: number | null;
@@ -751,8 +766,12 @@ interface BuildScoreArgs {
 
 function buildSleepScore(a: BuildScoreArgs): SleepScore | null {
   if (!a.stages || a.stages.total < 0.5) return null;
-  const hrvHistory = a.history.map((n) => n.hrv).filter((v): v is number => typeof v === 'number' && v > 0);
-  const bedtimeHistory = a.history
+  const baselineHistory = a.history.length > 14 ? a.history.slice(0, -1) : a.history;
+  const hrvHistory = baselineHistory.map((n) => n.hrv).filter((v): v is number => typeof v === 'number' && v > 0);
+  const rhrHistory = baselineHistory.map((n) => n.restingHr).filter((v): v is number => typeof v === 'number' && v > 0);
+  const respiratoryRateHistory = baselineHistory.map((n) => n.respiratoryRate).filter((v): v is number => typeof v === 'number' && v > 0);
+  const spo2History = baselineHistory.map((n) => n.spo2Percent).filter((v): v is number => typeof v === 'number' && v > 0);
+  const bedtimeHistory = baselineHistory
     .map((n) => n.bedtimeMinutes)
     .filter((v): v is number => typeof v === 'number' && v >= 0 && v < 1440);
 
@@ -762,11 +781,15 @@ function buildSleepScore(a: BuildScoreArgs): SleepScore | null {
     deepSleepHours: a.stages.deep,
     remSleepHours: a.stages.rem,
     hrvMs: a.hrvAvg,
+    restingHeartRate: a.rhrAvg,
     spo2Percent: a.spo2,
     respiratoryRate: a.respRate,
     age: a.age,
     stages: a.stages,
     hrvHistory,
+    rhrHistory,
+    respiratoryRateHistory,
+    spo2History,
     bedtimeHistory,
   });
 }
@@ -776,6 +799,9 @@ function buildSleepScore(a: BuildScoreArgs): SleepScore | null {
 export interface NightRecord {
   night: string;                 // YYYY-MM-DD (end-of-sleep date)
   hrv: number | null;
+  restingHr?: number | null;
+  respiratoryRate?: number | null;
+  spo2Percent?: number | null;
   sleepHours: number | null;
   bedtimeMinutes: number | null; // minutes from midnight, local time
 }
@@ -783,6 +809,9 @@ export interface NightRecord {
 function buildNightlyHistory(
   sleepSamples: SleepSample[],
   hrvSamples: Array<{ value: number; startDate: string; endDate?: string }>,
+  rhrSamples: Array<{ value: number; startDate: string; endDate?: string }> = [],
+  respiratorySamples: Array<{ value: number; startDate: string; endDate?: string }> = [],
+  spo2Samples: Array<{ value: number; startDate: string; endDate?: string }> = [],
 ): NightRecord[] {
   // Group sleep samples by night (end date YYYY-MM-DD).
   const nights = new Map<string, SleepSample[]>();
@@ -810,25 +839,62 @@ function buildNightlyHistory(
     const sleepHours = asleepMin > 0 ? round1(asleepMin / 60) : null;
     const bedtimeMinutes = firstAsleepMs != null ? minutesFromMidnight(new Date(firstAsleepMs)) : null;
 
-    // Nightly HRV: average of samples whose start falls within this night's window.
+    // Nightly recovery markers: average samples in the sleep window.
+    // Resting HR can be a daily HealthKit summary, so the helper falls
+    // back to matching the waking date when no sample lands inside the
+    // actual sleep window.
     let nightHrv: number | null = null;
+    let nightRhr: number | null = null;
+    let nightResp: number | null = null;
+    let nightSpo2: number | null = null;
     if (firstAsleepMs != null) {
       const windowStart = firstAsleepMs;
       const windowEnd = windowStart + 14 * 3600_000; // cap at +14h from onset
-      const vals: number[] = [];
-      for (const h of hrvSamples ?? []) {
-        const t = new Date(h.startDate).getTime();
-        if (t >= windowStart && t <= windowEnd && h.value > 0) vals.push(h.value);
-      }
-      if (vals.length) nightHrv = Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
+      nightHrv = avgSamplesForNight(hrvSamples, night, windowStart, windowEnd, 'round');
+      nightRhr = avgSamplesForNight(rhrSamples, night, windowStart, windowEnd, 'round');
+      nightResp = avgSamplesForNight(respiratorySamples, night, windowStart, windowEnd, 'round1');
+      nightSpo2 = avgSamplesForNight(spo2Samples, night, windowStart, windowEnd, 'round1');
     }
 
     if (sleepHours != null && sleepHours >= 1 && sleepHours < 14) {
-      out.push({ night, hrv: nightHrv, sleepHours, bedtimeMinutes });
+      out.push({
+        night,
+        hrv: nightHrv,
+        restingHr: nightRhr,
+        respiratoryRate: nightResp,
+        spo2Percent: nightSpo2,
+        sleepHours,
+        bedtimeMinutes,
+      });
     }
   }
   out.sort((a, b) => a.night.localeCompare(b.night));
   return out.slice(-MAX_HISTORY_NIGHTS);
+}
+
+function avgSamplesForNight(
+  samples: Array<{ value: number; startDate: string; endDate?: string }> | null | undefined,
+  night: string,
+  windowStart: number,
+  windowEnd: number,
+  rounding: 'round' | 'round1',
+): number | null {
+  if (!Array.isArray(samples) || samples.length === 0) return null;
+  const inWindow: number[] = [];
+  const sameWakingDate: number[] = [];
+  for (const s of samples) {
+    const value = Number(s.value);
+    if (!(value > 0)) continue;
+    const t = new Date(s.startDate).getTime();
+    if (t >= windowStart && t <= windowEnd) inWindow.push(value);
+    if (s.startDate?.slice(0, 10) === night || s.endDate?.slice(0, 10) === night) {
+      sameWakingDate.push(value);
+    }
+  }
+  const vals = inWindow.length ? inWindow : sameWakingDate;
+  if (!vals.length) return null;
+  const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+  return rounding === 'round' ? Math.round(avg) : round1(avg);
 }
 
 export async function loadSleepHistory(): Promise<NightRecord[]> {
@@ -955,6 +1021,13 @@ function avgValue(samples: Array<{ value: number }> | null): number | null {
   const vals = samples.map((s) => s.value).filter((v) => v > 0);
   if (!vals.length) return null;
   return Math.round(vals.reduce((a, b) => a + b, 0) / vals.length);
+}
+
+function avgValue1(samples: Array<{ value: number }> | null): number | null {
+  if (!samples?.length) return null;
+  const vals = samples.map((s) => s.value).filter((v) => v > 0);
+  if (!vals.length) return null;
+  return round1(vals.reduce((a, b) => a + b, 0) / vals.length);
 }
 
 function totalValue(samples: Array<{ value: number }> | null): number | null {

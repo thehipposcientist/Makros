@@ -70,6 +70,7 @@ def log_meal_from_plan(
     meal_type: str,
     meal_data: dict,
     source: str = "plan_check",
+    consumed_at: datetime | None = None,
     *,
     db: Session,
 ) -> dict:
@@ -87,6 +88,8 @@ def log_meal_from_plan(
         "lunch": MealType.LUNCH,
         "dinner": MealType.DINNER,
         "snack": MealType.SNACK,
+        "pre_workout": MealType.PRE_WORKOUT,
+        "post_workout": MealType.POST_WORKOUT,
     }
     # If meal_type is "meal_N", try to infer from index or fall back to SNACK.
     resolved_type = mt_map.get(meal_type.lower())
@@ -138,7 +141,17 @@ def log_meal_from_plan(
                 for item in items_by_meal.get(existing.id, [])
             ])
             if signature == incoming_signature:
-                return {"id": existing.id, "name": existing.name, "meal_date": str(existing.meal_date)}
+                if consumed_at is not None:
+                    existing.consumed_at = consumed_at
+                    db.add(existing)
+                    db.commit()
+                    db.refresh(existing)
+                return {
+                    "id": existing.id,
+                    "name": existing.name,
+                    "meal_date": str(existing.meal_date),
+                    "consumed_at": existing.consumed_at.isoformat() if existing.consumed_at else None,
+                }
 
     meal = Meal(
         user_id=user_id,
@@ -147,6 +160,7 @@ def log_meal_from_plan(
         name=meal_data.get("meal", "Checked meal"),
         source=resolved_source,
         notes=None,
+        consumed_at=consumed_at or datetime.now(timezone.utc),
     )
     db.add(meal)
     db.flush()  # get meal.id
@@ -279,7 +293,12 @@ def log_meal_from_plan(
 
     db.commit()
     db.refresh(meal)
-    return {"id": meal.id, "name": meal.name, "meal_date": str(meal.meal_date)}
+    return {
+        "id": meal.id,
+        "name": meal.name,
+        "meal_date": str(meal.meal_date),
+        "consumed_at": meal.consumed_at.isoformat() if meal.consumed_at else None,
+    }
 
 
 # ─── Meal history query ──────────────────────────────────────────────────────
@@ -320,6 +339,8 @@ def get_meal_history(
             "meal_type": m.meal_type.value if m.meal_type else None,
             "name": m.name,
             "source": m.source.value if m.source else None,
+            "consumed_at": m.consumed_at.isoformat() if m.consumed_at else None,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
             "items": [
                 {
                     "food_name": it.food_name,

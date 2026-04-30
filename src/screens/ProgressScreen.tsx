@@ -106,6 +106,54 @@ function buildExerciseTrend(history: WorkoutSession[], exerciseName: string) {
 
 const _CARDIO_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle rope|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone.?2|tempo|boxing|kickboxing|bag.?work|shadow.?box|burpee|plank|dead hang|wall sit|hollow.?hold|farmer.?carry|suitcase carry/i;
 
+function paceSeconds(raw: string | null): number | null {
+  if (!raw) return null;
+  const match = raw.match(/(\d+):(\d{1,2})/);
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function formatPaceDelta(seconds: number): string {
+  const abs = Math.abs(seconds);
+  const min = Math.floor(abs / 60);
+  const sec = abs % 60;
+  return `${seconds < 0 ? '-' : '+'}${min}:${String(sec).padStart(2, '0')}`;
+}
+
+function buildCardioInsights(points: PaceHistoryPoint[]) {
+  const withDistance = points.filter(p => p.distance != null && p.distance > 0);
+  if (withDistance.length === 0) return [];
+  const totalDistance = withDistance.reduce((sum, p) => sum + (p.distance ?? 0), 0);
+  const bestDistance = withDistance.reduce((best, p) => (p.distance ?? 0) > (best.distance ?? 0) ? p : best, withDistance[0]);
+  const latest = [...withDistance].sort((a, b) => +new Date(a.date) - +new Date(b.date)).slice(-1)[0];
+  const byExercise = new Map<string, PaceHistoryPoint[]>();
+  for (const p of points) byExercise.set(p.exercise, [...(byExercise.get(p.exercise) ?? []), p]);
+  let bestPaceTrend: { exercise: string; delta: number } | null = null;
+  for (const [exercise, rows] of byExercise) {
+    const paceRows = rows
+      .filter(p => paceSeconds(p.pace) != null)
+      .sort((a, b) => +new Date(a.date) - +new Date(b.date));
+    if (paceRows.length < 2) continue;
+    const delta = paceSeconds(paceRows[paceRows.length - 1].pace)! - paceSeconds(paceRows[0].pace)!;
+    if (!bestPaceTrend || delta < bestPaceTrend.delta) bestPaceTrend = { exercise, delta };
+  }
+  const recent = withDistance.slice(-3);
+  const previous = withDistance.slice(-6, -3);
+  const recentAvg = recent.reduce((sum, p) => sum + (p.distance ?? 0), 0) / Math.max(1, recent.length);
+  const previousAvg = previous.reduce((sum, p) => sum + (p.distance ?? 0), 0) / Math.max(1, previous.length);
+  const avgDelta = previous.length ? recentAvg - previousAvg : null;
+  return [
+    { label: '90d distance', value: `${totalDistance.toFixed(1)} mi`, detail: `${withDistance.length} cardio logs with distance` },
+    { label: 'Best session', value: `${(bestDistance.distance ?? 0).toFixed(1)} mi`, detail: bestDistance.exercise },
+    { label: 'Latest', value: `${(latest.distance ?? 0).toFixed(1)} mi`, detail: latest.pace ? `${latest.exercise} · ${latest.pace}` : latest.exercise },
+    bestPaceTrend
+      ? { label: 'Pace trend', value: formatPaceDelta(bestPaceTrend.delta), detail: `${bestPaceTrend.exercise} vs first log` }
+      : avgDelta != null
+        ? { label: 'Distance trend', value: `${avgDelta >= 0 ? '+' : ''}${avgDelta.toFixed(1)} mi`, detail: 'Recent 3 vs previous 3 avg' }
+        : null,
+  ].filter((x): x is { label: string; value: string; detail: string } => Boolean(x));
+}
+
 /**
  * AnimatedChartBar — "draw-in" a chart bar from height 0 → target over
  * ~800ms on mount / when the target changes significantly. Staggered by
@@ -424,7 +472,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         const age = userProfile.physicalStats?.age ?? null;
         const { getHealthDataSummary } = await import('../services/healthDataSummary');
         const agg = await getHealthDataSummary({ age });
-        setAppleHealthZone2Minutes(agg?.zone2Minutes ?? null);
+        setAppleHealthZone2Minutes(agg?.weekly?.totalZone2Minutes ?? agg?.zone2Minutes ?? null);
         const fresh = agg?.raw ?? await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
         if (fresh) {
           setHealthSummary(fresh);
@@ -966,6 +1014,31 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <Text style={styles.emptyBody}>Tap an exercise above to see its progress chart.</Text>
                 </View>
               )}
+
+              {paceHistory.length > 0 && (() => {
+                const cardioInsights = buildCardioInsights(paceHistory);
+                if (cardioInsights.length === 0) return null;
+                return (
+                  <View style={{ marginTop: 20 }}>
+                    <Text style={styles.sectionLabel}>Cardio Insights</Text>
+                    <View style={[styles.graphCard, { gap: 10 }]}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <Ionicons name="pulse-outline" size={17} color={tc.primary} />
+                        <Text style={[styles.graphTitle, { flex: 1 }]}>Endurance trend</Text>
+                      </View>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                        {cardioInsights.map(item => (
+                          <View key={item.label} style={{ flexGrow: 1, flexBasis: '47%', backgroundColor: tc.surface, borderRadius: 10, borderWidth: 1, borderColor: tc.border, padding: 10 }}>
+                            <Text style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
+                            <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.4, textTransform: 'uppercase', marginTop: 2 }}>{item.label}</Text>
+                            <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 4 }} numberOfLines={2}>{item.detail}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    </View>
+                  </View>
+                );
+              })()}
 
               {/* ── Cardio Pace Progression ── */}
               {paceHistory.length >= 2 && (() => {
@@ -2380,12 +2453,18 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   )}
                 </View>
 
-                {(ss.hrvAvg != null || ss.respiratoryRate != null || ss.oxygenSaturation != null) && (
+                {(ss.hrvAvg != null || ss.restingHeartRate != null || ss.respiratoryRate != null || ss.oxygenSaturation != null) && (
                   <View style={{ flexDirection: 'row', gap: 12, marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
                     {ss.hrvAvg != null && (
                       <View style={{ flex: 1, alignItems: 'center' }}>
                         <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{ss.hrvAvg}</Text>
                         <Text style={{ fontSize: 9, color: tc.textMuted }}>HRV (ms)</Text>
+                      </View>
+                    )}
+                    {ss.restingHeartRate != null && (
+                      <View style={{ flex: 1, alignItems: 'center' }}>
+                        <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{ss.restingHeartRate}</Text>
+                        <Text style={{ fontSize: 9, color: tc.textMuted }}>RHR</Text>
                       </View>
                     )}
                     {ss.respiratoryRate != null && (

@@ -215,6 +215,101 @@ def test_format_for_prompt_includes_meal_history_lines() -> None:
     _ok("meal_history context lines render in the skeleton prompt")
 
 
+def test_log_meal_from_plan_persists_consumed_at() -> None:
+    """Checked-off plan meals should preserve eaten time separately
+    from logged/created time."""
+    print("\n[test] log_meal_from_plan persists consumed_at")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.models import User, Meal  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import log_meal_from_plan
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    consumed_at = datetime(2026, 4, 29, 12, 45, tzinfo=timezone.utc)
+    with Session(engine) as s:
+        u = User(email="meal-time@example.com", username="mealtime", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        result = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=date(2026, 4, 29),
+            meal_type="meal_0",
+            meal_data={
+                "meal": "Greek Yogurt Bowl",
+                "items": [
+                    {"name": "Greek Yogurt", "quantity": 1, "unit": "cup", "calories": 180, "protein": 20, "carbs": 8, "fat": 4},
+                ],
+            },
+            consumed_at=consumed_at,
+            db=s,
+        )
+        meal = s.get(Meal, result["id"])
+        assert meal is not None
+        assert meal.consumed_at is not None
+        assert meal.consumed_at.isoformat().startswith("2026-04-29T12:45:00"), meal.consumed_at
+        assert result["consumed_at"].startswith("2026-04-29T12:45:00"), result
+        updated_at = datetime(2026, 4, 29, 14, 5, tzinfo=timezone.utc)
+        updated = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=date(2026, 4, 29),
+            meal_type="meal_0",
+            meal_data={
+                "meal": "Greek Yogurt Bowl",
+                "items": [
+                    {"name": "Greek Yogurt", "quantity": 1, "unit": "cup", "calories": 180, "protein": 20, "carbs": 8, "fat": 4},
+                ],
+            },
+            consumed_at=updated_at,
+            db=s,
+        )
+        s.refresh(meal)
+        assert updated["id"] == meal.id, updated
+        assert meal.consumed_at.isoformat().startswith("2026-04-29T14:05:00"), meal.consumed_at
+        assert updated["consumed_at"].startswith("2026-04-29T14:05:00"), updated
+    _ok("consumed_at is stored and returned")
+
+
+def test_hydration_get_reads_requested_date() -> None:
+    """Past-day hydration should be readable by explicit log_date, not
+    hard-wired to today's row."""
+    print("\n[test] hydration GET reads the requested date")
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.models import User  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.meals import HydrationLogBody, get_hydration, log_hydration
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        u = User(email="hydration-date@example.com", username="hydrationdate", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        log_hydration(
+            HydrationLogBody(ounces=42, log_date="2026-04-27"),
+            current_user=u,
+            db=s,
+        )
+        today = get_hydration(log_date=None, current_user=u, db=s)
+        past = get_hydration(log_date="2026-04-27", current_user=u, db=s)
+
+        assert today["date"] != "2026-04-27", today
+        assert today["ounces"] == 0, today
+        assert past["date"] == "2026-04-27", past
+        assert past["ounces"] == 42, past
+    _ok("requested date returns its own hydration row")
+
+
 # ── Runner ──────────────────────────────────────────────────────────
 
 cases = [
@@ -223,6 +318,8 @@ cases = [
     test_build_nutrition_context_handles_missing_db,
     test_build_nutrition_context_calls_meal_history_with_db,
     test_format_for_prompt_includes_meal_history_lines,
+    test_log_meal_from_plan_persists_consumed_at,
+    test_hydration_get_reads_requested_date,
 ]
 
 

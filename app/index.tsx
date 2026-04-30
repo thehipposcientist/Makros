@@ -1167,7 +1167,8 @@ export default function Index() {
   const handleSaveProfile = async (updated: UserProfile, modeOverride?: typeof editMode) => {
     const effectiveMode = modeOverride ?? editMode;
 
-    // For goal and workout changes that trigger regen, show a confirmation first
+    // Goal/workout edits affect the next generated week, so ask before
+    // saving settings that will change the future plan shape.
     if (effectiveMode === 'goal' || effectiveMode === 'workout') {
       const willRegen = effectiveMode === 'goal'
         ? (userProfile?.goal !== updated.goal || userProfile?.goalDetails?.pace !== updated.goalDetails?.pace)
@@ -1210,16 +1211,22 @@ export default function Index() {
       await pushUserStateToBackend(authToken).catch(() => null);
       await syncOnboarding(authToken, stamped).catch(() => null);
 
-      // Regen strictly by edit mode. Workout edits NEVER touch
-      // nutrition and vice versa. Goal edits regenerate both only if
-      // `goalChanged` is true.
-      // Pro gate — free users don't hit AI plan generation. Their workout
-      // and nutrition surfaces stay on whatever deterministic local plan
-      // was last persisted (generateWorkoutPlan in utils/planGenerator.ts).
+      // Keep the active PlanWeek stable. Goal/workout settings are saved
+      // immediately, but the dated week in progress is not replaced from
+      // this profile-save path. Meal-plan and goal edits can refresh
+      // NutritionPlan templates for future weeks because active PlanDay
+      // nutrition remains the source of truth for the current week.
       const { isPro } = await import('../src/utils/subscription');
       const canRegen = isPro(stamped);
-      const regenWorkout  = canRegen && (priorEditMode === 'workout' || (priorEditMode === 'goal' && goalChanged));
+      const regenWorkout = false;
       const regenNutrition = canRegen && (priorEditMode === 'mealplan' || (priorEditMode === 'goal' && goalChanged));
+
+      if (goalChanged) {
+        await appendUserLog({
+          type: 'goal_updated',
+          summary: `Goal updated to ${stamped.goal.replace(/_/g, ' ')}; next generated week will use it.`,
+        });
+      }
 
       if (regenWorkout || regenNutrition) {
         // Preserve today's logged meals when regenerating nutrition
@@ -1266,9 +1273,8 @@ export default function Index() {
 
         const opts = { userLog, extraContext };
 
-        // Goal change → regenerate both via single call
-        // Workout-only edit → regenerate just workout plan
-        // Mealplan-only edit → regenerate just nutrition plan
+        // Goal/meal-plan edits refresh nutrition templates only. Workout
+        // edits do not replace the active PlanWeek from this path.
         const planCall = (regenWorkout && regenNutrition)
           ? getAIPlans(authToken, stamped, opts)
           : regenWorkout
@@ -1313,6 +1319,8 @@ export default function Index() {
             setIsNutritionUpdating(false);
             releasePlanGenAwake();
           });
+      } else {
+        setPlanRefreshKey(k => k + 1);
       }
     }
   };
@@ -1448,39 +1456,17 @@ export default function Index() {
             setPlanRefreshKey(k => k + 1);
             return;
           }
-          // Otherwise trigger plan regeneration
+          // Save plan-affecting preferences without replacing the active
+          // PlanWeek. The next generated week reads these settings; immediate
+          // changes should go through explicit Change Focus / per-day edits.
           const needsWorkout = !!changes.daysPerWeek || !!changes.workoutDurationMinutes || !!changes.equipment || !!changes.goal || !!changes.preferredSplit;
           const needsNutrition = !!changes.goal;
           if (needsWorkout || needsNutrition) {
-            if (needsWorkout) setIsWorkoutUpdating(true);
-            if (needsNutrition) setIsNutritionUpdating(true);
-            holdPlanGenAwake();
-            setPlanGenMarker(
-              (needsWorkout && needsNutrition) ? 'full' : needsWorkout ? 'workout' : 'nutrition'
-            ).catch(() => null);
-            const recentSessions = (await loadWorkoutHistory()).filter(s => !s.skipped && s.completed).slice(0, 3);
-            const sessionLines = recentSessions.length
-              ? 'Last 3 completed workouts:\n' + recentSessions.map(s => `  [${s.date.slice(0, 10)}] ${s.focus}`).join('\n')
-              : '';
-            const userLogRaw = await AsyncStorage.getItem('userLog');
-            const userLog: import('../src/types').UserLogEntry[] = safeParse<import('../src/types').UserLogEntry[]>(userLogRaw, []);
-            const opts = { userLog, extraContext: sessionLines || undefined };
-            const planCall = (needsWorkout && needsNutrition)
-              ? getAIPlans(authToken, stamped, opts)
-              : needsWorkout
-                ? getAIWorkoutPlan(authToken, stamped, opts)
-                : getAINutritionPlan(authToken, stamped, opts);
-            planCall.then(async (aiPlans: any) => {
-              await applyPlanResult(aiPlans);
-              setPlanRefreshKey(k => k + 1);
-            }).then(() => clearPlanGenMarker().catch(() => null))
-            .catch((err: any) => {
-              console.error('[onProfileUpdate] plan regen failed:', err?.message ?? err);
-            }).finally(() => {
-              setIsWorkoutUpdating(false);
-              setIsNutritionUpdating(false);
-              releasePlanGenAwake();
+            console.log('[onProfileUpdate] profile saved; active PlanWeek left unchanged', {
+              needsWorkout,
+              needsNutrition,
             });
+            setPlanRefreshKey(k => k + 1);
           } else {
             setPlanRefreshKey(k => k + 1);
           }
@@ -1702,12 +1688,12 @@ export default function Index() {
             <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
               <View style={{ backgroundColor: tc.surface, borderRadius: 20, padding: 24, width: '100%', maxWidth: 340, borderWidth: 1, borderColor: tc.border }}>
                 <Text style={{ fontSize: 18, fontWeight: '800', color: tc.textPrimary, textAlign: 'center', marginBottom: 8 }}>
-                  {isGoal ? 'Update Your Plan?' : 'Regenerate Workout Plan?'}
+                  {isGoal ? 'Save Goal Change?' : 'Save Workout Settings?'}
                 </Text>
                 <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', marginBottom: 20, lineHeight: 18 }}>
                   {isGoal
-                    ? 'Your current week\'s workouts and nutrition targets stay unchanged so your active plan isn\'t disrupted. Your new goal applies to next week\'s generated plan.'
-                    : 'Your workout plan will be regenerated with the new settings. Your nutrition plan won\'t change.'}
+                    ? 'Your current week stays unchanged so your active plan is not disrupted. Your new goal applies to the next generated week.'
+                    : 'Your current week stays unchanged. The next generated week will use these settings; use Change Focus or Swap for immediate day-level tweaks.'}
                 </Text>
                 <TouchableOpacity
                   style={{ backgroundColor: tc.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
@@ -1724,7 +1710,7 @@ export default function Index() {
                     }
                   }}>
                   <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>
-                    {isGoal ? 'Update Plan' : 'Regenerate'}
+                    {isGoal ? 'Save Goal' : 'Save Settings'}
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity

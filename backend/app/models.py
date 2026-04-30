@@ -89,6 +89,8 @@ class UserPreferences(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", unique=True, index=True)
     days_per_week: int = Field(default=3)
+    workout_duration_minutes: int | None = Field(default=None)
+    core_frequency_per_week: int | None = Field(default=None)
     equipment: list = Field(default_factory=list, sa_column=Column(JSON))
     equipment_settings: dict | None = Field(default=None, sa_column=Column(JSON))
     foods_available: list = Field(default_factory=list, sa_column=Column(JSON))
@@ -101,6 +103,7 @@ class UserCoachingState(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", unique=True, index=True)
     calorie_adjustment: int = Field(default=0)    # daily calories delta from baseline
     volume_adjustment_pct: int = Field(default=0) # training volume delta percentage
+    deload_until_date: date | None = Field(default=None)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -111,8 +114,10 @@ class UserDayState(SQLModel, table=True):
     user_id: int = Field(foreign_key="user.id", index=True)
     day_key: date = Field(index=True)
     skipped_focus: str | None = Field(default=None)
+    skip_reason: str | None = Field(default=None)
     meal_checks: dict = Field(default_factory=dict, sa_column=Column(JSON))
     nutrition_plan: dict | None = Field(default=None, sa_column=Column(JSON))
+    macro_overrides: dict | None = Field(default=None, sa_column=Column(JSON))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -550,6 +555,7 @@ class PlanDay(SQLModel, table=True):
     locked: bool = Field(default=False)
     locked_at: datetime | None = Field(default=None)
     lock_reason: str | None = Field(default=None)  # completed | started | manual_edit | skipped
+    skip_reason: str | None = Field(default=None)
     generation_source: str = Field(default="initial")  # initial | adapt | swap | manual | backfill
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -1491,6 +1497,8 @@ class GoalUpsert(SQLModel):
 
 class PreferencesUpsert(SQLModel):
     days_per_week: int
+    workout_duration_minutes: int | None = None
+    core_frequency_per_week: int | None = None
     equipment: list[str]       # item names e.g. "Dumbbells", "Pull-up bar"
     equipment_settings: dict | None = None
     foods_available: list[str]
@@ -1508,8 +1516,11 @@ class DayStateUpsert(SQLModel):
     # via the `clear_skipped_focus` flag below.
     skipped_focus: str | None = None
     clear_skipped_focus: bool = False
+    skip_reason: str | None = None
+    clear_skip_reason: bool = False
     meal_checks: dict | None = None
     nutrition_plan: dict | None = None
+    macro_overrides: dict | None = None
 
 
 class WeeklyCheckInCreate(SQLModel):

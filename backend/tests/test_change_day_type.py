@@ -473,6 +473,30 @@ def test_day_slot_from_dict_cardio():
     assert_false(slot.is_rest, "Cardio is not rest")
 
 
+def test_empty_shell_is_editable_and_smart_balances():
+    """Empty is a blank workout shell, so smart mode can move the lost
+    focus later instead of silently lowering weekly training frequency."""
+    print("[change_day_type] Empty shell stays editable and smart-balances")
+    from app.services.workout.change_day_type import DaySlot, change_day_type
+    from app.services.workout.switch_day import _focus_family
+
+    slot = DaySlot.from_dict(0, {"focus": "Empty"})
+    assert_false(slot.is_lifting, "Empty is not lifting yet")
+    assert_false(slot.is_rest, "Empty is not rest")
+
+    days = _make_days("Push", "Pull", "Legs", "Push")
+    statuses = _statuses("pending", "pending", "pending", "pending")
+    result = change_day_type(
+        days, day_index=1, new_focus="Empty",
+        day_statuses=statuses, mode="smart", split="ppl",
+    )
+    assert_eq(result.proposed_days[1]["focus"], "Empty", "day1 is Empty")
+    assert_eq(result.proposed_days[1]["exercises"], [], "Empty has no exercises")
+    assert_in(1, result.changed_indices, "day1 in changed")
+    future_families = [_focus_family(d["focus"]) for d in result.proposed_days[2:]]
+    assert_in("pull", future_families, "pull moved to a future slot")
+
+
 # ── Test: smart adjust with upper_lower split ────────────────────────
 
 def test_smart_adjust_upper_lower():
@@ -654,6 +678,7 @@ cases = [
     test_day_slot_from_dict_recovery,
     test_day_slot_from_dict_rest,
     test_day_slot_from_dict_cardio,
+    test_empty_shell_is_editable_and_smart_balances,
     test_smart_adjust_upper_lower,
     test_smart_adjust_preserves_rest_days,
     test_many_completed_days_limits_changes,

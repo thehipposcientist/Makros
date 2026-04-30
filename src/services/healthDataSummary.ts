@@ -73,7 +73,7 @@ export interface HealthDataSummary {
   raw: HealthSummary | null;
 }
 
-const CACHE_KEY = 'healthDataSummary_v1';
+const CACHE_KEY = 'healthDataSummary_v2';
 const STALE_AFTER_MS = 30 * 60 * 1000;   // 30 min
 
 let _inflight: Promise<HealthDataSummary | null> | null = null;
@@ -175,8 +175,9 @@ async function pushSnapshotToBackend(_s: HealthDataSummary): Promise<void> {
   }
 }
 
-function _hasAnyValue(d: { steps: number | null; activeEnergyKcal: number | null; workoutMinutes: number | null; restingHr: number | null; hrv: number | null; weightLbs: number | null; vo2Max: number | null }): boolean {
+function _hasAnyValue(d: { steps: number | null; activeEnergyKcal: number | null; workoutMinutes: number | null; cardioMinutes?: number | null; zone2Minutes?: number | null; restingHr: number | null; hrv: number | null; weightLbs: number | null; vo2Max: number | null }): boolean {
   return d.steps != null || d.activeEnergyKcal != null || d.workoutMinutes != null
+    || d.cardioMinutes != null || d.zone2Minutes != null
     || d.restingHr != null || d.hrv != null || d.weightLbs != null || d.vo2Max != null;
 }
 

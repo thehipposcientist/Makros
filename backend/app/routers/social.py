@@ -683,6 +683,43 @@ class CreatePostBody(BaseModel):
         return v[:500] if v else None
 
 
+def _sanitize_workout_summary(raw: dict) -> dict:
+    """Whitelist the social workout payload.
+
+    Social may show activity, streaks, and workout structure. It must
+    never echo nutrition, body weight, body composition, or recovery
+    internals if a buggy client includes them.
+    """
+    exercises = []
+    for ex in list(raw.get("exercises") or [])[:20]:
+        if not isinstance(ex, dict):
+            continue
+        sets = []
+        for s in list(ex.get("sets") or [])[:20]:
+            if not isinstance(s, dict):
+                continue
+            sets.append({
+                "reps": int(s.get("reps") or 0),
+                "weight_lbs": float(s.get("weight_lbs") or 0),
+            })
+        exercises.append({
+            "name": str(ex.get("name") or "Exercise")[:80],
+            "equipment": str(ex.get("equipment"))[:60] if ex.get("equipment") else None,
+            "sets": sets,
+        })
+
+    return {
+        "focus": str(raw.get("focus") or "Workout")[:80],
+        "duration_seconds": int(raw.get("duration_seconds") or 0),
+        "date": str(raw.get("date") or "")[:10],
+        "exercises": exercises,
+        "total_sets": int(raw.get("total_sets") or 0),
+        "total_reps": int(raw.get("total_reps") or 0),
+        "training_score": raw.get("training_score") if isinstance(raw.get("training_score"), (int, float)) else None,
+        "training_rating": str(raw.get("training_rating"))[:40] if raw.get("training_rating") else None,
+    }
+
+
 @router.post("/posts")
 def create_post(
     body: CreatePostBody,
@@ -695,7 +732,7 @@ def create_post(
     if body.photo_base64:
         payload["photo_base64"] = body.photo_base64
     if body.workout_summary:
-        payload["workout_summary"] = body.workout_summary
+        payload["workout_summary"] = _sanitize_workout_summary(body.workout_summary)
 
     item = ActivityFeedItem(
         user_id=current_user.id,

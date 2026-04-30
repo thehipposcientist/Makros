@@ -167,16 +167,28 @@ def _sum_cardio_minutes(completions: list[WorkoutCompletion]) -> tuple[float, fl
         subtype = (c.activity_subtype or "").lower()
         style = (c.cardio_style or "").lower()
         intensity = (c.activity_intensity or "").lower()
+        is_lift_plus_cardio = " + cardio" in focus or "+ cardio" in focus
+        is_pure_cardio_focus = (
+            not is_lift_plus_cardio
+            and any(
+                token in focus
+                for token in (
+                    "zone 2", "zone2", "z2", "cardio", "conditioning",
+                    "tempo", "interval", "run", "bike", "cycle", "row",
+                    "swim", "elliptical", "stair", "treadmill",
+                )
+            )
+        )
 
         cardio_mins = 0.0
-        if category == "cardio":
+        if category == "cardio" or is_pure_cardio_focus:
             cardio_mins = mins
         elif category in {"sport", "active"} and (
             "cardio" in focus
             or subtype in {"soccer", "basketball", "tennis", "pickleball", "boxing", "kickboxing", "martial_arts", "dancing"}
         ):
             cardio_mins = mins
-        elif " + cardio" in focus or style in {"steady", "intervals", "easy", "recovery", "class"}:
+        elif is_lift_plus_cardio or style in {"steady", "intervals", "easy", "recovery", "class"}:
             cardio_mins = min(20.0, max(10.0, mins * 0.25))
         elif (c.stimulus or "").lower() == "conditioning":
             cardio_mins = mins
@@ -204,9 +216,10 @@ def _sum_cardio_minutes(completions: list[WorkoutCompletion]) -> tuple[float, fl
         # Otherwise infer from style/intensity labels. Adds `style == 'easy'`
         # and `style == 'recovery'` which were silently dropped before — an
         # easy walk IS Z2 cardio by definition.
-        if style in {"steady", "easy", "recovery"} or intensity == "easy":
+        focus_is_zone2 = any(token in focus for token in ("zone 2", "zone2", "z2", "steady"))
+        if style in {"steady", "easy", "recovery"} or intensity == "easy" or focus_is_zone2:
             zone2 += cardio_mins
-        elif " + cardio" in focus and style not in {"intervals", "sprint"}:
+        elif is_lift_plus_cardio and style not in {"intervals", "sprint"}:
             zone2 += cardio_mins
     return total, zone2
 

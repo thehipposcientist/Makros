@@ -409,14 +409,28 @@ def _persist_active_workout_plan(
             f"version={PLANNER_VERSION} reason={reason} future_day_rows_cleared={cleared}"
         )
 
-        # Dual-write: also create a PlanWeek so the new weekly model stays in sync.
+        # Dual-write only for users who do not have a PlanWeek yet. Profile
+        # edits can regenerate the legacy WorkoutPlan artifact, but they must
+        # not replace a dated active PlanWeek mid-week.
         try:
             from app.services.workout.week_manager import create_plan_week, default_training_pattern
+            from app.models import PlanWeek
             from datetime import date as _date2, timedelta as _td2
             wp_data = plan_json.get("workout_plan", plan_json) if isinstance(plan_json, dict) else {}
             workout_days = wp_data.get("days", [])
             dpw = int(getattr(req, "daysPerWeek", 0) or 0) or len(workout_days)
-            if workout_days and dpw:
+            active_week = db.exec(
+                select(PlanWeek).where(
+                    PlanWeek.user_id == user_id,
+                    PlanWeek.status == "active",
+                )
+            ).first()
+            if active_week:
+                print(
+                    f"[workout-plan] dual-write skipped: active PlanWeek "
+                    f"id={active_week.id} start={active_week.start_date}"
+                )
+            elif workout_days and dpw:
                 today = _date2.today()
                 week_start = today - _td2(days=today.weekday())
                 create_plan_week(
@@ -933,6 +947,7 @@ def _build_deterministic_workout(
                 skipped_days.append({
                     "date": str(sr.day_key),
                     "focus": sr.skipped_focus,
+                    "reason": getattr(sr, "skip_reason", None),
                 })
             if skipped_days:
                 print(f"[plan-gen workout] skipped days (7d): {skipped_days}")

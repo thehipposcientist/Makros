@@ -1484,7 +1484,7 @@ export async function getDayState(token: string, dayKey: string) {
 export async function upsertDayState(
   token: string,
   dayKey: string,
-  payload: { skipped_focus?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any },
+  payload: { skipped_focus?: string | null; skip_reason?: string | null; meal_checks?: Record<string, boolean>; nutrition_plan?: any; macro_overrides?: any },
 ) {
   // Patch semantics — only send fields the caller actually wants to change.
   // Backend treats omitted fields as "leave existing value alone" (since the
@@ -1496,8 +1496,14 @@ export async function upsertDayState(
   } else if (payload.skipped_focus !== undefined) {
     body.skipped_focus = payload.skipped_focus;
   }
+  if (payload.skip_reason === null) {
+    body.clear_skip_reason = true;
+  } else if (payload.skip_reason !== undefined) {
+    body.skip_reason = payload.skip_reason;
+  }
   if (payload.meal_checks !== undefined) body.meal_checks = payload.meal_checks;
   if (payload.nutrition_plan !== undefined) body.nutrition_plan = payload.nutrition_plan;
+  if (payload.macro_overrides !== undefined) body.macro_overrides = payload.macro_overrides;
   return request('/profile/day-state/' + dayKey, {
     method: 'PUT',
     headers: { Authorization: `Bearer ${token}` },
@@ -2442,6 +2448,8 @@ export interface MealHistoryEntry {
   meal_type: string | null;
   name: string;
   source: string | null;
+  consumed_at?: string | null;
+  created_at?: string | null;
   items: MealHistoryItem[];
   totals: { calories: number; protein_g: number; carbs_g: number; fat_g: number };
 }
@@ -2459,8 +2467,8 @@ export interface MealAverages {
 
 export async function logMealChecked(
   token: string,
-  payload: { meal_date: string; meal_type: string; meal: Record<string, any>; source?: string },
-): Promise<{ id: number }> {
+  payload: { meal_date: string; meal_type: string; meal: Record<string, any>; source?: string; consumed_at?: string },
+): Promise<{ id: number; consumed_at?: string | null }> {
   return request('/meals/log-checked', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
@@ -2699,15 +2707,16 @@ export interface HydrationStatus {
   /** Optional — older app builds may not surface this. */
   breakdown?: HydrationBreakdown;
 }
-export async function getHydration(token: string): Promise<HydrationStatus> {
-  return request('/meals/hydration', { headers: { Authorization: `Bearer ${token}` } });
+export async function getHydration(token: string, logDate?: string): Promise<HydrationStatus> {
+  const qs = logDate ? `?log_date=${encodeURIComponent(logDate)}` : '';
+  return request(`/meals/hydration${qs}`, { headers: { Authorization: `Bearer ${token}` } });
 }
 
-export async function logHydration(token: string, ounces: number): Promise<{ date: string; ounces: number }> {
+export async function logHydration(token: string, ounces: number, logDate?: string): Promise<{ date: string; ounces: number }> {
   return request('/meals/hydration', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ounces }),
+    body: JSON.stringify({ ounces, ...(logDate ? { log_date: logDate } : {}) }),
   });
 }
 
@@ -3256,6 +3265,7 @@ export interface ApplyActionResult {
   changed_fields: Record<string, any>;
   descriptive_only: boolean;
   error: string | null;
+  undo_action?: Record<string, any> | null;
 }
 
 // ── Weekly Coach Check-In ─────────────────────────────────────────────────────
@@ -3372,6 +3382,7 @@ export interface PlanDayResponse {
   is_rest: boolean;
   locked: boolean;
   lock_reason: string | null;
+  skip_reason: string | null;
   /** WorkoutDay-shaped JSON (focus/exercises/...). Null on rest days. */
   workout: any | null;
   /** DailyNutritionPlan-shaped JSON. Null when no template assigned. */
@@ -3392,6 +3403,11 @@ export interface PlanWeekResponse {
   days: PlanDayResponse[];
 }
 
+export interface CyclePlanContext {
+  cyclePhase?: 'menses' | 'follicular' | 'ovulation' | 'luteal' | 'unknown' | null;
+  dayOfCycle?: number | null;
+}
+
 /** Returns the active 7-day plan, or null if none exists yet (caller
  *  should then POST /plans/start-new-week to generate one). */
 export async function getActivePlanWeek(token: string): Promise<PlanWeekResponse | null> {
@@ -3403,11 +3419,19 @@ export async function getActivePlanWeek(token: string): Promise<PlanWeekResponse
 
 /** Force-create a new 7-day plan starting today. Used on first run
  *  and when needs_new_week is true. */
-export async function startNewPlanWeek(token: string, force: boolean = false): Promise<PlanWeekResponse> {
+export async function startNewPlanWeek(
+  token: string,
+  force: boolean = false,
+  cycle?: CyclePlanContext | null,
+): Promise<PlanWeekResponse> {
   return request<PlanWeekResponse>('/plans/start-new-week', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ force }),
+    body: JSON.stringify({
+      force,
+      cycle_phase: cycle?.cyclePhase ?? null,
+      day_of_cycle: cycle?.dayOfCycle ?? null,
+    }),
   });
 }
 
@@ -3420,6 +3444,28 @@ export async function patchPlanDayWorkout(
     method: 'PATCH',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ workout_json: workoutJson }),
+  });
+}
+
+export async function skipPlanDay(
+  token: string,
+  dayDate: string,
+  reason?: string | null,
+): Promise<PlanDayResponse> {
+  return request<PlanDayResponse>(`/plans/days/${encodeURIComponent(dayDate)}/skip`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: reason ?? null }),
+  });
+}
+
+export async function unskipPlanDay(
+  token: string,
+  dayDate: string,
+): Promise<PlanDayResponse> {
+  return request<PlanDayResponse>(`/plans/days/${encodeURIComponent(dayDate)}/unskip`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
   });
 }
 
@@ -3487,8 +3533,13 @@ export interface PlanWeekCheckinSubmit {
  *  a check-in must be completed or skipped first. */
 export async function autoRenewPlanWeek(
   token: string,
+  cycle?: CyclePlanContext | null,
 ): Promise<AutoRenewPlanWeekResponse | CheckinRequiredResponse> {
-  return request<AutoRenewPlanWeekResponse | CheckinRequiredResponse>('/plans/week/auto-renew', {
+  const params = new URLSearchParams();
+  if (cycle?.cyclePhase && cycle.cyclePhase !== 'unknown') params.set('cycle_phase', cycle.cyclePhase);
+  if (cycle?.dayOfCycle != null) params.set('day_of_cycle', String(cycle.dayOfCycle));
+  const qs = params.toString();
+  return request<AutoRenewPlanWeekResponse | CheckinRequiredResponse>(`/plans/week/auto-renew${qs ? '?' + qs : ''}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   });

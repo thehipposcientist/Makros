@@ -23,6 +23,7 @@ from app.services.workout.week_manager import (
     lock_day,
     complete_day,
     skip_day,
+    unskip_day,
     start_day,
     patch_day_workout,
     patch_day_nutrition,
@@ -48,6 +49,7 @@ class PlanDayResponse(BaseModel):
     is_rest: bool
     locked: bool
     lock_reason: str | None = None
+    skip_reason: str | None = None
     workout: dict | None = None
     nutrition: dict | None = None
     generation_source: str = "initial"
@@ -94,6 +96,8 @@ class PlanWeekCheckinSubmitRequest(BaseModel):
 
 class StartNewWeekRequest(BaseModel):
     force: bool = False
+    cycle_phase: str | None = None
+    day_of_cycle: int | None = None
 
 
 class WeekCheckinAnswersRequest(BaseModel):
@@ -118,6 +122,10 @@ class PatchDayNutritionRequest(BaseModel):
     nutrition_json: dict
 
 
+class SkipDayRequest(BaseModel):
+    reason: str | None = None
+
+
 class AdaptRemainingRequest(BaseModel):
     reason: str = "fatigue_adapt"
 
@@ -139,6 +147,7 @@ def _plan_day_to_response(pd: PlanDay) -> PlanDayResponse:
         is_rest=pd.is_rest,
         locked=pd.locked,
         lock_reason=pd.lock_reason,
+        skip_reason=getattr(pd, "skip_reason", None),
         workout=pd.workout_json,
         nutrition=pd.nutrition_json,
         generation_source=pd.generation_source,
@@ -340,6 +349,8 @@ def start_new_week(
         recent_focus_buckets=recent_focus_buckets,
         recent_focus_families=recent_focus_families,
         muscle_fatigue=muscle_fatigue,
+        cycle_phase=body.cycle_phase,
+        day_of_cycle=body.day_of_cycle,
         load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
 
@@ -406,6 +417,8 @@ def auto_renew(
     avg_resting_hr: float | None = None,
     avg_steps: float | None = None,
     readiness_score: int | None = None,
+    cycle_phase: str | None = None,
+    day_of_cycle: int | None = None,
 ) -> AutoRenewResponse | CheckinRequiredResponse:
     """Auto-generate a new week when the active plan has expired.
 
@@ -451,6 +464,8 @@ def auto_renew(
         avg_resting_hr=avg_resting_hr,
         avg_steps=avg_steps,
         readiness_score=readiness_score,
+        cycle_phase=cycle_phase,
+        day_of_cycle=day_of_cycle,
     )
 
     if "error" in result:
@@ -1015,6 +1030,7 @@ def mark_day_complete(
 @router.post("/days/{day_date}/skip")
 def mark_day_skipped(
     day_date: date,
+    body: SkipDayRequest | None = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ) -> PlanDayResponse:
@@ -1033,7 +1049,30 @@ def mark_day_skipped(
     if plan_day.locked:
         return _plan_day_to_response(plan_day)
 
-    result = skip_day(db, plan_day)
+    result = skip_day(db, plan_day, reason=body.reason if body else None)
+    return _plan_day_to_response(result)
+
+
+@router.post("/days/{day_date}/unskip")
+def mark_day_unskipped(
+    day_date: date,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> PlanDayResponse:
+    """Undo a manual skip, restoring the PlanDay to an unlocked planned state."""
+    pw = get_active_week(db, current_user.id)
+    if not pw:
+        raise HTTPException(status_code=404, detail="No active plan week")
+    plan_day = db.exec(
+        select(PlanDay).where(
+            PlanDay.plan_week_id == pw.id,
+            PlanDay.day_date == day_date,
+        )
+    ).first()
+    if not plan_day:
+        raise HTTPException(status_code=404, detail=f"No plan day for {day_date}")
+
+    result = unskip_day(db, plan_day)
     return _plan_day_to_response(result)
 
 

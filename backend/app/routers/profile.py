@@ -210,6 +210,8 @@ def sync_onboarding(
     ).first()
     if prefs:
         prefs.days_per_week    = body.preferences.days_per_week
+        prefs.workout_duration_minutes = body.preferences.workout_duration_minutes
+        prefs.core_frequency_per_week = body.preferences.core_frequency_per_week
         prefs.equipment        = body.preferences.equipment
         prefs.equipment_settings = body.preferences.equipment_settings
         prefs.foods_available  = body.preferences.foods_available
@@ -486,8 +488,10 @@ def get_day_state(
         return {
             "day_key": day_key,
             "skipped_focus": None,
+            "skip_reason": None,
             "meal_checks": {},
             "nutrition_plan": None,
+            "macro_overrides": None,
         }
     return state
 
@@ -512,18 +516,26 @@ def upsert_day_state(
             state.skipped_focus = None
         elif body.skipped_focus is not None:
             state.skipped_focus = body.skipped_focus
+        if body.clear_skip_reason:
+            state.skip_reason = None
+        elif body.skip_reason is not None:
+            state.skip_reason = body.skip_reason.strip() or None
         if body.meal_checks is not None:
             state.meal_checks = body.meal_checks
         if body.nutrition_plan is not None:
             state.nutrition_plan = body.nutrition_plan
+        if body.macro_overrides is not None:
+            state.macro_overrides = body.macro_overrides
         state.updated_at = now
     else:
         state = UserDayState(
             user_id=current_user.id,
             day_key=day_key,
             skipped_focus=None if body.clear_skipped_focus else body.skipped_focus,
+            skip_reason=None if body.clear_skip_reason else ((body.skip_reason or "").strip() or None),
             meal_checks=body.meal_checks or {},
             nutrition_plan=body.nutrition_plan,
+            macro_overrides=body.macro_overrides,
             updated_at=now,
         )
     session.add(state)

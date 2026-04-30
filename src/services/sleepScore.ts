@@ -25,12 +25,16 @@ export interface SleepScoreInput {
   deepSleepHours: number | null;
   remSleepHours: number | null;
   hrvMs: number | null;
+  restingHeartRate?: number | null;
   spo2Percent: number | null;
   respiratoryRate: number | null;
   age: number | null;
   stages?: SleepStages | null;
   // History (personalized mode only):
   hrvHistory?: number[] | null;           // last 14-30 nightly HRV values
+  rhrHistory?: number[] | null;           // last 14-30 resting-heart-rate values
+  respiratoryRateHistory?: number[] | null;
+  spo2History?: number[] | null;
   bedtimeHistory?: number[] | null;       // last 14 nightly onset times (minutes from midnight, 0-1439)
 }
 
@@ -51,14 +55,14 @@ export function scoreSleepMVP(input: SleepScoreInput): SleepScore | null {
   // because deep sleep drives physical recovery (HGH release, slow-
   // wave consolidation) and REM is more cognitive-recovery skewed.
   // Awake/fragmentation is small (5) because efficiency already
-  // captures the gross signal — this is just a top-up penalty for
-  // mid-sleep wake patterns.
+  // captures the gross signal. Severe wake time is handled by score
+  // caps below so a fragmented night cannot look deceptively "fair".
   const duration = scoreDuration(hours);                                          // 32
   const efficiency = scoreEfficiency(hours, input.inBedMinutes, 18);              // 18
   const hrvFallback = scoreHrvFallback(input.hrvMs, input.age);                   // 20
   const deepSleep = scoreDeepSleep(input.deepSleepHours, hours, 10);              // 10
   const remSleep = scoreRemSleep(input.remSleepHours, hours, 5);                  //  5
-  const healthFlags = scoreHealthFlags(input.spo2Percent, input.respiratoryRate, 10); // 10
+  const healthFlags = scoreHealthFlags(input, 10);                              // 10
   const awakeFrag = scoreAwakeFragmentation(awakeMinutesFromInput(input), 5);     //  5
 
   const pillars: SleepScorePillars = {
@@ -99,6 +103,7 @@ export function scoreSleepMVP(input: SleepScoreInput): SleepScore | null {
     duration: hours,
     stages: input.stages ?? emptyStages(hours, input.deepSleepHours, input.remSleepHours),
     hrvAvg: input.hrvMs,
+    restingHeartRate: input.restingHeartRate ?? null,
     respiratoryRate: input.respiratoryRate,
     oxygenSaturation: input.spo2Percent,
     efficiency: efficiency.ratio ?? null,
@@ -120,7 +125,7 @@ export function scoreSleepPersonalized(input: SleepScoreInput): SleepScore | nul
   const regularity = scoreRegularity(input.bedtimeHistory ?? null);               // 15
   const deepSleep = scoreDeepSleep(input.deepSleepHours, hours, 9);               //  9
   const remSleep = scoreRemSleep(input.remSleepHours, hours, 4);                  //  4
-  const healthFlags = scoreHealthFlagsPersonalized(input.spo2Percent, input.respiratoryRate); // 5
+  const healthFlags = scoreHealthFlagsPersonalized(input);                     // 5
   const awakeFrag = scoreAwakeFragmentation(awakeMinutesFromInput(input), 4);     //  4
 
   const pillars: SleepScorePillars = {
@@ -158,6 +163,7 @@ export function scoreSleepPersonalized(input: SleepScoreInput): SleepScore | nul
     duration: hours,
     stages: input.stages ?? emptyStages(hours, input.deepSleepHours, input.remSleepHours),
     hrvAvg: input.hrvMs,
+    restingHeartRate: input.restingHeartRate ?? null,
     respiratoryRate: input.respiratoryRate,
     oxygenSaturation: input.spo2Percent,
     efficiency: efficiency.ratio ?? null,
@@ -355,8 +361,8 @@ function scoreRemSleep(
 // what `efficiency` already captures. Efficiency = asleep/in-bed
 // catches gross fragmentation; this pillar catches the case where
 // total awake minutes are notable even on a high-efficiency night.
-// Small-weight by design (5 in MVP, 4 in Personalized) so we don't
-// double-punish.
+// Small-weight by design (5 in MVP, 4 in Personalized); hard caps below
+// handle severe wake time so we don't overstate recovery on sick nights.
 function scoreAwakeFragmentation(
   awakeMin: number | null,
   max: number,
@@ -367,13 +373,16 @@ function scoreAwakeFragmentation(
   let frac: number;
   let insight: string | undefined;
   if (awakeMin <= 20) frac = 1.0;
-  else if (awakeMin <= 45) frac = 0.75;
+  else if (awakeMin <= 45) frac = 0.65;
   else if (awakeMin <= 75) {
-    frac = 0.45;
+    frac = 0.35;
     insight = `Mid-sleep wake totaled ${Math.round(awakeMin)} min — check room temp, light, or late hydration.`;
-  } else {
-    frac = 0.15;
+  } else if (awakeMin <= 120) {
+    frac = 0.10;
     insight = `Highly fragmented night (${Math.round(awakeMin)} min awake). If this keeps repeating, look at bedtime routine, light, temperature, or caffeine timing.`;
+  } else {
+    frac = 0.0;
+    insight = `Severely fragmented night (${Math.round(awakeMin)} min awake). Prioritise recovery today, especially if illness or stress was involved.`;
   }
   return { points: Math.round(max * frac), insight, ratio: awakeMin };
 }
@@ -410,45 +419,66 @@ function scoreHrvBaselinePersonalized(
   return { points: Math.round(max * frac), insight, ratio };
 }
 
-// Health flags — mostly deduction-style, but missing breathing data
-// gets conservative-neutral credit instead of free perfect points.
-function scoreHealthFlags(spo2: number | null, respRate: number | null, max: number): PillarResult {
-  if (spo2 == null && respRate == null) {
-    return { points: Math.round(max * 0.7), insight: 'Breathing signals unavailable' };
+// Health flags — deduction-style corroborating signals. SpO2 and
+// respiratory rate catch breathing disruption; resting HR vs personal
+// baseline catches illness/stress load that a pure sleep-duration score
+// misses. Missing vitals get conservative-neutral credit instead of free
+// perfect points.
+function scoreHealthFlags(input: SleepScoreInput, max: number): PillarResult {
+  const spo2 = input.spo2Percent;
+  const respRate = input.respiratoryRate;
+  const rhr = input.restingHeartRate ?? null;
+  const hasAnySignal = spo2 != null || respRate != null || rhr != null;
+  if (!hasAnySignal) {
+    return { points: Math.round(max * 0.7), insight: 'Recovery vitals unavailable' };
   }
   let points = max;
-  let insight: string | undefined;
+  const insights: string[] = [];
   if (spo2 != null) {
-    if (spo2 < 94) points -= 6;
-    else if (spo2 < 95) points -= 3;
+    if (spo2 < 94) { points -= max * 0.6; insights.push('oxygen signal was low'); }
+    else if (spo2 < 95) { points -= max * 0.3; insights.push('oxygen signal dipped'); }
+
+    const spo2Base = medianIfEnough(input.spo2History, 7);
+    if (spo2Base != null) {
+      const drop = spo2Base - spo2;
+      if (drop >= 3) { points -= max * 0.3; insights.push('oxygen was below baseline'); }
+      else if (drop >= 2) { points -= max * 0.15; insights.push('oxygen was below baseline'); }
+    }
   }
   if (respRate != null) {
-    if (respRate < 10 || respRate > 22) points -= 4;
-    else if (respRate < 12 || respRate > 20) points -= 2;
+    if (respRate < 10 || respRate > 22) { points -= max * 0.4; insights.push('breathing rate was out of range'); }
+    else if (respRate < 12 || respRate > 20) { points -= max * 0.2; insights.push('breathing rate was elevated'); }
+
+    const respBase = medianIfEnough(input.respiratoryRateHistory, 7);
+    if (respBase != null) {
+      const delta = respRate - respBase;
+      if (delta >= 3) { points -= max * 0.35; insights.push(`breathing rate +${round1(delta)} above baseline`); }
+      else if (delta >= 1.5) { points -= max * 0.18; insights.push(`breathing rate +${round1(delta)} above baseline`); }
+    }
   }
-  points = clamp(points, 0, max);
-  if (points < max) insight = 'Breathing signals outside normal range';
-  return { points, insight };
+  if (rhr != null) {
+    const rhrBase = medianIfEnough(input.rhrHistory, 7);
+    if (rhrBase != null) {
+      const delta = rhr - rhrBase;
+      if (delta >= 8) { points -= max * 0.45; insights.push(`resting HR +${Math.round(delta)} above baseline`); }
+      else if (delta >= 5) { points -= max * 0.25; insights.push(`resting HR +${Math.round(delta)} above baseline`); }
+    } else if (rhr >= 95) {
+      points -= max * 0.35;
+      insights.push('resting HR was high');
+    } else if (rhr >= 85) {
+      points -= max * 0.18;
+      insights.push('resting HR was elevated');
+    }
+  }
+  points = Math.round(clamp(points, 0, max));
+  return {
+    points,
+    insight: points < max ? `Recovery vitals: ${dedupe(insights).slice(0, 2).join('; ')}` : undefined,
+  };
 }
 
-function scoreHealthFlagsPersonalized(spo2: number | null, respRate: number | null): PillarResult {
-  const MAX = 5;
-  if (spo2 == null && respRate == null) {
-    return { points: Math.round(MAX * 0.7), insight: 'Breathing signals unavailable' };
-  }
-  let points = MAX;
-  let insight: string | undefined;
-  if (spo2 != null) {
-    if (spo2 < 94) points -= 3;
-    else if (spo2 < 95) points -= 1;
-  }
-  if (respRate != null) {
-    if (respRate < 10 || respRate > 22) points -= 2;
-    else if (respRate < 12 || respRate > 20) points -= 1;
-  }
-  points = clamp(points, 0, MAX);
-  if (points < MAX) insight = 'Breathing signals outside normal range';
-  return { points, insight };
+function scoreHealthFlagsPersonalized(input: SleepScoreInput): PillarResult {
+  return scoreHealthFlags(input, 5);
 }
 
 function sleepScoreCaps(
@@ -492,8 +522,11 @@ function sleepScoreCaps(
 
   const awakeMin = awakeMinutesFromInput(input);
   if (awakeMin != null) {
-    if (awakeMin > 90) applyCap(69, 'High wake time caps recovery today');
-    else if (awakeMin > 60) applyCap(79, 'Wake time limits top-end recovery');
+    if (awakeMin >= 180) applyCap(35, 'Extreme wake time caps recovery today');
+    else if (awakeMin >= 135) applyCap(44, 'Very high wake time caps recovery today');
+    else if (awakeMin >= 105) applyCap(49, 'Severe wake time caps recovery today');
+    else if (awakeMin >= 75) applyCap(59, 'High wake time caps recovery today');
+    else if (awakeMin > 45) applyCap(69, 'Wake time limits recovery today');
   }
 
   const hrvRatio = signals.hrv.ratio;
@@ -509,11 +542,20 @@ function sleepScoreCaps(
     applyCap(79, 'Breathing signal limits top-end recovery');
   }
 
+  const stress = recoveryStressSignals(input, hrvRatio);
+  if (stress.severeCount >= 2) applyCap(49, 'Multiple recovery markers were off overnight');
+  else if (stress.count >= 2) applyCap(59, 'Recovery markers limit training readiness today');
+  if (awakeMin != null && awakeMin >= 105 && stress.count >= 2) {
+    applyCap(39, 'Fragmented sleep plus stress markers caps recovery today');
+  } else if (awakeMin != null && awakeMin >= 105 && stress.count >= 1) {
+    applyCap(42, 'Fragmented sleep plus an off recovery marker caps recovery today');
+  }
+
   const hasEfficiency = input.inBedMinutes != null && input.inBedMinutes > 0;
   const hasHrv = input.hrvMs != null;
   const hasStages = input.deepSleepHours != null || input.remSleepHours != null || input.stages?.awake != null;
-  const hasBreathing = input.spo2Percent != null || input.respiratoryRate != null;
-  const qualitySignals = [hasEfficiency, hasHrv, hasStages, hasBreathing].filter(Boolean).length;
+  const hasVitals = input.spo2Percent != null || input.respiratoryRate != null || input.restingHeartRate != null;
+  const qualitySignals = [hasEfficiency, hasHrv, hasStages, hasVitals].filter(Boolean).length;
   if (qualitySignals === 0) {
     applyCap(69, 'Only sleep duration was available');
   } else if (qualitySignals <= signals.maxQualitySignalsForExcellent) {
@@ -537,6 +579,51 @@ function awakeMinutesFromInput(input: SleepScoreInput): number | null {
   return null;
 }
 
+function recoveryStressSignals(input: SleepScoreInput, hrvRatio: number | null | undefined): { count: number; severeCount: number } {
+  let count = 0;
+  let severeCount = 0;
+  const add = (severe: boolean) => {
+    count++;
+    if (severe) severeCount++;
+  };
+
+  if (hrvRatio != null) {
+    if (hrvRatio < 0.65) add(true);
+    else if (hrvRatio < 0.80) add(false);
+  }
+
+  const rhr = input.restingHeartRate ?? null;
+  const rhrBase = medianIfEnough(input.rhrHistory, 7);
+  if (rhr != null && rhrBase != null) {
+    const delta = rhr - rhrBase;
+    if (delta >= 8) add(true);
+    else if (delta >= 5) add(false);
+  }
+
+  const resp = input.respiratoryRate;
+  const respBase = medianIfEnough(input.respiratoryRateHistory, 7);
+  if (resp != null && respBase != null) {
+    const delta = resp - respBase;
+    if (delta >= 3) add(true);
+    else if (delta >= 1.5) add(false);
+  } else if (resp != null && (resp < 10 || resp > 22)) {
+    add(true);
+  }
+
+  const spo2 = input.spo2Percent;
+  const spo2Base = medianIfEnough(input.spo2History, 7);
+  if (spo2 != null) {
+    if (spo2 < 94) add(true);
+    else if (spo2 < 95) add(false);
+    else if (spo2Base != null) {
+      const drop = spo2Base - spo2;
+      if (drop >= 3) add(true);
+      else if (drop >= 2) add(false);
+    }
+  }
+  return { count, severeCount };
+}
+
 export function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
@@ -557,6 +644,11 @@ export function rollingMedian(values: number[]): number | null {
   vals.sort((a, b) => a - b);
   const mid = Math.floor(vals.length / 2);
   return vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2;
+}
+
+function medianIfEnough(values: number[] | null | undefined, minCount: number): number | null {
+  if (!values || values.length < minCount) return null;
+  return rollingMedian(values);
 }
 
 export function rollingAverage(values: number[]): number | null {
@@ -598,6 +690,10 @@ function buildInsights(pillars: PillarResult[]): string[] {
   const out: string[] = [];
   for (const p of pillars) if (p.insight) out.push(p.insight);
   return out.slice(0, 4);
+}
+
+function dedupe(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function emptyStages(totalHrs: number, deep: number | null, rem: number | null): SleepStages {

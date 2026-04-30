@@ -169,6 +169,36 @@ def _ensure_user_preferences_equipment_settings_column() -> None:
         print(f"[migration] user_preferences equipment_settings add failed (non-fatal): {e}")
 
 
+def _ensure_coach_apply_state_columns() -> None:
+    """Add durable settings used by /coach/apply-action.
+
+    These columns let accepted coach actions mutate the same settings a
+    user can change directly, while keeping active PlanWeek rows fixed.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE user_preferences "
+                "ADD COLUMN IF NOT EXISTS workout_duration_minutes INTEGER"
+            ))
+            conn.execute(text(
+                "ALTER TABLE user_preferences "
+                "ADD COLUMN IF NOT EXISTS core_frequency_per_week INTEGER"
+            ))
+            conn.execute(text(
+                "ALTER TABLE user_coaching_state "
+                "ADD COLUMN IF NOT EXISTS deload_until_date DATE"
+            ))
+            conn.execute(text(
+                "ALTER TABLE user_day_state "
+                "ADD COLUMN IF NOT EXISTS macro_overrides JSONB"
+            ))
+    except Exception as e:
+        print(f"[migration] coach apply state columns add failed (non-fatal): {e}")
+
+
 def _ensure_exercise_tracking_mode_column() -> None:
     """Add Exercise.default_tracking_mode if missing. Required for the
     timed/distance exercise flag (planks, carries). Existing rows default
@@ -541,9 +571,8 @@ def _ensure_meal_consumed_at_column() -> None:
     """Add `consumed_at` timestamp + new meal_type enum values.
 
     `meal_type` is a Postgres enum and `ALTER TYPE ... ADD VALUE` is how
-    we grow it in-place. `consumed_at` is a plain nullable timestamptz
-    — existing rows get NULL and the client falls back to meal_date +
-    noon for display.
+    we grow it in-place. `consumed_at` is a plain nullable timestamptz;
+    existing rows are backfilled from `created_at`.
     """
     if engine.dialect.name != "postgresql":
         return
@@ -551,6 +580,9 @@ def _ensure_meal_consumed_at_column() -> None:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             conn.execute(text(
                 "ALTER TABLE meals ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMPTZ"
+            ))
+            conn.execute(text(
+                "UPDATE meals SET consumed_at = created_at WHERE consumed_at IS NULL"
             ))
             conn.execute(text(
                 "CREATE INDEX IF NOT EXISTS ix_meals_consumed_at ON meals(user_id, consumed_at)"
@@ -1131,6 +1163,22 @@ def _ensure_plan_week_snapshot_columns() -> None:
         print(f"[migration] plan_weeks snapshot columns failed (non-fatal): {e}")
 
 
+def _ensure_skip_reason_columns() -> None:
+    """Add human-readable skip reasons to day-state and PlanDay rows."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE user_day_state ADD COLUMN IF NOT EXISTS skip_reason VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE plan_days ADD COLUMN IF NOT EXISTS skip_reason VARCHAR"
+            ))
+    except Exception as e:
+        print(f"[migration] skip reason columns failed (non-fatal): {e}")
+
+
 def _ensure_plan_week_checkins_table() -> None:
     """Create plan_week_checkins — one coaching check-in record per PlanWeek.
     Blocks auto-renew until submitted or skipped."""
@@ -1181,6 +1229,7 @@ def create_db_and_tables():
     _ensure_workout_completion_stimulus_column()
     _ensure_workout_completion_health_columns()
     _ensure_user_preferences_equipment_settings_column()
+    _ensure_coach_apply_state_columns()
     _ensure_user_recovery_columns()
     _ensure_exercise_tracking_mode_column()
     _ensure_exercise_video_id_column()
@@ -1208,6 +1257,7 @@ def create_db_and_tables():
     _ensure_user_reports_table()
     _ensure_plan_week_tables()
     _ensure_plan_week_snapshot_columns()
+    _ensure_skip_reason_columns()
     _ensure_plan_week_checkins_table()
 
     # ─── Heavy backfills ─────────────────────────────────────────────────

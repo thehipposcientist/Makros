@@ -18,12 +18,14 @@ SQLModel `create_all` creates tables but does NOT ALTER existing columns. Idempo
 | `_ensure_workout_completion_stimulus_column` | Stimulus tracking on completions. |
 | `_ensure_workout_completion_health_columns` | Health signals on completions. |
 | `_ensure_user_preferences_equipment_settings_column` | `UserPreferences.equipment_settings` JSONB for plate/dumbbell loading constraints. |
+| `_ensure_coach_apply_state_columns` | Durable coach-apply settings: workout duration, core frequency, deload date, and one-day macro overrides. |
 | `_ensure_exercise_tracking_mode_column` | `Exercise.default_tracking_mode`. |
 | `_ensure_food_metadata_classifier_v2_columns` | `protein_source` + `probiotic_flag` on `FoodMetadata`. |
 | `_ensure_daily_nutrition_metrics_v2_columns` | `plant_protein_g`, `animal_protein_g`, `probiotic_servings` on `DailyNutritionMetrics`. |
 | `_ensure_nutrition_v3_columns` | `FoodNutrition.added_sugar_g` + `FoodMetadata` v3 flags (seafood/fruit/vegetable/alcohol/processed_meat/refined_grain) + `DailyNutritionMetrics` tag servings + `recovery_flags` JSONB + `energy_availability` + `max_meal_protein_pct`. |
 | `_ensure_social_tables` | `friendships` canonical pair index + `weekly_digest_cache` per-user-per-week index. Tables built by `create_all`; this helper guarantees the indexes on legacy DBs. |
 | `_ensure_exercise_set_actual_rir_column` | `ExerciseSet.actual_rir DOUBLE PRECISION`. |
+| `_ensure_skip_reason_columns` | `UserDayState.skip_reason` + `PlanDay.skip_reason` for manual skips. |
 | `_backfill_custom_food_micronutrients` | One-shot backfill on startup. |
 
 ## PlanWeek + PlanDay Tables
