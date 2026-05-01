@@ -42,6 +42,7 @@ export interface PreparednessPillars {
   nutrition: number;     // 0-15
   restingHr: number;     // 0-10
   yesterdayStrain: number; // 0-5
+  wellness?: number;     // 0-10 optional user-reported readiness context
 }
 
 export interface PreparednessResult {

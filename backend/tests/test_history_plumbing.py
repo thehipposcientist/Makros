@@ -339,6 +339,178 @@ def test_log_meal_from_plan_replaces_edited_meal_items() -> None:
     _ok("edited meal replaces prior items without duplicate meal rows")
 
 
+def test_log_meal_from_plan_collapses_existing_generated_duplicates() -> None:
+    """Existing duplicate generated rows for one checked plan meal should
+    be collapsed when the meal is logged again."""
+    print("\n[test] log_meal_from_plan collapses existing generated duplicates")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.enums import MealSource, MealType
+    from app.models import User, Meal, MealItem  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import log_meal_from_plan
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date(2026, 4, 29)
+    with Session(engine) as s:
+        u = User(email="meal-dupe@example.com", username="mealdupe", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        for calories in (180, 210):
+            meal = Meal(
+                user_id=u.id,
+                meal_date=meal_date,
+                meal_type=MealType.BREAKFAST,
+                name="Greek Yogurt Bowl",
+                source=MealSource.GENERATED,
+                consumed_at=datetime(2026, 4, 29, 12, 0, tzinfo=timezone.utc),
+            )
+            s.add(meal); s.flush()
+            s.add(MealItem(
+                meal_id=meal.id,
+                food_name="Greek Yogurt",
+                quantity=1,
+                unit="cup",
+                calories=calories,
+                protein_g=20,
+                carbs_g=8,
+                fat_g=4,
+            ))
+        s.commit()
+
+        updated = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_0",
+            meal_data={
+                "meal": "Greek Yogurt Bowl",
+                "items": [
+                    {"name": "Greek Yogurt", "quantity": 1.5, "unit": "cup", "calories": 270, "protein": 30, "carbs": 12, "fat": 6},
+                ],
+            },
+            consumed_at=datetime(2026, 4, 29, 13, 30, tzinfo=timezone.utc),
+            db=s,
+        )
+
+        meals = s.exec(
+            select(Meal)
+            .where(Meal.user_id == u.id)
+            .where(Meal.meal_date == meal_date)
+            .where(Meal.name == "Greek Yogurt Bowl")
+        ).all()
+        assert len(meals) == 1, meals
+        assert updated["id"] == meals[0].id, updated
+        items = s.exec(select(MealItem).where(MealItem.meal_id == meals[0].id)).all()
+        assert len(items) == 1, items
+        assert items[0].calories == 270, items[0].calories
+    _ok("existing generated duplicates are collapsed to one updated row")
+
+
+def test_rolling_averages_ignore_duplicate_generated_plan_rows() -> None:
+    """Rolling averages should not multiply calories from repeated plan
+    check-off rows with the same generated meal name."""
+    print("\n[test] rolling averages ignore duplicate generated plan rows")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.enums import MealSource, MealType
+    from app.models import User, Meal, MealItem  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import get_rolling_averages
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date.today()
+    with Session(engine) as s:
+        u = User(email="meal-average-dupe@example.com", username="mealavgdupe", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        for calories in (900, 1100):
+            meal = Meal(
+                user_id=u.id,
+                meal_date=meal_date,
+                meal_type=MealType.BREAKFAST,
+                name="Balanced meal 1",
+                source=MealSource.GENERATED,
+            )
+            s.add(meal); s.flush()
+            s.add(MealItem(
+                meal_id=meal.id,
+                food_name="Chicken Breast",
+                quantity=1,
+                unit="serving",
+                calories=calories,
+                protein_g=60,
+                carbs_g=80,
+                fat_g=25,
+            ))
+        s.commit()
+
+        averages = get_rolling_averages(u.id, window=1, db=s)
+        assert averages["total_meals_logged"] == 1, averages
+        assert averages["avg_calories"] == 1100.0, averages
+        assert averages["avg_calories_when_logged"] == 1100.0, averages
+    _ok("generated duplicate rows do not inflate calorie averages")
+
+
+def test_rolling_averages_preserve_distinct_generic_meals() -> None:
+    """Generic generated names can represent multiple user-added meals;
+    different item signatures should still count separately."""
+    print("\n[test] rolling averages preserve distinct generic generated meals")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.enums import MealSource, MealType
+    from app.models import User, Meal, MealItem  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import get_rolling_averages
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date.today()
+    with Session(engine) as s:
+        u = User(email="generic-meals@example.com", username="genericmeals", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        for food_name, calories in (("Snack A", 100), ("Snack B", 200)):
+            meal = Meal(
+                user_id=u.id,
+                meal_date=meal_date,
+                meal_type=MealType.SNACK,
+                name="New Meal",
+                source=MealSource.GENERATED,
+            )
+            s.add(meal); s.flush()
+            s.add(MealItem(
+                meal_id=meal.id,
+                food_name=food_name,
+                quantity=1,
+                unit="serving",
+                calories=calories,
+                protein_g=10,
+                carbs_g=10,
+                fat_g=5,
+            ))
+        s.commit()
+
+        averages = get_rolling_averages(u.id, window=1, db=s)
+        assert averages["total_meals_logged"] == 2, averages
+        assert averages["avg_calories"] == 300.0, averages
+    _ok("distinct generic generated meals remain separate")
+
+
 def test_hydration_get_reads_requested_date() -> None:
     """Past-day hydration should be readable by explicit log_date, not
     hard-wired to today's row."""
@@ -384,6 +556,9 @@ cases = [
     test_format_for_prompt_includes_meal_history_lines,
     test_log_meal_from_plan_persists_consumed_at,
     test_log_meal_from_plan_replaces_edited_meal_items,
+    test_log_meal_from_plan_collapses_existing_generated_duplicates,
+    test_rolling_averages_ignore_duplicate_generated_plan_rows,
+    test_rolling_averages_preserve_distinct_generic_meals,
     test_hydration_get_reads_requested_date,
 ]
 

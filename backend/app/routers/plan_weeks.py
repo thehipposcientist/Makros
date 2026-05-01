@@ -1274,6 +1274,11 @@ def mark_day_skipped(
         return _plan_day_to_response(plan_day)
 
     result = skip_day(db, plan_day, reason=body.reason if body else None)
+    try:
+        from app.services.readiness.compute import invalidate_readiness_cache
+        invalidate_readiness_cache(current_user.id)
+    except Exception:
+        pass
     return _plan_day_to_response(result)
 
 
@@ -1297,6 +1302,11 @@ def mark_day_unskipped(
         raise HTTPException(status_code=404, detail=f"No plan day for {day_date}")
 
     result = unskip_day(db, plan_day)
+    try:
+        from app.services.readiness.compute import invalidate_readiness_cache
+        invalidate_readiness_cache(current_user.id)
+    except Exception:
+        pass
     return _plan_day_to_response(result)
 
 

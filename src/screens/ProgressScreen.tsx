@@ -2977,6 +2977,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const directionLabel = direction === 'improving' ? 'Improving' : direction === 'slipping' ? 'Slipping' : 'Steady';
             const trackingDelta = Number(trends.tracking_delta_pct ?? 0);
             const proteinDelta = trends.protein_hit_delta_pct == null ? null : Number(trends.protein_hit_delta_pct);
+            const calorieAvg = Number(recent.avg_calories_when_logged ?? recent.avg_calories ?? 0);
+            const calorieDelta = Number(trends.calorie_delta_when_logged ?? trends.calorie_delta ?? 0);
             return (
               <View style={[styles.vitalsCard, { marginTop: 0 }]}>
                 <View style={[styles.vitalsHeader, { marginBottom: 12 }]}>
@@ -2988,7 +2990,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   {[
                     { label: 'Tracked', value: `${recent.tracking_rate_pct ?? 0}%`, delta: `${trackingDelta >= 0 ? '+' : ''}${trackingDelta}%` },
                     { label: 'Protein', value: recent.protein_hit_pct == null ? 'n/a' : `${recent.protein_hit_pct}%`, delta: proteinDelta == null ? null : `${proteinDelta >= 0 ? '+' : ''}${proteinDelta}%` },
-                    { label: 'Calories', value: `${Math.round(recent.avg_calories ?? 0)}`, delta: `${Number(trends.calorie_delta ?? 0) >= 0 ? '+' : ''}${Math.round(Number(trends.calorie_delta ?? 0))}` },
+                    { label: 'Calories', value: `${Math.round(calorieAvg)}`, delta: `${calorieDelta >= 0 ? '+' : ''}${Math.round(calorieDelta)}` },
                   ].map(item => (
                     <View key={item.label} style={{ flex: 1, backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingVertical: 9, paddingHorizontal: 8 }}>
                       <Text style={{ fontSize: 17, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
@@ -3058,10 +3060,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </Text>
                   <View style={{ flexDirection: 'row', gap: 6 }}>
                     {[
-                      { label: 'Calories', value: Math.round(mealAverages.avg_calories), color: tc.primary },
-                      { label: 'Protein', value: `${Math.round(mealAverages.avg_protein_g)}g`, color: '#22C55E' },
-                      { label: 'Carbs', value: `${Math.round(mealAverages.avg_carbs_g)}g`, color: '#F59E0B' },
-                      { label: 'Fat', value: `${Math.round(mealAverages.avg_fat_g)}g`, color: '#A78BFA' },
+                      { label: 'Calories', value: Math.round(mealAverages.avg_calories_when_logged ?? mealAverages.avg_calories), color: tc.primary },
+                      { label: 'Protein', value: `${Math.round(mealAverages.avg_protein_g_when_logged ?? mealAverages.avg_protein_g)}g`, color: '#22C55E' },
+                      { label: 'Carbs', value: `${Math.round(mealAverages.avg_carbs_g_when_logged ?? mealAverages.avg_carbs_g)}g`, color: '#F59E0B' },
+                      { label: 'Fat', value: `${Math.round(mealAverages.avg_fat_g_when_logged ?? mealAverages.avg_fat_g)}g`, color: '#A78BFA' },
                     ].map(s => (
                       <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: 8, paddingVertical: 8 }}>
                         <Text style={{ fontSize: 15, fontWeight: '800', color: s.color }}>{s.value}</Text>

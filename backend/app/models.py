@@ -1188,6 +1188,12 @@ class UserSupplementStack(SQLModel, table=True):
     dose_unit: str = Field(default="mg")
     frequency: str = Field(default="daily")                    # "daily" | "weekdays" | "pre_workout" | "as_needed"
     timing: str | None = Field(default=None)                   # "morning" | "evening" | "pre_workout" | "with_meal"
+    # Optional user-defined group label so supplements can be batched
+    # beyond the built-in `timing` buckets. Free-text — e.g. "Stack 1",
+    # "Travel pack", "Pre-bed". When set, it overrides `timing` for
+    # group rendering + the "take group" action. Bulk-log endpoint reads
+    # this to decide which items belong to a tap.
+    group_label: str | None = Field(default=None)
     taken_with_food: bool = Field(default=False)
     active: bool = Field(default=True)
     notes: str | None = Field(default=None)

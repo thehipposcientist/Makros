@@ -2496,6 +2496,11 @@ export interface MealAverages {
   avg_protein_g: number;
   avg_carbs_g: number;
   avg_fat_g: number;
+  avg_calories_when_logged?: number;
+  avg_protein_g_when_logged?: number;
+  avg_carbs_g_when_logged?: number;
+  avg_fat_g_when_logged?: number;
+  tracking_rate_pct?: number;
   avg_meals_per_day: number;
   total_meals_logged: number;
 }
@@ -3071,6 +3076,9 @@ export type StackItem = {
   dose_unit: string;
   frequency: string;
   timing?: string | null;
+  /** Optional user-defined group ("Stack 1", "Travel pack"). Overrides
+   *  the built-in `timing` bucket for grouping + the "take group" tap. */
+  group_label?: string | null;
   taken_with_food: boolean;
   active: boolean;
   notes?: string | null;
@@ -3135,6 +3143,21 @@ export async function logDose(
   body: { taken_at?: string; skipped?: boolean; dose_amount?: number; dose_unit?: string } = {},
 ): Promise<any> {
   return request(`/supplements/stack/${stackId}/log`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+/** Bulk-log every active item in a group with one tap.
+ *  Pass `group_label` for user-defined groups, or `timing` for the
+ *  built-in buckets ("morning", "pre_workout", etc.). Items already
+ *  logged today are skipped server-side so a double-tap is safe. */
+export async function logSupplementGroup(
+  token: string,
+  body: { group_label?: string; timing?: string; skipped?: boolean },
+): Promise<{ logged: number; items: number[] }> {
+  return request('/supplements/stack/log-group', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(body),

@@ -62,6 +62,99 @@ def _normalized_item_signature(items: list[dict]) -> str:
     return json.dumps(canonical, separators=(",", ":"), sort_keys=True)
 
 
+def _meal_source_name(meal: object) -> str:
+    source = getattr(meal, "source", None)
+    if source is None:
+        return ""
+    return str(getattr(source, "value", None) or getattr(source, "name", None) or source).lower()
+
+
+def _is_generated_plan_meal(meal: object) -> bool:
+    return _meal_source_name(meal) == "generated"
+
+
+def _meal_recency_key(meal: object) -> tuple[str, int]:
+    created = getattr(meal, "created_at", None)
+    created_key = created.isoformat() if hasattr(created, "isoformat") else ""
+    return (created_key, int(getattr(meal, "id", 0) or 0))
+
+
+_GENERIC_MEAL_NAMES = frozenset({"new meal", "checked meal", "meal", "breakfast", "lunch", "dinner", "snack"})
+
+
+def _meal_type_name(meal: object) -> str:
+    meal_type = getattr(meal, "meal_type", None)
+    return str(getattr(meal_type, "value", None) or getattr(meal_type, "name", None) or meal_type or "").lower()
+
+
+def dedupe_generated_plan_meals(meals: list, items_by_meal: dict[int, list] | None = None) -> list:
+    """Collapse repeated generated plan check-offs to the latest row.
+
+    The client can legitimately add the same manually logged meal twice,
+    so manual/logged rows stay untouched. Generated plan rows, however,
+    represent checking a scheduled meal off once. Repeated taps, retries,
+    or a plan reload can leave several rows with the same date + meal
+    name; aggregators should count the latest copy only.
+    """
+    latest_generated_by_key: dict[tuple, object] = {}
+    passthrough_ids: set[int] = set()
+
+    for meal in meals:
+        meal_id = int(getattr(meal, "id", 0) or 0)
+        if not _is_generated_plan_meal(meal):
+            passthrough_ids.add(meal_id)
+            continue
+        name_key = _normalize_meal_text(getattr(meal, "name", ""))
+        meal_date = getattr(meal, "meal_date", None)
+        if not name_key or meal_date is None:
+            passthrough_ids.add(meal_id)
+            continue
+        type_key = _meal_type_name(meal)
+        if name_key in _GENERIC_MEAL_NAMES:
+            if items_by_meal is None:
+                passthrough_ids.add(meal_id)
+                continue
+            signature = _normalized_item_signature([
+                {
+                    "name": getattr(item, "food_name", ""),
+                    "quantity": getattr(item, "quantity", 0),
+                    "unit": getattr(item, "unit", ""),
+                    "calories": getattr(item, "calories", 0),
+                    "protein": getattr(item, "protein_g", 0),
+                    "carbs": getattr(item, "carbs_g", 0),
+                    "fat": getattr(item, "fat_g", 0),
+                }
+                for item in items_by_meal.get(meal_id, [])
+            ])
+            key = (meal_date, type_key, name_key, signature)
+        else:
+            key = (meal_date, type_key, name_key)
+        current = latest_generated_by_key.get(key)
+        if current is None or _meal_recency_key(meal) >= _meal_recency_key(current):
+            latest_generated_by_key[key] = meal
+
+    kept_generated_ids = {
+        int(getattr(meal, "id", 0) or 0)
+        for meal in latest_generated_by_key.values()
+    }
+    return [
+        meal for meal in meals
+        if int(getattr(meal, "id", 0) or 0) in passthrough_ids
+        or int(getattr(meal, "id", 0) or 0) in kept_generated_ids
+    ]
+
+
+def _delete_meal_with_items(db: Session, meal: object) -> None:
+    from app.models import MealItem
+
+    meal_id = getattr(meal, "id", None)
+    if meal_id is None:
+        return
+    for item in db.exec(select(MealItem).where(MealItem.meal_id == meal_id)).all():
+        db.delete(item)
+    db.delete(meal)
+
+
 # ─── Log a meal from plan check-off ──────────────────────────────────────────
 
 def log_meal_from_plan(
@@ -109,15 +202,17 @@ def log_meal_from_plan(
     # if the exact same payload has already been logged for this
     # user/date/type/source, return the existing row instead of adding
     # another duplicate meal entry.
-    existing_meals = db.exec(
+    existing_query = (
         select(Meal)
         .where(Meal.user_id == user_id)
         .where(Meal.meal_date == meal_date)
-        .where(Meal.meal_type == resolved_type)
         .where(Meal.source == resolved_source)
         .order_by(col(Meal.created_at).desc())
-        .limit(10)
-    ).all()
+        .limit(20)
+    )
+    if source != "plan_check":
+        existing_query = existing_query.where(Meal.meal_type == resolved_type)
+    existing_meals = db.exec(existing_query).all()
     if existing_meals:
         existing_items = db.exec(
             select(MealItem).where(col(MealItem.meal_id).in_([m.id for m in existing_meals]))
@@ -141,8 +236,21 @@ def log_meal_from_plan(
                 for item in items_by_meal.get(existing.id, [])
             ])
             if signature == incoming_signature:
+                deleted_duplicates = False
+                if source == "plan_check":
+                    for duplicate in existing_meals:
+                        if duplicate.id == existing.id:
+                            continue
+                        if _normalize_meal_text(duplicate.name) != incoming_name:
+                            continue
+                        _delete_meal_with_items(db, duplicate)
+                        deleted_duplicates = True
                 if consumed_at is not None:
                     existing.consumed_at = consumed_at
+                if source == "plan_check":
+                    existing.meal_type = resolved_type
+                    existing.source = resolved_source
+                if consumed_at is not None or deleted_duplicates or source == "plan_check":
                     db.add(existing)
                     db.commit()
                     db.refresh(existing)
@@ -156,10 +264,15 @@ def log_meal_from_plan(
     replace_target = None
     if source == "plan_check" and existing_meals:
         same_name = [m for m in existing_meals if _normalize_meal_text(m.name) == incoming_name]
-        if len(same_name) == 1:
-            replace_target = same_name[0]
-        elif len(existing_meals) == 1:
-            replace_target = existing_meals[0]
+        if same_name:
+            replace_target = max(same_name, key=_meal_recency_key)
+            for duplicate in same_name:
+                if duplicate.id != replace_target.id:
+                    _delete_meal_with_items(db, duplicate)
+        else:
+            same_type = [m for m in existing_meals if m.meal_type == resolved_type]
+            if len(same_type) == 1:
+                replace_target = same_type[0]
 
     if replace_target is None and source == "plan_check":
         cross_source_meals = db.exec(
@@ -182,6 +295,8 @@ def log_meal_from_plan(
         for item in old_items:
             db.delete(item)
         replace_target.name = meal_data.get("meal", "Checked meal")
+        replace_target.meal_type = resolved_type
+        replace_target.source = resolved_source
         replace_target.consumed_at = consumed_at or replace_target.consumed_at or datetime.now(timezone.utc)
         db.add(replace_target)
         db.flush()
@@ -363,6 +478,7 @@ def get_meal_history(
     items_by_meal: dict[int, list] = defaultdict(list)
     for item in all_items:
         items_by_meal[item.meal_id].append(item)
+    meals = dedupe_generated_plan_meals(meals, items_by_meal)
 
     result = []
     for m in meals:
@@ -446,6 +562,7 @@ def get_rolling_averages(user_id: int, window: int = 7, *, db: Session) -> dict:
     items_by_meal: dict[int, list] = defaultdict(list)
     for item in all_items:
         items_by_meal[item.meal_id].append(item)
+    meals = dedupe_generated_plan_meals(meals, items_by_meal)
 
     for m in meals:
         items = items_by_meal.get(m.id, [])
@@ -521,18 +638,20 @@ def get_common_meals(
         .where(col(Meal.meal_date) >= cutoff)
     ).all()
 
+    # Batch-load all items up front so generic generated names ("New Meal")
+    # only collapse when their item signatures are identical.
+    meal_ids = [m.id for m in meals]
+    all_items = db.exec(select(MealItem).where(MealItem.meal_id.in_(meal_ids))).all() if meal_ids else []
+    items_by_meal: dict[int, list] = defaultdict(list)
+    for item in all_items:
+        items_by_meal[item.meal_id].append(item)
+    meals = dedupe_generated_plan_meals(meals, items_by_meal)
+
     # Group by normalized meal name for better deduplication
     name_groups: dict[str, list[int]] = defaultdict(list)
     for m in meals:
         key = _normalize_meal_name(m.name)
         name_groups[key].append(m.id)
-
-    # Batch-load all items for all meals to avoid N+1
-    all_meal_ids = [mid for ids in name_groups.values() if len(ids) >= min_count for mid in ids]
-    all_items = db.exec(select(MealItem).where(MealItem.meal_id.in_(all_meal_ids))).all() if all_meal_ids else []
-    items_by_meal: dict[int, list] = defaultdict(list)
-    for item in all_items:
-        items_by_meal[item.meal_id].append(item)
 
     results = []
     for name_key, meal_ids in name_groups.items():
@@ -604,6 +723,7 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
     _pattern_items_by_meal: dict[int, list] = defaultdict(list)
     for _item in _pattern_all_items:
         _pattern_items_by_meal[_item.meal_id].append(_item)
+    meals = dedupe_generated_plan_meals(meals, _pattern_items_by_meal)
 
     for m in meals:
         if m.meal_date not in daily:
@@ -782,6 +902,9 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
             "tracking_delta_pct": round(tracking_delta, 0),
             "protein_hit_delta_pct": round(protein_delta, 0) if protein_delta is not None else None,
             "calorie_delta": round(recent_adherence["avg_calories"] - previous_adherence["avg_calories"], 0),
+            "calorie_delta_when_logged": round(
+                recent_adherence["avg_calories_when_logged"] - previous_adherence["avg_calories_when_logged"], 0
+            ),
             "current_logging_streak_days": current_logging_streak,
             "current_protein_streak_days": current_protein_streak if protein_target else None,
         },

@@ -283,6 +283,68 @@ def test_fatigue_uses_recent_completion_and_planned_focus():
     assert "legs" in (recovery.detail or "").lower()
 
 
+def test_sick_skip_yesterday_caps_readiness_without_counting_as_load():
+    """Sick skip is wellness context, not training load: yesterday stays
+    a rest day, while the headline readiness is capped conservatively."""
+    print("\n[test] readiness: sick skip caps readiness separately from load")
+    from app.services.readiness.compute import compute_readiness
+    from app.models import UserDayState
+    from datetime import date, timedelta
+
+    _, s, u = _setup()
+    s.add(UserDayState(
+        user_id=u.id,
+        day_key=date.today() - timedelta(days=1),
+        skipped_focus="Legs",
+        skip_reason="Feeling sick",
+    ))
+    s.commit()
+
+    r = compute_readiness(
+        s, u.id,
+        last_night_sleep_score=92,
+        avg_hrv_ms=72,
+        avg_resting_hr=54,
+        use_cache=False,
+    )
+    wellness = next((f for f in r.factors if f.label == "Wellness"), None)
+    yesterday = next((f for f in r.factors if f.label == "Yesterday"), None)
+    assert wellness is not None, f"sick skip should surface Wellness, factors={[f.label for f in r.factors]}"
+    assert r.score <= 40, f"sick skip should cap readiness, got {r.score}"
+    assert r.label == "Fatigued", f"sick skip should read Fatigued, got {r.label}"
+    assert yesterday is not None and yesterday.value == 100, \
+        "sick skip should not masquerade as training load"
+    assert "sick" in r.summary.lower()
+
+
+def test_logistics_skip_reason_does_not_penalize_readiness():
+    """No-time/work-conflict skips are adherence context, not recovery
+    context, so they should not add a Wellness penalty."""
+    print("\n[test] readiness: logistics skip does not affect recovery")
+    from app.services.readiness.compute import compute_readiness
+    from app.models import UserDayState
+    from datetime import date, timedelta
+
+    _, s, u = _setup()
+    s.add(UserDayState(
+        user_id=u.id,
+        day_key=date.today() - timedelta(days=1),
+        skipped_focus="Push",
+        skip_reason="No time today",
+    ))
+    s.commit()
+
+    r = compute_readiness(
+        s, u.id,
+        last_night_sleep_score=92,
+        avg_hrv_ms=72,
+        avg_resting_hr=54,
+        use_cache=False,
+    )
+    assert all(f.label != "Wellness" for f in r.factors)
+    assert r.score >= 80, f"logistics skip should not cap high readiness, got {r.score}"
+
+
 # ── Missed-watch / minimum-signals gate ──────────────────────────
 # These tests cover the user-reported bug: "wife forgot to wear her
 # Apple Watch last night, but our sleep score says 100." Root cause:

@@ -540,6 +540,11 @@ def upsert_day_state(
         )
     session.add(state)
     session.commit()
+    try:
+        from app.services.readiness.compute import invalidate_readiness_cache
+        invalidate_readiness_cache(current_user.id)
+    except Exception:
+        pass
     return {"status": "ok"}
 
 

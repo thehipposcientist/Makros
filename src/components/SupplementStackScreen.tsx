@@ -149,6 +149,86 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
     }
   };
 
+  // ── Group helpers ────────────────────────────────────────────────
+  // A "group" is either the user's custom group_label OR the built-in
+  // timing bucket. Items with neither fall under "Other" so the screen
+  // still renders cleanly. Groups display in a stable order so morning
+  // shows before evening, etc.
+  const TIMING_ORDER: Record<string, number> = {
+    morning: 0, pre_workout: 1, with_meal: 2, evening: 3,
+  };
+  const titleCase = (s: string): string =>
+    s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
+  type GroupKey = { kind: 'custom' | 'timing' | 'other'; key: string; label: string; items: api.TodayStackItem[] };
+  const buildGroups = (items: api.TodayStackItem[]): GroupKey[] => {
+    const groups = new Map<string, GroupKey>();
+    for (const it of items) {
+      const customGroup = (it.group_label ?? '').toString().trim();
+      const timingBucket = (it.timing ?? '').toString().trim();
+      let kind: GroupKey['kind'];
+      let key: string;
+      let label: string;
+      if (customGroup) {
+        kind = 'custom'; key = `c:${customGroup.toLowerCase()}`; label = customGroup;
+      } else if (timingBucket) {
+        kind = 'timing'; key = `t:${timingBucket}`; label = titleCase(timingBucket);
+      } else {
+        kind = 'other'; key = 'other'; label = 'Other';
+      }
+      const existing = groups.get(key);
+      if (existing) existing.items.push(it);
+      else groups.set(key, { kind, key, label, items: [it] });
+    }
+    return Array.from(groups.values()).sort((a, b) => {
+      // Custom groups float to top (they're more intentional).
+      if (a.kind !== b.kind) {
+        const order = { custom: 0, timing: 1, other: 2 };
+        return order[a.kind] - order[b.kind];
+      }
+      if (a.kind === 'timing' && b.kind === 'timing') {
+        const ka = a.key.replace('t:', '');
+        const kb = b.key.replace('t:', '');
+        return (TIMING_ORDER[ka] ?? 99) - (TIMING_ORDER[kb] ?? 99);
+      }
+      return a.label.localeCompare(b.label);
+    });
+  };
+
+  const [takingGroupKey, setTakingGroupKey] = useState<string | null>(null);
+  const handleTakeGroup = async (group: GroupKey) => {
+    const pending = group.items.filter(i => {
+      const logs = i.logs_today || [];
+      return !logs.find(l => !l.skipped) && !logs.find(l => l.skipped);
+    });
+    if (pending.length === 0) return;
+    setTakingGroupKey(group.key);
+    try {
+      // Use the dedicated bulk endpoint when possible — single roundtrip
+      // and the backend dedupes against today's existing logs. Falls
+      // through to per-item logs only if the bulk call fails.
+      try {
+        if (group.kind === 'custom') {
+          await api.logSupplementGroup(authToken, { group_label: group.label });
+        } else if (group.kind === 'timing') {
+          await api.logSupplementGroup(authToken, { timing: group.key.replace('t:', '') });
+        } else {
+          throw new Error('use per-item fallback');
+        }
+      } catch {
+        for (const item of pending) {
+          await api.logDose(authToken, item.id, { skipped: false }).catch(() => null);
+        }
+      }
+      import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+      reload();
+    } catch (e: any) {
+      Alert.alert('Could not log group', String(e?.message ?? e));
+    } finally {
+      setTakingGroupKey(null);
+    }
+  };
+
   const handleRemove = (item: api.StackItem) => {
     Alert.alert(
       'Remove from stack?',
@@ -230,59 +310,110 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
             </TouchableOpacity>
           </View>
         )}
-        {today.map(item => {
-          const logs = item.logs_today || [];
-          const taken = logs.find(l => !l.skipped);
-          const skipped = !taken && logs.find(l => l.skipped);
+        {buildGroups(today).map((group) => {
+          const groupPending = group.items.filter(i => {
+            const logs = i.logs_today || [];
+            return !logs.find(l => !l.skipped) && !logs.find(l => l.skipped);
+          }).length;
+          const isLogging = takingGroupKey === group.key;
           return (
-            <View key={item.id} style={{
-              backgroundColor: tc.surface, borderWidth: 1, borderColor: tc.border,
-              borderRadius: 12, padding: 12,
-            }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                <View style={{
-                  width: 36, height: 36, borderRadius: 18,
-                  backgroundColor: taken ? tc.success + '22' : skipped ? tc.border : tc.surfaceRaised,
-                  alignItems: 'center', justifyContent: 'center',
-                }}>
-                  <Ionicons
-                    name={taken ? 'checkmark' : skipped ? 'close' : 'time-outline'}
-                    size={18}
-                    color={taken ? tc.success : skipped ? tc.textMuted : tc.textSecondary}
-                  />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }} numberOfLines={1}>
-                    {item.custom_name || 'Supplement'}
+            <View key={group.key} style={{ gap: 6, marginTop: 4 }}>
+              {/* Group header — label + (when group has 2+ items) a
+                  one-tap "Take group" button so users can log a whole
+                  pack at once instead of marking each. */}
+              <View style={{
+                flexDirection: 'row', alignItems: 'center',
+                justifyContent: 'space-between',
+                paddingHorizontal: 4, paddingTop: 4,
+              }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <Text style={{
+                    fontSize: 11, fontWeight: '800', color: tc.textMuted,
+                    letterSpacing: 0.6, textTransform: 'uppercase',
+                  }}>
+                    {group.label}
                   </Text>
-                  <Text style={{ fontSize: 11, color: tc.textMuted }}>
-                    {item.dose_amount}{item.dose_unit}
-                    {item.timing ? ` · ${item.timing.replace(/_/g, ' ')}` : ''}
-                    {taken ? ` · Taken ${new Date(taken.taken_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ''}
+                  <Text style={{ fontSize: 10, color: tc.textMuted }}>
+                    · {group.items.length}
                   </Text>
                 </View>
-                {!taken && !skipped && (
-                  <>
-                    <TouchableOpacity
-                      onPress={() => handleMarkTaken(item, false)}
-                      style={{
-                        paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8,
-                        backgroundColor: tc.primary,
-                      }}
-                    >
-                      <Text style={{ fontSize: 11, fontWeight: '700', color: '#fff' }}>Mark taken</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      onPress={() => handleMarkTaken(item, true)}
-                      style={{
-                        paddingVertical: 6, paddingHorizontal: 8,
-                      }}
-                    >
-                      <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textMuted }}>Skip</Text>
-                    </TouchableOpacity>
-                  </>
+                {group.items.length >= 2 && groupPending > 0 && (
+                  <TouchableOpacity
+                    onPress={() => handleTakeGroup(group)}
+                    disabled={isLogging}
+                    style={{
+                      flexDirection: 'row', alignItems: 'center', gap: 4,
+                      paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,
+                      backgroundColor: tc.primary + '1F',
+                      borderWidth: 1, borderColor: tc.primary + '88',
+                      opacity: isLogging ? 0.6 : 1,
+                    }}
+                  >
+                    {isLogging
+                      ? <ActivityIndicator size="small" color={tc.primary} />
+                      : <Ionicons name="checkmark-done" size={12} color={tc.primary} />}
+                    <Text style={{ fontSize: 10, fontWeight: '800', color: tc.primary }}>
+                      {isLogging ? 'Logging…' : `Take ${groupPending}`}
+                    </Text>
+                  </TouchableOpacity>
                 )}
               </View>
+              {group.items.map(item => {
+                const logs = item.logs_today || [];
+                const taken = logs.find(l => !l.skipped);
+                const skipped = !taken && logs.find(l => l.skipped);
+                return (
+                  <View key={item.id} style={{
+                    backgroundColor: tc.surface, borderWidth: 1, borderColor: tc.border,
+                    borderRadius: 12, padding: 12,
+                  }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                      <View style={{
+                        width: 36, height: 36, borderRadius: 18,
+                        backgroundColor: taken ? tc.success + '22' : skipped ? tc.border : tc.surfaceRaised,
+                        alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        <Ionicons
+                          name={taken ? 'checkmark' : skipped ? 'close' : 'time-outline'}
+                          size={18}
+                          color={taken ? tc.success : skipped ? tc.textMuted : tc.textSecondary}
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }} numberOfLines={1}>
+                          {item.custom_name || 'Supplement'}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: tc.textMuted }}>
+                          {item.dose_amount}{item.dose_unit}
+                          {item.timing ? ` · ${item.timing.replace(/_/g, ' ')}` : ''}
+                          {taken ? ` · Taken ${new Date(taken.taken_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}` : ''}
+                        </Text>
+                      </View>
+                      {!taken && !skipped && (
+                        <>
+                          <TouchableOpacity
+                            onPress={() => handleMarkTaken(item, false)}
+                            style={{
+                              paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8,
+                              backgroundColor: tc.primary,
+                            }}
+                          >
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: '#fff' }}>Mark taken</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            onPress={() => handleMarkTaken(item, true)}
+                            style={{
+                              paddingVertical: 6, paddingHorizontal: 8,
+                            }}
+                          >
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: tc.textMuted }}>Skip</Text>
+                          </TouchableOpacity>
+                        </>
+                      )}
+                    </View>
+                  </View>
+                );
+              })}
             </View>
           );
         })}
@@ -553,6 +684,10 @@ function AddSupplementModal({
   const [unit, setUnit] = useState('mg');
   const [freq, setFreq] = useState<'daily' | 'weekdays' | 'as_needed' | 'pre_workout'>('daily');
   const [timing, setTiming] = useState<'morning' | 'evening' | 'with_meal' | 'pre_workout' | ''>('');
+  // Free-text user-defined group. When set, overrides `timing` for the
+  // grouped Today view + the "take group" action. e.g. "Stack 1",
+  // "Travel pack", "Race day".
+  const [groupLabel, setGroupLabel] = useState<string>('');
   const [scanning, setScanning] = useState(false);
   const [scanHint, setScanHint] = useState<string | null>(null);
   // Multi-scan review list. Populated by handleScanMultiple; cleared
@@ -568,7 +703,7 @@ function AddSupplementModal({
   useEffect(() => {
     if (!visible) {
       setSelected(null); setCustomName(''); setDose(''); setUnit('mg');
-      setFreq('daily'); setTiming('');
+      setFreq('daily'); setTiming(''); setGroupLabel('');
       setScanning(false); setScanHint(null);
       setMultiReview(null); setMultiLoading(false);
       setAiSearch(''); setAiSearching(false);
@@ -733,6 +868,7 @@ function AddSupplementModal({
       dose_unit: unit,
       frequency: freq,
       timing: timing || null,
+      group_label: groupLabel.trim() || null,
       category: selected?.category,
     });
   };
@@ -976,6 +1112,29 @@ function AddSupplementModal({
                 );
               })}
             </View>
+
+            {/* Custom group — overrides the timing bucket on the Today
+                tab so users can name their own packs ("Stack 1",
+                "Travel pack") and tap-to-take the whole group at once. */}
+            <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, marginBottom: 6, letterSpacing: 0.5 }}>
+              GROUP (OPTIONAL)
+            </Text>
+            <TextInput
+              value={groupLabel}
+              onChangeText={setGroupLabel}
+              placeholder="e.g. Stack 1, Travel pack, Pre-bed"
+              placeholderTextColor={tc.textMuted}
+              maxLength={40}
+              style={{
+                backgroundColor: tc.surface,
+                borderWidth: 1, borderColor: tc.border,
+                borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12,
+                color: tc.textPrimary, fontSize: 14, marginBottom: 6,
+              }}
+            />
+            <Text style={{ fontSize: 10, color: tc.textMuted, marginBottom: 16 }}>
+              Lets you tap "Take all" for this whole group on the Today tab. Leave blank to use the timing bucket above.
+            </Text>
 
             <TouchableOpacity
               onPress={handleSave}

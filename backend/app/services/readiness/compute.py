@@ -19,6 +19,7 @@ Inputs (all optional — degrade gracefully):
   • MuscleFatigue from compute_rolling_fatigue (recent completions)
   • DailyNutritionMetrics for nutrition adherence
   • Last completed WorkoutCompletion (yesterday's strain)
+  • Recent skip reasons for wellness context (illness, pain, low energy)
 
 Output is the same shape today's `services/preparedness.ts` produces
 on the client, plus `computed_at_ms` for the WC ordering protocol.
@@ -38,7 +39,7 @@ from sqlmodel import select
 
 from app.models import (
     DailyHealthSnapshot, DailyNutritionMetrics,
-    SleepLog, WorkoutCompletion,
+    PlanDay, SleepLog, UserDayState, WorkoutCompletion,
 )
 
 
@@ -60,11 +61,12 @@ W_NUTRITION = 15
 W_RHR = 10
 W_YESTERDAY = 5
 W_CYCLE = 10
+W_WELLNESS = 10
 
 # Pillars that represent real "today" health signals. The yesterday-
 # strain pillar is excluded — it's always available (rest day = full
 # credit) and so can't be used to gate a meaningful score.
-_HEALTH_PILLARS: frozenset[str] = frozenset({"sleep", "hrv", "rhr", "nutrition", "fatigue"})
+_HEALTH_PILLARS: frozenset[str] = frozenset({"sleep", "hrv", "rhr", "nutrition", "fatigue", "wellness"})
 
 # Minimum health pillars required before we'll publish a numeric
 # readiness score. Below this we return score=0, label="—" and a
@@ -107,6 +109,15 @@ class ReadinessResult:
             "signals_total": self.signals_total,
             "computed_at_ms": self.computed_at_ms,
         }
+
+
+@dataclass(frozen=True)
+class SkipWellnessImpact:
+    value: int
+    cap: int | None
+    detail: str
+    summary: str
+    counts_as_gate: bool
 
 
 # ── Per-process TTL cache for compute_readiness ────────────────────
@@ -263,6 +274,110 @@ def _score_yesterday(yesterday_minutes: int | None) -> tuple[int | None, str | N
     if yesterday_minutes <= 75:
         return int(round(W_YESTERDAY * 0.65)), f"{yesterday_minutes}min yesterday"
     return int(round(W_YESTERDAY * 0.40)), f"{yesterday_minutes}min yesterday"
+
+
+def _has_any(text: str, needles: tuple[str, ...]) -> bool:
+    return any(n in text for n in needles)
+
+
+def _classify_skip_wellness(reason: str | None, when: str) -> SkipWellnessImpact | None:
+    if not reason:
+        return None
+    text = reason.strip().lower()
+    if not text:
+        return None
+
+    logistics = (
+        "no time", "busy", "schedule", "appointment", "work conflict",
+        "meeting", "commute", "did something else",
+    )
+    if _has_any(text, logistics):
+        return None
+
+    if _has_any(text, ("sick", "ill", "flu", "cold", "fever", "covid", "virus", "infection", "stomach", "nausea", "vomit", "migraine")):
+        value = 12 if when == "today" else 20
+        cap = 35 if when == "today" else 40
+        return SkipWellnessImpact(
+            value=value,
+            cap=cap,
+            detail=f"sick skip {when}",
+            summary=f"You skipped {when} because you were sick. Treat today as recovery-first and keep intensity easy until symptoms settle.",
+            counts_as_gate=True,
+        )
+
+    if _has_any(text, ("injury", "injured", "pain", "hurt", "strain", "sprain", "tweak", "tweaked", "joint", "ache")):
+        value = 18 if when == "today" else 25
+        cap = 38 if when == "today" else 45
+        return SkipWellnessImpact(
+            value=value,
+            cap=cap,
+            detail=f"pain/injury skip {when}",
+            summary=f"You skipped {when} for pain or injury. Keep today conservative and avoid loading the irritated area.",
+            counts_as_gate=True,
+        )
+
+    if _has_any(text, ("too tired", "exhaust", "fatigue", "worn out", "burnt", "burned", "need more rest", "rough night", "poor sleep", "sleep")):
+        value = 38 if when == "today" else 45
+        cap = 55 if when == "today" else 60
+        return SkipWellnessImpact(
+            value=value,
+            cap=cap,
+            detail=f"low-energy skip {when}",
+            summary=f"You skipped {when} because recovery felt low. A lighter session or rest day fits better than forcing intensity.",
+            counts_as_gate=True,
+        )
+
+    if _has_any(text, ("stress", "anxiety", "mental", "overwhelmed")):
+        return SkipWellnessImpact(
+            value=60,
+            cap=75,
+            detail=f"stress skip {when}",
+            summary=f"You skipped {when} because stress was high. Keep today's plan flexible and stop short of grindy sets.",
+            counts_as_gate=False,
+        )
+
+    if _has_any(text, ("travel", "travelling", "traveling", "jet lag", "flight")):
+        return SkipWellnessImpact(
+            value=72,
+            cap=85,
+            detail=f"travel disruption {when}",
+            summary=f"Travel disrupted training {when}. Use readiness as a governor and warm up gradually today.",
+            counts_as_gate=False,
+        )
+
+    return None
+
+
+def _skip_reason_for_day(db, user_id: int, day: date) -> str | None:
+    state = db.exec(
+        select(UserDayState)
+        .where(UserDayState.user_id == user_id)
+        .where(UserDayState.day_key == day)
+    ).first()
+    if state and state.skip_reason:
+        return state.skip_reason
+
+    plan_day = db.exec(
+        select(PlanDay)
+        .where(PlanDay.user_id == user_id)
+        .where(PlanDay.day_date == day)
+        .where(PlanDay.status == "skipped")
+        .order_by(PlanDay.updated_at.desc())
+    ).first()
+    if plan_day and plan_day.skip_reason:
+        return plan_day.skip_reason
+    return None
+
+
+def _recent_skip_wellness(db, user_id: int, today: date) -> SkipWellnessImpact | None:
+    impacts: list[SkipWellnessImpact] = []
+    for day, when in ((today, "today"), (today - timedelta(days=1), "yesterday")):
+        impact = _classify_skip_wellness(_skip_reason_for_day(db, user_id, day), when)
+        if impact:
+            impacts.append(impact)
+    if not impacts:
+        return None
+    return sorted(impacts, key=lambda i: (i.cap if i.cap is not None else 100, i.value))[0]
 
 
 # Cycle phases sourced from `src/services/appleHealth.ts:getCycleStatus`.
@@ -548,6 +663,21 @@ def compute_readiness(
     else:
         missing.append("yesterday")
 
+    # ── Wellness from skip reasons (W_WELLNESS) ─────────────────────
+    # A sick/injured/low-energy skip is not training load, so
+    # yesterday's load can still be 5/5. It is still real readiness
+    # context, though, and should cap the headline score.
+    skip_wellness = _recent_skip_wellness(db, user_id, today)
+    if skip_wellness:
+        pts = int(round((skip_wellness.value / 100.0) * W_WELLNESS))
+        pillar_scores["wellness"] = (pts, W_WELLNESS)
+        factors.append(ReadinessFactor(
+            label="Wellness",
+            value=skip_wellness.value,
+            status=_factor_status(skip_wellness.value),
+            detail=skip_wellness.detail,
+        ))
+
     # ── Cycle phase (W_CYCLE) — optional ───────────────────────────
     # Only contributes when the phone passes meaningful cycle data.
     # Skipped silently for male users / users without HK cycle reads —
@@ -573,7 +703,8 @@ def compute_readiness(
     # This gate is what fixes the missed-watch-but-shows-100 bug.
     health_pillars_present = sum(1 for p in pillar_scores if p in _HEALTH_PILLARS)
 
-    if health_pillars_present < _MIN_HEALTH_PILLARS:
+    wellness_can_publish = bool(skip_wellness and skip_wellness.counts_as_gate)
+    if health_pillars_present < _MIN_HEALTH_PILLARS and not wellness_can_publish:
         result = ReadinessResult(
             score=0,
             label="—",
@@ -581,7 +712,7 @@ def compute_readiness(
             factors=factors,
             missing=missing,
             signals_present=len(pillar_scores),
-            signals_total=6,
+            signals_total=7 if skip_wellness else 6,
             computed_at_ms=int(time.time() * 1000),
         )
         if use_cache:
@@ -596,15 +727,17 @@ def compute_readiness(
     max_possible = sum(_max for _got, _max in pillar_scores.values())
     score = int(round((raw / max_possible) * 100))
     score = max(0, min(100, score))
+    if skip_wellness and skip_wellness.cap is not None:
+        score = min(score, skip_wellness.cap)
 
     result = ReadinessResult(
         score=score,
         label=_label_for(score),
-        summary=_summary_for(score),
+        summary=skip_wellness.summary if skip_wellness else _summary_for(score),
         factors=factors,
         missing=missing,
         signals_present=len(pillar_scores),
-        signals_total=6,
+        signals_total=7 if skip_wellness else 6,
         computed_at_ms=int(time.time() * 1000),
     )
     if use_cache:

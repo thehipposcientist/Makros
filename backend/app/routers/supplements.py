@@ -77,6 +77,8 @@ def add_to_stack(
         category = category or ing.category
         custom_name = custom_name or ing.name
 
+    raw_group = body.get("group_label")
+    group_label = raw_group.strip() if isinstance(raw_group, str) and raw_group.strip() else None
     row = UserSupplementStack(
         user_id=current_user.id,
         supplement_ingredient_id=int(ingredient_id) if ingredient_id else None,
@@ -87,6 +89,7 @@ def add_to_stack(
         dose_unit=str(body.get("dose_unit") or "mg"),
         frequency=str(body.get("frequency") or "daily"),
         timing=body.get("timing"),
+        group_label=group_label,
         taken_with_food=bool(body.get("taken_with_food") or False),
         active=bool(body.get("active", True)),
         notes=body.get("notes"),
@@ -112,9 +115,13 @@ def update_stack_item(
     if not row or row.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Stack item not found")
     mutable = {"goal", "dose_amount", "dose_unit", "frequency", "timing",
-               "taken_with_food", "active", "notes", "custom_name"}
+               "group_label", "taken_with_food", "active", "notes", "custom_name"}
     for k, v in body.items():
         if k in mutable:
+            # Empty string for group_label means "remove the group" — store
+            # NULL so the row falls back to its `timing` bucket on render.
+            if k == "group_label" and isinstance(v, str) and not v.strip():
+                v = None
             setattr(row, k, v)
     db.add(row)
     db.commit()
@@ -169,6 +176,84 @@ def log_dose(
     db.commit()
     db.refresh(log)
     return log.model_dump()
+
+
+# ── Bulk group log ─────────────────────────────────────────────────────────
+# Logs a dose for every supplement in a named group at once. Two ways to
+# identify the group:
+#   - `group_label`: matches `UserSupplementStack.group_label` exactly
+#   - `timing`: matches `UserSupplementStack.timing` (built-in bucket)
+#
+# Skips items already logged today so a double-tap doesn't double-log.
+# Best-effort: a single failed insert doesn't roll back the whole group.
+@router.post("/stack/log-group", status_code=201)
+def log_group(
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    group_label = (body.get("group_label") or "").strip() if isinstance(body.get("group_label"), str) else ""
+    timing = (body.get("timing") or "").strip() if isinstance(body.get("timing"), str) else ""
+    skipped = bool(body.get("skipped") or False)
+    if not group_label and not timing:
+        raise HTTPException(status_code=400, detail="group_label or timing required")
+
+    q = select(UserSupplementStack).where(
+        UserSupplementStack.user_id == current_user.id,
+        UserSupplementStack.active == True,  # noqa: E712
+    )
+    if group_label:
+        q = q.where(UserSupplementStack.group_label == group_label)
+    else:
+        # When falling back to timing, exclude items that have a custom
+        # group_label set — those belong to their own group, not the
+        # built-in timing bucket.
+        q = q.where(
+            UserSupplementStack.timing == timing,
+            UserSupplementStack.group_label == None,  # noqa: E711
+        )
+    items = list(db.exec(q).all())
+    if not items:
+        return {"logged": 0, "items": []}
+
+    today = date.today()
+    start_of_day = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    end_of_day = start_of_day + timedelta(days=1)
+
+    # Items already logged today (taken or skipped) are no-ops so a
+    # repeat tap doesn't double-record.
+    already_logged_ids = {
+        l.stack_item_id for l in db.exec(
+            select(SupplementLog).where(
+                SupplementLog.user_id == current_user.id,
+                SupplementLog.stack_item_id.in_([i.id for i in items]),
+                SupplementLog.taken_at >= start_of_day,
+                SupplementLog.taken_at < end_of_day,
+            )
+        ).all()
+    }
+
+    now = datetime.now(timezone.utc)
+    logged_ids: list[int] = []
+    for item in items:
+        if item.id in already_logged_ids:
+            continue
+        try:
+            db.add(SupplementLog(
+                user_id=current_user.id,
+                stack_item_id=item.id,
+                taken_at=now,
+                dose_amount=item.dose_amount,
+                dose_unit=item.dose_unit,
+                skipped=skipped,
+            ))
+            logged_ids.append(item.id)
+        except Exception:
+            # Single-item failure shouldn't strand the rest of the batch.
+            continue
+    if logged_ids:
+        db.commit()
+    return {"logged": len(logged_ids), "items": logged_ids}
 
 
 @router.get("/today")

@@ -7445,6 +7445,34 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         </View>
                       );
                     })()}
+                    {/* Quick "+ Add" button — visible on the collapsed
+                        header so users don't have to expand the card just
+                        to log a meal. Stops propagation so the parent
+                        TouchableOpacity (which toggles expand) doesn't
+                        fire underneath. */}
+                    {!isPastSkipped && (
+                      <TouchableOpacity
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+                          handleAddSnack(d.key);
+                        }}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 6 }}
+                        style={{
+                          flexDirection: 'row', alignItems: 'center', gap: 4,
+                          paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14,
+                          backgroundColor: MEALS_ACCENT + '18',
+                          borderWidth: 1, borderColor: MEALS_ACCENT + '55',
+                          marginRight: 6,
+                        }}
+                        accessibilityLabel="Add meal"
+                      >
+                        <Ionicons name="add" size={14} color={MEALS_ACCENT} />
+                        <Text style={{ fontSize: 11, fontWeight: '800', color: MEALS_ACCENT, letterSpacing: 0.3 }}>
+                          ADD
+                        </Text>
+                      </TouchableOpacity>
+                    )}
                     <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
                   </TouchableOpacity>
 
@@ -10988,34 +11016,27 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
         );
       })}
 
-      <TouchableOpacity
-        style={[styles.todayActivityActionCard, { backgroundColor: tc.primary + '10', borderColor: tc.primary + '55' }]}
-        onPress={onStartCustom}
-        activeOpacity={0.78}>
-        <View style={[styles.todayActivityActionIcon, { backgroundColor: tc.primary + '18' }]}>
-          <Ionicons name="flash" size={18} color={tc.primary} />
-        </View>
-        <View style={{ flex: 1, minWidth: 0 }}>
-          <Text style={[styles.todayActivityActionTitle, { color: tc.textPrimary }]}>Custom workout</Text>
-          <Text style={[styles.todayActivityActionMeta, { color: tc.textMuted }]} numberOfLines={1}>Run · Yoga · Ride · Lift</Text>
-        </View>
-        <Ionicons name="play-circle" size={22} color={tc.primary} />
-      </TouchableOpacity>
-
-      <View style={styles.todayActivitySecondaryRow}>
+      <View style={styles.todayActivityQuickRow}>
         <TouchableOpacity
-          style={[styles.todayActivitySecondaryCard, { backgroundColor: tc.surface, borderColor: tc.border }]}
-          onPress={onLogActivity}
-          activeOpacity={0.75}>
-          <Ionicons name="add-circle-outline" size={16} color={tc.primary} />
-          <Text style={[styles.todayActivitySecondaryText, { color: tc.textPrimary }]}>Log completed</Text>
+          style={[styles.todayActivityQuickAction, { backgroundColor: tc.primary + '10', borderColor: tc.primary + '55' }]}
+          onPress={onStartCustom}
+          activeOpacity={0.78}>
+          <Ionicons name="flash" size={15} color={tc.primary} />
+          <Text style={[styles.todayActivityQuickText, { color: tc.textPrimary }]}>Custom</Text>
         </TouchableOpacity>
         <TouchableOpacity
-          style={[styles.todayActivitySecondaryCard, { backgroundColor: tc.surface, borderColor: tc.border }]}
+          style={[styles.todayActivityQuickAction, { backgroundColor: tc.surface, borderColor: tc.border }]}
+          onPress={onLogActivity}
+          activeOpacity={0.75}>
+          <Ionicons name="add-circle-outline" size={15} color={tc.primary} />
+          <Text style={[styles.todayActivityQuickText, { color: tc.textPrimary }]}>Log</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.todayActivityQuickAction, { backgroundColor: tc.surface, borderColor: tc.border }]}
           onPress={onEditPlan}
           activeOpacity={0.75}>
-          <Ionicons name="settings-sharp" size={16} color={tc.textMuted} />
-          <Text style={[styles.todayActivitySecondaryText, { color: tc.textPrimary }]}>Edit plan</Text>
+          <Ionicons name="settings-sharp" size={15} color={tc.textMuted} />
+          <Text style={[styles.todayActivityQuickText, { color: tc.textPrimary }]}>Edit</Text>
         </TouchableOpacity>
       </View>
 
@@ -12286,31 +12307,20 @@ const styles = StyleSheet.create({
   todayActivityIconBubble: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   todayActivityTitle: { fontSize: 14, fontWeight: '800' },
   todayActivityMeta: { fontSize: 11, marginTop: 2 },
-  todayActivityActionCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 11,
-    paddingHorizontal: 13,
-    paddingVertical: 13,
-    borderRadius: 8,
-    borderWidth: 1,
-  },
-  todayActivityActionIcon: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
-  todayActivityActionTitle: { fontSize: 15, fontWeight: '900' },
-  todayActivityActionMeta: { fontSize: 11, marginTop: 2 },
-  todayActivitySecondaryRow: { flexDirection: 'row', gap: 8 },
-  todayActivitySecondaryCard: {
+  todayActivityQuickRow: { flexDirection: 'row', gap: 7 },
+  todayActivityQuickAction: {
     flex: 1,
-    minHeight: 42,
+    minHeight: 38,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
+    gap: 5,
     borderRadius: 8,
     borderWidth: 1,
-    paddingHorizontal: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 8,
   },
-  todayActivitySecondaryText: { fontSize: 12, fontWeight: '800' },
+  todayActivityQuickText: { fontSize: 11, fontWeight: '900' },
 
   actionRow:       { flexDirection: 'row', gap: 10, marginTop: 12 },
   skipLink:        { alignSelf: 'center', paddingVertical: 8, paddingHorizontal: 4 },

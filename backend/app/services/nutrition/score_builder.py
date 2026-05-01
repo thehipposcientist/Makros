@@ -26,6 +26,7 @@ from app.models import (
     UserProfile, UserGoal, UserDayState,
 )
 from app.services.nutrition.gut_health import compute_daily_metrics, compute_weekly_rollup
+from app.services.nutrition.meal_history import dedupe_generated_plan_meals
 from app.services.nutrition.nutrition_score import (
     NutritionIndicators, compute_nutrition_score, NutritionScore, RDA,
 )
@@ -266,6 +267,12 @@ def build_indicators(
     items: list[MealItem] = []
     if meal_ids:
         items = db.exec(select(MealItem).where(MealItem.meal_id.in_(meal_ids))).all()
+    items_by_meal: dict[int, list[MealItem]] = {}
+    for item in items:
+        items_by_meal.setdefault(item.meal_id, []).append(item)
+    meals = dedupe_generated_plan_meals(meals, items_by_meal)
+    kept_meal_ids = {m.id for m in meals}
+    items = [item for item in items if item.meal_id in kept_meal_ids]
 
     total_cal = sum(float(i.calories or 0) for i in items)
     total_pro = sum(float(i.protein_g or 0) for i in items)

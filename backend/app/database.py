@@ -183,6 +183,30 @@ def _ensure_user_preferences_equipment_settings_column() -> None:
         print(f"[migration] user_preferences equipment_settings add failed (non-fatal): {e}")
 
 
+def _ensure_user_supplement_stack_group_column() -> None:
+    """Add user-defined group label to user_supplement_stack.
+
+    Lets users batch supplements beyond the built-in timing buckets
+    ("Stack 1", "Travel pack", etc.). Nullable so existing rows keep
+    working unchanged. Per-row index speeds up the grouped query the
+    Today tab fires on every render.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE user_supplement_stack "
+                "ADD COLUMN IF NOT EXISTS group_label VARCHAR"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_supp_stack_user_group "
+                "ON user_supplement_stack(user_id, group_label)"
+            ))
+    except Exception as e:
+        print(f"[migration] user_supplement_stack group_label add failed (non-fatal): {e}")
+
+
 def _ensure_coach_apply_state_columns() -> None:
     """Add durable settings used by /coach/apply-action.
 
@@ -1268,6 +1292,7 @@ def create_db_and_tables():
     _ensure_workout_completion_stimulus_column()
     _ensure_workout_completion_health_columns()
     _ensure_user_preferences_equipment_settings_column()
+    _ensure_user_supplement_stack_group_column()
     _ensure_coach_apply_state_columns()
     _ensure_user_recovery_columns()
     _ensure_user_goal_track_column()

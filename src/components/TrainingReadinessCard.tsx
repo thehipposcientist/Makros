@@ -156,6 +156,9 @@ function derivePillarRecommendations(
   if (present.nutrition && pillars.nutrition < 7) {
     recs.push('Hit calorie + protein target before training — undereating compounds the fatigue.');
   }
+  if (present.wellness && (pillars.wellness ?? 10) < 6) {
+    recs.push('Treat the skip reason as signal: keep today easy, and stop if symptoms or pain show up.');
+  }
   return recs.slice(0, 4);
 }
 
@@ -292,6 +295,7 @@ export default function TrainingReadinessCard({
             nutrition: get('Nutrition', 15),
             restingHr: get('RHR', 10),
             yesterdayStrain: get('Yesterday', 5),
+            wellness: get('Wellness', 10),
           };
         };
         const serverPillars = pillarFromFactors(serverResp.factors);
@@ -306,6 +310,7 @@ export default function TrainingReadinessCard({
         if (!serverResp.missing.includes('fatigue')) serverPresent.fatigue = true;
         if (!serverResp.missing.includes('nutrition')) serverPresent.nutrition = true;
         if (!serverResp.missing.includes('rhr')) serverPresent.restingHr = true;
+        if (serverResp.factors.some(f => f.label === 'Wellness')) serverPresent.wellness = true;
         const serverRecs = derivePillarRecommendations(serverPillars, serverPresent);
         displayResult = {
           score: displayScore,
@@ -444,6 +449,7 @@ export default function TrainingReadinessCard({
   if (isPresent('fatigue')) pillarRows.push(['Muscle recovery', prep.pillars.fatigue, 20]);
   if (isPresent('nutrition')) pillarRows.push(['Nutrition', prep.pillars.nutrition, 15]);
   if (hasAppleHealth && isPresent('rhr')) pillarRows.push(['Resting HR', prep.pillars.restingHr, 10]);
+  if (prep.pillars.wellness != null && prep.pillars.wellness > 0) pillarRows.push(['Wellness', prep.pillars.wellness, 10]);
   pillarRows.push(['Yesterday\'s load', prep.pillars.yesterdayStrain, 5]);
 
   // Pillars the server said were missing AND are AH-derived. Surfaced
@@ -580,7 +586,7 @@ export default function TrainingReadinessCard({
             DRIVERS
           </Text>
           <Text style={{ fontSize: 10, color: tc.textMuted, lineHeight: 13, marginBottom: 6 }}>
-            Biggest drivers: last night's sleep, HRV trend, muscle recovery, nutrition, resting HR, and yesterday's load.
+            Biggest drivers: last night's sleep, HRV trend, muscle recovery, nutrition, resting HR, wellness notes, and yesterday's load.
           </Text>
           {/* Per-pillar descriptions so users understand what each row
               means — particularly "Yesterday", which was confusing
@@ -593,6 +599,7 @@ export default function TrainingReadinessCard({
               'Muscle recovery': 'How fresh the muscles you\'re training today are (fatigue decay from recent workouts).',
               'Nutrition': 'Whether you\'ve hit your calorie + protein targets the last few days.',
               'Resting HR': 'Resting heart rate vs your 30-day baseline. Elevated RHR often means under-recovered.',
+              'Wellness': 'Your skip reason when sickness, pain, travel, stress, or low energy affects training readiness.',
               "Yesterday's load": 'How hard yesterday\'s training was. A short or rest day = more points today; 2+ hours of training yesterday pulls the score down because you\'re less recovered.',
             };
             return pillarRows.map(([label, pts, max], pIdx) => {
