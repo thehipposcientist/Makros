@@ -51,9 +51,19 @@ def _make_mem_engine():
     return engine
 
 
-def _insert_user(session, *, email: str = "nutrition_persist@example.com"):
+def _insert_user(
+    session,
+    *,
+    email: str = "nutrition_persist@example.com",
+    subscription_tier: str = "pro",
+):
     from app.models import User
-    u = User(email=email, username=email.split("@")[0], hashed_password="x")
+    u = User(
+        email=email,
+        username=email.split("@")[0],
+        hashed_password="x",
+        subscription_tier=subscription_tier,
+    )
     session.add(u)
     session.commit()
     session.refresh(u)
@@ -226,6 +236,7 @@ def test_active_nutrition_endpoint_returns_plan() -> None:
                 u = s.get(User, user_id)
                 if u is not None:
                     _ = (u.id, u.email, u.username, u.hashed_password,
+                         u.subscription_tier,
                          u.is_active, u.created_at,
                          u.recovery_question, u.recovery_answer_hash)
                     s.expunge(u)
@@ -282,6 +293,7 @@ def test_active_nutrition_endpoint_404_when_no_plan() -> None:
                 u = s.get(User, user_id)
                 if u is not None:
                     _ = (u.id, u.email, u.username, u.hashed_password,
+                         u.subscription_tier,
                          u.is_active, u.created_at,
                          u.recovery_question, u.recovery_answer_hash)
                     s.expunge(u)
@@ -298,6 +310,56 @@ def test_active_nutrition_endpoint_404_when_no_plan() -> None:
     finally:
         app_db.engine = orig_engine
     _ok("404 when the user has never generated a nutrition plan")
+
+
+def test_active_nutrition_endpoint_403_for_free_user() -> None:
+    """Free users cannot read generated nutrition-plan artifacts."""
+    print("\n[test] GET /ai/plans/active-nutrition 403s for free users")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from sqlmodel import Session
+
+    from app import database as app_db
+    from app.auth import get_current_user
+    from app.database import get_session
+    from app.models import User
+    from app.routers.ai.router import router as ai_router
+
+    engine = _make_mem_engine()
+    orig_engine = app_db.engine
+    app_db.engine = engine
+    try:
+        with Session(engine) as s:
+            user = _insert_user(s, subscription_tier="free")
+            user_id = user.id
+
+        def _session_override():
+            with Session(engine) as s:
+                yield s
+
+        def _user_override():
+            with Session(engine) as s:
+                u = s.get(User, user_id)
+                if u is not None:
+                    _ = (u.id, u.email, u.username, u.hashed_password,
+                         u.subscription_tier,
+                         u.is_active, u.created_at,
+                         u.recovery_question, u.recovery_answer_hash)
+                    s.expunge(u)
+                return u
+
+        app = FastAPI()
+        app.include_router(ai_router)
+        app.dependency_overrides[get_session] = _session_override
+        app.dependency_overrides[get_current_user] = _user_override
+
+        client = TestClient(app)
+        resp = client.get("/ai/plans/active-nutrition")
+        assert resp.status_code == 403, f"expected 403, got {resp.status_code}: {resp.text}"
+        assert "Thallo Pro" in resp.json().get("detail", "")
+    finally:
+        app_db.engine = orig_engine
+    _ok("free users are blocked before active nutrition lookup")
 
 
 def test_planner_version_stamped_on_new_templates_matches_active_row() -> None:

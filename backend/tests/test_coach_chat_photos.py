@@ -44,7 +44,7 @@ def _captured_messages_handler(captured: list[dict]):
     return fake_chat_create
 
 
-def _setup_client(captured: list[dict]):
+def _setup_client(captured: list[dict], *, subscription_tier: str = "pro"):
     """Spin up FastAPI test client with auth + chat_create mocked.
     Returns (client, auth_dependency_override)."""
     from app.main import app
@@ -53,7 +53,11 @@ def _setup_client(captured: list[dict]):
     from app.routers.ai import chat as chat_mod
 
     fake_user = User(
-        id=1, email="t@t", username="t", hashed_password="x",
+        id=1,
+        email="t@t",
+        username="t",
+        hashed_password="x",
+        subscription_tier=subscription_tier,
     )
     app.dependency_overrides[get_current_user] = lambda: fake_user
 
@@ -65,6 +69,21 @@ def _setup_client(captured: list[dict]):
 
 
 # ─── Photo attachment ─────────────────────────────────────────────────────────
+
+def test_workout_question_requires_pro():
+    print("\n[test] coach: workout question blocks free users")
+    captured: list[dict] = []
+    client = _setup_client(captured, subscription_tier="free")
+
+    r = client.post("/ai/workout-question", json={
+        "question": "How should I cue this lift?",
+        "workout": {"name": "Push"},
+        "activeExerciseName": "Bench Press",
+    })
+    assert r.status_code == 403, r.text
+    assert "Thallo Pro" in r.json().get("detail", "")
+    assert captured == []
+    _ok("free users are blocked before coach LLM call")
 
 def test_text_only_question_uses_string_content():
     """A plain question without a photo: latest user message has plain
@@ -215,6 +234,7 @@ def test_invalid_history_entries_filtered():
 
 
 cases = [
+    test_workout_question_requires_pro,
     test_text_only_question_uses_string_content,
     test_photo_question_uses_multipart_content,
     test_conversation_history_passed_through,

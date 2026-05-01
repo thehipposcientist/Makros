@@ -3644,6 +3644,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           picked = normalize(generateDailyNutritionForDate(profile, allFoodsWithCustom, d.key));
           pickedPathRef.name = 'fallback';
         }
+        if (!picked) {
+          picked = {
+            meals: [],
+            removedMealIds: [],
+            targets: { calories: 0, protein: 0, carbs: 0, fat: 0 },
+          };
+          pickedPathRef.name = 'empty';
+        }
         // Diagnostic — first meal's micronutrient key count so we can
         // see whether data actually reached the UI layer.
         const firstMeal: any = picked?.meals?.[0];
@@ -6850,18 +6858,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         setTemplateBuilderOpen(true);
                       }}
                     />
-                    <DetectedWorkoutsCard
-                      themeName={userProfile.themePreference}
-                      authToken={authToken}
-                      onAfterImport={async () => {
-                        try {
-                          const { history, summaries } = await loadWorkoutHistoryBundle();
-                          setWorkoutHistoryList(history);
-                          setWorkoutHistorySummaries(summaries);
-                        } catch {}
-                        loadDayStatus();
-                      }}
-                    />
+                    {!isFreeTier && (
+                      <DetectedWorkoutsCard
+                        themeName={userProfile.themePreference}
+                        authToken={authToken}
+                        onAfterImport={async () => {
+                          try {
+                            const { history, summaries } = await loadWorkoutHistoryBundle();
+                            setWorkoutHistoryList(history);
+                            setWorkoutHistorySummaries(summaries);
+                          } catch {}
+                          loadDayStatus();
+                        }}
+                      />
+                    )}
                   </View>
                 ) : (
                   <View style={{ gap: 6, marginBottom: 12, marginTop: -4 }}>
@@ -8323,6 +8333,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         visible={showLiveTracker}
         onClose={() => setShowLiveTracker(false)}
         themeName={userProfile.themePreference}
+        enableHealthKit={!isFreeTier}
         onSave={async (session) => {
           await saveWorkoutSession(session);
           if (authToken) {
@@ -10314,7 +10325,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       })}
                     </View>
                   </View>
-                  <AppleHealthToggleRow themeColors={themeColors} userAge={userProfile.physicalStats?.age ?? null} />
+                  {!isFreeTier ? (
+                    <AppleHealthToggleRow themeColors={themeColors} userAge={userProfile.physicalStats?.age ?? null} />
+                  ) : (
+                    <View style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Apple Health</Text>
+                        <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
+                          Pro adds HealthKit sleep, HRV, heart-rate, weight, and workout context.
+                        </Text>
+                      </View>
+                      <Ionicons name="lock-closed-outline" size={18} color={themeColors.textMuted} />
+                    </View>
+                  )}
                 </View>
 
                 {/* Name */}

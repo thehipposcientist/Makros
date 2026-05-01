@@ -709,7 +709,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           try {
             const p = await loadCachedProfile();
             if (p) {
-              injuries = (p.injuriesOrLimitations || p.injuries || [])
+              injuries = ((p as any).injuriesOrLimitations || p.injuries || [])
                 .map((i: any) => typeof i === 'string' ? i : (i?.label || i?.name || ''))
                 .filter(Boolean);
             }

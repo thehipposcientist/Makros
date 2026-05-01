@@ -69,6 +69,26 @@ def _auth() -> dict[str, str]:
     return {"Authorization": f"Bearer {_token}"}
 
 
+def _set_subscription_tier(tier: str) -> None:
+    assert _user_id, "user id not populated — did test_00_register run?"
+    from sqlmodel import Session, create_engine
+
+    from app.database import DATABASE_URL
+    from app.models import User
+
+    connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+    smoke_engine = create_engine(DATABASE_URL, connect_args=connect_args)
+    try:
+        with Session(smoke_engine) as s:
+            user = s.get(User, _user_id)
+            assert user is not None, f"smoke user {_user_id} missing"
+            user.subscription_tier = tier
+            s.add(user)
+            s.commit()
+    finally:
+        smoke_engine.dispose()
+
+
 def _check(resp: _http.Response, expected: int, label: str) -> Any:
     """Fail fast with a useful message when status != expected."""
     body: Any
@@ -157,6 +177,7 @@ def test_04_me_returns_current_user():
     body = _check(r, 200, "GET /auth/me")
     assert body.get("email") == EMAIL
     assert body.get("id") == _user_id
+    assert body.get("subscription_tier") == "free"
 
 
 def test_05_meta_exercises_seeded():
@@ -173,7 +194,20 @@ def test_06_meta_goals_seeded():
     assert isinstance(body, list) and len(body) > 0, "no goals seeded"
 
 
-def test_07_fatigue_endpoint_without_workouts():
+def test_07_pro_workout_analytics_require_pro_then_work_for_pro():
+    for path, label in (
+        ("/workouts/fatigue", "GET /workouts/fatigue free gate"),
+        ("/workouts/e1rm?exercise_name=NonExistentExercise123", "GET /workouts/e1rm free gate"),
+        (
+            "/workouts/e1rm/history?exercise_name=NonExistentExercise123",
+            "GET /workouts/e1rm/history free gate",
+        ),
+    ):
+        r = _http.get(f"{BASE_URL}{path}", headers=_auth(), timeout=15)
+        body = _check(r, 403, label)
+        assert "Thallo Pro" in body.get("detail", "")
+
+    _set_subscription_tier("pro")
     r = _http.get(f"{BASE_URL}/workouts/fatigue", headers=_auth(), timeout=15)
     body = _check(r, 200, "GET /workouts/fatigue")
     # Fresh user has no completions — readiness should be 100.
@@ -360,7 +394,7 @@ _ALL_CASES = [
     test_04_me_returns_current_user,
     test_05_meta_exercises_seeded,
     test_06_meta_goals_seeded,
-    test_07_fatigue_endpoint_without_workouts,
+    test_07_pro_workout_analytics_require_pro_then_work_for_pro,
     test_08_log_complete_workout,
     test_09_list_completions_contains_new_workout,
     test_10_list_workouts_respects_limit,

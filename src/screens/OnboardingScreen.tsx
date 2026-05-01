@@ -72,11 +72,11 @@ type StepKey = 'goal' | 'goalRefine' | 'physicalStats' | 'trainingDays' | 'equip
 
 function getSteps(): StepKey[] {
   // Meal routine moved out of onboarding — users can pin meals as routines
-  // from the Home screen after the first plan generates, which gives a
-  // much better UX than typing prose at signup time.
-  // Compressed onboarding: 5 core steps + optional health/context
+  // from the Home screen, which gives a much better UX than typing prose
+  // at signup time.
+  // Compressed onboarding: 5 core free steps. Apple Health is Pro-only,
+  // so it is offered after upgrade instead of during first-run setup.
   const base: StepKey[] = ['goal', 'physicalStats', 'trainingDays', 'equipment', 'foods'];
-  if (Platform.OS === 'ios') base.push('appleHealth');
   return base;
 }
 
@@ -572,7 +572,10 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 if (cancelled) return;
                 // Apply each saved field, defaulting on missing keys so
                 // an older draft shape doesn't crash with undefineds.
-                if (typeof draft.currentStep === 'number') setCurrentStep(draft.currentStep);
+                if (typeof draft.currentStep === 'number') {
+                  const maxStep = Math.max(0, getSteps().length - 1);
+                  setCurrentStep(Math.min(Math.max(0, draft.currentStep), maxStep));
+                }
                 if (typeof draft.selectedGoal === 'string') setSelectedGoal(draft.selectedGoal);
                 if (Array.isArray(draft.selectedModifiers)) setSelectedModifiers(draft.selectedModifiers);
                 if (typeof draft.selectedRegion === 'string') setSelectedRegion(draft.selectedRegion);

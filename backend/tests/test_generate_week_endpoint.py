@@ -48,9 +48,14 @@ def _make_mem_engine():
     return engine
 
 
-def _insert_user(session):
+def _insert_user(session, *, subscription_tier: str = "pro"):
     from app.models import User
-    u = User(email="switchday_test@example.com", username="switchday_test", hashed_password="x")
+    u = User(
+        email="switchday_test@example.com",
+        username="switchday_test",
+        hashed_password="x",
+        subscription_tier=subscription_tier,
+    )
     session.add(u)
     session.commit()
     session.refresh(u)
@@ -79,6 +84,7 @@ def _make_test_app(engine, user_id: int):
             u = s.get(User, user_id)
             if u is not None:
                 _ = (u.id, u.email, u.username, u.hashed_password,
+                     u.subscription_tier,
                      u.is_active, u.created_at,
                      u.recovery_question, u.recovery_answer_hash)
                 s.expunge(u)
@@ -148,6 +154,34 @@ def _focuses(days: list[dict]) -> list[str]:
 
 def _changed_positions(before: list[dict], after: list[dict]) -> list[int]:
     return [i for i in range(len(before)) if _focuses([before[i]])[0] != _focuses([after[i]])[0]]
+
+
+# ── Entitlement gate ───────────────────────────────────────────────
+
+def test_generate_week_for_free_user_returns_403() -> None:
+    """Weekly generated plans are Pro-only."""
+    print("\n[test] /workouts/generate-week blocks free users")
+    from sqlmodel import Session
+    from fastapi.testclient import TestClient
+
+    engine = _make_mem_engine()
+    with Session(engine) as s:
+        user = _insert_user(s, subscription_tier="free")
+        user_id = user.id
+    app = _make_test_app(engine, user_id)
+    client = TestClient(app)
+
+    resp = _post_pin(
+        client,
+        current_days=_ppl_6d_days(),
+        pin_day_index=0,
+        pin_focus="Push",
+        days_per_week=6,
+        preferred_split="ppl",
+    )
+    assert resp.status_code == 403, f"expected 403, got {resp.status_code}: {resp.text[:200]}"
+    assert "Thallo Pro" in resp.json().get("detail", "")
+    _ok("free users cannot call generated weekly plans")
 
 
 # ── Pin every position on PPL 6d ───────────────────────────────────

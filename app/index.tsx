@@ -859,7 +859,7 @@ export default function Index() {
     resumePlanGenRef.current = resumePlanGenIfPending;
   });
 
-  const loadProfile = async (token: string) => {
+  const loadProfile = async (token: string): Promise<UserProfile | null> => {
     let profile: UserProfile | null = null;
     const stored = await AsyncStorage.getItem('userProfile');
     if (stored) {
@@ -874,8 +874,14 @@ export default function Index() {
       profile = profile ? { ...profile, ...remote, subscriptionTier: remote.subscriptionTier } : remote;
       await AsyncStorage.setItem('userProfile', JSON.stringify(profile));
     }
-    if (!profile) return;
+    if (!profile) return null;
     setUserProfile(profile);
+    if (tierOf(profile) === 'free') {
+      try {
+        const { setAppleHealthEnabled: disableAppleHealth } = await import('../src/utils/workoutHistory');
+        await disableAppleHealth(false);
+      } catch {}
+    }
 
     // Backfill the backend's UserProfile row if it's missing. A test user
     // who signs in on top of a stale local profile, or whose original
@@ -920,6 +926,7 @@ export default function Index() {
     // profile edit save, weekly review, or an explicit "Generate plan"
     // tap. If a user signs in and has no plan yet, they see the empty
     // state; they can kick a generation from the profile menu when ready.
+    return profile;
   };
 
   const handleAuthenticated = async (token: string, isNewUser: boolean) => {
@@ -1012,7 +1019,7 @@ export default function Index() {
     // profile from cache, THEN flip the token so the render lands straight
     // on HomeScreen with all the data in place.
     await pullUserStateFromBackend(token);
-    await loadProfile(token);
+    const loadedProfile = await loadProfile(token);
     setAuthToken(token);
 
     // Auto-reconnect Apple Health silently if the user previously enabled it.
@@ -1022,7 +1029,7 @@ export default function Index() {
     try {
       const { isAppleHealthEnabled: ahEnabled } = await import('../src/utils/workoutHistory');
       const { isHealthKitAvailable, requestHealthPermissions } = await import('../src/services/appleHealth');
-      if (await ahEnabled() && isHealthKitAvailable()) {
+      if (tierOf(loadedProfile) === 'pro' && await ahEnabled() && isHealthKitAvailable()) {
         requestHealthPermissions().catch(() => {});
       }
     } catch { /* HealthKit optional, never block sign-in */ }
@@ -1061,6 +1068,10 @@ export default function Index() {
     if (tierOf(stampedWithTier) === 'free') {
       await clearAllPlanCache().catch(() => null);
       await clearPlanGenMarker().catch(() => null);
+      try {
+        const { setAppleHealthEnabled: disableAppleHealth } = await import('../src/utils/workoutHistory');
+        await disableAppleHealth(false);
+      } catch {}
       setUserProfile(stampedWithTier);
       setIsLoading(false);
       setIsWorkoutUpdating(false);

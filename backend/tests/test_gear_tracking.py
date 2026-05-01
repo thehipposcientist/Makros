@@ -17,7 +17,7 @@ def _minimal_jpeg_b64() -> str:
     ).decode()
 
 
-def _setup_client(captured: list[dict]) -> TestClient:
+def _setup_client(captured: list[dict], *, subscription_tier: str = "pro") -> TestClient:
     from app.main import app
     from app.models import User
     from app.routers.auth import get_current_user
@@ -46,12 +46,30 @@ def _setup_client(captured: list[dict]) -> TestClient:
             "notes": "Looks like adjustable dumbbells.",
         }))
 
-    fake_user = User(id=1, email="t@t", username="t", hashed_password="x")
+    fake_user = User(
+        id=1,
+        email="t@t",
+        username="t",
+        hashed_password="x",
+        subscription_tier=subscription_tier,
+    )
     app.dependency_overrides[get_current_user] = lambda: fake_user
     gear_mod.get_openai_api_key = lambda: "test-key-not-real"  # type: ignore
     gear_mod.model_image = lambda: "gpt-5.4-mini"  # type: ignore
     gear_mod._chat_create = fake_chat_create  # type: ignore
     return TestClient(app)
+
+
+def test_gear_photo_identification_requires_pro():
+    print("\n[test] gear photo identification blocks free users")
+    captured: list[dict] = []
+    client = _setup_client(captured, subscription_tier="free")
+
+    response = client.post("/gear/identify", json={"images": [_minimal_jpeg_b64()]})
+    assert response.status_code == 403, response.text
+    assert "Thallo Pro" in response.json().get("detail", "")
+    assert captured == []
+    print("  ✓ free users are blocked before gear vision call")
 
 
 def test_gear_photo_identification_uses_configured_vision_model():
@@ -77,5 +95,6 @@ def test_gear_photo_identification_uses_configured_vision_model():
 
 
 cases = [
+    test_gear_photo_identification_requires_pro,
     test_gear_photo_identification_uses_configured_vision_model,
 ]

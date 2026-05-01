@@ -49,6 +49,7 @@ interface Props {
    *  the user populates manually. Falls back to the stopwatch path
    *  when omitted. */
   onStartStrengthWorkout?: (focus: string) => void;
+  enableHealthKit?: boolean;
 }
 
 // Minimal category + subtype picker — mirrors LogActivityModal's
@@ -100,7 +101,7 @@ function fmtElapsed(seconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
-export default function LiveActivityTracker({ visible, onClose, themeName, onSaved, onSave, onStartStrengthWorkout }: Props) {
+export default function LiveActivityTracker({ visible, onClose, themeName, onSaved, onSave, onStartStrengthWorkout, enableHealthKit = true }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const insets = useSafeAreaInsets();
@@ -177,6 +178,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   // a display + a running-average calculation.
   useEffect(() => {
     if (phase !== 'running') return;
+    if (!enableHealthKit) return;
     if (!isHealthKitAvailable()) return;
     const tick = async () => {
       try {
@@ -193,7 +195,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     return () => {
       if (hrIntervalRef.current) { clearInterval(hrIntervalRef.current); hrIntervalRef.current = null; }
     };
-  }, [phase]);
+  }, [enableHealthKit, phase]);
 
   const handleStart = (c: typeof QUICK_START[number]) => {
     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
@@ -308,14 +310,16 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     // save the session.
     let avgHr: number | null = fallbackAvgHr;
     let kcal: number | null = null;
-    try {
-      const hr = await getWorkoutHrSummary(startedAtMs, endedMs).catch(() => null);
-      if (hr?.avgBpm) avgHr = Math.round(hr.avgBpm);
-    } catch { /* swallow — HK optional */ }
-    try {
-      const c = await getAppleWorkoutCaloriesForWindow(startedAtMs, endedMs).catch(() => null);
-      if (c && typeof c === 'number') kcal = Math.round(c);
-    } catch { /* swallow */ }
+    if (enableHealthKit) {
+      try {
+        const hr = await getWorkoutHrSummary(startedAtMs, endedMs).catch(() => null);
+        if (hr?.avgBpm) avgHr = Math.round(hr.avgBpm);
+      } catch { /* swallow — HK optional */ }
+      try {
+        const c = await getAppleWorkoutCaloriesForWindow(startedAtMs, endedMs).catch(() => null);
+        if (c && typeof c === 'number') kcal = Math.round(c);
+      } catch { /* swallow */ }
+    }
 
     setPrefill({
       // Namespacing the id with `live_` lets the save path tag the
@@ -376,7 +380,9 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                 <View style={styles.headerBtn} />
               </View>
               <Text style={{ fontSize: 12, color: tc.textMuted, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4 }}>
-                Pick a type. We'll time it and sync HR from Apple Health.
+                {enableHealthKit
+                  ? "Pick a type. We'll time it and sync HR from Apple Health."
+                  : "Pick a type. We'll time it and save the activity to your log."}
               </Text>
               <ScrollView contentContainerStyle={{ padding: 16, gap: 10 }}>
                 {QUICK_START.map((c) => (
