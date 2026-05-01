@@ -149,6 +149,61 @@ def _ensure_user_subscription_tier_column() -> None:
         print(f"[migration] user subscription_tier column add failed (non-fatal): {e}")
 
 
+def _ensure_user_plan_cadence_anchor_column() -> None:
+    """Add `plan_cadence_anchor` to users + backfill from earliest PlanWeek.
+
+    The anchor day persists the user's "sign-up weekday" so plan-week
+    auto-renewal stays on the same day-of-week cadence forever, even if
+    PlanWeek rows are wiped, regenerated, or get out-of-sync across
+    devices. Backfill walks every existing user's earliest PlanWeek
+    and copies its `start_date` into `plan_cadence_anchor`. Marker
+    prevents the backfill from running twice — subsequent renewals
+    are responsible for keeping the anchor in sync (they don't need to
+    update it; the anchor is set once and never moves).
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        backfill_marker = "user_plan_cadence_anchor_backfill_20260502"
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS app_migrations ("
+                "name VARCHAR PRIMARY KEY, "
+                "applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+                ")"
+            ))
+            conn.execute(text(
+                'ALTER TABLE "user" '
+                "ADD COLUMN IF NOT EXISTS plan_cadence_anchor DATE"
+            ))
+            applied = conn.execute(
+                text("SELECT 1 FROM app_migrations WHERE name = :name"),
+                {"name": backfill_marker},
+            ).first()
+            if applied is None:
+                # Backfill: earliest plan_weeks.start_date per user.
+                # NULL when a user has no PlanWeek yet — the anchor will
+                # be set lazily on their first PlanWeek creation
+                # (`set_plan_cadence_anchor_if_unset`).
+                conn.execute(text(
+                    'UPDATE "user" u '
+                    'SET plan_cadence_anchor = sub.first_start '
+                    'FROM ( '
+                    '  SELECT user_id, MIN(start_date) AS first_start '
+                    '  FROM plan_weeks '
+                    '  GROUP BY user_id '
+                    ') sub '
+                    'WHERE sub.user_id = u.id '
+                    'AND u.plan_cadence_anchor IS NULL'
+                ))
+                conn.execute(
+                    text("INSERT INTO app_migrations (name) VALUES (:name)"),
+                    {"name": backfill_marker},
+                )
+    except Exception as e:
+        print(f"[migration] user plan_cadence_anchor column add/backfill failed (non-fatal): {e}")
+
+
 def _ensure_user_goal_track_column() -> None:
     """Persist rich frontend goal ids alongside the legacy GoalType enum."""
     if engine.dialect.name != "postgresql":
@@ -1349,6 +1404,7 @@ def create_db_and_tables():
     _ensure_coach_apply_state_columns()
     _ensure_user_recovery_columns()
     _ensure_user_subscription_tier_column()
+    _ensure_user_plan_cadence_anchor_column()
     _ensure_user_goal_track_column()
     _ensure_exercise_tracking_mode_column()
     _ensure_exercise_video_id_column()

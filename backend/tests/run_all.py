@@ -72,6 +72,9 @@ _TEST_MODULES = (
     "tests.test_auth_dev_token_isolation",
     # PlanWeekCheckin: status, gate, idempotency, skip, recap.
     "tests.test_plan_week_checkin",
+    # plan_cadence_anchor: pure helper that locks the user's sign-up
+    # day-of-week as the rhythm for every future plan-week start_date.
+    "tests.test_plan_cadence_anchor",
     # Change Day Type — conflict detection + smart adjust reconciliation.
     "tests.test_change_day_type",
     # Switch Day pin/rotate/swap algorithm — pure-function helper.

@@ -37,6 +37,51 @@ def get_week_days(db: Session, plan_week_id: int) -> list[PlanDay]:
     )
 
 
+def set_plan_cadence_anchor_if_unset(db: Session, user_id: int, anchor: date) -> None:
+    """Stamp the user's `plan_cadence_anchor` on first PlanWeek creation.
+
+    No-op when an anchor already exists (subsequent renewals must NOT
+    overwrite it — the anchor's value comes from the user's first
+    PlanWeek and never moves). Cheap query: WHERE clause skips updates
+    when the anchor is already set.
+    """
+    from app.models import User
+    user = db.get(User, user_id)
+    if user is None:
+        return
+    if user.plan_cadence_anchor is None:
+        user.plan_cadence_anchor = anchor
+        db.add(user)
+        db.flush()
+
+
+def get_plan_cadence_anchor(db: Session, user_id: int) -> date | None:
+    """Read the user's `plan_cadence_anchor` (None until first stamped)."""
+    from app.models import User
+    user = db.get(User, user_id)
+    return user.plan_cadence_anchor if user else None
+
+
+def next_plan_week_start(anchor: date, today: date | None = None) -> date:
+    """Compute the start_date of the plan week that should contain
+    `today`, given the user's cadence anchor.
+
+    The anchor never moves; we just walk forward in 7-day increments
+    until the resulting week contains today. This is a pure function so
+    it's robust against PlanWeek wipes / multi-device clock skew /
+    out-of-band creates: if you know `anchor`, you know exactly what
+    `today`'s plan-week start_date should be.
+    """
+    if today is None:
+        today = date.today()
+    if today < anchor:
+        # Edge case — clock skew or backdated test data. Anchor wins.
+        return anchor
+    days_since = (today - anchor).days
+    weeks_since = days_since // 7
+    return anchor + timedelta(days=weeks_since * 7)
+
+
 def create_plan_week(
     db: Session,
     user_id: int,
@@ -59,8 +104,13 @@ def create_plan_week(
     Maps workout_days (N-length recipe) to calendar dates using
     training_day_pattern (list of DOW indices 0=Mon that are training days).
     Rest days get workout_json=None. Nutrition templates rotate via index.
+
+    Stamps the user's `plan_cadence_anchor` on first creation so the
+    week-start cadence is preserved across all future renewals.
     """
     _abandon_active_week(db, user_id)
+    # Anchor lock-in: first PlanWeek stamps the cadence on User.
+    set_plan_cadence_anchor_if_unset(db, user_id, start_date)
 
     # Delete any existing PlanWeek (and its PlanDays) for this start_date.
     # The unique constraint on (user_id, start_date) prevents inserting a
@@ -635,23 +685,20 @@ def auto_renew_week(
     except Exception:
         pass
 
-    # Anchor the new week to the day after the expiring week's end so
-    # the user's sign-up-day cadence sticks across weeks (Friday → Thu
-    # → Friday → Thu → ...). When the user has been away long enough
-    # that the next slot is already in the past, advance by full 7-day
-    # cycles until the new week contains today — preserves the original
-    # weekday anchor instead of jumping to "today + 6" and breaking
-    # the rhythm.
+    # Cadence: pure function of (User.plan_cadence_anchor, today). The
+    # anchor is stamped at first PlanWeek creation and never moves, so
+    # the user's sign-up-day rhythm sticks across renewals, reinstalls,
+    # PlanWeek wipes, and long absences. Falls back to chaining off the
+    # expiring week (or `today` for first-ever creation) only when the
+    # anchor is missing — which should only happen for very old users
+    # whose backfill failed silently.
     today = date.today()
-    if expiring_pw and expiring_pw.end_date:
-        week_start = expiring_pw.end_date + timedelta(days=1)
-        while week_start + timedelta(days=6) < today:
-            week_start += timedelta(days=7)
-    else:
-        # First-ever week (no prior PlanWeek to anchor against) — start
-        # today. Mirrors the initial-creation path in
-        # `plan_weeks.start_new_week` and `ai/plans._dual_write_plan_week`.
-        week_start = today
+    anchor = get_plan_cadence_anchor(db, user_id)
+    if anchor is None:
+        anchor = expiring_pw.start_date if expiring_pw else today
+        # Stamp the user so subsequent renewals stay on this rhythm.
+        set_plan_cadence_anchor_if_unset(db, user_id, anchor)
+    week_start = next_plan_week_start(anchor, today)
     training_pattern = default_training_pattern(days_per_week)
 
     pw = create_plan_week(

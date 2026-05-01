@@ -42,6 +42,17 @@ class User(SQLModel, table=True):
     # the user's current value. Lets us invalidate every existing token
     # for an account without flushing the JWT signing key globally.
     token_version: int = Field(default=0)
+    # Day-of-week anchor for the user's plan-week cadence. Set once at
+    # first PlanWeek creation (the user's "sign-up day"); auto-renewal
+    # walks forward in 7-day increments from this date instead of
+    # snapping to Monday or chaining off prev.end_date. Storing it on
+    # User makes the cadence a pure function of (anchor, today) — robust
+    # to PlanWeek wipes, multi-device clock skew, or any path that
+    # creates a new PlanWeek out-of-band. Backfilled for pre-existing
+    # users from their earliest PlanWeek.start_date in
+    # `_ensure_user_plan_cadence_anchor_column`. Nullable until backfill
+    # runs (callers must fall back to today / earliest plan week).
+    plan_cadence_anchor: date | None = Field(default=None)
 
 
 class ClientTelemetryEvent(SQLModel, table=True):
