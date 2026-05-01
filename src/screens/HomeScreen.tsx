@@ -10846,7 +10846,7 @@ function HydrationTodayPanel({
           }}>
           <Text style={{ fontSize: 10, fontWeight: '900', color: '#fff' }}>Set</Text>
         </PressableScale>
-        {[8, 16, 24].map(oz => (
+        {[8, 16, 24, 40].map(oz => (
           <PressableScale
             key={oz}
             onPress={() => onDelta(oz)}

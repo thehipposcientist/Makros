@@ -588,26 +588,15 @@ export default function TrainingReadinessCard({
           <Text style={{ fontSize: 10, color: tc.textMuted, lineHeight: 13, marginBottom: 6 }}>
             Biggest drivers: last night's sleep, HRV trend, muscle recovery, nutrition, resting HR, wellness notes, and yesterday's load.
           </Text>
-          {/* Per-pillar descriptions so users understand what each row
-              means — particularly "Yesterday", which was confusing
-              users ("what is yesterday?"). The description renders as
-              a small muted caption beneath each bar. */}
-          {(() => {
-            const descriptions: Record<string, string> = {
-              'Sleep': 'Last night\'s sleep duration + quality from Apple Health.',
-              'HRV': 'Heart-rate variability trend — higher = better recovered.',
-              'Muscle recovery': 'How fresh the muscles you\'re training today are (fatigue decay from recent workouts).',
-              'Nutrition': 'Whether you\'ve hit your calorie + protein targets the last few days.',
-              'Resting HR': 'Resting heart rate vs your 30-day baseline. Elevated RHR often means under-recovered.',
-              'Wellness': 'Your skip reason when sickness, pain, travel, stress, or low energy affects training readiness.',
-              "Yesterday's load": 'How hard yesterday\'s training was. A short or rest day = more points today; 2+ hours of training yesterday pulls the score down because you\'re less recovered.',
-            };
-            return pillarRows.map(([label, pts, max], pIdx) => {
-              const pct = Math.max(0, Math.min(1, (pts as number) / (max as number)));
-              const barColor = barColorFor(pct);
-              const desc = descriptions[label as string];
-              return (
-                <FadeInView key={label as string} delay={150 + pIdx * 35} duration={240} slideDistance={4}>
+          {/* Per-pillar bars only — the long-form descriptions were
+              removed per UX feedback. The DRIVERS heading above already
+              names the inputs; the Recovery focus block below gives
+              actionable suggestions when a pillar comes back weak. */}
+          {pillarRows.map(([label, pts, max], pIdx) => {
+            const pct = Math.max(0, Math.min(1, (pts as number) / (max as number)));
+            const barColor = barColorFor(pct);
+            return (
+              <FadeInView key={label as string} delay={150 + pIdx * 35} duration={240} slideDistance={4}>
                 <View style={{ marginBottom: 6 }}>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                     <Text style={{ width: 110, fontSize: 11, fontWeight: '600', color: tc.textSecondary }}>{label as string}</Text>
@@ -616,16 +605,10 @@ export default function TrainingReadinessCard({
                       {pts}/{max}
                     </Text>
                   </View>
-                  {desc && (
-                    <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2, marginLeft: 0, lineHeight: 13 }}>
-                      {desc}
-                    </Text>
-                  )}
                 </View>
-                </FadeInView>
-              );
-            });
-          })()}
+              </FadeInView>
+            );
+          })}
 
           {missingHkRows.length > 0 && (
             <View style={{ marginTop: 4 }}>

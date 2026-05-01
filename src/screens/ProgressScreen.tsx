@@ -3342,8 +3342,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const directionLabel = direction === 'improving' ? 'Improving' : direction === 'slipping' ? 'Slipping' : 'Steady';
             const trackingDelta = Number(trends.tracking_delta_pct ?? 0);
             const proteinDelta = trends.protein_hit_delta_pct == null ? null : Number(trends.protein_hit_delta_pct);
-            const calendarCalorieAvg = Number(recent.avg_calories ?? 0);
-            const calorieAvg = Number(recent.avg_calories_when_logged ?? recent.avg_calories ?? 0);
+            // Use the SAME 14-day average as the Nutrition & Gut Facts
+            // card below for the headline calories number. Previously the
+            // Trend card showed only the recent half (last 7 of 14 days)
+            // which caused the headline to disagree with the Facts card
+            // even though both said "logged cal" — confusing for users.
+            // Direction + delta still come from the half-window comparison
+            // (that's what makes "improving" / "slipping" meaningful).
+            const calendarCalorieAvg = Number(mealAverages?.avg_calories ?? recent.avg_calories ?? 0);
+            const calorieAvg = Number(mealAverages?.avg_calories_when_logged ?? recent.avg_calories_when_logged ?? recent.avg_calories ?? 0);
             const calorieDelta = Number(trends.calorie_delta_when_logged ?? trends.calorie_delta ?? 0);
             return (
               <View style={[styles.vitalsCard, { marginTop: 0 }]}>
@@ -3453,8 +3460,18 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       ? ` · calendar avg ${Math.round(mealAverages.avg_calories)} cal`
                       : ''}
                   </Text>
-                  {dailyRows.length > 0 && (
+                  {dailyRows.length > 0 && (() => {
+                    // Use the max of the visible rows (or the avg, whichever
+                    // is larger) as the bar denominator. The previous version
+                    // used `loggedCal` (the avg), which clamped every
+                    // above-average day to 100% — making them all look
+                    // identical even when one day was far higher than another.
+                    const barMax = Math.max(loggedCal, ...dailyRows.map(r => r.calories), 1);
+                    return (
                     <View style={{ marginTop: 8, gap: 4 }}>
+                      <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 2 }}>
+                        RECENT LOGGED DAYS
+                      </Text>
                       {dailyRows.map(row => {
                         const d = new Date(`${row.date}T12:00:00`);
                         const label = `${d.getMonth() + 1}/${d.getDate()}`;
@@ -3462,7 +3479,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <View key={row.date} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                             <Text style={{ width: 36, fontSize: 10, fontWeight: '700', color: tc.textMuted }}>{label}</Text>
                             <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                              <View style={{ width: `${Math.min(100, (row.calories / Math.max(loggedCal, 1)) * 100)}%` as any, height: 5, borderRadius: 3, backgroundColor: tc.primary }} />
+                              <View style={{ width: `${Math.min(100, (row.calories / barMax) * 100)}%` as any, height: 5, borderRadius: 3, backgroundColor: tc.primary }} />
                             </View>
                             <Text style={{ width: 92, fontSize: 10, color: tc.textSecondary, textAlign: 'right' }}>
                               {Math.round(row.calories)} cal · {Math.round(row.protein_g)}g P
@@ -3471,7 +3488,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         );
                       })}
                     </View>
-                  )}
+                    );
+                  })()}
                 </View>
                 );
               })()}
