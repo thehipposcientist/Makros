@@ -347,8 +347,9 @@ function GearFormModal({
           mediaTypes: ImagePicker.MediaTypeOptions.Images,
           exif: false,
         });
-        if (result.canceled || !result.assets?.[0]?.base64) return;
-        setPhotos(prev => [...prev, `data:image/jpeg;base64,${result.assets[0].base64}`]);
+        const asset = result.assets?.[0];
+        if (result.canceled || !asset?.base64) return;
+        setPhotos(prev => [...prev, `data:image/jpeg;base64,${asset.base64}`]);
         return;
       }
       const lib = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -364,8 +365,9 @@ function GearFormModal({
         aspect: [4, 3],
         exif: false,
       });
-      if (result.canceled || !result.assets?.[0]?.base64) return;
-      setPhotos(prev => [...prev, `data:image/jpeg;base64,${result.assets[0].base64}`]);
+      const asset = result.assets?.[0];
+      if (result.canceled || !asset?.base64) return;
+      setPhotos(prev => [...prev, `data:image/jpeg;base64,${asset.base64}`]);
     } catch {
       Alert.alert('Photo error', source === 'camera' ? 'Could not open camera.' : 'Could not open photo library.');
     }

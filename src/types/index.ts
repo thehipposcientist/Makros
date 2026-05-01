@@ -4,7 +4,7 @@
 export type Goal = string;
 export type GoalPace = 'conservative' | 'moderate' | 'aggressive';
 export type Gender = 'male' | 'female' | 'nonbinary' | 'prefer_not_to_say';
-export type Equipment = 'home' | 'gym' | 'dumbbells' | 'bodyweight' | 'other';
+export type Equipment = 'home' | 'gym' | 'dumbbells' | 'bodyweight' | 'other' | (string & {});
 import type { AppThemeName as _AppThemeName } from '../constants/theme';
 export type { AppThemeName } from '../constants/theme';
 type AppThemeName = _AppThemeName;
@@ -72,7 +72,7 @@ export interface ManualActivity {
 export interface WeightEntry {
   date: string;   // ISO date YYYY-MM-DD
   weightLbs: number;
-  source?: 'manual' | 'onboarding' | 'coach' | 'checkin';
+  source?: 'manual' | 'onboarding' | 'coach' | 'checkin' | 'watch';
 }
 
 export interface GoalDetails {
@@ -224,6 +224,9 @@ export interface UserProfile {
   supplementsAvailable?: string[];  // supplements the user has / takes
   customFoods: CustomFoodItem[]; // user-added foods with AI-fetched macros
   customExercises?: CustomExerciseItem[]; // AI-found exercises the user saved to their library
+  cookingSkill?: string;
+  prepTimeMinutes?: number;
+  dietaryPreference?: string;
   /** How many distinct daily meal templates the AI generates. The client
    *  rotates these across 7 days (e.g. variety=2 → ABABABA, variety=7 → all
    *  unique). Lower = faster plan generation; higher = more variety.
@@ -245,6 +248,7 @@ export interface UserProfile {
   lastWorkoutContext?: string;   // what user last trained and when (new user onboarding context)
   customMacros?: CustomMacros;   // user-set macro overrides (replace computed TDEE targets)
   weightHistory?: WeightEntry[];
+  weightEntries?: Array<{ date: string; weight_lbs: number; source?: string }>;
   allergies?: string[];           // allergen categories the user avoids
   dislikedExercises?: string[];  // exercise names excluded from plan generation
   /** Subscription tier. `free` = manual tracking only (no AI, no generators).
@@ -289,6 +293,8 @@ export interface Exercise {
   restSeconds: number;
   equipment: Equipment;
   image_url?: string;
+  primary_muscle?: string | null;
+  secondary_muscles?: string[];
   // ── New progression layer (all optional — backward compatible) ──
   /** Anchor target weight for the FIRST working set. Heavy-top and
    *  backoff loads inside setScheme are derived from this. Null when
@@ -488,6 +494,7 @@ export interface MealItem {
 
 export interface MealSuggestion {
   meal: string;
+  name?: string;
   /** Canonical structured list. Prefer this over `foods`/`amounts` in new code. */
   items?: MealItem[];
   /** @deprecated Parallel arrays preserved for backwards compat with older
@@ -689,6 +696,8 @@ export interface SessionExercise {
   /** Primary muscle slug from the exercise library. Used to bias weight
    *  recs when the exact exercise has no direct history. */
   primaryMuscle?: string | null;
+  primary_muscle?: string | null;
+  muscles_targeted?: string[];
   /** Whether this is a compound (multi-joint) movement. Propagated from
    *  the planner's exercise library — used for 1RM estimation eligibility. */
   isCompound?: boolean | null;

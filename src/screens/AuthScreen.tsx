@@ -11,7 +11,7 @@ import LegalDisclosureModal from '../components/LegalDisclosureModal';
 import { LEGAL_VERSION, legalAcceptanceLabel } from '../constants/legal';
 
 const { width: SCREEN_W } = Dimensions.get('window');
-const logo = require('../../assets/images/thallo-logo-white.png');
+const logo = require('../../assets/images/thallo-logo-white-transparent-New.png');
 
 const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
 

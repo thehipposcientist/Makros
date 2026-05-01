@@ -7,7 +7,7 @@
 //
 // Pure functions only — no React Native runtime needed.
 
-import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate, isFree, isPro, labelFor, tierOf, workoutTemplateLimit } from '../subscription';
+import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate, isFree, isPro, labelFor, tierOf, workoutTemplateLimit } from '../subscriptionCore.ts';
 
 describe('subscription helpers', () => {
   describe('tierOf', () => {

@@ -43,6 +43,18 @@ class User(SQLModel, table=True):
     token_version: int = Field(default=0)
 
 
+class ClientTelemetryEvent(SQLModel, table=True):
+    __tablename__ = "client_telemetry_events"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int | None = Field(default=None, foreign_key="user.id", index=True)
+    anonymous_id: str | None = Field(default=None, index=True)
+    event_name: str = Field(index=True)
+    platform: str | None = Field(default=None)
+    app_version: str | None = Field(default=None)
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
 # ─── User profile / stats ─────────────────────────────────────────────────────
 
 class UserProfile(SQLModel, table=True):

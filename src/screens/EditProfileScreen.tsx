@@ -85,6 +85,7 @@ interface ScannedFoodItem {
   protein: number;
   carbs: number;
   fat: number;
+  micronutrients?: Record<string, number>;
   selected: boolean;
 }
 
@@ -502,7 +503,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [suppSearchResult, setSuppSearchResult] = useState<any>(null);
   const [aiFoodSearchLoading, setAiFoodSearchLoading] = useState(false);
   const [barcodeScanVisible, setBarcodeScanVisible] = useState(false);
-  const [aiFoodResults, setAiFoodResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }>>([]);
+  const [aiFoodResults, setAiFoodResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; micronutrients?: Record<string, number> }>>([]);
 
   // Custom macro overrides
   const [useCustomMacros, setUseCustomMacros] = useState(!!profile.customMacros);
@@ -873,6 +874,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         protein:  Math.round(first.protein  ?? 0),
         carbs:    Math.round(first.carbs    ?? 0),
         fat:      Math.round(first.fat      ?? 0),
+        ...(first.micronutrients ? { micronutrients: first.micronutrients } : {}),
       } : { name, unit: '1 serving', calories: 0, protein: 0, carbs: 0, fat: 0 };
       setCustomFoods(prev => prev.some(f => f.name.toLowerCase() === item.name.toLowerCase())
         ? prev
@@ -1176,6 +1178,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         protein: Math.round(f.protein),
         carbs: Math.round(f.carbs),
         fat: Math.round(f.fat),
+        ...(f.micronutrients ? { micronutrients: f.micronutrients } : {}),
       };
       handleAddCustomFood(item);
     });
@@ -1199,7 +1202,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     }
   };
 
-  const addAiFoodResult = (item: { name: string; serving: string; calories: number; protein: number; carbs: number; fat: number }) => {
+  const addAiFoodResult = (item: { name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; micronutrients?: Record<string, number> }) => {
     const customItem: CustomFoodItem = {
       name: item.name,
       unit: item.serving,
@@ -1207,6 +1210,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       protein: Math.round(item.protein),
       carbs: Math.round(item.carbs),
       fat: Math.round(item.fat),
+      ...(item.micronutrients ? { micronutrients: item.micronutrients } : {}),
     };
     handleAddCustomFood(customItem);
     setAiFoodResults(prev => prev.filter(r => r.name !== item.name));
@@ -1226,6 +1230,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           protein: result.protein,
           carbs: result.carbs,
           fat: result.fat,
+          micronutrients: result.micronutrients,
         });
         Alert.alert('Added', `${result.name} added to your food list.`);
       }

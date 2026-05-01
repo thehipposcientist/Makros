@@ -83,9 +83,8 @@ def test_fatigue_override_mid_band_minus_5pct():
     assert adj.weight_lbs == 190.0, adj.weight_lbs
     # Mid band keeps base confidence (0.85), NOT 'low'.
     assert adj.confidence == 0.85
-    assert "recovering" in adj.reason.lower()
-    assert "0.55" in adj.reason
-    _ok(f"0.55 chest → {adj.weight_lbs} lb + reason '{adj.reason[:50]}...'")
+    assert adj.reason == ""
+    _ok(f"0.55 chest → {adj.weight_lbs} lb")
 
 
 def test_fatigue_override_high_band_minus_10pct():
@@ -100,8 +99,7 @@ def test_fatigue_override_high_band_minus_10pct():
     # 200 × 0.9 = 180
     assert adj.weight_lbs == 180.0, adj.weight_lbs
     assert adj.confidence == 0.85
-    assert "recovering" in adj.reason.lower()
-    assert "0.70" in adj.reason
+    assert adj.reason == ""
     _ok(f"0.7 chest → {adj.weight_lbs} lb (-10%)")
 
 
@@ -117,7 +115,7 @@ def test_fatigue_override_very_high_band_minus_15pct_low_confidence():
     # 200 × 0.85 = 170
     assert adj.weight_lbs == 170.0, adj.weight_lbs
     assert adj.confidence == "low"
-    assert "recovering" in adj.reason.lower()
+    assert adj.reason == ""
     _ok(f"0.85 chest → {adj.weight_lbs} lb, confidence='low'")
 
 
@@ -193,11 +191,11 @@ def _fake_json_extractor(content):
     return json.loads(content)
 
 
-def test_ai_first_time_no_muscle_sessions_returns_none():
-    """Precondition: no similar-muscle sessions → caller falls back to
-    deterministic tier-7 default. Function returns None immediately —
-    no AI call."""
-    print("\n[test] empty muscle_sessions → returns None (no AI call)")
+def test_ai_first_time_no_muscle_sessions_uses_profile_ai_path():
+    """No similar-muscle sessions now uses the profile/bodyweight AI path.
+    The caller still falls back deterministically if bodyweight/client is
+    missing, but fresh users with profile data get a conservative estimate."""
+    print("\n[test] empty muscle_sessions → profile AI path")
     called = {"n": 0}
 
     def spy_invoker(client, **kwargs):
@@ -217,9 +215,12 @@ def test_ai_first_time_no_muscle_sessions_returns_none():
         chat_invoker=spy_invoker,
         json_extractor=_fake_json_extractor,
     )
-    assert rec is None
-    assert called["n"] == 0, "AI should not be called when there are no sessions"
-    _ok("no sessions → no AI call, None returned")
+    assert rec is not None
+    assert rec.weight_lbs == 60.0
+    assert rec.confidence == "low"
+    assert rec.reason == ""
+    assert called["n"] == 1, "AI should be called for the profile/bodyweight path"
+    _ok("no sessions → profile AI call, conservative rec returned")
 
 
 def test_ai_first_time_three_sessions_hits_ai_and_stamps_fields():
@@ -279,8 +280,8 @@ def test_ai_first_time_three_sessions_hits_ai_and_stamps_fields():
     assert rec is not None
     # 52 should round to 52.5 (nearest 2.5).
     assert rec.weight_lbs == 52.5, rec.weight_lbs
-    assert rec.confidence == "medium"
-    assert "bench press" in rec.reason.lower()
+    assert rec.confidence == "low"
+    assert rec.reason == ""
     _ok(f"AI rec: {rec.weight_lbs} lb, confidence={rec.confidence}")
 
 
@@ -403,7 +404,7 @@ def _run_all() -> int:
         test_fatigue_override_skips_when_fatigue_map_missing,
         test_fatigue_override_alias_map_routes_traps_to_back,
         # Feature 2
-        test_ai_first_time_no_muscle_sessions_returns_none,
+        test_ai_first_time_no_muscle_sessions_uses_profile_ai_path,
         test_ai_first_time_three_sessions_hits_ai_and_stamps_fields,
         test_ai_first_time_malformed_json_falls_back_cleanly,
         test_ai_first_time_non_positive_weight_rejected,
@@ -438,7 +439,7 @@ cases = [
     test_fatigue_override_rounds_to_2_5_lb,
     test_fatigue_override_skips_when_fatigue_map_missing,
     test_fatigue_override_alias_map_routes_traps_to_back,
-    test_ai_first_time_no_muscle_sessions_returns_none,
+    test_ai_first_time_no_muscle_sessions_uses_profile_ai_path,
     test_ai_first_time_three_sessions_hits_ai_and_stamps_fields,
     test_ai_first_time_malformed_json_falls_back_cleanly,
     test_ai_first_time_non_positive_weight_rejected,

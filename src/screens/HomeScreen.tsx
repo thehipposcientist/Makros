@@ -139,6 +139,7 @@ interface ScheduleItem {
   date: Date;
   workout: WorkoutDay | null;
   isRest: boolean;
+  isCompleted?: boolean;
 }
 
 interface MealDay {
@@ -664,7 +665,7 @@ const SUPPLEMENT_LIBRARY: SupplementEntry[] = [
 ];
 
 // ── Logo assets ───────────────────────────────────────────────────────────────
-const LOGO_DARK   = require('../../assets/images/thallo-logo-white.png');
+const LOGO_DARK   = require('../../assets/images/thallo-logo-white-transparent-New.png');
 const LOGO_LIGHT_HEADER = require('../../assets/images/thallo-logo-black.png');
 
 const _MICRO_CHECK_KEYS = ['saturated_fat', 'omega_3', 'potassium', 'calcium', 'iron', 'vitamin_d'];
@@ -844,12 +845,24 @@ function AppleHealthToggleRow({
   themeColors,
 }: { themeColors: any; userAge?: number | null }) {
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [available, setAvailable] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     (async () => {
       try {
-        const { isAppleHealthEnabled } = await import('../utils/workoutHistory');
-        setEnabled(await isAppleHealthEnabled());
+        const [history, ah] = await Promise.all([
+          import('../utils/workoutHistory'),
+          import('../services/appleHealth'),
+        ]);
+        const isAvailable = ah.isHealthKitAvailable();
+        setAvailable(isAvailable);
+        const stored = await history.isAppleHealthEnabled();
+        if (!isAvailable && stored) {
+          await history.setAppleHealthEnabled(false);
+          setEnabled(false);
+        } else {
+          setEnabled(stored);
+        }
       } catch { setEnabled(false); }
     })();
   }, []);
@@ -858,12 +871,18 @@ function AppleHealthToggleRow({
     setBusy(true);
     try {
       const ah = await import('../services/appleHealth');
+      const { setAppleHealthEnabled } = await import('../utils/workoutHistory');
       if (!ah.isHealthKitAvailable()) {
-        Alert.alert('Not available', 'Apple Health is iPhone-only and requires HealthKit support.');
+        await setAppleHealthEnabled(false);
+        setEnabled(false);
+        setAvailable(false);
+        if (next) {
+          Alert.alert('Not available', 'Apple Health is iPhone-only and requires HealthKit support. Thallo still works normally with manual logs and in-app workout tracking.');
+        }
         setBusy(false);
         return;
       }
-      const { setAppleHealthEnabled } = await import('../utils/workoutHistory');
+      setAvailable(true);
       if (next) {
         Alert.alert(
           ah.APPLE_HEALTH_PERMISSION_COPY.title,
@@ -906,7 +925,9 @@ function AppleHealthToggleRow({
       <View style={{ flex: 1 }}>
         <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Apple Health</Text>
         <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
-          {enabled === null
+          {available === false
+            ? 'Unavailable on this device. Manual logs and in-app workouts still work.'
+            : enabled === null
             ? 'Checking…'
             : enabled
               ? 'Optional sync adds sleep, HRV, weight, and workout context'
@@ -915,7 +936,7 @@ function AppleHealthToggleRow({
       </View>
       <Switch
         value={enabled === true}
-        disabled={busy || enabled === null}
+        disabled={busy || enabled === null || available === false}
         onValueChange={onToggle}
         trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
         thumbColor={enabled ? themeColors.primary : themeColors.textMuted}
@@ -1679,9 +1700,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       intensity?: string;
       duration_minutes?: number;
       kind?: 'training' | 'recovery';
-      muscles: Record<string, number>;
+      muscles?: Record<string, number>;
     }>;
-    nutritionContext?: { protein_avg: number; protein_status: string; message: string | null; recovery_bonus_applied: boolean } | null;
+    nutritionContext?: { protein_avg: number; protein_status: string; message?: string | null; recovery_bonus_applied: boolean } | null;
   } | null>(null);
   const [recoveryExpanded, setRecoveryExpanded] = useState(false);
   const [nutritionScoreData, setNutritionScoreData] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
@@ -2255,8 +2276,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         // and phone always show the same number.
         try {
           const { pushSleepToWatch } = await import('../utils/watchSync');
-          const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
-          const cached = await getCachedHealthDataSummary();
+          const { getHealthDataSummary } = await import('../services/healthDataSummary');
+          // Use the fresh-fetcher (cache + auto-refresh if stale) so the
+          // watch gets the same sleep score the phone's Progress card
+          // sees, not whatever was last cached. Otherwise watch stays on
+          // a stale value while phone refreshes silently in the background.
+          const cached = await getHealthDataSummary({ age: userProfile?.physicalStats?.age ?? null });
           const ss = (cached?.raw as any)?.sleepScore ?? null;
           const hours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
           // Prefer the full sleep score when available; fall back to
@@ -5086,6 +5111,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setSkipReasonFocus(focus);
   }, []);
 
+  const scheduleRawRef = useRef<ScheduleItem[]>([]);
+
   const confirmSkip = useCallback(async () => {
     const focus = skipReasonFocus;
     if (!focus) return;
@@ -5104,7 +5131,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // Freeze today's workout so a plan regen doesn't replace the
     // content of the skipped day. Same mechanism as completed days
     // — preservedWorkouts survives plan regeneration.
-    const todayScheduleItem = scheduleRaw.find(
+    const todayScheduleItem = scheduleRawRef.current.find(
       item => dateKey(item.date) === today && item.workout,
     );
     if (todayScheduleItem?.workout) {
@@ -5181,7 +5208,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         setNutritionPlansByDate(prev => ({ ...prev, [today]: adjusted }));
       }
     }
-  }, [skipReasonFocus, selectedSkipReason, customSkipReason, skipType, persistDayState, scheduleRaw, authToken, nutritionPlansByDate]);
+  }, [skipReasonFocus, selectedSkipReason, customSkipReason, skipType, persistDayState, authToken, nutritionPlansByDate]);
 
   const handleUnskipDay = useCallback(async (date: string) => {
     setSkippedDates(prev => {
@@ -5415,6 +5442,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates, droppedSkipDates, completedDates, userProfile.trainingDays)
         : [];
   }, [planWeek, workoutPlan, userProfile?.daysPerWeek, userProfile?.trainingDays, skippedDates, droppedSkipDates, completedDates]);
+  scheduleRawRef.current = scheduleRaw as ScheduleItem[];
   // Overlay preserved completed workouts: any date the user has already
   // finished keeps its original WorkoutDay snapshot, so a plan regen can't
   // swap a done day's exercises out from under them.
@@ -8341,6 +8369,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 protein_g: Number(it.protein_g ?? it.protein ?? 0),
                 carbs_g: Number(it.carbs_g ?? it.carbs ?? 0),
                 fat_g: Number(it.fat_g ?? it.fat ?? 0),
+                ...(it.micronutrients ? { micronutrients: it.micronutrients } : {}),
               };
             });
             if (items.length === 0) {

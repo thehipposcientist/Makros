@@ -392,7 +392,7 @@ def gut_health_signals(
     except Exception:
         today_row = None
 
-    rollup = compute_weekly_rollup(db, user_id=current_user.id, end_date=today, days=days)
+    rollup = compute_weekly_rollup(db, user_id=current_user.id, end_date=today, days=days, allow_ai=True)
 
     if today_row is None:
         return {"today": None, "window": rollup}
@@ -456,23 +456,26 @@ def protein_breakdown_today(
     so the UI can prompt the user to classify.
     """
     from app.models import Meal, MealItem, FoodMetadata
-    from app.services.nutrition.food_classifier import normalize_name as _norm
+    from app.services.nutrition.ai_classify import get_or_create_metadata
+    from app.services.nutrition.food_classifier import CLASSIFIER_VERSION, normalize_name
     from sqlalchemy import and_, func as _sa_func, or_
     today_d = date.today()
-    rows = db.exec(
-        select(MealItem, FoodMetadata)
+    items = db.exec(
+        select(MealItem)
         .join(Meal, Meal.id == MealItem.meal_id)
-        .join(
-            FoodMetadata,
-            FoodMetadata.normalized_name == _sa_func.lower(MealItem.food_name),
-            isouter=True,
-        )
         .where(Meal.user_id == current_user.id)
         .where(or_(
             _sa_func.date(Meal.consumed_at) == today_d,
             and_(Meal.consumed_at.is_(None), Meal.meal_date == today_d),
         ))
     ).all()
+    normalized_names = {normalize_name(item.food_name) for item in items if item.food_name}
+    metas = db.exec(
+        select(FoodMetadata)
+        .where(FoodMetadata.classifier_version == CLASSIFIER_VERSION)
+        .where(FoodMetadata.normalized_name.in_(normalized_names))
+    ).all() if normalized_names else []
+    meta_by_name = {m.normalized_name: m for m in metas}
 
     plant: list[dict] = []
     animal: list[dict] = []
@@ -486,10 +489,18 @@ def protein_breakdown_today(
     animal_agg: dict[str, float] = {}
     uncls_agg: dict[str, float] = {}
 
-    for item, meta in rows:
+    for item in items:
         protein_g = float(item.protein_g or 0.0)
         if protein_g <= 0:
             continue
+        norm = normalize_name(item.food_name)
+        meta = meta_by_name.get(norm)
+        if meta is None:
+            try:
+                meta = get_or_create_metadata(item.food_name, db=db, allow_ai=False)
+                meta_by_name[norm] = meta
+            except Exception:
+                meta = None
         source = (meta.protein_source if meta else "unknown") or "unknown"
         name = item.food_name
         if source == "plant":

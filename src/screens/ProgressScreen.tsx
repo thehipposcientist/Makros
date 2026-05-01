@@ -68,7 +68,7 @@ const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const SHARE_LOGO_LIGHT = require('../../assets/images/thallo-logo-black.png');
-const SHARE_LOGO_DARK  = require('../../assets/images/thallo-logo-white.png');
+const SHARE_LOGO_DARK  = require('../../assets/images/thallo-logo-white-transparent-New.png');
 
 interface StrengthPoint {
   key: string;
@@ -204,6 +204,15 @@ type ProgressMilestone = {
 type PlateauEntry = import('../services/api').PlateauEntry;
 
 type ProgressAnalyticsItem = {
+  key: string;
+  label: string;
+  value: string;
+  detail: string;
+  icon: any;
+  color: string;
+};
+
+type TrainingSignalItem = {
   key: string;
   label: string;
   value: string;
@@ -422,6 +431,102 @@ function buildProgressAnalytics(
   return rows.slice(0, 4);
 }
 
+function buildTrainingSignals(
+  history: WorkoutSession[],
+  summaries: StoredWorkoutSummary[],
+  healthKitAvailable: boolean,
+  healthEnabled: boolean,
+): TrainingSignalItem[] {
+  const now = Date.now();
+  const thirtyDaysAgo = now - 30 * 86400000;
+  const fourteenDaysAgo = now - 14 * 86400000;
+
+  const recentSets = history
+    .filter(s => +new Date(s.date) >= thirtyDaysAgo && s.completed && !s.skipped)
+    .flatMap(s => (s.exercises ?? []).flatMap(ex => ex.sets ?? []));
+  const rirValues = recentSets
+    .map(set => set.rir)
+    .filter((rir): rir is number => typeof rir === 'number' && Number.isFinite(rir));
+
+  const recentSummaries = summaries
+    .filter(s => +new Date(s.date) >= fourteenDaysAgo)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const hrTotals = recentSummaries.reduce(
+    (acc, s) => {
+      const zones = s.hrZoneMinutes;
+      if (!zones?.some(m => m > 0)) return acc;
+      zones.forEach((min, idx) => { acc[idx] += min; });
+      return acc;
+    },
+    [0, 0, 0, 0, 0],
+  );
+  const totalHrMinutes = hrTotals.reduce((sum, min) => sum + min, 0);
+  const sorenessCounts = new Map<string, number>();
+  for (const summary of recentSummaries) {
+    for (const area of summary.feedback?.sorenessAreas ?? []) {
+      sorenessCounts.set(area, (sorenessCounts.get(area) ?? 0) + 1);
+    }
+  }
+  const topSoreness = Array.from(sorenessCounts.entries()).sort((a, b) => b[1] - a[1])[0] ?? null;
+  const scored = recentSummaries
+    .map(s => s.trainingScore)
+    .filter((score): score is number => typeof score === 'number' && Number.isFinite(score));
+
+  const signals: TrainingSignalItem[] = [];
+  signals.push({
+    key: 'rir',
+    label: 'Effort reserve',
+    value: rirValues.length > 0
+      ? `${(rirValues.reduce((sum, rir) => sum + rir, 0) / rirValues.length).toFixed(1)} RIR`
+      : 'No RIR yet',
+    detail: rirValues.length > 0
+      ? `${rirValues.length} logged set${rirValues.length === 1 ? '' : 's'} in the last 30 days`
+      : 'Log reps-in-reserve on hard sets to tune progression.',
+    icon: 'speedometer-outline',
+    color: '#6366F1',
+  });
+  signals.push({
+    key: 'hr-zones',
+    label: 'Heart-rate zones',
+    value: totalHrMinutes > 0
+      ? `${Math.round(hrTotals[1])}m Z2`
+      : healthKitAvailable && healthEnabled
+        ? 'No HR yet'
+        : 'Manual mode',
+    detail: totalHrMinutes > 0
+      ? `${Math.round(hrTotals[2] + hrTotals[3] + hrTotals[4])}m Z3+ across recent sessions`
+      : healthKitAvailable
+        ? 'Connect Apple Health or wear Watch during workouts for zone trends.'
+        : 'Apple Health is unavailable here; workout scoring falls back to sets, duration, and completion.',
+    icon: 'pulse-outline',
+    color: '#EF4444',
+  });
+  signals.push({
+    key: 'soreness',
+    label: 'Soreness trend',
+    value: topSoreness ? topSoreness[0] : 'Clear',
+    detail: topSoreness
+      ? `${topSoreness[1]} recent mention${topSoreness[1] === 1 ? '' : 's'} in post-workout feedback`
+      : 'No soreness areas reported in the last 14 days.',
+    icon: 'body-outline',
+    color: topSoreness ? '#F59E0B' : '#22C55E',
+  });
+  signals.push({
+    key: 'training-score',
+    label: 'Session quality',
+    value: scored.length > 0
+      ? `${Math.round(scored.reduce((sum, score) => sum + score, 0) / scored.length)}`
+      : 'Pending',
+    detail: scored.length > 0
+      ? `Average training score across ${scored.length} recent session${scored.length === 1 ? '' : 's'}`
+      : 'Finish a scored workout to see trendable quality data.',
+    icon: 'analytics-outline',
+    color: '#14B8A6',
+  });
+
+  return signals;
+}
+
 /**
  * AnimatedChartBar — "draw-in" a chart bar from height 0 → target over
  * ~800ms on mount / when the target changes significantly. Staggered by
@@ -626,6 +731,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     () => buildProgressAnalytics(history, summaries, prs, plateaus),
     [history, plateaus, prs, summaries],
   );
+  const trainingSignals = useMemo(
+    () => buildTrainingSignals(history, summaries, isHealthKitAvailable(), healthEnabled),
+    [healthEnabled, history, summaries],
+  );
   const prFocusOptions = useMemo(
     () => Array.from(new Set(prs.map(p => p.sessionFocus).filter(Boolean))).sort(),
     [prs],
@@ -672,7 +781,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               const remote = await getWeightEntries(authToken);
               if (remote.length > 0) {
                 const merged = new Map<string, { date: string; weightLbs: number; source: string }>();
-                for (const e of local) merged.set(e.date, e);
+                for (const e of local) merged.set(e.date, { ...e, source: e.source || 'manual' });
                 for (const e of remote) merged.set(e.date, { date: e.date, weightLbs: e.weight_lbs, source: e.source });
                 const sorted = Array.from(merged.values()).sort((a, b) => a.date.localeCompare(b.date));
                 setWeightEntries(sorted as any);
@@ -846,6 +955,31 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         if (fresh) {
           setHealthSummary(fresh);
           saveHealthSummary(fresh).catch(() => null);
+          // Re-push the fresh sleep score to the watch. Without this,
+          // the watch reads only the cached HealthSummary at HomeScreen
+          // mount time and never sees the refreshed score Progress just
+          // pulled from HealthKit — phone shows a new score, watch stays
+          // stuck on the older one.
+          try {
+            const ss: any = (fresh as any).sleepScore ?? null;
+            if (ss) {
+              const hours = (fresh as any).sleepMinutes != null
+                ? (fresh as any).sleepMinutes / 60
+                : null;
+              const { pushSleepToWatch } = await import('../utils/watchSync');
+              await pushSleepToWatch({
+                score: ss.score ?? null,
+                hoursLastNight: hours,
+                asleepMin: (fresh as any).sleepMinutes ?? null,
+                remMin: ss.stages?.rem != null ? Math.round(ss.stages.rem * 60) : null,
+                deepMin: ss.stages?.deep != null ? Math.round(ss.stages.deep * 60) : null,
+                restingHr: (fresh as any).restingHeartRate ?? null,
+                hrvMs: (fresh as any).hrv ?? null,
+                label: ss.rating ?? null,
+                summary: hours != null && ss.rating ? `${hours.toFixed(1)}h slept · ${ss.rating}` : null,
+              });
+            }
+          } catch { /* watch may be unavailable */ }
           const rows = await Promise.all(
             (fresh.workoutDetails ?? []).map((w) => summarizeWorkoutZone2(w, age).catch(() => null)),
           );
@@ -1517,6 +1651,30 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </View>
             </View>
           )}
+
+          <View style={{ marginBottom: 16 }}>
+            <Text style={styles.sectionLabel}>Training Signals</Text>
+            <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
+              {trainingSignals.map(item => (
+                <View key={item.key} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <View style={{ width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '1F' }}>
+                    <Ionicons name={item.icon} size={16} color={item.color} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                      {item.label}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 2, lineHeight: 16 }}>
+                      {item.detail}
+                    </Text>
+                  </View>
+                  <Text style={{ fontSize: 16, fontWeight: '900', color: item.color, textAlign: 'right', maxWidth: 92 }} numberOfLines={2}>
+                    {item.value}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </View>
 
           {/* Cardio PRs — best distance, pace, and output per exercise type */}
           {cardioBestsMemo.length > 0 && (
@@ -2494,6 +2652,22 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               />
             );
           })()}
+
+          {!isHealthKitAvailable() && (
+            <View style={styles.vitalsCard}>
+              <View style={{ alignItems: 'center', paddingVertical: 12 }}>
+                <Ionicons name="heart-outline" size={34} color={tc.textMuted} />
+                <Text {...dynamicTextProps} style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary, marginTop: 8 }}>
+                  Apple Health unavailable
+                </Text>
+                <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6 }}>
+                  {Platform.OS === 'ios'
+                    ? 'This build does not have HealthKit available. Thallo will keep using manual logs, in-app workouts, meal data, and recovery check-ins.'
+                    : 'Apple Health is iPhone-only. Thallo will keep using manual logs, in-app workouts, meal data, and recovery check-ins.'}
+                </Text>
+              </View>
+            </View>
+          )}
 
           {isHealthKitAvailable() && (
             <DetectedWorkoutsCard

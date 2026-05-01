@@ -131,10 +131,48 @@ def compute_daily_metrics(
     return row
 
 
-def compute_weekly_rollup(db: Any, user_id: int, end_date: date, *, days: int = 7) -> dict:
-    """7-day descriptive summary. Does NOT recompute days — callers should
-    ensure the backfill (or per-log hook) has populated DailyNutritionMetrics."""
+def compute_weekly_rollup(
+    db: Any,
+    user_id: int,
+    end_date: date,
+    *,
+    days: int = 7,
+    allow_ai: bool = False,
+) -> dict:
+    """Descriptive summary over logged days in the requested window."""
     start = end_date - timedelta(days=days - 1)
+
+    meal_dates = {
+        d for d in db.exec(
+            select(Meal.meal_date)
+            .where(Meal.user_id == user_id)
+            .where(Meal.meal_date >= start)
+            .where(Meal.meal_date <= end_date)
+            .distinct()
+        ).all()
+        if d is not None
+    }
+    if meal_dates:
+        existing_by_date = {
+            r.metric_date: r for r in db.exec(
+                select(DailyNutritionMetrics)
+                .where(DailyNutritionMetrics.user_id == user_id)
+                .where(DailyNutritionMetrics.metric_date >= start)
+                .where(DailyNutritionMetrics.metric_date <= end_date)
+            ).all()
+        }
+        for d in sorted(meal_dates):
+            existing = existing_by_date.get(d)
+            if (
+                existing is None
+                or existing.metrics_version != METRICS_VERSION
+                or existing.classifier_version_used != CLASSIFIER_VERSION
+            ):
+                try:
+                    compute_daily_metrics(db, user_id=user_id, metric_date=d, allow_ai=allow_ai)
+                except Exception:
+                    continue
+
     rows = db.exec(
         select(DailyNutritionMetrics)
         .where(DailyNutritionMetrics.user_id == user_id)
@@ -146,30 +184,38 @@ def compute_weekly_rollup(db: Any, user_id: int, end_date: date, *, days: int = 
     if not rows:
         return _empty_rollup(days)
 
-    n = len(rows)
+    data_rows = [
+        r for r in rows
+        if int(getattr(r, "item_count", 0) or 0) > 0
+        or float(getattr(r, "calories_total", 0) or 0) > 0
+    ]
+    if not data_rows:
+        return _empty_rollup(days)
+
+    n = len(data_rows)
     weekly_slugs: set[str] = set()
-    for r in rows:
+    for r in data_rows:
         for s in (r.plant_slugs or []):
             weekly_slugs.add(s)
 
-    days_hitting_fiber = sum(1 for r in rows if r.fiber_total_g >= FIBER_TARGET_G)
+    days_hitting_fiber = sum(1 for r in data_rows if r.fiber_total_g >= FIBER_TARGET_G)
 
     proc_totals: dict[str, int] = {}
-    for r in rows:
+    for r in data_rows:
         for bucket, count in (r.processing_counts or {}).items():
             proc_totals[bucket] = proc_totals.get(bucket, 0) + int(count)
 
     def _avg(field_name: str) -> float:
-        return round(sum(getattr(r, field_name) or 0 for r in rows) / n, 1)
+        return round(sum(getattr(r, field_name) or 0 for r in data_rows) / n, 1)
 
-    plant_p_sum = sum((getattr(r, "plant_protein_g", 0) or 0) for r in rows)
-    animal_p_sum = sum((getattr(r, "animal_protein_g", 0) or 0) for r in rows)
+    plant_p_sum = sum((getattr(r, "plant_protein_g", 0) or 0) for r in data_rows)
+    animal_p_sum = sum((getattr(r, "animal_protein_g", 0) or 0) for r in data_rows)
     total_p = plant_p_sum + animal_p_sum
     plant_protein_pct = round(100 * plant_p_sum / total_p) if total_p > 0 else 0
 
     # Calorie stability: coefficient of variation over logged days (0-1).
     # Low CV = steady eating; high CV = big swings. Feeds the LEA flag.
-    cals = [float(r.calories_total or 0) for r in rows if (r.calories_total or 0) > 0]
+    cals = [float(r.calories_total or 0) for r in data_rows if (r.calories_total or 0) > 0]
     if len(cals) >= 2:
         mean_cal = sum(cals) / len(cals)
         variance = sum((c - mean_cal) ** 2 for c in cals) / len(cals)
@@ -189,19 +235,21 @@ def compute_weekly_rollup(db: Any, user_id: int, end_date: date, *, days: int = 
         "avg_saturated_fat_g": _avg("saturated_fat_g"),
         "pct_days_fiber_target": round(100 * days_hitting_fiber / n, 0),
         "distinct_plant_foods_week": len(weekly_slugs),
-        "fermented_servings": round(sum((r.fermented_servings or 0) for r in rows), 1),
-        "probiotic_servings": round(sum((getattr(r, "probiotic_servings", 0) or 0) for r in rows), 1),
-        "omega3_servings": round(sum((r.omega3_servings or 0) for r in rows), 1),
+        "fermented_servings": round(sum((r.fermented_servings or 0) for r in data_rows), 1),
+        "probiotic_servings": round(sum((getattr(r, "probiotic_servings", 0) or 0) for r in data_rows), 1),
+        "omega3_servings": round(sum((r.omega3_servings or 0) for r in data_rows), 1),
         # AI-estimated nutrients USDA doesn't carry. Summed from
         # per-food per-serving × servings consumed.
-        "collagen_g": round(sum((getattr(r, "collagen_g", 0) or 0) for r in rows), 1),
-        "avg_collagen_g": round(sum((getattr(r, "collagen_g", 0) or 0) for r in rows) / n, 1),
-        "seafood_servings": round(sum((getattr(r, "seafood_servings", 0) or 0) for r in rows), 1),
-        "fruit_servings": round(sum((getattr(r, "fruit_servings", 0) or 0) for r in rows), 1),
-        "vegetable_servings": round(sum((getattr(r, "vegetable_servings", 0) or 0) for r in rows), 1),
-        "alcohol_servings": round(sum((getattr(r, "alcohol_servings", 0) or 0) for r in rows), 1),
-        "processed_meat_servings": round(sum((getattr(r, "processed_meat_servings", 0) or 0) for r in rows), 1),
-        "refined_grain_servings": round(sum((getattr(r, "refined_grain_servings", 0) or 0) for r in rows), 1),
+        "collagen_g": round(sum((getattr(r, "collagen_g", 0) or 0) for r in data_rows), 1),
+        "avg_collagen_g": round(sum((getattr(r, "collagen_g", 0) or 0) for r in data_rows) / n, 1),
+        "probiotic_cfu_billions": round(sum((getattr(r, "probiotic_cfu_billions", 0) or 0) for r in data_rows), 1),
+        "avg_probiotic_cfu_billions": round(sum((getattr(r, "probiotic_cfu_billions", 0) or 0) for r in data_rows) / n, 1),
+        "seafood_servings": round(sum((getattr(r, "seafood_servings", 0) or 0) for r in data_rows), 1),
+        "fruit_servings": round(sum((getattr(r, "fruit_servings", 0) or 0) for r in data_rows), 1),
+        "vegetable_servings": round(sum((getattr(r, "vegetable_servings", 0) or 0) for r in data_rows), 1),
+        "alcohol_servings": round(sum((getattr(r, "alcohol_servings", 0) or 0) for r in data_rows), 1),
+        "processed_meat_servings": round(sum((getattr(r, "processed_meat_servings", 0) or 0) for r in data_rows), 1),
+        "refined_grain_servings": round(sum((getattr(r, "refined_grain_servings", 0) or 0) for r in data_rows), 1),
         # Raw sums kept for backwards-compat with old clients.
         "plant_protein_g": round(plant_p_sum, 1),
         "animal_protein_g": round(animal_p_sum, 1),
@@ -224,9 +272,12 @@ def _empty_rollup(days: int) -> dict:
         "distinct_plant_foods_week": 0,
         "fermented_servings": 0.0, "probiotic_servings": 0.0, "omega3_servings": 0.0,
         "collagen_g": 0.0, "avg_collagen_g": 0.0,
+        "probiotic_cfu_billions": 0.0, "avg_probiotic_cfu_billions": 0.0,
         "seafood_servings": 0.0, "fruit_servings": 0.0, "vegetable_servings": 0.0,
         "alcohol_servings": 0.0, "processed_meat_servings": 0.0, "refined_grain_servings": 0.0,
-        "plant_protein_g": 0.0, "animal_protein_g": 0.0, "plant_protein_pct": 0,
+        "plant_protein_g": 0.0, "animal_protein_g": 0.0,
+        "avg_plant_protein_g": 0.0, "avg_animal_protein_g": 0.0,
+        "plant_protein_pct": 0,
         "processing_counts": {},
         "calorie_stability_cv": 0.0,
     }
@@ -317,8 +368,9 @@ def _gather_raw_signals(
             scale = grams_consumed / float(nut.reference_grams)
             if nut.fiber is not None:
                 fiber_total_g += float(nut.fiber) * scale
-            if getattr(nut, "added_sugar_g", None) is not None:
-                added_sugar_g += float(nut.added_sugar_g) * scale
+            item_added_sugar = getattr(nut, "added_sugar_g", None)
+            if item_added_sugar is not None:
+                added_sugar_g += float(item_added_sugar) * scale
             if nut.sodium_mg is not None:
                 sodium_mg += float(nut.sodium_mg) * scale
             extras = nut.extra_nutrients or {}
@@ -326,8 +378,7 @@ def _gather_raw_signals(
             if sat is not None:
                 try: saturated_fat_g += float(sat) * scale
                 except Exception: pass
-            # If added_sugar_g wasn't a top-level column, try extras as a fallback.
-            if added_sugar_g == 0 and "added_sugar" in extras:
+            if item_added_sugar is None and "added_sugar" in extras:
                 try: added_sugar_g += float(extras["added_sugar"]) * scale
                 except Exception: pass
 
@@ -344,7 +395,7 @@ def _gather_raw_signals(
         servings_consumed = max(0.1, servings_consumed)
 
         if meta.fermented_flag:
-            fermented_servings += 1.0
+            fermented_servings += servings_consumed
         # Probiotic aggregation — CFU count (billions) is the real
         # bioactive unit. When the AI estimated CFUs we sum them and
         # also bump the legacy servings count for back-compat with
@@ -368,19 +419,19 @@ def _gather_raw_signals(
         if col_per_serving is not None and col_per_serving > 0:
             collagen_g += float(col_per_serving) * servings_consumed
         if meta.omega3_flag:
-            omega3_servings += 1.0
+            omega3_servings += servings_consumed
         if getattr(meta, "seafood_flag", False):
-            seafood_servings += 1.0
+            seafood_servings += servings_consumed
         if getattr(meta, "fruit_flag", False):
-            fruit_servings += 1.0
+            fruit_servings += servings_consumed
         if getattr(meta, "vegetable_flag", False):
-            vegetable_servings += 1.0
+            vegetable_servings += servings_consumed
         if getattr(meta, "alcohol_flag", False):
-            alcohol_servings += 1.0
+            alcohol_servings += servings_consumed
         if getattr(meta, "processed_meat_flag", False):
-            processed_meat_servings += 1.0
+            processed_meat_servings += servings_consumed
         if getattr(meta, "refined_grain_flag", False):
-            refined_grain_servings += 1.0
+            refined_grain_servings += servings_consumed
 
         item_protein = float(item.protein_g or 0)
         ps = getattr(meta, "protein_source", "unknown") or "unknown"

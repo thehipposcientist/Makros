@@ -368,7 +368,8 @@ def log_meal_from_plan(
     # Pre-load FoodNutrition for matched food_ids so we can reverse-
     # compute grams from calories (more robust than unit parsing, which
     # has to handle oz / fl_oz / cup / slice / piece / etc).
-    from app.models import FoodNutrition
+    from app.models import FoodNutrition, FoodServing
+    from app.enums import FoodCategory, FoodSource
     match_cache: dict[str, tuple[int | None, float | None]] = {}
     for it in (meal_data.get("items") or []):
         nm = it.get("name") or ""
@@ -380,10 +381,152 @@ def log_meal_from_plan(
         for n in db.exec(select(FoodNutrition).where(col(FoodNutrition.food_id).in_(all_food_ids))).all():
             nut_by_food[n.food_id] = n
 
+    def _item_micros(item: dict) -> dict:
+        raw = item.get("micronutrients") or {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _estimate_item_grams(item: dict) -> float:
+        explicit = item.get("serving_grams")
+        try:
+            if explicit is not None and float(explicit) > 0:
+                return float(explicit)
+        except Exception:
+            pass
+        qty = float(item.get("quantity", 1) or 1)
+        unit = str(item.get("unit") or "").strip().lower()
+        if unit in ("g", "gram", "grams"):
+            return qty
+        if unit in ("kg", "kilogram", "kilograms"):
+            return qty * 1000.0
+        if unit in ("mg", "milligram", "milligrams"):
+            return qty / 1000.0
+        if unit in ("oz", "ounce", "ounces"):
+            return qty * 28.35
+        if unit in ("lb", "lbs", "pound", "pounds"):
+            return qty * 453.59
+        if unit in ("ml", "milliliter", "milliliters"):
+            return qty
+        if unit in ("l", "liter", "liters"):
+            return qty * 1000.0
+        household = {
+            "cup": 240.0, "cups": 240.0,
+            "tbsp": 15.0, "tablespoon": 15.0, "tablespoons": 15.0,
+            "tsp": 5.0, "teaspoon": 5.0, "teaspoons": 5.0,
+            "fl_oz": 30.0, "fl oz": 30.0,
+            "piece": 50.0, "pieces": 50.0,
+            "slice": 30.0, "slices": 30.0,
+            "scoop": 30.0, "scoops": 30.0,
+        }
+        return max(1.0, qty * household.get(unit, 100.0))
+
+    def _category_for_food(name: str) -> FoodCategory:
+        from app.services.nutrition.food_classifier import classify_food
+        cls = classify_food(name)
+        lower = name.lower()
+        if getattr(cls, "fruit_flag", False):
+            return FoodCategory.FRUITS
+        if getattr(cls, "vegetable_flag", False):
+            return FoodCategory.VEGETABLES
+        if cls.protein_source == "plant":
+            return FoodCategory.PLANT_PROTEINS
+        if cls.protein_source == "animal":
+            if any(k in lower for k in ("milk", "yogurt", "cheese", "egg", "kefir", "skyr")):
+                return FoodCategory.DAIRY
+            return FoodCategory.PROTEINS
+        if any(k in lower for k in ("oil", "butter", "nut", "avocado", "tahini")):
+            return FoodCategory.FATS_OILS
+        if any(k in lower for k in ("coffee", "tea", "juice", "smoothie", "water", "soda")):
+            return FoodCategory.BEVERAGES
+        return FoodCategory.GRAINS_CARBS
+
+    def _upsert_logged_food_from_item(item: dict) -> tuple[int | None, float | None]:
+        micros = _item_micros(item)
+        if not micros:
+            return (None, None)
+        name = str(item.get("name") or "").strip()
+        if not name:
+            return (None, None)
+        from app.services.nutrition.food_classifier import normalize_name
+        normalized = normalize_name(name)
+        grams = _estimate_item_grams(item)
+        reference_unit = f"{item.get('quantity', 1) or 1} {item.get('unit') or 'serving'}".strip()
+
+        food = db.exec(
+            select(Food)
+            .where(Food.normalized_name == normalized)
+            .where(Food.owner_user_id == user_id)
+            .where(Food.is_active == True)  # noqa: E712
+        ).first()
+        if food is None:
+            food = Food(
+                name=name,
+                normalized_name=normalized,
+                category=_category_for_food(name),
+                source=FoodSource.AI,
+                owner_user_id=user_id,
+                is_verified=False,
+                is_custom=True,
+                unit=reference_unit,
+                serving_grams=grams,
+                calories=float(item.get("calories", 0) or 0),
+                protein=float(item.get("protein", 0) or 0),
+                carbs=float(item.get("carbs", 0) or 0),
+                fat=float(item.get("fat", 0) or 0),
+            )
+            db.add(food)
+            db.flush()
+
+        nutrition = db.exec(select(FoodNutrition).where(FoodNutrition.food_id == food.id)).first()
+        if nutrition is None:
+            nutrition = FoodNutrition(food_id=food.id)
+
+        extras = dict(nutrition.extra_nutrients or {})
+        for k, raw_v in micros.items():
+            try:
+                v = float(raw_v or 0)
+            except (TypeError, ValueError):
+                continue
+            if k == "fiber":
+                nutrition.fiber = v
+            elif k == "sugar":
+                nutrition.sugar = v
+            elif k in ("sodium", "sodium_mg"):
+                nutrition.sodium_mg = v
+            elif k in ("added_sugar", "added_sugar_g"):
+                nutrition.added_sugar_g = v
+            else:
+                extras[k] = v
+        nutrition.reference_unit = reference_unit
+        nutrition.reference_grams = grams
+        nutrition.calories = float(item.get("calories", 0) or 0)
+        nutrition.protein = float(item.get("protein", 0) or 0)
+        nutrition.carbs = float(item.get("carbs", 0) or 0)
+        nutrition.fat = float(item.get("fat", 0) or 0)
+        nutrition.extra_nutrients = extras
+        db.add(nutrition)
+
+        serving = db.exec(
+            select(FoodServing)
+            .where(FoodServing.food_id == food.id)
+            .where(FoodServing.label == reference_unit)
+        ).first()
+        if serving is None:
+            serving = FoodServing(food_id=food.id, label=reference_unit, grams=grams, is_default=True)
+        serving.calories = nutrition.calories
+        serving.protein = nutrition.protein
+        serving.carbs = nutrition.carbs
+        serving.fat = nutrition.fat
+        db.add(serving)
+        match_cache[name] = (food.id, grams)
+        nut_by_food[food.id] = nutrition
+        return (food.id, grams)
+
     items = meal_data.get("items") or []
     for item in items:
         name = item.get("name", "Unknown")
         food_id, default_grams = match_cache.get(name, (None, None))
+        if food_id is None:
+            food_id, default_grams = _upsert_logged_food_from_item(item)
         qty = float(item.get("quantity", 1) or 1)
         unit = str(item.get("unit") or "").strip().lower()
         item_cal = float(item.get("calories", 0) or 0)
@@ -515,7 +658,7 @@ def get_meal_history(
 
 # ─── Rolling averages ────────────────────────────────────────────────────────
 
-def get_rolling_averages(user_id: int, window: int = 7, *, db: Session) -> dict:
+def get_rolling_averages(user_id: int, window: int = 7, *, db: Session, end_date: date | None = None) -> dict:
     """Compute rolling nutrition averages: calories, protein, carbs, fat,
     meals/day. Aggregates directly from meals + meal_items tables.
 
@@ -541,7 +684,7 @@ def get_rolling_averages(user_id: int, window: int = 7, *, db: Session) -> dict:
     """
     from app.models import Meal, MealItem
 
-    today_d = date.today()
+    today_d = end_date or date.today()
     cutoff = today_d - timedelta(days=window - 1)
     meals = db.exec(
         select(Meal)

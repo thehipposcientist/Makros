@@ -135,6 +135,16 @@ Use plain text for each. **Do not leave any value blank** — App Runner rejects
 | `PLAN_REVIEW_ENABLED` | `0` |
 | `NUTRITION_REVIEW_ENABLED` | `0` |
 | `LOG_LEVEL` | `INFO` |
+| `SMTP_HOST` | SMTP hostname from SES/Postmark/SendGrid/etc. |
+| `SMTP_PORT` | usually `587` |
+| `SMTP_USERNAME` | SMTP username |
+| `SMTP_PASSWORD` | SMTP password |
+| `SMTP_FROM_EMAIL` | verified sender address, e.g. `support@thallo.app` |
+| `SMTP_FROM_NAME` | `Thallo` |
+| `SMTP_USE_TLS` | `1` |
+| `EMAIL_VERIFICATION_URL_TEMPLATE` | optional deep-link/web template containing `{email}` and `{token}` |
+| `PASSWORD_RESET_URL_TEMPLATE` | optional deep-link/web template containing `{email}` and `{token}` |
+| `SOCIAL_FEED_ENABLED` | omit or set `0` for external beta |
 
 **Do NOT set `DEV_PASSWORD_RESET`.** Omitting it disables the dev-mode password reset endpoint in prod.
 

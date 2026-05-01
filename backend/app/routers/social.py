@@ -5,6 +5,7 @@ shape: friend list + once-a-week digest.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,6 +22,7 @@ from app.models import (
 from app.services.social.digest import compute_digest, week_start_for, _accepted_friend_ids
 
 router = APIRouter(prefix="/social", tags=["social"])
+SOCIAL_FEED_ENABLED = os.getenv("SOCIAL_FEED_ENABLED", "0") == "1"
 
 
 # ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -589,6 +591,8 @@ def get_feed(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    if not SOCIAL_FEED_ENABLED:
+        raise HTTPException(404, "social feed disabled")
     friend_ids = _accepted_friend_ids(db, current_user.id)
     visible_ids = [current_user.id]
     for fid in friend_ids:
@@ -680,6 +684,8 @@ def get_user_feed(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    if not SOCIAL_FEED_ENABLED:
+        raise HTTPException(404, "social feed disabled")
     """Get a specific user's feed items. Only visible if they're a friend with sharing enabled, or it's yourself."""
     if user_id != current_user.id:
         friend_ids = _accepted_friend_ids(db, current_user.id)
@@ -743,6 +749,8 @@ def get_user_feed(
 
 
 def write_activity(db: Session, user_id: int, event_type: str, payload: dict) -> None:
+    if not SOCIAL_FEED_ENABLED:
+        return
     db.add(ActivityFeedItem(
         user_id=user_id,
         event_type=event_type,
@@ -781,10 +789,7 @@ def _sanitize_workout_summary(raw: dict) -> dict:
         for s in list(ex.get("sets") or [])[:20]:
             if not isinstance(s, dict):
                 continue
-            sets.append({
-                "reps": int(s.get("reps") or 0),
-                "weight_lbs": float(s.get("weight_lbs") or 0),
-            })
+            sets.append({"reps": int(s.get("reps") or 0)})
         exercises.append({
             "name": str(ex.get("name") or "Exercise")[:80],
             "equipment": str(ex.get("equipment"))[:60] if ex.get("equipment") else None,
@@ -809,6 +814,8 @@ def create_post(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    if not SOCIAL_FEED_ENABLED:
+        raise HTTPException(404, "social feed disabled")
     payload: dict = {}
     if body.caption:
         payload["caption"] = body.caption
@@ -834,6 +841,8 @@ def delete_post(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    if not SOCIAL_FEED_ENABLED:
+        raise HTTPException(404, "social feed disabled")
     item = db.exec(
         select(ActivityFeedItem).where(ActivityFeedItem.id == post_id)
     ).first()
@@ -853,6 +862,8 @@ def toggle_like(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    if not SOCIAL_FEED_ENABLED:
+        raise HTTPException(404, "social feed disabled")
     item = db.exec(select(ActivityFeedItem).where(ActivityFeedItem.id == item_id)).first()
     if not item:
         raise HTTPException(404, "item not found")

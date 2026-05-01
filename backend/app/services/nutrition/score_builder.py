@@ -79,33 +79,54 @@ def _aggregate_micros(db: Any, items: list[MealItem]) -> tuple[dict[str, float],
         for n in db.exec(select(FoodNutrition).where(FoodNutrition.food_id.in_(food_ids))).all():
             nut_by_food[n.food_id] = n
 
+    def _grams_consumed(item: MealItem, nut: FoodNutrition) -> float:
+        grams = float(item.serving_grams or 0)
+        if (
+            grams <= 0
+            and (nut.calories or 0) > 0
+            and (nut.reference_grams or 0) > 0
+            and (item.calories or 0) > 0
+        ):
+            grams = (float(item.calories) / float(nut.calories)) * float(nut.reference_grams)
+        return grams
+
+    micro_aliases: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("calcium_mg", ("calcium_mg", "calcium")),
+        ("iron_mg", ("iron_mg", "iron")),
+        ("potassium_mg", ("potassium_mg", "potassium")),
+        ("magnesium_mg", ("magnesium_mg", "magnesium")),
+        ("vitamin_d_mcg", ("vitamin_d_mcg", "vitamin_d")),
+        ("vitamin_b12_mcg", ("vitamin_b12_mcg", "vitamin_b12")),
+        ("vitamin_c_mg", ("vitamin_c_mg", "vitamin_c")),
+        ("vitamin_a_mcg", ("vitamin_a_mcg", "vitamin_a")),
+        ("zinc_mg", ("zinc_mg", "zinc")),
+        ("selenium_mcg", ("selenium_mcg", "selenium")),
+        ("folate_mcg", ("folate_mcg", "folate_b9", "folate")),
+    )
+
     micros: dict[str, float] = {}
     with_micros = 0
     for item in items:
         nut = nut_by_food.get(item.food_id) if item.food_id else None
         if not nut:
             continue
-        grams_consumed = float(item.serving_grams or 0)
+        grams_consumed = _grams_consumed(item, nut)
         if grams_consumed <= 0 or nut.reference_grams <= 0:
             continue
         scale = grams_consumed / float(nut.reference_grams)
         extras = nut.extra_nutrients or {}
         had_any = False
-        # Canonical keys we care about for scoring
-        for key in (
-            "calcium_mg", "iron_mg", "potassium_mg", "magnesium_mg",
-            "vitamin_d_mcg", "vitamin_b12_mcg", "vitamin_c_mg", "vitamin_a_mcg",
-            "zinc_mg", "selenium_mcg", "folate_b9", "folate_mcg",
-        ):
-            if key in extras:
+        for store_key, aliases in micro_aliases:
+            for key in aliases:
+                if key not in extras:
+                    continue
                 try:
                     v = float(extras[key]) * scale
-                    # Normalize folate_b9 → folate_mcg
-                    store_key = "folate_mcg" if key in ("folate_b9", "folate_mcg") else key
-                    micros[store_key] = micros.get(store_key, 0) + v
-                    had_any = True
                 except Exception:
-                    pass
+                    continue
+                micros[store_key] = micros.get(store_key, 0) + v
+                had_any = True
+                break
         # fiber is a top-level column
         if nut.fiber is not None:
             micros["fiber_g"] = micros.get("fiber_g", 0) + float(nut.fiber) * scale

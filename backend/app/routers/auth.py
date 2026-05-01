@@ -12,6 +12,7 @@ from app.limiter import limiter
 from app.logging_setup import get_logger, set_request_context
 from app.models import User, UserCreate, UserRead, LoginRequest, Token
 from app.auth import hash_password, verify_password, create_access_token, get_current_user
+from app.services.email_delivery import send_password_reset_email, send_verification_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = get_logger("app.auth")
@@ -158,6 +159,7 @@ def register(body: UserCreate, request: Request, session: Session = Depends(get_
     session.refresh(user)
     set_request_context(user_id=user.id)
     logger.info("auth_register_ok", extra={"user_id": user.id, "email": email, "ip": ip})
+    send_verification_email(email, email_token)
     return _user_read(user)
 
 
@@ -229,12 +231,10 @@ def request_email_verification(
     request: Request,
     session: Session = Depends(get_session),
 ):
-    """Create an email-verification token.
+    """Create and send an email-verification token.
 
-    Delivery is intentionally generic here so account existence is not
-    leaked. When an email provider is configured later, this is the place to
-    send the token or magic link. In local/dev, set DEV_EMAIL_TOKENS=1 to get
-    the token in the response for manual testing.
+    Response stays generic so account existence is not leaked. In local/dev,
+    set DEV_EMAIL_TOKENS=1 to get the token in the response for manual testing.
     """
     email = body.email.strip().lower()
     ip = _client_ip(request)
@@ -247,6 +247,7 @@ def request_email_verification(
         session.add(user)
         session.commit()
         dev_token = token
+        send_verification_email(email, token)
         logger.info("auth_email_verification_requested", extra={"user_id": user.id, "email": email, "ip": ip})
     response = {"status": "ok", "message": "If that email belongs to an account, a verification link will be sent."}
     if os.getenv("DEV_EMAIL_TOKENS") == "1" and dev_token:
@@ -396,9 +397,9 @@ def request_password_reset_email(
 ):
     """Start email-token password reset.
 
-    This avoids relying on security questions once email delivery is wired.
-    For now it safely stores a short-lived token and returns a generic
-    response. Set DEV_EMAIL_TOKENS=1 locally to see the token in the response.
+    Safely stores a short-lived token, sends it through the configured email
+    provider, and returns a generic response. Set DEV_EMAIL_TOKENS=1 locally to
+    see the token in the response.
     """
     email = body.email.strip().lower()
     ip = _client_ip(request)
@@ -411,6 +412,7 @@ def request_password_reset_email(
         session.add(user)
         session.commit()
         dev_token = token
+        send_password_reset_email(email, token)
         logger.info("auth_password_reset_email_requested", extra={"user_id": user.id, "email": email, "ip": ip})
     response = {"status": "ok", "message": "If that email belongs to an account, a reset link will be sent."}
     if os.getenv("DEV_EMAIL_TOKENS") == "1" and dev_token:

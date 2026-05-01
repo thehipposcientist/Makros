@@ -10,8 +10,14 @@ declare module 'expo-image-picker' {
     assets?: ImagePickerAsset[];
   };
 
-  export function requestCameraPermissionsAsync(): Promise<{ granted: boolean }>;
-  export function requestMediaLibraryPermissionsAsync(): Promise<{ granted: boolean }>;
+  export const MediaTypeOptions: {
+    Images: 'images';
+    Videos: 'videos';
+    All: 'all';
+  };
+
+  export function requestCameraPermissionsAsync(): Promise<{ granted: boolean; status: 'granted' | 'denied' | 'undetermined' }>;
+  export function requestMediaLibraryPermissionsAsync(): Promise<{ granted: boolean; status: 'granted' | 'denied' | 'undetermined' }>;
   export function launchCameraAsync(options?: Record<string, unknown>): Promise<ImagePickerResult>;
   export function launchImageLibraryAsync(options?: Record<string, unknown>): Promise<ImagePickerResult>;
 }

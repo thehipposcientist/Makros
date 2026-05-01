@@ -96,6 +96,7 @@ def create_saved_meal(
                 "protein_g": float(it.get("protein_g") or 0),
                 "carbs_g": float(it.get("carbs_g") or 0),
                 "fat_g": float(it.get("fat_g") or 0),
+                "micronutrients": it.get("micronutrients") if isinstance(it.get("micronutrients"), dict) else None,
             })
 
     if not name:
@@ -149,6 +150,7 @@ def update_saved_meal(
                 "protein_g": float(it.get("protein_g") or 0),
                 "carbs_g": float(it.get("carbs_g") or 0),
                 "fat_g": float(it.get("fat_g") or 0),
+                "micronutrients": it.get("micronutrients") if isinstance(it.get("micronutrients"), dict) else None,
             })
         if not cleaned:
             raise HTTPException(status_code=422, detail="At least one item is required")
@@ -245,6 +247,108 @@ def log_saved_meal(
                 if key and key in normalized_targets and key not in food_by_name:
                     food_by_name[key] = f.id
 
+    def _upsert_food_from_saved_item(it: dict) -> tuple[int | None, float | None]:
+        micros = it.get("micronutrients") if isinstance(it.get("micronutrients"), dict) else None
+        if not micros:
+            return (None, None)
+        name = str(it.get("food_name") or it.get("name") or "").strip()
+        if not name:
+            return (None, None)
+        from app.models import Food, FoodNutrition, FoodServing
+        from app.enums import FoodCategory, FoodSource
+        from app.services.nutrition.food_classifier import classify_food, normalize_name
+
+        def _grams() -> float:
+            try:
+                if it.get("serving_grams") is not None and float(it.get("serving_grams")) > 0:
+                    return float(it.get("serving_grams"))
+            except Exception:
+                pass
+            qty = float(it.get("quantity") or 1)
+            unit = str(it.get("unit") or "").lower().strip()
+            weights = {
+                "g": 1.0, "gram": 1.0, "grams": 1.0,
+                "kg": 1000.0, "oz": 28.35, "lb": 453.59, "lbs": 453.59,
+                "ml": 1.0, "l": 1000.0, "cup": 240.0, "tbsp": 15.0,
+                "tsp": 5.0, "piece": 50.0, "slice": 30.0, "scoop": 30.0,
+            }
+            return max(1.0, qty * weights.get(unit, 100.0))
+
+        normalized = normalize_name(name)
+        food = db.exec(
+            select(Food)
+            .where(Food.normalized_name == normalized)
+            .where(Food.owner_user_id == current_user.id)
+            .where(Food.is_active == True)  # noqa: E712
+        ).first()
+        grams = _grams()
+        unit_label = f"{it.get('quantity') or 1} {it.get('unit') or 'serving'}"
+        if food is None:
+            cls = classify_food(name)
+            category = (
+                FoodCategory.FRUITS if getattr(cls, "fruit_flag", False)
+                else FoodCategory.VEGETABLES if getattr(cls, "vegetable_flag", False)
+                else FoodCategory.PLANT_PROTEINS if cls.protein_source == "plant"
+                else FoodCategory.PROTEINS if cls.protein_source == "animal"
+                else FoodCategory.GRAINS_CARBS
+            )
+            food = Food(
+                name=name,
+                normalized_name=normalized,
+                category=category,
+                source=FoodSource.AI,
+                owner_user_id=current_user.id,
+                is_custom=True,
+                unit=unit_label,
+                serving_grams=grams,
+                calories=float(it.get("calories") or 0),
+                protein=float(it.get("protein_g") or 0),
+                carbs=float(it.get("carbs_g") or 0),
+                fat=float(it.get("fat_g") or 0),
+            )
+            db.add(food)
+            db.flush()
+        nutrition = db.exec(select(FoodNutrition).where(FoodNutrition.food_id == food.id)).first()
+        if nutrition is None:
+            nutrition = FoodNutrition(food_id=food.id)
+        extras = dict(nutrition.extra_nutrients or {})
+        for k, raw_v in micros.items():
+            try:
+                v = float(raw_v or 0)
+            except (TypeError, ValueError):
+                continue
+            if k == "fiber":
+                nutrition.fiber = v
+            elif k == "sugar":
+                nutrition.sugar = v
+            elif k in ("sodium", "sodium_mg"):
+                nutrition.sodium_mg = v
+            elif k in ("added_sugar", "added_sugar_g"):
+                nutrition.added_sugar_g = v
+            else:
+                extras[k] = v
+        nutrition.reference_unit = unit_label
+        nutrition.reference_grams = grams
+        nutrition.calories = float(it.get("calories") or 0)
+        nutrition.protein = float(it.get("protein_g") or 0)
+        nutrition.carbs = float(it.get("carbs_g") or 0)
+        nutrition.fat = float(it.get("fat_g") or 0)
+        nutrition.extra_nutrients = extras
+        db.add(nutrition)
+        serving = db.exec(
+            select(FoodServing)
+            .where(FoodServing.food_id == food.id)
+            .where(FoodServing.label == unit_label)
+        ).first()
+        if serving is None:
+            serving = FoodServing(food_id=food.id, label=unit_label, grams=grams, is_default=True)
+        serving.calories = nutrition.calories
+        serving.protein = nutrition.protein
+        serving.carbs = nutrition.carbs
+        serving.fat = nutrition.fat
+        db.add(serving)
+        return (food.id, grams)
+
     for it in saved.items or []:
         fid = it.get("food_id")
         if not fid:
@@ -252,6 +356,9 @@ def log_saved_meal(
             import re as _re2
             key = _re2.sub(r"[^a-z0-9]+", " ", (it.get("food_name") or "").lower()).strip()
             fid = food_by_name.get(key)
+        serving_grams = it.get("serving_grams")
+        if not fid:
+            fid, serving_grams = _upsert_food_from_saved_item(it)
         db.add(MealItem(
             meal_id=meal.id,
             food_name=it.get("food_name") or "Item",
@@ -259,7 +366,7 @@ def log_saved_meal(
             serving_id=it.get("serving_id"),
             quantity=float(it.get("quantity") or 1),
             unit=str(it.get("unit") or "serving"),
-            serving_grams=it.get("serving_grams"),
+            serving_grams=serving_grams,
             calories=float(it.get("calories") or 0),
             protein_g=float(it.get("protein_g") or 0),
             carbs_g=float(it.get("carbs_g") or 0),

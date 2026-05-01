@@ -63,6 +63,7 @@ export interface GoalConfig {
 export interface MetaData {
   foodCategories: FoodCategoryGroup[];
   allFoods: FoodItem[];
+  foods?: FoodItem[];
   equipmentCategories: EquipmentCategoryGroup[];
   goals: GoalOption[];
   paces: PaceOption[];

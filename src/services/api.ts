@@ -1,5 +1,6 @@
 import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { Platform } from 'react-native';
 import { goalCategory } from '../constants/goalConfig';
 
 const LOCAL_BACKEND_IP = '192.168.1.246'; // your dev machine's LAN IP
@@ -52,6 +53,45 @@ function getBaseUrl(): string {
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
+function tokenFromHeaders(headers: RequestInit['headers'] | undefined): string | undefined {
+  if (!headers || Array.isArray(headers)) return undefined;
+  if (headers instanceof Headers) {
+    const value = headers.get('Authorization') ?? headers.get('authorization') ?? '';
+    return value.startsWith('Bearer ') ? value.slice(7) : undefined;
+  }
+  const record = headers as Record<string, string>;
+  const value = record.Authorization ?? record.authorization ?? '';
+  return value.startsWith('Bearer ') ? value.slice(7) : undefined;
+}
+
+export async function recordTelemetryEvent(
+  eventName: string,
+  payload: Record<string, any> = {},
+  token?: string,
+): Promise<void> {
+  try {
+    const appVersion = Constants.expoConfig?.version ?? undefined;
+    const platform = Platform.OS;
+    const anonymousId = await AsyncStorage.getItem('installMarker').catch(() => null);
+    await fetch(`${getBaseUrl()}/telemetry/events`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        event_name: eventName,
+        anonymous_id: anonymousId,
+        platform,
+        app_version: appVersion,
+        payload,
+      }),
+    });
+  } catch {
+    // Telemetry must never affect product flows.
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 30000, noRetry = false): Promise<T> {
   const maxRetries = noRetry ? 0 : 2;
   let lastError: Error | undefined;
@@ -85,6 +125,7 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
         const detail = Array.isArray(data.detail)
           ? data.detail.map((e: any) => `${e.loc?.join('.')}: ${e.msg}`).join(', ')
           : (typeof data.detail === 'string' ? data.detail : `HTTP ${res.status}`);
+        recordTelemetryEvent('api_error', { path, status: res.status, detail }, tokenFromHeaders(options.headers));
         throw new Error(detail);
       }
       return data as T;
@@ -92,11 +133,13 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
       clearTimeout(timer);
       if (e.name === 'AbortError') {
         lastError = new Error(`Request timed out. Backend: ${getBaseUrl()} — is it reachable?`);
+        recordTelemetryEvent('api_timeout', { path, timeout_ms: timeoutMs }, tokenFromHeaders(options.headers));
         if (attempt < maxRetries) continue;
         throw lastError;
       }
       if (e.message === 'Network request failed') {
         lastError = new Error(`Can't reach backend at ${getBaseUrl()} — is it running?`);
+        recordTelemetryEvent('api_network_error', { path }, tokenFromHeaders(options.headers));
         if (attempt < maxRetries) continue;
         throw lastError;
       }
@@ -120,7 +163,7 @@ export async function register(
     acceptedAiDisclaimer?: boolean;
   },
 ) {
-  return request('/auth/register', {
+  const result = await request('/auth/register', {
     method: 'POST',
     body: JSON.stringify({
       email,
@@ -135,13 +178,17 @@ export async function register(
       legal_version: opts?.legalVersion,
     }),
   });
+  recordTelemetryEvent('signup_completed', { has_legal_acceptance: true });
+  return result;
 }
 
 export async function login(email: string, password: string): Promise<{ access_token: string }> {
-  return request('/auth/login', {
+  const result = await request<{ access_token: string }>('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   });
+  recordTelemetryEvent('login_completed', {}, result.access_token);
+  return result;
 }
 
 /** Authenticated password change. Backend bumps `token_version` so every
@@ -722,6 +769,11 @@ export async function getAIPlans(
     nutritionistNote: (result?.nutritionistNote ?? result?.nutrition_plan?.nutritionistNote)?.slice(0, 80) ?? 'MISSING',
     workoutDays: result?.workout_plan?.days?.length ?? 0,
   });
+  recordTelemetryEvent('plan_generated', {
+    kind: 'full',
+    workout_days: result?.workout_plan?.days?.length ?? 0,
+    meal_templates: result?.nutrition_plan?.templates?.length ?? result?.nutrition_plan?.days?.length ?? 0,
+  }, token);
   return result;
 }
 
@@ -1023,7 +1075,7 @@ export async function syncOnboarding(token: string, profile: import('../types').
   if (mappedGoal !== profile.goal) {
     console.log('[syncOnboarding] mapped goal', profile.goal, '→', mappedGoal);
   }
-  return request('/profile/onboarding', {
+  const result = await request('/profile/onboarding', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({
@@ -1050,6 +1102,12 @@ export async function syncOnboarding(token: string, profile: import('../types').
       },
     }),
   });
+  recordTelemetryEvent('onboarding_completed', {
+    goal: profile.goal,
+    days_per_week: profile.daysPerWeek,
+    meals_per_day: profile.mealsPerDay ?? 3,
+  }, token);
+  return result;
 }
 
 export async function updatePhysicalStats(
@@ -1370,7 +1428,7 @@ export async function logWorkoutDone(
   const hrSummary = healthMetrics?.hrSummary ?? activityHrSummary;
   const caloriesBurned = healthMetrics?.caloriesBurned ?? activity?.caloriesBurned;
 
-  return request<WorkoutCompleteResponse>('/workouts/complete', {
+  const result = await request<WorkoutCompleteResponse>('/workouts/complete', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({
@@ -1398,6 +1456,14 @@ export async function logWorkoutDone(
       ...(Array.isArray(gearIds) ? { gear_ids: gearIds } : {}),
     }),
   });
+  recordTelemetryEvent('workout_completed', {
+    workout_date,
+    focus_label,
+    duration_seconds,
+    exercise_count: exercises?.length ?? 0,
+    source: activity?.source ?? 'phone',
+  }, token);
+  return result;
 }
 
 /** Mid-workout sync: saves per-set detail to the backend WITHOUT flipping
@@ -1993,7 +2059,7 @@ export async function matchGoal(
 export async function lookupBarcode(
   token: string,
   barcode: string,
-): Promise<{ name: string; barcode: string; serving: string; calories: number; protein: number; carbs: number; fat: number; source: string }> {
+): Promise<{ name: string; barcode: string; serving: string; calories: number; protein: number; carbs: number; fat: number; micronutrients?: Record<string, number>; source: string }> {
   return request<any>('/ai/barcode-lookup', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
@@ -2006,7 +2072,7 @@ export async function searchFoodNutrition(
   token: string,
   query: string,
   opts?: { forceAi?: boolean },
-): Promise<{ results: Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; fiber?: number; source?: 'usda' | 'ai' }> }> {
+): Promise<{ results: Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; fiber?: number; micronutrients?: Record<string, number>; source?: 'usda' | 'ai' }> }> {
   return request<any>('/ai/food-search', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
@@ -2219,6 +2285,7 @@ export async function scanFoodsPhoto(
     protein: number;
     carbs: number;
     fat: number;
+    micronutrients?: Record<string, number>;
   }>;
 }> {
   return request('/ai/scan-foods', {
@@ -2509,11 +2576,17 @@ export async function logMealChecked(
   token: string,
   payload: { meal_date: string; meal_type: string; meal: Record<string, any>; source?: string; consumed_at?: string },
 ): Promise<{ id: number; consumed_at?: string | null }> {
-  return request('/meals/log-checked', {
+  const result = await request<{ id: number; consumed_at?: string | null }>('/meals/log-checked', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
   }, 10000, true);  // noRetry — fire and forget, don't block UI
+  recordTelemetryEvent('meal_logged', {
+    meal_date: payload.meal_date,
+    meal_type: payload.meal_type,
+    source: payload.source ?? 'unknown',
+  }, token);
+  return result;
 }
 
 export async function getMealHistory(token: string, days = 30): Promise<{ meals: MealHistoryEntry[] }> {
@@ -2548,6 +2621,8 @@ export interface GutHealthToday {
   omega3_servings: number;
   /** AI-estimated grams of collagen from today's logged items. */
   collagen_g: number;
+  /** AI-estimated probiotic CFU from today's logged items, in billions. */
+  probiotic_cfu_billions?: number;
   seafood_servings: number;
   fruit_servings: number;
   vegetable_servings: number;
@@ -2581,6 +2656,10 @@ export interface GutHealthWindow {
   collagen_g: number;
   /** AI-estimated average collagen grams per logged day. */
   avg_collagen_g: number;
+  /** AI-estimated probiotic CFU across the full window, in billions. */
+  probiotic_cfu_billions?: number;
+  /** AI-estimated average probiotic CFU per logged day, in billions. */
+  avg_probiotic_cfu_billions?: number;
   seafood_servings: number;
   fruit_servings: number;
   vegetable_servings: number;
@@ -2589,6 +2668,8 @@ export interface GutHealthWindow {
   refined_grain_servings: number;
   plant_protein_g: number;
   animal_protein_g: number;
+  avg_plant_protein_g?: number;
+  avg_animal_protein_g?: number;
   plant_protein_pct: number;
   processing_counts: Record<string, number>;
   calorie_stability_cv: number;
@@ -2967,6 +3048,7 @@ export type SavedMealItem = {
   protein_g: number;
   carbs_g: number;
   fat_g: number;
+  micronutrients?: Record<string, number> | null;
 };
 
 export type SavedMeal = {
@@ -3504,7 +3586,7 @@ export async function startNewPlanWeek(
   force: boolean = false,
   cycle?: CyclePlanContext | null,
 ): Promise<PlanWeekResponse> {
-  return request<PlanWeekResponse>('/plans/start-new-week', {
+  const result = await request<PlanWeekResponse>('/plans/start-new-week', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -3513,6 +3595,13 @@ export async function startNewPlanWeek(
       day_of_cycle: cycle?.dayOfCycle ?? null,
     }),
   });
+  recordTelemetryEvent('plan_week_created', {
+    plan_week_id: result.id,
+    start_date: result.start_date,
+    end_date: result.end_date,
+    force,
+  }, token);
+  return result;
 }
 
 export async function patchPlanDayWorkout(

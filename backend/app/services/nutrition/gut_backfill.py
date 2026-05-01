@@ -161,7 +161,7 @@ def backfill_food_metadata(
 
 
 def backfill_daily_metrics(
-    *, chunk_size: int = 500, max_rows: int | None = None,
+    *, chunk_size: int = 500, max_rows: int | None = None, allow_ai: bool = False,
 ) -> dict:
     """Compute DailyNutritionMetrics for every (user, date) pair with meals
     whose row is either missing or out-of-version. Resumable, idempotent."""
@@ -191,7 +191,7 @@ def backfill_daily_metrics(
                 )
                 if not needs_recompute:
                     continue
-                compute_daily_metrics(db, user_id=user_id, metric_date=d, allow_ai=False)
+                compute_daily_metrics(db, user_id=user_id, metric_date=d, allow_ai=allow_ai)
                 updated += 1
                 processed += 1
             except Exception:
@@ -207,5 +207,5 @@ def backfill_daily_metrics(
 def run_full_backfill(*, allow_ai: bool = False) -> dict:
     food_row_stats = backfill_all_food_rows(allow_ai=allow_ai)
     meta_stats = backfill_food_metadata(allow_ai=allow_ai)
-    daily_stats = backfill_daily_metrics()
+    daily_stats = backfill_daily_metrics(allow_ai=allow_ai)
     return {"food_rows": food_row_stats, "metadata": meta_stats, "daily": daily_stats}

@@ -2,6 +2,7 @@ import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { HealthSummary, SleepScore, SleepStages } from '../types';
 import { scoreSleep, minutesFromMidnight } from './sleepScore';
+import { recordTelemetryEvent } from './api';
 
 let _module: any = null;
 let _moduleChecked = false;
@@ -84,14 +85,20 @@ export async function diagnoseHealthKit(): Promise<string> {
 
 export async function requestHealthPermissions(): Promise<boolean> {
   const mod = getModule();
-  if (!mod) { _lastHealthKitError = 'Native module not loaded — needs a fresh EAS build.'; return false; }
+  if (!mod) {
+    _lastHealthKitError = 'Native module not loaded — needs a fresh EAS build.';
+    recordTelemetryEvent('healthkit_permission_result', { granted: false, error: _lastHealthKitError });
+    return false;
+  }
   try {
     const ok = await mod.requestAuthorization(READ_TYPES);
     _lastHealthKitError = ok ? null : 'Authorization returned false';
+    recordTelemetryEvent('healthkit_permission_result', { granted: ok, error: _lastHealthKitError });
     return ok;
   } catch (e: any) {
     _lastHealthKitError = e?.message ?? String(e);
     console.warn('[appleHealth] requestAuthorization error:', _lastHealthKitError);
+    recordTelemetryEvent('healthkit_permission_result', { granted: false, error: _lastHealthKitError });
     return false;
   }
 }

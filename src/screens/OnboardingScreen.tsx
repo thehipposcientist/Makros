@@ -63,7 +63,7 @@ import {
   launchGoalIdFor,
 } from '../constants/goalConfig';
 
-const logo = require('../../assets/images/thallo-logo-white.png');
+const logo = require('../../assets/images/thallo-logo-white-transparent-New.png');
 
 // ─── Step logic ───────────────────────────────────────────────────────────────
 

@@ -274,7 +274,7 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
   }
 }
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent } from '../src/services/api';
 import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday } from '../src/utils/mealTracker';
 import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
 import AuthScreen from '../src/screens/AuthScreen';
@@ -336,6 +336,7 @@ async function appendUserLog(entry: Omit<UserLogEntry, 'id' | 'date'>) {
 export default function Index() {
   const [isLoading, setIsLoading]         = useState(true);
   const [authToken, setAuthToken]         = useState<string | null>(null);
+  const authTokenRef = useRef<string | null>(null);
   const [userProfile, setUserProfile]     = useState<UserProfile | null>(null);
   const [isEditing, setIsEditing]         = useState(false);
   const [editMode, setEditMode]           = useState<'goal' | 'workout' | 'mealplan' | 'theme' | 'body'>('goal');
@@ -361,6 +362,30 @@ export default function Index() {
   // navigating back to a "home tab" that doesn't really exist as
   // its own destination, so the replay flow felt broken.
   const [showTutorial, setShowTutorial] = useState(false);
+
+  useEffect(() => {
+    authTokenRef.current = authToken;
+  }, [authToken]);
+
+  useEffect(() => {
+    const errorUtils = (globalThis as any).ErrorUtils;
+    const previousHandler = errorUtils?.getGlobalHandler?.();
+    if (errorUtils?.setGlobalHandler) {
+      errorUtils.setGlobalHandler((error: any, isFatal?: boolean) => {
+        recordTelemetryEvent('app_js_error', {
+          message: String(error?.message ?? error),
+          stack: String(error?.stack ?? '').slice(0, 4000),
+          is_fatal: !!isFatal,
+        }, authTokenRef.current ?? undefined);
+        if (previousHandler) previousHandler(error, isFatal);
+      });
+    }
+    return () => {
+      if (errorUtils?.setGlobalHandler && previousHandler) {
+        errorUtils.setGlobalHandler(previousHandler);
+      }
+    };
+  }, []);
 
   // First-mount auto-show: open the tutorial once after onboarding
   // completes (or whenever the user lands here without the
@@ -1223,6 +1248,16 @@ export default function Index() {
     }
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
     setUserProfile(stamped);
+    // Direct watch theme push on save — HomeScreen's useEffect will also
+    // fire on the themePreference dep change, but a save can race the
+    // re-render. Pushing here guarantees the watch sees the new theme
+    // immediately after Save (no need to land back on Home first).
+    if (stamped.themePreference !== userProfile?.themePreference) {
+      try {
+        const { pushThemeToWatch } = await import('../src/utils/watchSync');
+        await pushThemeToWatch(stamped.themePreference);
+      } catch { /* watch may be unavailable */ }
+    }
     const priorEditMode = effectiveMode;
     setIsEditing(false);
     setEditMode('goal');
@@ -1697,42 +1732,72 @@ export default function Index() {
         )}
       </Modal>
 
-      {/* Resume workout — themed modal */}
+      {/* Resume workout — persistent banner. A force-quit mid-session should
+          be recoverable without blocking the entire app behind a modal. */}
       {resumeWorkoutData && (() => {
         const tc = getTheme(userProfile?.themePreference).colors;
         return (
-          <Modal visible transparent animationType="fade" onRequestClose={() => {}}>
-            <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-              <View style={{ backgroundColor: tc.surface, borderRadius: 20, padding: 24, width: '100%', maxWidth: 340, borderWidth: 1, borderColor: tc.border }}>
-                {(() => { try { const { Ionicons: Ic } = require('@expo/vector-icons'); return <Ic name="barbell-outline" size={36} color={tc.primary} style={{ alignSelf: 'center', marginBottom: 12 }} />; } catch { return null; } })()}
-                <Text style={{ fontSize: 20, fontWeight: '800', color: tc.textPrimary, textAlign: 'center', marginBottom: 8 }}>
-                  Resume Workout?
-                </Text>
-                <Text style={{ fontSize: 14, color: tc.textSecondary, textAlign: 'center', marginBottom: 20, lineHeight: 20 }}>
-                  You have an unfinished {resumeWorkoutData.workout.focus || 'workout'} with{' '}
-                  {resumeWorkoutData.loggedCount} exercise{resumeWorkoutData.loggedCount !== 1 ? 's' : ''} logged.
-                </Text>
+          <View
+            pointerEvents="box-none"
+            style={{
+              position: 'absolute',
+              left: 14,
+              right: 14,
+              top: Platform.OS === 'ios' ? 58 : 28,
+              zIndex: 80,
+            }}
+          >
+            <View style={{
+              backgroundColor: tc.surface,
+              borderRadius: 14,
+              padding: 14,
+              borderWidth: 1,
+              borderColor: tc.primary + '66',
+              shadowColor: '#000',
+              shadowOpacity: 0.22,
+              shadowRadius: 14,
+              shadowOffset: { width: 0, height: 8 },
+              elevation: 8,
+            }}>
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+                <View style={{
+                  width: 34, height: 34, borderRadius: 17,
+                  alignItems: 'center', justifyContent: 'center',
+                  backgroundColor: tc.primary + '1F',
+                }}>
+                  <Ionicons name="barbell-outline" size={18} color={tc.primary} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 15, fontWeight: '900', color: tc.textPrimary }}>
+                    Continue your workout
+                  </Text>
+                  <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 3, lineHeight: 17 }}>
+                    {resumeWorkoutData.workout.focus || 'Workout'} · {resumeWorkoutData.loggedCount} exercise{resumeWorkoutData.loggedCount !== 1 ? 's' : ''} logged
+                  </Text>
+                </View>
+              </View>
+              <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
                 <TouchableOpacity
-                  style={{ backgroundColor: tc.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
+                  style={{ flex: 1, backgroundColor: tc.primary, borderRadius: 10, paddingVertical: 11, alignItems: 'center' }}
                   onPress={() => {
-                    setActiveWorkoutRaw(resumeWorkoutData.workout);
+                    setActiveWorkout(resumeWorkoutData.workout);
                     setResumeWorkoutData(null);
                   }}>
-                  <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>Resume</Text>
+                  <Text style={{ color: '#fff', fontSize: 14, fontWeight: '800' }}>Resume</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={{ borderRadius: 12, paddingVertical: 12, alignItems: 'center', borderWidth: 1, borderColor: tc.border }}
+                  style={{ flex: 1, borderRadius: 10, paddingVertical: 11, alignItems: 'center', borderWidth: 1, borderColor: tc.border }}
                   onPress={() => {
                     AsyncStorage.removeItem('activeWorkoutSession').catch(() => {});
                     AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
                     AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
                     setResumeWorkoutData(null);
                   }}>
-                  <Text style={{ color: tc.error ?? '#EF4444', fontSize: 15, fontWeight: '600' }}>Discard</Text>
+                  <Text style={{ color: tc.error ?? '#EF4444', fontSize: 14, fontWeight: '700' }}>Discard</Text>
                 </TouchableOpacity>
               </View>
             </View>
-          </Modal>
+          </View>
         );
       })()}
 
@@ -1854,7 +1919,7 @@ function SplashLoadingScreen() {
       {/* Logo with shimmer sweep */}
       <Animated.View style={{ opacity: fadeAnim, marginBottom: 12, width: LOGO_W, height: LOGO_H, overflow: 'hidden' }}>
         <Image
-          source={require('../assets/images/thallo-logo-white.png')}
+          source={require('../assets/images/thallo-logo-white-transparent-New.png')}
           style={{ width: LOGO_W, height: LOGO_H }}
           resizeMode="contain"
         />
@@ -2038,7 +2103,7 @@ function AccountInfoModal({
       await requestEmailVerification(accountData.email);
       Alert.alert(
         'Verification requested',
-        'The verification token flow is ready. Add an email provider to send the link automatically.',
+        'Check your inbox for the Thallo verification link.',
       );
     } catch (e: any) {
       Alert.alert('Could not request verification', e?.message ?? 'Try again later.');
@@ -2163,7 +2228,7 @@ function AccountInfoModal({
           {accountData && !accountData.emailVerified && (
             <ActionRow
               label="Verify Email"
-              desc="Creates a verification token. Add email delivery to send links automatically."
+              desc="Sends a verification link to your account email."
               onPress={handleRequestEmailVerification}
               busy={accountBusy === 'verify'}
             />

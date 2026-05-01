@@ -310,14 +310,14 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const [speechLoading, setSpeechLoading] = useState(false);
   const [speechReview, setSpeechReview] = useState<null | {
     transcript: string;
-    items: Array<{ name: string; quantity: number; unit: string; calories: number; protein: number; carbs: number; fat: number }>;
+    items: Array<{ name: string; quantity: number; unit: string; calories: number; protein: number; carbs: number; fat: number; micronutrients?: Record<string, number> }>;
   }>(null);
   const [search,      setSearch]      = useState('');
   const [scanLoading, setScanLoading] = useState(false);
   const [barcodeScanning, setBarcodeScanning] = useState(false);
   const [barcodeFallback, setBarcodeFallback] = useState<string | null>(null);
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
-  const [aiResults, setAiResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; source?: 'usda' | 'ai' }>>([]);
+  const [aiResults, setAiResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; micronutrients?: Record<string, number>; source?: 'usda' | 'ai' }>>([]);
   // Track which item is currently showing the unit picker popover.
   const [unitPickerIdx, setUnitPickerIdx] = useState<number | null>(null);
   // In-progress text for each row's quantity input. Lets the user type
@@ -429,7 +429,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     const result = source === 'camera'
       ? await ImagePicker.launchCameraAsync({ base64: true, quality: 0.6, mediaTypes: 'images', exif: false, allowsEditing: false, maxWidth: 1024, maxHeight: 1024 } as any)
       : await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.4, mediaTypes: 'images', exif: false, allowsEditing: false, maxWidth: 1024, maxHeight: 1024 } as any);
-    if (result.canceled || !result.assets[0]?.base64) {
+    if (result.canceled || !result.assets?.[0]?.base64) {
       scanLock.current = false;
       return;
     }
@@ -488,6 +488,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             calories: cal, protein: prot, carbs: carb, fat,
             baseQuantity: qty > 0 ? qty : 1,
             baseCalories: cal, baseProtein: prot, baseCarbs: carb, baseFat: fat,
+            ...(p.micronutrients ? { micronutrients: p.micronutrients } : {}),
           };
         });
         setItems(prev => {
@@ -513,6 +514,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               protein:  p.protein  ?? 0,
               carbs:    p.carbs    ?? 0,
               fat:      p.fat      ?? 0,
+              ...(p.micronutrients ? { micronutrients: p.micronutrients } : {}),
             });
           }
         }
@@ -733,6 +735,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           protein: result.protein,
           carbs: result.carbs,
           fat: result.fat,
+          micronutrients: result.micronutrients,
         });
       } else {
         setBarcodeFallback(barcode.trim());
@@ -791,7 +794,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     }
   };
 
-  const addAiFood = (aiItem: { name: string; serving?: string; calories: number; protein: number; carbs: number; fat: number }) => {
+  const addAiFood = (aiItem: { name: string; serving?: string; calories: number; protein: number; carbs: number; fat: number; micronutrients?: Record<string, number> }) => {
     if (!items.some(it => it.name.toLowerCase() === aiItem.name.toLowerCase())) {
       const parsed = aiItem.serving
         ? splitFoodString(`${aiItem.serving} ${aiItem.name}`)
@@ -808,6 +811,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
         calories: cal, protein: prot, carbs: carb, fat,
         baseQuantity: qty > 0 ? qty : 1,
         baseCalories: cal, baseProtein: prot, baseCarbs: carb, baseFat: fat,
+        ...(aiItem.micronutrients ? { micronutrients: aiItem.micronutrients } : {}),
       };
       setItems(prev => {
         const next = [...prev, newItem];
@@ -823,6 +827,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       protein: Math.round(aiItem.protein),
       carbs: Math.round(aiItem.carbs),
       fat: Math.round(aiItem.fat),
+      ...(aiItem.micronutrients ? { micronutrients: aiItem.micronutrients } : {}),
     });
     setAiResults(prev => prev.filter(r => r.name !== aiItem.name));
   };
@@ -1618,6 +1623,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                     baseProtein: it.protein,
                     baseCarbs: it.carbs,
                     baseFat: it.fat,
+                    ...(it.micronutrients ? { micronutrients: it.micronutrients } : {}),
                   } as any));
                 userEdited.current = true;
                 setItems(prev => [...prev, ...mapped]);

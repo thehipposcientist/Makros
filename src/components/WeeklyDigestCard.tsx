@@ -46,7 +46,7 @@ function deltaLabel(delta: number, suffix: string = ''): string {
 }
 
 export default function WeeklyDigestCard({ authToken, themeName, todayOverride }: Props) {
-  const tc = getTheme(themeName);
+  const tc = getTheme(themeName).colors;
   const now = todayOverride ?? new Date();
   const weekKey = isoWeekKey(now);
   const dismissedKey = `lastDigestDismissedWeek_${weekKey}`;
@@ -129,7 +129,7 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
       transform: [{ translateY }],
     }}>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <Text style={{ fontSize: 16, fontWeight: '700', color: tc.text }}>
+        <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary }}>
           Week in review — {formatRange(digest.week_start, digest.week_end)}
         </Text>
         <TouchableOpacity onPress={handleDismiss} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -139,21 +139,21 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
 
       <View style={{ flexDirection: 'row', gap: 12, marginBottom: 12 }}>
         <View style={{ flex: 1 }}>
-          <AnimatedNumber value={digest.sessions.completed} style={{ fontSize: 22, fontWeight: '800', color: tc.text }} duration={600} />
+          <AnimatedNumber value={digest.sessions.completed} style={{ fontSize: 22, fontWeight: '800', color: tc.textPrimary }} duration={600} />
           <Text style={{ fontSize: 11, color: tc.textMuted }}>sessions</Text>
           <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>
             {deltaLabel(sessionsDelta)}
           </Text>
         </View>
         <View style={{ flex: 1 }}>
-          <AnimatedNumber value={digest.sessions.adherence_pct} suffix="%" style={{ fontSize: 22, fontWeight: '800', color: tc.text }} duration={700} />
+          <AnimatedNumber value={digest.sessions.adherence_pct} suffix="%" style={{ fontSize: 22, fontWeight: '800', color: tc.textPrimary }} duration={700} />
           <Text style={{ fontSize: 11, color: tc.textMuted }}>adherence</Text>
           <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>
             {digest.sessions.distinct_days}/{digest.sessions.planned} planned days
           </Text>
         </View>
         <View style={{ flex: 1 }}>
-          <AnimatedNumber value={digest.volume.total_sets} style={{ fontSize: 22, fontWeight: '800', color: tc.text }} duration={800} />
+          <AnimatedNumber value={digest.volume.total_sets} style={{ fontSize: 22, fontWeight: '800', color: tc.textPrimary }} duration={800} />
           <Text style={{ fontSize: 11, color: tc.textMuted }}>sets</Text>
           <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>
             {deltaLabel(setsDelta)}
@@ -161,7 +161,7 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
         </View>
       </View>
 
-      <Text style={{ fontSize: 13, color: tc.text, marginBottom: 8, lineHeight: 18 }}>
+      <Text style={{ fontSize: 13, color: tc.textPrimary, marginBottom: 8, lineHeight: 18 }}>
         {copy}
       </Text>
 
@@ -169,7 +169,7 @@ export default function WeeklyDigestCard({ authToken, themeName, todayOverride }
         <View style={{ backgroundColor: tc.background, padding: 10, borderRadius: radius.md, marginTop: 4 }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 }}>
             <Ionicons name="trophy" size={13} color={tc.warning ?? '#F0A820'} />
-            <Text style={{ fontSize: 13, fontWeight: '700', color: tc.text }}>PRs this week</Text>
+            <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>PRs this week</Text>
           </View>
           {digest.prs.slice(0, 4).map((pr, i) => (
             <Text key={i} style={{ fontSize: 12, color: tc.textMuted }}>

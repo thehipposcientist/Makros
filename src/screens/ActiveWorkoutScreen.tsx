@@ -28,6 +28,7 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
     },
   });
 })();
+const SOCIAL_WORKOUT_POSTS_ENABLED = false;
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
@@ -653,7 +654,7 @@ function buildWarmupPlan(workout: WorkoutDay): string[] {
 }
 
 const SHARE_LOGO_LIGHT = require('../../assets/images/thallo-logo-black.png');
-const SHARE_LOGO_DARK  = require('../../assets/images/thallo-logo-white.png');
+const SHARE_LOGO_DARK  = require('../../assets/images/thallo-logo-white-transparent-New.png');
 
 export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, onFinish, onCancel, onDislikeExercise }: ActiveWorkoutScreenProps) {
     // Warm-up state
@@ -5590,12 +5591,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   </View>
                 ) : null}
 
-                <View style={styles.summaryPrivacyNote}>
-                  <Ionicons name="lock-closed-outline" size={12} color={themeColors.textMuted} />
-                  <Text style={styles.summaryPrivacyNoteText}>
-                    Friends posts only include workout stats. Calories, macros, and body weight stay private.
-                  </Text>
-                </View>
+                {SOCIAL_WORKOUT_POSTS_ENABLED ? (
+                  <View style={styles.summaryPrivacyNote}>
+                    <Ionicons name="lock-closed-outline" size={12} color={themeColors.textMuted} />
+                    <Text style={styles.summaryPrivacyNoteText}>
+                      Friends posts only include workout stats. Calories, macros, and body weight stay private.
+                    </Text>
+                  </View>
+                ) : null}
 
                 <TouchableOpacity
                   style={[styles.summaryFeedbackBtn, { backgroundColor: templateSaved ? themeColors.success + '22' : themeColors.surfaceRaised, borderWidth: 1, borderColor: templateSaved ? themeColors.success : themeColors.border }]}
@@ -5627,26 +5630,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       </Text>
                     </View>
                   </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.summaryFeedbackBtn, { flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }]}
-                    onPress={() => {
-                      if (!authToken) {
-                        Alert.alert('Sign in', 'You need to be signed in to post to friends.');
-                        return;
-                      }
-                      setShowShareWorkoutModal(true);
-                    }}
-                    disabled={summaryLoading || !workoutPostSummary}
-                    accessibilityRole="button"
-                    accessibilityLabel="Open friends share sheet"
-                    activeOpacity={0.85}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                      <Ionicons name="people-outline" size={15} color={themeColors.textPrimary} />
-                      <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
-                        Friends
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
+                  {SOCIAL_WORKOUT_POSTS_ENABLED ? (
+                    <TouchableOpacity
+                      style={[styles.summaryFeedbackBtn, { flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }]}
+                      onPress={() => {
+                        if (!authToken) {
+                          Alert.alert('Sign in', 'You need to be signed in to post to friends.');
+                          return;
+                        }
+                        setShowShareWorkoutModal(true);
+                      }}
+                      disabled={summaryLoading || !workoutPostSummary}
+                      accessibilityRole="button"
+                      accessibilityLabel="Open friends share sheet"
+                      activeOpacity={0.85}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Ionicons name="people-outline" size={15} color={themeColors.textPrimary} />
+                        <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
+                          Friends
+                        </Text>
+                      </View>
+                    </TouchableOpacity>
+                  ) : null}
                 </View>
                 <TouchableOpacity onPress={dismissSummaryModal} style={styles.summarySkipBtn}>
                   <Text style={styles.summarySkipText}>Close</Text>
@@ -5657,13 +5662,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         </View>
       </Modal>
 
-      <ShareWorkoutModal
-        visible={showShareWorkoutModal}
-        authToken={authToken}
-        onClose={() => setShowShareWorkoutModal(false)}
-        themeName={themeName}
-        workoutSummary={workoutPostSummary}
-      />
+      {SOCIAL_WORKOUT_POSTS_ENABLED ? (
+        <ShareWorkoutModal
+          visible={showShareWorkoutModal}
+          authToken={authToken}
+          onClose={() => setShowShareWorkoutModal(false)}
+          themeName={themeName}
+          workoutSummary={workoutPostSummary}
+        />
+      ) : null}
 
       <Modal visible={coachModalVisible} transparent animationType="slide" onRequestClose={() => setCoachModalVisible(false)}>
         <KeyboardAvoidingView

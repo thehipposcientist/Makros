@@ -10,6 +10,7 @@ import {
   ActivityIndicator,
   Alert,
   LayoutAnimation,
+  Share,
 } from 'react-native';
 import FadeInView from './FadeInView';
 import { Ionicons } from '@expo/vector-icons';
@@ -35,6 +36,8 @@ import {
   type SocialSearchHit,
 } from '../services/api';
 import SocialFeedView from './SocialFeedView';
+
+const SOCIAL_ACTIVITY_FEED_ENABLED = false;
 
 interface Props {
   visible: boolean;
@@ -71,7 +74,9 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
   const [showOptIn, setShowOptIn] = useState(false);
   // Feed is the default tab so users land on activity immediately.
   // Friends tab lazy-renders on first switch (no extra cost on open).
-  const [activeTab, setActiveTab] = useState<'friends' | 'activity'>('activity');
+  const [activeTab, setActiveTab] = useState<'friends' | 'activity'>(
+    SOCIAL_ACTIVITY_FEED_ENABLED ? 'activity' : 'friends',
+  );
   // Bumped to force the activity view to re-fetch (e.g., after share).
   const [feedRefreshKey, setFeedRefreshKey] = useState(0);
   void setFeedRefreshKey;
@@ -300,6 +305,20 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
     }
   }, [authToken]);
 
+  const onShareInvite = useCallback(async () => {
+    if (!me?.username) {
+      Alert.alert('Username unavailable', 'Open Friends again after your profile finishes loading.');
+      return;
+    }
+    try {
+      await Share.share({
+        message: `Add me on Thallo: @${me.username}`,
+      });
+    } catch (e: any) {
+      Alert.alert('Could not share invite', e?.message ?? 'Try again');
+    }
+  }, [me?.username]);
+
   const incoming = list?.pending.filter((p) => p.direction === 'incoming') ?? [];
   const outgoing = list?.pending.filter((p) => p.direction === 'outgoing') ?? [];
   const friends = list?.friends ?? [];
@@ -349,14 +368,16 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
           the friend detail surface is where users go to dig into a
           specific person's training. */}
       <View style={styles.tabStrip}>
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'activity' && styles.tabActive]}
-          onPress={() => setActiveTab('activity')}
-        >
-          <Text style={[styles.tabText, activeTab === 'activity' && styles.tabTextActive]}>
-            Activity
-          </Text>
-        </TouchableOpacity>
+        {SOCIAL_ACTIVITY_FEED_ENABLED ? (
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'activity' && styles.tabActive]}
+            onPress={() => setActiveTab('activity')}
+          >
+            <Text style={[styles.tabText, activeTab === 'activity' && styles.tabTextActive]}>
+              Activity
+            </Text>
+          </TouchableOpacity>
+        ) : null}
         <TouchableOpacity
           style={[styles.tab, activeTab === 'friends' && styles.tabActive]}
           onPress={() => setActiveTab('friends')}
@@ -368,7 +389,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
       </View>
 
       <FadeInView key={activeTab} duration={240} slideDistance={8} style={{ flex: 1 }}>
-      {activeTab === 'activity' ? (
+      {SOCIAL_ACTIVITY_FEED_ENABLED && activeTab === 'activity' ? (
         <SocialFeedView
           authToken={authToken}
           themeName={themeName}
@@ -553,6 +574,24 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
               {/* Add friends */}
               <View style={styles.section}>
                 <Text style={styles.sectionLabel}>ADD FRIENDS</Text>
+                {me?.username ? (
+                  <View style={styles.inviteCard}>
+                    <View style={styles.inviteIcon}>
+                      <Ionicons name="person-add-outline" size={18} color={colors.primary} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.inviteTitle}>Invite by username</Text>
+                      <Text style={styles.inviteHandle}>@{me.username}</Text>
+                      <Text style={styles.inviteBody}>
+                        Friends can search this handle, or you can share it directly.
+                      </Text>
+                    </View>
+                    <TouchableOpacity style={styles.inviteButton} onPress={onShareInvite} activeOpacity={0.78}>
+                      <Ionicons name="share-outline" size={15} color="#000" />
+                      <Text style={styles.btnPrimaryText}>Share</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
                 <View style={[styles.searchRow, searchFocused && { borderColor: colors.primary, borderWidth: 1.5 }]}>
                   <Ionicons name="search" size={16} color={searchFocused ? colors.primary : colors.textMuted} />
                   <TextInput
@@ -796,6 +835,37 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       fontWeight: '700',
       color: colors.textMuted,
       paddingHorizontal: spacing.sm,
+    },
+    inviteCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1,
+      borderRadius: radius.md,
+      padding: spacing.md,
+      marginBottom: spacing.sm,
+    },
+    inviteIcon: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colors.primary + '18',
+    },
+    inviteTitle: { fontSize: 13, fontWeight: '800', color: colors.textPrimary },
+    inviteHandle: { fontSize: 14, fontWeight: '900', color: colors.primary, marginTop: 2 },
+    inviteBody: { fontSize: 11, color: colors.textMuted, lineHeight: 15, marginTop: 2 },
+    inviteButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      backgroundColor: colors.primary,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 8,
+      borderRadius: radius.full,
     },
     searchRow: {
       flexDirection: 'row',

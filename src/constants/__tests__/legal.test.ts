@@ -1,6 +1,6 @@
 // Smoke tests for legal version re-acceptance gating.
 
-import { LEGAL_VERSION, needsLegalReAcceptance, legalAcceptanceLabel } from '../legal';
+import { LEGAL_VERSION, needsLegalReAcceptance, legalAcceptanceLabel } from '../legal.ts';
 
 describe('legal helpers', () => {
   describe('needsLegalReAcceptance', () => {

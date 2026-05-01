@@ -28,6 +28,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutDay, AppThemeName, DailyNutritionPlan } from '../types';
 import { getTheme } from '../constants/theme';
+import { recordTelemetryEvent } from '../services/api';
 
 export { WatchBridge };
 
@@ -54,6 +55,13 @@ async function recordWatchSync(surface: string, ok: boolean, detail?: string): P
     paired: WatchBridge.isAvailable() ? WatchBridge.isPaired() : false,
   };
   try { await AsyncStorage.setItem(WATCH_SYNC_STATUS_KEY, JSON.stringify(snapshot)); } catch {}
+  recordTelemetryEvent('watch_sync_result', {
+    surface,
+    ok,
+    reachable: snapshot.reachable,
+    paired: snapshot.paired,
+    detail,
+  });
 }
 
 export async function getWatchSyncSnapshot(): Promise<WatchSyncSnapshot | null> {

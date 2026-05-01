@@ -285,6 +285,24 @@ def get_or_create_metadata(
         .where(FoodMetadata.classifier_version == CLASSIFIER_VERSION)
     ).first()
     if existing:
+        if (
+            allow_ai
+            and getattr(existing, "collagen_g_per_serving", None) is None
+            and getattr(existing, "probiotic_cfu_billions_per_serving", None) is None
+        ):
+            amounts = estimate_amounts(raw_name)
+            if amounts is not None:
+                from datetime import datetime, timezone
+                existing.collagen_g_per_serving = amounts.get("collagen_g_per_serving")
+                existing.probiotic_cfu_billions_per_serving = amounts.get("probiotic_cfu_billions_per_serving")
+                existing.amount_confidence = amounts.get("amount_confidence") or "none"
+                existing.updated_at = datetime.now(timezone.utc)
+                db.add(existing)
+                try:
+                    db.commit()
+                    db.refresh(existing)
+                except Exception:
+                    db.rollback()
         return existing
 
     cls = classify_food(raw_name)

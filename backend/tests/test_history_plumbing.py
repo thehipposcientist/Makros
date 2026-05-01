@@ -511,6 +511,193 @@ def test_rolling_averages_preserve_distinct_generic_meals() -> None:
     _ok("distinct generic generated meals remain separate")
 
 
+def test_logged_ai_food_micros_are_persisted_for_gut_metrics() -> None:
+    """AI/USDA food-search results arrive with per-item micronutrients.
+    Logging an unmatched custom item should turn those into a FoodNutrition
+    row so gut facts and the Nutrition Score can read them historically."""
+    print("\n[test] logged custom food micros persist into FoodNutrition")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, FoodNutrition, MealItem  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import log_meal_from_plan
+    from app.services.nutrition.gut_health import compute_daily_metrics
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        u = User(email="custom-micros@example.com", username="custommicros", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        d = date.today()
+        log_meal_from_plan(
+            user_id=u.id,
+            meal_date=d,
+            meal_type="snack",
+            source="manual_add",
+            db=s,
+            meal_data={
+                "meal": "AI berry bowl",
+                "items": [{
+                    "name": "AI Berry Fiber Bowl",
+                    "quantity": 1,
+                    "unit": "bowl",
+                    "calories": 420,
+                    "protein": 24,
+                    "carbs": 58,
+                    "fat": 12,
+                    "micronutrients": {
+                        "fiber": 14,
+                        "added_sugar": 3,
+                        "sodium": 180,
+                        "saturated_fat": 2,
+                        "calcium": 220,
+                    },
+                }],
+            },
+        )
+        item = s.exec(select(MealItem)).first()
+        assert item and item.food_id is not None, item
+        nutrition = s.exec(select(FoodNutrition).where(FoodNutrition.food_id == item.food_id)).first()
+        assert nutrition is not None
+        assert nutrition.fiber == 14
+        assert nutrition.added_sugar_g == 3
+        assert (nutrition.extra_nutrients or {}).get("calcium") == 220
+
+        row = compute_daily_metrics(s, user_id=u.id, metric_date=d, allow_ai=False)
+        assert row.fiber_total_g == 14, row.model_dump()
+        assert row.added_sugar_g == 3, row.model_dump()
+        assert row.saturated_fat_g == 2, row.model_dump()
+    _ok("unmatched AI food micros feed daily gut metrics")
+
+
+def test_score_micros_read_unsuffixed_aliases_and_calorie_fallback() -> None:
+    """FoodNutrition.extra_nutrients historically stores both suffixed
+    keys (`calcium_mg`) and plan/search keys (`calcium`). The score builder
+    must read both, even when older MealItems lack serving_grams."""
+    print("\n[test] score micros read alias keys + derive grams from calories")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.enums import FoodCategory, FoodSource, MealSource, MealType
+    from app.models import Food, FoodNutrition, Meal, MealItem, User  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.score_builder import _aggregate_micros
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        u = User(email="micro-alias@example.com", username="microalias", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        food = Food(
+            name="Alias Yogurt",
+            normalized_name="alias yogurt",
+            category=FoodCategory.DAIRY,
+            source=FoodSource.AI,
+        )
+        s.add(food); s.flush()
+        s.add(FoodNutrition(
+            food_id=food.id,
+            reference_grams=100,
+            calories=200,
+            protein=20,
+            carbs=20,
+            fat=5,
+            fiber=8,
+            extra_nutrients={"calcium": 300, "vitamin_d": 4, "vitamin_b12": 1.2},
+        ))
+        meal = Meal(
+            user_id=u.id,
+            meal_date=date.today(),
+            meal_type=MealType.SNACK,
+            name="Alias Yogurt",
+            source=MealSource.LOGGED,
+        )
+        s.add(meal); s.flush()
+        item = MealItem(
+            meal_id=meal.id,
+            food_name="Alias Yogurt",
+            food_id=food.id,
+            quantity=1,
+            unit="serving",
+            serving_grams=None,
+            calories=100,
+            protein_g=10,
+            carbs_g=10,
+            fat_g=2.5,
+        )
+        s.add(item); s.commit()
+
+        micros, food_count, with_micros = _aggregate_micros(s, [item])
+        assert food_count == 1
+        assert with_micros == 1
+        assert micros["fiber_g"] == 4
+        assert micros["calcium_mg"] == 150
+        assert micros["vitamin_d_mcg"] == 2
+        assert micros["vitamin_b12_mcg"] == 0.6
+    _ok("score micronutrients survive alias keys and missing serving_grams")
+
+
+def test_gut_rollup_uses_logged_days_not_empty_metric_placeholders() -> None:
+    """Reading /gut-health creates an empty row for today. That row should
+    not dilute historical averages when no meals were logged today."""
+    print("\n[test] gut rollup ignores empty metric placeholders")
+    from datetime import date, timedelta
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.models import DailyNutritionMetrics, User  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.gut_health import compute_weekly_rollup
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    today = date.today()
+    with Session(engine) as s:
+        u = User(email="gut-rollup@example.com", username="gutrollup", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        s.add(DailyNutritionMetrics(
+            user_id=u.id,
+            metric_date=today - timedelta(days=1),
+            calories_total=2000,
+            fiber_total_g=28,
+            fiber_per_1000_kcal=14,
+            added_sugar_g=10,
+            plant_protein_g=30,
+            animal_protein_g=90,
+            item_count=4,
+            plant_slugs=["oat", "blueberry"],
+            processing_counts={"minimally_processed": 4},
+        ))
+        s.add(DailyNutritionMetrics(
+            user_id=u.id,
+            metric_date=today,
+            calories_total=0,
+            fiber_total_g=0,
+            item_count=0,
+            processing_counts={},
+        ))
+        s.commit()
+
+        rollup = compute_weekly_rollup(s, user_id=u.id, end_date=today, days=2)
+        assert rollup["days_with_data"] == 1, rollup
+        assert rollup["avg_fiber_g"] == 28, rollup
+        assert rollup["avg_calories"] == 2000, rollup
+        assert rollup["avg_plant_protein_g"] == 30, rollup
+    _ok("empty today row no longer dilutes gut averages")
+
+
 def test_hydration_get_reads_requested_date() -> None:
     """Past-day hydration should be readable by explicit log_date, not
     hard-wired to today's row."""
@@ -559,6 +746,9 @@ cases = [
     test_log_meal_from_plan_collapses_existing_generated_duplicates,
     test_rolling_averages_ignore_duplicate_generated_plan_rows,
     test_rolling_averages_preserve_distinct_generic_meals,
+    test_logged_ai_food_micros_are_persisted_for_gut_metrics,
+    test_score_micros_read_unsuffixed_aliases_and_calorie_fallback,
+    test_gut_rollup_uses_logged_days_not_empty_metric_placeholders,
     test_hydration_get_reads_requested_date,
 ]
 

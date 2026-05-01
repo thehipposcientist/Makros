@@ -14,6 +14,15 @@ export async function loadWeightHistory(): Promise<WeightEntry[]> {
   }
 }
 
+export async function loadWeightEntries(): Promise<Array<{ date: string; weight_lbs: number; source?: string }>> {
+  const history = await loadWeightHistory();
+  return history.map(entry => ({
+    date: entry.date,
+    weight_lbs: entry.weightLbs,
+    source: entry.source,
+  }));
+}
+
 export async function saveWeightEntry(
   weightLbs: number,
   source: WeightEntry['source'] = 'manual',

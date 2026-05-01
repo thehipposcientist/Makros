@@ -175,7 +175,7 @@ def build_weekly_digest(user_id: int, *, today: date | None = None, db: Session)
     nutrition_this: dict = {}
     nutrition_prior: dict = {}
     try:
-        nutrition_this = get_rolling_averages(user_id, window=7, db=db)
+        nutrition_this = get_rolling_averages(user_id, window=7, db=db, end_date=week_end)
     except Exception:
         nutrition_this = {}
     # For the prior 7-day window, get_rolling_averages always uses
@@ -183,7 +183,7 @@ def build_weekly_digest(user_id: int, *, today: date | None = None, db: Session)
     # 14 days ago". We approximate the delta by asking for window=14 and
     # subtracting — good enough for a digest tile.
     try:
-        two_week = get_rolling_averages(user_id, window=14, db=db)
+        two_week = get_rolling_averages(user_id, window=14, db=db, end_date=week_end)
         # Back out the prior 7 by subtracting totals-for-7 from totals-for-14.
         # nutrition_this["avg_calories"] is averaged over 7 days (sum/7).
         if nutrition_this and two_week:

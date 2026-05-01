@@ -88,7 +88,7 @@ const GAP_NUTRIENTS: Set<string> = new Set([
   'potassium', 'vitaminC',
 ]);
 
-function warningLabel(key: string, direction: 'min' | 'max', severity: 'critical' | 'notable'): string {
+function warningLabel(key: string, direction: 'min' | 'max', severity: 'critical' | 'notable' | 'info'): string {
   if (direction === 'max') {
     // Sugar / sodium / sat fat etc. — the user is OVER the limit.
     return severity === 'critical' ? 'LIMIT EXCEEDED' : 'HIGH INTAKE';
