@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated, Easing, Linking } from 'react-native';
+import { View, Text, Modal, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated, Easing, Linking, TextInput } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -306,7 +306,7 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
   }
 }
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName } from '../src/services/api';
 import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday } from '../src/utils/mealTracker';
 import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
 import AuthScreen from '../src/screens/AuthScreen';
@@ -325,6 +325,7 @@ import { LEGAL_VERSION, SUPPORT_EMAIL } from '../src/constants/legal';
 import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, todayKey, isAppleHealthEnabled, setAppleHealthEnabled } from '../src/utils/workoutHistory';
 import { workoutSessionToLoggedPayload } from '../src/utils/workoutLogPayload';
 import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
+import { effectiveAge } from '../src/utils/age';
 
 /** Stamp startWeightLbs + goalStartedAt when a goal is first set or changes. */
 function stampGoalStart(profile: UserProfile, previous: UserProfile | null): UserProfile {
@@ -893,10 +894,12 @@ export default function Index() {
     const hasRequiredFields = !!(
       ps && ps.weightLbs && ps.heightFeet != null && ps.heightInches != null && ps.age && ps.gender
     );
-    if (hasRequiredFields) {
+    if (remote && hasRequiredFields) {
       syncOnboarding(token, profile).catch((e) =>
         console.warn('[loadProfile] backend sync failed (non-fatal)', e?.message ?? e),
       );
+    } else if (!remote) {
+      console.warn('[loadProfile] using local cached profile; skipping backend sync so cache cannot overwrite DB profile facts');
     } else {
       console.warn('[loadProfile] local profile missing required fields, skipping sync', {
         weightLbs: ps?.weightLbs, heightFeet: ps?.heightFeet, heightInches: ps?.heightInches,
@@ -1692,10 +1695,6 @@ export default function Index() {
             setShowAccount(false);
             setTimeout(() => setShowTutorial(true), 200);
           }}
-          onOpenSettings={() => {
-            setShowAccount(false);
-            setTimeout(() => setShowSettings(true), 180);
-          }}
         />
       )}
 
@@ -2076,16 +2075,42 @@ function AccountInfoModal({
   const [showTierInfo, setShowTierInfo] = useState(false);
   const [showLegal, setShowLegal] = useState(false);
   const [accountBusy, setAccountBusy] = useState<string | null>(null);
+  const [nameFirst, setNameFirst] = useState(profile.firstName ?? '');
+  const [nameLast, setNameLast] = useState(profile.lastName ?? '');
+  const [nameStatus, setNameStatus] = useState('');
   const [watchStatus, setWatchStatus] = useState<string>('No sync recorded yet');
   const showHealthToggle = Platform.OS === 'ios';
-  const physicalStats = (profile as Partial<UserProfile>).physicalStats;
-  const goalValue = typeof profile.goal === 'string' && profile.goal
-    ? profile.goal.replace(/_/g, ' ')
+  const cleanProfileText = (value: unknown): string => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    return text && text.toLowerCase() !== 'undefined' && text.toLowerCase() !== 'null' ? text : '';
+  };
+  const profileNumberValue = (value: unknown): number | null => {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+  };
+  const formatProfilePounds = (value: number): string =>
+    Number.isInteger(value) ? `${value}` : value.toFixed(1);
+  const physicalStats = ((profile as Partial<UserProfile>).physicalStats ?? {}) as any;
+  const goalDetails = ((profile as Partial<UserProfile>).goalDetails ?? {}) as any;
+  const goalText = cleanProfileText(profile.goal);
+  const goalValue = goalText
+    ? goalText.replace(/_/g, ' ')
     : '—';
-  const weightValue = physicalStats?.weightLbs != null
-    ? `${physicalStats.weightLbs} lbs`
+  const weightLbs = profileNumberValue(physicalStats.weightLbs ?? physicalStats.weight_lbs);
+  const targetWeightLbs = profileNumberValue(goalDetails.targetWeightLbs ?? goalDetails.target_weight_lbs);
+  const birthdate = cleanProfileText(physicalStats.birthdate ?? physicalStats.birth_date);
+  const age = effectiveAge({ birthdate: birthdate || null, age: profileNumberValue(physicalStats.age) });
+  const weightValue = weightLbs != null && weightLbs > 0
+    ? `${formatProfilePounds(weightLbs)} lbs`
     : '—';
-  const ageValue = physicalStats?.age != null ? String(physicalStats.age) : '—';
+  const targetWeightValue = targetWeightLbs != null && targetWeightLbs > 0
+    ? `${formatProfilePounds(targetWeightLbs)} lbs`
+    : '—';
+  const ageValue = age != null && age > 0 ? String(Math.round(age)) : '—';
 
   useEffect(() => {
     getMe(token)
@@ -2098,6 +2123,8 @@ function AccountInfoModal({
           emailVerified: !!data.email_verified,
           legalAccepted: !!data.legal_accepted,
         });
+        setNameFirst(data.first_name ?? profile.firstName ?? '');
+        setNameLast(data.last_name ?? profile.lastName ?? '');
         setHasRecoveryQuestion(!!data.has_recovery_question);
       })
       .catch(() => setAccountData(null))
@@ -2129,6 +2156,29 @@ function AccountInfoModal({
       <Text style={am.rowValue}>{value}</Text>
     </View>
   );
+
+  const handleSaveName = async () => {
+    const firstName = nameFirst.trim();
+    const lastName = nameLast.trim();
+    if (firstName === (profile.firstName ?? '') && lastName === (profile.lastName ?? '')) return;
+    setAccountBusy('name');
+    setNameStatus('');
+    try {
+      const res = await updateName(token, firstName, lastName);
+      const nextFirst = res.first_name ?? undefined;
+      const nextLast = res.last_name ?? undefined;
+      const updated = { ...profile, firstName: nextFirst, lastName: nextLast };
+      setUserProfile(updated);
+      setAccountData(prev => prev ? { ...prev, firstName: nextFirst ?? null, lastName: nextLast ?? null } : prev);
+      await AsyncStorage.setItem('userProfile', JSON.stringify(updated));
+      setNameStatus('Saved');
+      setTimeout(() => setNameStatus(''), 2000);
+    } catch (e: any) {
+      Alert.alert('Name not saved', e?.message ?? 'Try again.');
+    } finally {
+      setAccountBusy(null);
+    }
+  };
 
   const ActionRow = ({
     label, desc, onPress, tone = 'default', busy = false,
@@ -2246,12 +2296,45 @@ function AccountInfoModal({
               legal version) show a placeholder until getMe resolves —
               avoids the "blank modal then everything pops in" delay. */}
           <View style={am.infoSection}>
-            {((profile.firstName || profile.lastName) || (accountData?.firstName || accountData?.lastName)) && (
-              <Row
-                label="Name"
-                value={`${accountData?.firstName ?? profile.firstName ?? ''} ${accountData?.lastName ?? profile.lastName ?? ''}`.trim()}
-              />
-            )}
+            <View style={am.nameBlock}>
+              <Text style={am.rowLabel}>Name</Text>
+              <View style={am.nameInputRow}>
+                <TextInput
+                  style={am.nameInput}
+                  value={nameFirst}
+                  onChangeText={(t) => { setNameFirst(t); setNameStatus(''); }}
+                  onBlur={handleSaveName}
+                  placeholder="First name"
+                  placeholderTextColor={tc.textMuted}
+                  autoCapitalize="words"
+                  returnKeyType="next"
+                />
+                <TextInput
+                  style={am.nameInput}
+                  value={nameLast}
+                  onChangeText={(t) => { setNameLast(t); setNameStatus(''); }}
+                  onBlur={handleSaveName}
+                  placeholder="Last name"
+                  placeholderTextColor={tc.textMuted}
+                  autoCapitalize="words"
+                  returnKeyType="done"
+                />
+              </View>
+              <View style={am.nameFooter}>
+                <Text style={[am.nameStatus, nameStatus ? { color: tc.success } : null]}>
+                  {nameStatus || 'Used for greetings and profile display.'}
+                </Text>
+                <TouchableOpacity
+                  onPress={handleSaveName}
+                  disabled={accountBusy === 'name'}
+                  style={[am.nameSaveBtn, { opacity: accountBusy === 'name' ? 0.6 : 1 }]}
+                >
+                  {accountBusy === 'name'
+                    ? <ActivityIndicator size="small" color={tc.background} />
+                    : <Text style={am.nameSaveText}>Save</Text>}
+                </TouchableOpacity>
+              </View>
+            </View>
             <Row label="Email"        value={accountData?.email ?? (loading ? 'Loading…' : '—')} />
             <Row label="Username"     value={accountData?.username ?? (loading ? 'Loading…' : '—')} />
             {!betaFullAccess && (
@@ -2260,6 +2343,7 @@ function AccountInfoModal({
             <Row label="Legal Version" value={accountData ? (accountData.legalAccepted ? LEGAL_VERSION : 'Needs review') : (loading ? 'Loading…' : '—')} />
             <Row label="Goal"   value={goalValue} />
             <Row label="Weight" value={weightValue} />
+            <Row label="Goal Weight" value={targetWeightValue} />
             <Row label="Age"    value={ageValue} />
             {!loading && !accountData && (
               <Text style={am.errorText}>Could not load full account info — tap retry by reopening.</Text>
@@ -2563,6 +2647,37 @@ function createAmStyles(c: ReturnType<typeof getTheme>['colors']) { return Style
   },
   rowLabel: { fontSize: 14, color: c.textSecondary, fontWeight: '500' },
   rowValue: { fontSize: 14, color: c.textPrimary,   fontWeight: '600', textTransform: 'capitalize' },
+  nameBlock: {
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: c.border,
+    gap: 10,
+  },
+  nameInputRow: { flexDirection: 'row', gap: 10 },
+  nameInput: {
+    flex: 1,
+    minHeight: 42,
+    paddingHorizontal: 12,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: c.border,
+    backgroundColor: c.surface,
+    color: c.textPrimary,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  nameFooter: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  nameStatus: { flex: 1, fontSize: 11, color: c.textMuted, lineHeight: 15 },
+  nameSaveBtn: {
+    minWidth: 64,
+    minHeight: 34,
+    paddingHorizontal: 12,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: c.primary,
+  },
+  nameSaveText: { fontSize: 12, fontWeight: '800', color: c.background },
 
   errorText: { fontSize: 13, color: c.error, padding: 16 },
 

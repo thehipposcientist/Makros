@@ -169,9 +169,14 @@ def sync_onboarding(
         select(UserProfile).where(UserProfile.user_id == current_user.id)
     ).first()
     # Age is derived from birthdate when present so it stays accurate
-    # years later. Fall back to the explicit `age` int only when the
-    # client couldn't collect a birthday (older onboarding flow).
-    derived_age = _derive_age(body.profile.birthdate) or body.profile.age
+    # years later. If an older client/local cache syncs without birthdate,
+    # preserve the existing DB birthday instead of wiping it.
+    incoming_birthdate = (
+        body.profile.birthdate
+        if body.profile.birthdate is not None
+        else (profile.birthdate if profile else None)
+    )
+    derived_age = _derive_age(incoming_birthdate) or body.profile.age
     if derived_age is None:
         raise HTTPException(status_code=422, detail="birthdate or age required")
     if profile:
@@ -179,7 +184,7 @@ def sync_onboarding(
         profile.height_feet   = body.profile.height_feet
         profile.height_inches = body.profile.height_inches
         profile.age           = derived_age
-        profile.birthdate     = body.profile.birthdate
+        profile.birthdate     = incoming_birthdate
         profile.gender        = body.profile.gender
         profile.updated_at    = now
     else:
@@ -189,7 +194,7 @@ def sync_onboarding(
             height_feet=body.profile.height_feet,
             height_inches=body.profile.height_inches,
             age=derived_age,
-            birthdate=body.profile.birthdate,
+            birthdate=incoming_birthdate,
             gender=body.profile.gender,
         )
     session.add(profile)

@@ -2,6 +2,7 @@ import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { goalCategory } from '../constants/goalConfig';
+import { effectiveAge } from '../utils/age';
 
 const LOCAL_BACKEND_IP = '192.168.1.246'; // your dev machine's LAN IP
 
@@ -304,6 +305,8 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
       headers: { Authorization: `Bearer ${token}` },
     });
     const goalTrack = data.goal.goal_track ?? data.goal.goal_type;
+    const birthdate = data.profile.birthdate ?? undefined;
+    const age = effectiveAge({ birthdate, age: data.profile.age });
     // Map backend snake_case → frontend UserProfile shape
     return {
       firstName:  data.first_name ?? undefined,
@@ -319,8 +322,8 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
         weightLbs:    data.profile.weight_lbs,
         heightFeet:   data.profile.height_feet,
         heightInches: data.profile.height_inches,
-        age:          data.profile.age,
-        birthdate:    data.profile.birthdate ?? undefined,
+        age:          age ?? data.profile.age,
+        birthdate:    birthdate,
         gender:       data.profile.gender,
       },
       daysPerWeek:            data.preferences.days_per_week,
@@ -1129,8 +1132,8 @@ export async function updatePhysicalStats(
   });
 }
 
-export async function updateName(token: string, firstName: string, lastName: string) {
-  return request('/profile/name', {
+export async function updateName(token: string, firstName: string, lastName: string): Promise<{ first_name: string | null; last_name: string | null }> {
+  return request<{ first_name: string | null; last_name: string | null }>('/profile/name', {
     method: 'PATCH',
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({ first_name: firstName, last_name: lastName }),

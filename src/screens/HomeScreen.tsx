@@ -96,6 +96,7 @@ import { computeNutritionScore } from '../utils/nutritionScore';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { getActiveWatchSessionId, setActiveWatchSessionId } from '../utils/activeWatchSession';
 import { dynamicCompactTextProps, dynamicTextProps } from '../utils/dynamicType';
+import { effectiveAge } from '../utils/age';
 import {
   FREE_MEAL_ROUTINE_LIMIT,
   FREE_SAVED_MEAL_LIMIT,
@@ -1789,9 +1790,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showFriends, setShowFriends] = useState(false);
   const [showGoalEditor, setShowGoalEditor] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsFirstName, setSettingsFirstName] = useState('');
-  const [settingsLastName, setSettingsLastName] = useState('');
-  const [nameSaved, setNameSaved] = useState(false);
   const [showGearScreen, setShowGearScreen] = useState(false);
   const [showReadiness, setShowReadiness] = useState(false);
   const [readinessBadge, setReadinessBadge] = useState<{ score: number; label: string } | null>(null);
@@ -8088,18 +8086,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {/* ── You tab ─────────────────────────────────────────────────── */}
       {activeTab === 'you' && (<ErrorBoundary>{(() => {
         const ps = userProfile.physicalStats;
-        const cleanText = (value: string | null | undefined): string => {
-          const text = (value ?? '').trim();
+        const cleanText = (value: unknown): string => {
+          const text = typeof value === 'string' ? value.trim() : '';
           return text && text.toLowerCase() !== 'undefined' && text.toLowerCase() !== 'null' ? text : '';
         };
-        const validNumber = (value: unknown): value is number =>
-          typeof value === 'number' && Number.isFinite(value);
+        const numberValue = (value: unknown): number | null => {
+          if (typeof value === 'number' && Number.isFinite(value)) return value;
+          if (typeof value === 'string' && value.trim()) {
+            const parsed = Number(value);
+            return Number.isFinite(parsed) ? parsed : null;
+          }
+          return null;
+        };
+        const formatPounds = (value: number): string =>
+          Number.isInteger(value) ? `${value}` : value.toFixed(1);
+        const stats = ps as any;
+        const details = (userProfile.goalDetails ?? {}) as any;
+        const weightLbs = numberValue(stats?.weightLbs ?? stats?.weight_lbs);
+        const heightFeet = numberValue(stats?.heightFeet ?? stats?.height_feet);
+        const heightInches = numberValue(stats?.heightInches ?? stats?.height_inches);
+        const birthdate = cleanText(stats?.birthdate ?? stats?.birth_date);
+        const age = effectiveAge({ birthdate: birthdate || null, age: numberValue(stats?.age) });
+        const targetWeightLbs = numberValue(details?.targetWeightLbs ?? details?.target_weight_lbs);
+        const profileGoalLabel = cleanText(goalLabel) || cleanText(userProfile.goal);
         const displayName = cleanText(userProfile.firstName) || cleanText(username) || 'Your Profile';
         const avatarLetter = (cleanText(userProfile.firstName) || cleanText(username) || cleanText(userProfile.goal) || 'U')[0].toUpperCase();
         const metaParts = [
-          validNumber(ps?.weightLbs) && ps.weightLbs > 0 ? `${ps.weightLbs} lb` : null,
-          validNumber(ps?.heightFeet) && validNumber(ps?.heightInches) ? `${ps.heightFeet}'${ps.heightInches}"` : null,
-          validNumber(ps?.age) && ps.age > 0 ? `age ${ps.age}` : null,
+          profileGoalLabel || null,
+          weightLbs != null && weightLbs > 0 ? `${formatPounds(weightLbs)} lb` : null,
+          targetWeightLbs != null && targetWeightLbs > 0 ? `goal ${formatPounds(targetWeightLbs)} lb` : null,
+          heightFeet != null && heightInches != null ? `${Math.round(heightFeet)}'${Math.round(heightInches)}"` : null,
+          age != null && age > 0 ? `age ${Math.round(age)}` : null,
         ].filter((part): part is string => !!part);
         return (
         <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
@@ -8114,16 +8131,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <Text style={[styles.profileHeroName, { color: themeColors.textPrimary }]}>
                 {displayName}
               </Text>
-              <Text style={[styles.profileHeroMeta, { color: themeColors.textSecondary }]}>
-                {metaParts.length > 0 ? metaParts.join('  ·  ') : 'Profile details incomplete'}
-              </Text>
+              {metaParts.length > 0 ? (
+                <Text style={[styles.profileHeroMeta, { color: themeColors.textSecondary }]}>
+                  {metaParts.join('  ·  ')}
+                </Text>
+              ) : (
+                <TouchableOpacity
+                  onPress={onEditBody}
+                  activeOpacity={0.8}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 2, alignSelf: 'flex-start' }}
+                >
+                  <Ionicons name="create-outline" size={13} color={themeColors.primary} />
+                  <Text style={[styles.profileHeroMeta, { color: themeColors.primary, fontWeight: '800' }]}>
+                    Complete profile
+                  </Text>
+                </TouchableOpacity>
+              )}
             </View>
             <TouchableOpacity
-              onPress={() => {
-                setSettingsFirstName(userProfile.firstName ?? '');
-                setSettingsLastName(userProfile.lastName ?? '');
-                setShowSettings(true);
-              }}
+              onPress={() => setShowSettings(true)}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               style={{ padding: 4 }}
             >
@@ -8145,7 +8171,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <View style={[styles.profileStatTile, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
               <Text style={[styles.profileStatLabel, { color: themeColors.textMuted }]}>WEIGHT</Text>
               <Text style={[styles.profileStatValue, { color: themeColors.textPrimary }]}>
-                {ps?.weightLbs ?? '—'}
+                {weightLbs != null && weightLbs > 0 ? formatPounds(weightLbs) : '—'}
               </Text>
               <Text style={[styles.profileStatSub, { color: themeColors.textMuted }]}>lb</Text>
             </View>
@@ -8155,7 +8181,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {userProfile.goalDetails?.pace ?? '—'}
               </Text>
               <Text style={[styles.profileStatSub, { color: themeColors.textMuted }]}>
-                {userProfile.goalDetails?.targetWeightLbs ? `→ ${userProfile.goalDetails.targetWeightLbs} lb` : ''}
+                {targetWeightLbs != null && targetWeightLbs > 0 ? `→ ${formatPounds(targetWeightLbs)} lb` : ''}
               </Text>
             </View>
           </View>
@@ -8186,6 +8212,28 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <View style={{ flex: 1, marginLeft: 10 }}>
                 <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Body & Stats</Text>
                 <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Weight, height, age, biological sex</Text>
+              </View>
+              <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
+            </TouchableOpacity>
+            {/* Settings & reminders */}
+            <TouchableOpacity style={styles.profileMenuItem} onPress={() => setShowSettings(true)}>
+              <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
+                <Ionicons name="notifications-outline" size={18} color={themeColors.primary} />
+              </View>
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Settings & Reminders</Text>
+                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Theme, workout reminders, meal reminders, and device feedback</Text>
+              </View>
+              <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
+            </TouchableOpacity>
+            {/* Account */}
+            <TouchableOpacity style={styles.profileMenuItem} onPress={onViewAccount}>
+              <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
+                <Ionicons name="id-card-outline" size={18} color={themeColors.primary} />
+              </View>
+              <View style={{ flex: 1, marginLeft: 10 }}>
+                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Account</Text>
+                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Name, email, password recovery, legal, and support</Text>
               </View>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
@@ -10350,56 +10398,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       <Ionicons name="lock-closed-outline" size={18} color={themeColors.textMuted} />
                     </View>
                   )}
-                </View>
-
-                {/* Name */}
-                <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>NAME</Text>
-                <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border, padding: 12, gap: 8 }]}>
-                  <View style={{ flexDirection: 'row', gap: 10 }}>
-                    <TextInput
-                      style={{ flex: 1, height: 42, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: themeColors.border, backgroundColor: themeColors.surfaceRaised, color: themeColors.textPrimary, fontSize: 14 }}
-                      value={settingsFirstName}
-                      onChangeText={(t) => { setSettingsFirstName(t); setNameSaved(false); }}
-                      placeholder="First name"
-                      placeholderTextColor={themeColors.textMuted}
-                      autoCapitalize="words"
-                      returnKeyType="next"
-                      onBlur={async () => {
-                        const fn = settingsFirstName.trim();
-                        const ln = settingsLastName.trim();
-                        if (fn !== (userProfile.firstName ?? '') || ln !== (userProfile.lastName ?? '')) {
-                          const { updateName } = await import('../services/api');
-                          await updateName(authToken, fn, ln).catch(() => {});
-                          onProfileUpdate?.({ firstName: fn || undefined, lastName: ln || undefined } as any, true);
-                          setNameSaved(true);
-                          setTimeout(() => setNameSaved(false), 2000);
-                        }
-                      }}
-                    />
-                    <TextInput
-                      style={{ flex: 1, height: 42, paddingHorizontal: 12, borderRadius: 8, borderWidth: 1, borderColor: themeColors.border, backgroundColor: themeColors.surfaceRaised, color: themeColors.textPrimary, fontSize: 14 }}
-                      value={settingsLastName}
-                      onChangeText={(t) => { setSettingsLastName(t); setNameSaved(false); }}
-                      placeholder="Last name"
-                      placeholderTextColor={themeColors.textMuted}
-                      autoCapitalize="words"
-                      returnKeyType="done"
-                      onBlur={async () => {
-                        const fn = settingsFirstName.trim();
-                        const ln = settingsLastName.trim();
-                        if (fn !== (userProfile.firstName ?? '') || ln !== (userProfile.lastName ?? '')) {
-                          const { updateName } = await import('../services/api');
-                          await updateName(authToken, fn, ln).catch(() => {});
-                          onProfileUpdate?.({ firstName: fn || undefined, lastName: ln || undefined } as any, true);
-                          setNameSaved(true);
-                          setTimeout(() => setNameSaved(false), 2000);
-                        }
-                      }}
-                    />
-                  </View>
-                  <Text style={{ fontSize: 11, color: nameSaved ? themeColors.success : themeColors.textMuted }}>
-                    {nameSaved ? 'Saved' : 'Used to personalize your daily motto and greetings'}
-                  </Text>
                 </View>
 
                 {/* Account + Sign out */}

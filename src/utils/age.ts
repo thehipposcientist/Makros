@@ -29,11 +29,16 @@ export function deriveAge(birthdate: string | null | undefined, today: Date = ne
  *  integer age. Prefers the derived value from `birthdate` so multi-year
  *  users automatically see accurate HR zones / TDEE. Falls back to the
  *  cached `age` int for profiles that haven't been backfilled yet. */
-export function effectiveAge(p: { birthdate?: string | null; age?: number | null } | null | undefined): number | null {
+export function effectiveAge(p: { birthdate?: string | null; age?: number | string | null } | null | undefined): number | null {
   if (!p) return null;
   const fromBirth = deriveAge(p.birthdate ?? null);
   if (fromBirth != null) return fromBirth;
-  return typeof p.age === 'number' ? p.age : null;
+  if (typeof p.age === 'number' && Number.isFinite(p.age)) return p.age;
+  if (typeof p.age === 'string' && p.age.trim()) {
+    const parsed = Number(p.age);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
 }
 
 /** Validate a user-entered birthdate. Must be a real date, user must be
