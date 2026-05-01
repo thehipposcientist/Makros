@@ -50,7 +50,7 @@ export type SportSubtype = 'basketball' | 'soccer' | 'tennis' | 'golf' | 'climbi
 export type RecoverySubtype = 'sauna' | 'ice_bath' | 'walk' | 'sleep' | 'meditation' | 'general';
 export type ActivityIntensity = 'easy' | 'moderate' | 'hard';
 export type CardioStyle = 'recovery' | 'easy' | 'steady' | 'intervals' | 'class';
-export type ActivitySource = 'manual' | 'peloton' | 'apple_health' | 'garmin';
+export type ActivitySource = 'manual' | 'peloton' | 'apple_health' | 'garmin' | 'live_tracker';
 
 export interface ManualActivity {
   id: string;
@@ -684,6 +684,11 @@ export interface SessionExercise {
   /** Whether this is a compound (multi-joint) movement. Propagated from
    *  the planner's exercise library — used for 1RM estimation eligibility. */
   isCompound?: boolean | null;
+  /** Planner slot metadata used by active-session UI surfaces such as
+   *  core-circuit grouping. */
+  slotRole?: string | null;
+  slotLabel?: string | null;
+  prescriptionType?: string | null;
   /** Where targetWeightLbs came from. 'default' means the planner
    *  fell through to the dumb category-default table — ActiveWorkoutScreen
    *  refreshes those with the AI helper before showing the user. */

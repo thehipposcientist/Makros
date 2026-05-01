@@ -1556,6 +1556,7 @@ export default function Index() {
           visible
           profile={userProfile}
           themeName={userProfile.themePreference}
+          authToken={authToken}
           onClose={() => setShowSettings(false)}
           onProfileUpdate={(changes, skipRegen) => {
             // Reuse the existing profile-update path so unit + theme

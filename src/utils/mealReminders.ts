@@ -64,6 +64,14 @@ async function requestPermissions(): Promise<boolean> {
 export async function scheduleMealReminder(settings: MealReminderSettings): Promise<void> {
   const granted = await requestPermissions();
   if (!granted) return;
+  // Suppress when the configured fire-time falls inside the user's quiet
+  // hours window. The reminder is silently skipped — better than waking
+  // users up just outside DND. They can resolve in Settings.
+  const { hourIsQuietNow } = await import('./notificationPrefs');
+  if (await hourIsQuietNow(settings.hour)) {
+    await cancelMealReminder();
+    return;
+  }
   await cancelMealReminder();
 
   const id = await Notifications.scheduleNotificationAsync({

@@ -533,6 +533,13 @@ class PlanWeek(SQLModel, table=True):
     goal_pace: str | None = Field(default=None)       # conservative | moderate | aggressive
     session_minutes: int | None = Field(default=None)  # session duration at generation time
     status: str = Field(default="active")  # active | completed | abandoned
+    # Travel / illness pause. When set to a future date, auto-renew, auto-skip,
+    # and reminder scheduling all suspend until pause expires. Null means the
+    # plan is running normally. Past dates are treated as not-paused (callers
+    # check `is_paused()` rather than testing the column directly).
+    paused_until: date | None = Field(default=None)
+    paused_at: datetime | None = Field(default=None)
+    pause_reason: str | None = Field(default=None)  # "travel" | "illness" | "other"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = Field(default=None)
     abandoned_at: datetime | None = Field(default=None)

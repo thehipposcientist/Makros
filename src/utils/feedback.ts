@@ -227,15 +227,21 @@ export async function playRestTimerDone() {
 
 // ── Background audio keepalive ──────────────────────────────────
 // iOS suspends the JS runtime when no audio session is active, so a
-// setInterval-based rest countdown stops firing when the user switches
-// away. Playing a 0-volume silent loop during the rest period keeps
-// UIBackgroundModes:audio alive — the interval then fires at t=0 and
-// calls playRestTimerDone() mixed with music (no ducking).
+// setInterval-based rest countdown can stop firing when the user
+// switches away. A 0-volume loop keeps it alive, but starting any audio
+// session can steal focus from Spotify/podcasts on some devices. Keep
+// that path opt-in via Background Alert Sound; the default relies on
+// local notifications and stays music-friendly when sets are logged.
 
 let _keepaliveSound: import('expo-av').Audio.Sound | null = null;
 
 export async function startRestTimerKeepalive(): Promise<void> {
   try {
+    const s = await loadSettings();
+    if (!s.soundsEnabled || !s.restNotificationSoundEnabled) {
+      await stopRestTimerKeepalive();
+      return;
+    }
     const Audio = await getAudio();
     if (!Audio) return;
     await ensureAudioSession(Audio);

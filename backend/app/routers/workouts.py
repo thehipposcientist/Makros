@@ -88,6 +88,9 @@ class WorkoutCompleteRequest(BaseModel):
     intensity: int | None = None            # 1..5
     soreness_areas: list[str] | None = None  # ["lower_back", "knees"]
     feedback_notes: str | None = None
+    # Per-session gear attribution. None = legacy keyword auto-match,
+    # [] = explicit "no gear used today", [ids] = only credit these.
+    gear_ids: list[int] | None = None
 
 # ─── Response models ──────────────────────────────────────────────────────────
 
@@ -1658,23 +1661,41 @@ def mark_workout_complete(
             logger.info(f"[workouts/complete] PR detection failed (non-fatal): {e}")
             prs = []
 
-    # ── Gear mileage auto-accumulation ──
-    # For each active gear item with auto_track_keywords, check if the
-    # workout focus or any exercise name contains a matching keyword.
-    # Distance from exercises is accumulated (actual_distance fields).
+    # ── Gear mileage / session accumulation ──
+    # Three modes, in priority order:
+    #   1. body.gear_ids = []         → user explicitly said "no gear today",
+    #                                    skip both modes — credit nothing
+    #   2. body.gear_ids = [1,3,...]  → user picked specific gear (per-session
+    #                                    disambiguation prompt). Credit ONLY
+    #                                    these IDs. Bypasses keyword match
+    #                                    entirely so two pairs of running
+    #                                    shoes both keyworded with "run"
+    #                                    don't double-count
+    #   3. body.gear_ids = None        → legacy keyword auto-match (default)
     # Best-effort: never blocks a successful completion.
     try:
         from app.models import GearItem
-        gear_items = db.exec(
-            select(GearItem)
-            .where(GearItem.user_id == current_user.id)
-            .where(GearItem.is_active == True)
-        ).all()
+        from sqlmodel import col
+
+        explicit_ids = body.gear_ids
+        if explicit_ids is not None and len(explicit_ids) == 0:
+            gear_items = []
+        elif explicit_ids:
+            gear_items = db.exec(
+                select(GearItem)
+                .where(GearItem.user_id == current_user.id)
+                .where(GearItem.is_active == True)
+                .where(col(GearItem.id).in_(explicit_ids))
+            ).all()
+        else:
+            gear_items = db.exec(
+                select(GearItem)
+                .where(GearItem.user_id == current_user.id)
+                .where(GearItem.is_active == True)
+            ).all()
         if gear_items:
             focus_lower = (body.focus_label or "").lower()
             exercise_names_lower = [ep.name.lower() for ep in (body.exercises or [])]
-            # Prefer structured set distance when present. Manual/imported
-            # cardio often arrives as session-level distance only.
             total_set_distance_miles = 0.0
             for ep in (body.exercises or []):
                 for s in ep.sets:
@@ -1685,17 +1706,21 @@ def mark_workout_complete(
                 if total_set_distance_miles > 0
                 else float(body.distance_miles or 0.0)
             )
+            now = datetime.now(timezone.utc)
             for gear in gear_items:
-                keywords = [kw.lower() for kw in (gear.auto_track_keywords or [])]
-                if not keywords:
-                    continue
-                matched = any(
-                    kw in focus_lower or any(kw in en for en in exercise_names_lower)
-                    for kw in keywords
-                )
+                # Explicit-pick path: skip the keyword guard entirely. The
+                # user told us this gear was used; trust them.
+                if explicit_ids:
+                    matched = True
+                else:
+                    keywords = [kw.lower() for kw in (gear.auto_track_keywords or [])]
+                    if not keywords:
+                        continue
+                    matched = any(
+                        kw in focus_lower or any(kw in en for en in exercise_names_lower)
+                        for kw in keywords
+                    )
                 if matched:
-                    from datetime import timezone as _tz
-                    now = datetime.now(timezone.utc)
                     gear.accumulated_miles += total_distance_miles
                     gear.accumulated_sessions += 1
                     gear.updated_at = now

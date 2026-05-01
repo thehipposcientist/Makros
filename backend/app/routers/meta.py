@@ -4,6 +4,7 @@ from sqlmodel import Session, select
 from app.database import get_session
 from app.enums import GoalType, GoalPace, Gender, MealType, EquipmentType, MuscleGroup, FoodCategory
 from app.models import Exercise, Food, Equipment, ExerciseEquipment, GoalOption, PaceOption
+from app.seed_exercises_data import RETIRED_EXERCISE_SLUGS
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 
@@ -47,6 +48,8 @@ def list_exercises(
     if equipment:
         query = query.where(Exercise.equipment == equipment)
     exercises = db.exec(query.order_by(Exercise.primary_muscle, Exercise.name)).all()
+    if RETIRED_EXERCISE_SLUGS:
+        exercises = [e for e in exercises if e.slug not in RETIRED_EXERCISE_SLUGS]
 
     # Batch the gear lookup so we don't issue one query per exercise.
     ex_ids = [e.id for e in exercises if e.id is not None]
@@ -241,5 +244,3 @@ def get_goal_config():
             "athletic_performance": {"conservative": 4,  "moderate": 12, "aggressive": 26},
         },
     }
-
-

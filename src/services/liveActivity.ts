@@ -9,6 +9,7 @@
 import { Platform } from 'react-native';
 
 export interface RestActivityState {
+  mode?: 'rest' | 'elapsed';
   exerciseName: string;
   setNumber: number;       // 0-indexed current set
   totalSets: number;
@@ -18,6 +19,8 @@ export interface RestActivityState {
   nextSetRecommendation: string;
   themeColorHex: string;   // e.g. "#15C7B8"
   workoutId?: string;
+  paused?: boolean;
+  elapsedSeconds?: number;
 }
 
 // Lazy-load the native module so non-iOS platforms never touch it.
@@ -76,6 +79,7 @@ export async function startRestActivity(state: RestActivityState): Promise<strin
   try {
     const id = await n.startActivity({
       workoutId: state.workoutId ?? `workout_${Date.now()}`,
+      mode: state.mode ?? 'rest',
       startedAtMs: state.startedAtMs,
       durationSeconds: state.durationSeconds,
       endDateMs: state.endDateMs,
@@ -84,6 +88,8 @@ export async function startRestActivity(state: RestActivityState): Promise<strin
       totalSets: state.totalSets,
       nextSetRecommendation: state.nextSetRecommendation,
       themeColorHex: state.themeColorHex,
+      paused: !!state.paused,
+      elapsedSeconds: state.elapsedSeconds ?? 0,
     });
     if (!id) {
       _lastStartDiagnostic = 'native startActivity returned null — Activity.request failed in Swift (check device logs for NSLog entries starting with [ThalloLiveActivity])';

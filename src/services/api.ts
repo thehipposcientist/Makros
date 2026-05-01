@@ -1356,6 +1356,13 @@ export async function logWorkoutDone(
     sorenessAreas?: string[];
     notes?: string;
   },
+  /** Explicit gear-attribution override. When set (even to []), the
+   *  backend SKIPS keyword-based auto-accumulation and only credits the
+   *  given gear IDs. Used by the per-session disambiguation prompt when
+   *  multiple gear items match the same workout (e.g. two pairs of
+   *  running shoes both keyworded with 'run'). Passing [] is a deliberate
+   *  "no gear used today" signal. */
+  gearIds?: number[],
 ): Promise<WorkoutCompleteResponse> {
   const activityHrSummary = activity?.avgHeartRate
     ? { avgBpm: activity.avgHeartRate, maxBpm: activity.avgHeartRate, zoneMinutes: [] }
@@ -1385,6 +1392,10 @@ export async function logWorkoutDone(
       ...(feedback?.intensity ? { intensity: feedback.intensity } : {}),
       ...(feedback?.sorenessAreas && feedback.sorenessAreas.length > 0 ? { soreness_areas: feedback.sorenessAreas } : {}),
       ...(feedback?.notes ? { feedback_notes: feedback.notes } : {}),
+      // gear_ids: undefined → keyword auto-match (legacy default)
+      // gear_ids: []        → explicit "no gear used today"
+      // gear_ids: [1,3]     → only credit these IDs, skip keyword match
+      ...(Array.isArray(gearIds) ? { gear_ids: gearIds } : {}),
     }),
   });
 }
@@ -3424,7 +3435,29 @@ export interface PlanWeekResponse {
   goal: string;
   days_per_week: number;
   preferred_split: string | null;
+  /** ISO date the plan resumes. While set + in the future, auto-renew,
+   *  auto-skip, and reminders all suspend. */
+  paused_until?: string | null;
+  pause_reason?: string | null;
   days: PlanDayResponse[];
+}
+
+export async function pausePlanWeek(
+  token: string,
+  body: { paused_until?: string | null; reason?: string | null } = {},
+): Promise<PlanWeekResponse> {
+  return request<PlanWeekResponse>('/plans/week/pause', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function resumePlanWeek(token: string): Promise<PlanWeekResponse> {
+  return request<PlanWeekResponse>('/plans/week/resume', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
 }
 
 export interface CyclePlanContext {

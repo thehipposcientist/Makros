@@ -29,6 +29,7 @@ import {
 import { isHealthKitAvailable, getLatestHeartRate, getWorkoutHrSummary, getAppleWorkoutCaloriesForWindow } from '../services/appleHealth';
 import LogActivityModal, { LogActivityPrefill } from './LogActivityModal';
 import { saveWorkoutSession } from '../utils/workoutHistory';
+import { startRestActivity, updateRestActivity, endRestActivity } from '../services/liveActivity';
 
 interface Props {
   visible: boolean;
@@ -118,8 +119,18 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hrIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const liveActivityIdRef = useRef<string | null>(null);
+  const liveActivityGenerationRef = useRef(0);
+
+  const endWorkoutLiveActivity = useCallback(() => {
+    liveActivityGenerationRef.current += 1;
+    const id = liveActivityIdRef.current;
+    liveActivityIdRef.current = null;
+    if (id) endRestActivity(id).catch(() => undefined);
+  }, []);
 
   const reset = useCallback(() => {
+    endWorkoutLiveActivity();
     setPhase('pick');
     setChoice(null);
     setStartedAtMs(null);
@@ -133,7 +144,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     setLogModalVisible(false);
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (hrIntervalRef.current) { clearInterval(hrIntervalRef.current); hrIntervalRef.current = null; }
-  }, []);
+  }, [endWorkoutLiveActivity]);
 
   // On close from outside (e.g. swipe down without saving) clean up
   // the timers so they don't leak into the next open.
@@ -142,8 +153,9 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (hrIntervalRef.current) clearInterval(hrIntervalRef.current);
+      endWorkoutLiveActivity();
     };
-  }, [visible, reset]);
+  }, [visible, reset, endWorkoutLiveActivity]);
 
   // Timer tick — runs while phase=running; pauses accumulate a static
   // offset that's subtracted from elapsed so the paused period doesn't
@@ -205,25 +217,74 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
       onClose();
       return;
     }
+    const now = Date.now();
     setChoice(c);
-    setStartedAtMs(Date.now());
+    setStartedAtMs(now);
     setPhase('running');
+    const generation = liveActivityGenerationRef.current + 1;
+    liveActivityGenerationRef.current = generation;
+    const workoutId = `live_${now}`;
+    startRestActivity({
+      mode: 'elapsed',
+      workoutId,
+      exerciseName: c.label,
+      setNumber: 0,
+      totalSets: 0,
+      startedAtMs: now,
+      durationSeconds: 0,
+      endDateMs: now + 12 * 60 * 60 * 1000,
+      nextSetRecommendation: 'Timer running',
+      themeColorHex: tc.primary,
+      paused: false,
+      elapsedSeconds: 0,
+    }).then((id) => {
+      if (!id) return;
+      if (liveActivityGenerationRef.current !== generation) {
+        endRestActivity(id).catch(() => undefined);
+        return;
+      }
+      liveActivityIdRef.current = id;
+    }).catch(() => undefined);
   };
 
   const handlePause = () => {
     import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
-    setPauseStartMs(Date.now());
+    const now = Date.now();
+    const currentElapsed = startedAtMs
+      ? Math.max(0, Math.floor((now - startedAtMs) / 1000) - pausedAccum)
+      : elapsedSec;
+    setElapsedSec(currentElapsed);
+    setPauseStartMs(now);
     setPhase('paused');
+    if (liveActivityIdRef.current) {
+      updateRestActivity(liveActivityIdRef.current, {
+        mode: 'elapsed',
+        paused: true,
+        elapsedSeconds: currentElapsed,
+        nextSetRecommendation: 'Paused',
+      }).catch(() => undefined);
+    }
   };
 
   const handleResume = () => {
     import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+    const resumedAt = Date.now();
+    const currentElapsed = elapsedSec;
     if (pauseStartMs) {
-      const paused = Math.floor((Date.now() - pauseStartMs) / 1000);
+      const paused = Math.floor((resumedAt - pauseStartMs) / 1000);
       setPausedAccum(prev => prev + paused);
       setPauseStartMs(null);
     }
     setPhase('running');
+    if (liveActivityIdRef.current) {
+      updateRestActivity(liveActivityIdRef.current, {
+        mode: 'elapsed',
+        paused: false,
+        startedAtMs: resumedAt - currentElapsed * 1000,
+        elapsedSeconds: currentElapsed,
+        nextSetRecommendation: 'Timer running',
+      }).catch(() => undefined);
+    }
   };
 
   const handleFinish = async () => {
@@ -235,6 +296,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
       : Date.now();
     const finalSeconds = Math.max(1, Math.floor((endedMs - startedAtMs) / 1000) - pausedAccum);
     const fallbackAvgHr = hrN > 0 ? Math.round(hrSum / hrN) : null;
+    endWorkoutLiveActivity();
 
     // Parity with AH imports: pull the authoritative HR + kcal
     // summary from HealthKit for the tracked window. HK records at

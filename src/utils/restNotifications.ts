@@ -91,7 +91,9 @@ export async function scheduleRestNotifications(params: {
       content: {
         title: `Rest — ${params.seconds}s  ·  ends ${endClock}`,
         body: `${params.exerciseName}\n${params.nextSetLabel}${aiLine}`,
-        sound: useSound,
+        // Starting a rest timer happens immediately after logging a set.
+        // Keep that notification silent so it cannot interrupt music.
+        sound: undefined,
         ...(Platform.OS === 'android' ? { sticky: false, ongoing: false } : {}),
       },
       trigger: null,

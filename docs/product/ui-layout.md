@@ -1,6 +1,6 @@
 # UI Layout
 
-Last updated: 2026-04-28
+Last updated: 2026-05-01
 
 ## Tab Structure
 
@@ -11,7 +11,10 @@ Last updated: 2026-04-28
   skipped in the selector, today is selected by default, and forward days remain
   queued. The 7 days are stable for the full week — no mid-week regeneration.
   Each selected day card has per-exercise Swap chip → `PlanSwapExerciseModal`.
-- **Library** — merged Exercises + Muscles browser.
+  Today's selected day also renders extra-workout cards for live custom
+  tracking, manual logging, and detected Apple Health imports.
+- **Library** — Exercises browser. The former Muscles tab is removed from the
+  workout library surface.
 - **Settings** — equipment, injuries, preferences.
 
 ### Meals Tab

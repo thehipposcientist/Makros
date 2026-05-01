@@ -272,7 +272,7 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
     id: 'bodyweight',
     label: 'No Equipment',
     description: 'Bodyweight only',
-    items: ['Yoga mat', 'Jump rope'],
+    items: ['Bodyweight / no equipment', 'Yoga mat'],
   },
   {
     id: 'home_basic',

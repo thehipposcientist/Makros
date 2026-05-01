@@ -10,6 +10,8 @@ import PressableScale from '../components/PressableScale';
 import AnimatedNumber from '../components/AnimatedNumber';
 import PRCelebrationModal from '../components/PRCelebrationModal';
 import ShareWorkoutModal from '../components/ShareWorkoutModal';
+import GearPickerModal from '../components/GearPickerModal';
+import type { GearItem } from '../services/api';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -54,7 +56,7 @@ import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNot
 import { humanizeToken } from '../utils/exerciseGuide';
 import { shouldHideWeight, shouldHideReps, formatDurationTarget } from '../utils/exerciseDisplay';
 import { startRestActivity, updateRestActivity, getRestActivityState, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
-import { isExerciseUsableWithEquipment, MAX_SWAP_SCORE, scoreSwapCandidate } from '../utils/swapScoring';
+import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, scoreSwapCandidate } from '../utils/swapScoring';
 
 /** Parse the top (ceiling) of a target rep string. Handles ranges like
  *  "8-12", AMRAP markers like "12+", singletons like "6", and junk.
@@ -141,6 +143,7 @@ const COACH_PROMPT_OPTIONS: Array<{ label: string; template: (exerciseName: stri
 interface ExerciseLibraryItem {
   id?: number;
   name: string;
+  slug?: string | null;
   equipment?: string;
   gear?: Array<{ slug: string; name: string; category?: string }>;
   primary_muscle?: string;
@@ -148,6 +151,9 @@ interface ExerciseLibraryItem {
   is_compound?: boolean;
   movement_pattern?: string | null;
   description?: string;
+  image_url?: string | null;
+  video_id?: string | null;
+  is_custom?: boolean;
 }
 
 type SmartSwapItem = ExerciseLibraryItem & { _overlap?: number; _swapNotes?: string[] };
@@ -167,6 +173,27 @@ function normalizeSwapText(raw: unknown): string {
 
 function exerciseHistoryKey(name: string): string {
   return normalizeSwapText(name);
+}
+
+function exerciseSlotRole(ex: Partial<SessionExercise> | any): string {
+  return String(ex?.slotRole ?? ex?.slot_role ?? ex?._role ?? '').toLowerCase();
+}
+
+function isCoreCircuitExercise(ex: Partial<SessionExercise> | any): boolean {
+  const role = exerciseSlotRole(ex);
+  const prescription = String(ex?.prescriptionType ?? ex?.prescription_type ?? '').toLowerCase();
+  const primary = String(ex?.primaryMuscle ?? ex?.primary_muscle ?? ex?._primary_muscle ?? '').toLowerCase();
+  return role === 'core' || prescription === 'core_circuit' || (primary === 'core' && prescription.includes('core'));
+}
+
+function coreCircuitRunAt(exercises: SessionExercise[], index: number): number[] {
+  if (!isCoreCircuitExercise(exercises[index])) return [];
+  let start = index;
+  while (start > 0 && isCoreCircuitExercise(exercises[start - 1])) start -= 1;
+  let end = index;
+  while (end + 1 < exercises.length && isCoreCircuitExercise(exercises[end + 1])) end += 1;
+  if (end - start + 1 < 2) return [];
+  return Array.from({ length: end - start + 1 }, (_, offset) => start + offset);
 }
 
 function extractActiveInjuryTokens(profile: any): string[] {
@@ -712,6 +739,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [showOpenWatchPrompt, setShowOpenWatchPrompt] = useState(false);
   const [watchStatus, setWatchStatus] = useState<{ paired: boolean; reachable: boolean } | null>(null);
   const watchSessionId = useRef(`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const watchWorkoutEndedRef = useRef(false);
+  const buildWatchWorkoutSnapshotRef = useRef<() => any>(() => workout as any);
   // Write session ID synchronously to the module-level store so HomeScreen's
   // pull_state / reachability handlers can read it immediately without waiting
   // for AsyncStorage (which is async and loses the race against pull_state).
@@ -779,13 +808,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         // Capture the current warmup steps (ref'd so the closure
         // always reads the freshest set — warmupSteps may get
         // replaced when the AI warmup resolves a beat after mount).
-        const pushActive = () => pushWorkoutToWatch(workout as any, {
+        const pushActive = () => pushWorkoutToWatch(buildWatchWorkoutSnapshotRef.current(), {
           dateISO: dateKey(new Date()),
           status: 'active',
           sessionId: watchSessionId.current,
           warmupSteps: warmupStepsRef.current,
           reason: 'active_snapshot',
-        }).catch(() => {});
+        })
+          .then(() => pushRestProgressToWatchRef.current())
+          .catch(() => {});
         // Initial push on mount.
         pushActive();
         // If the watch is paired but not reachable right now, the
@@ -848,10 +879,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     aiCue?: string | null;
     includeStartAlert?: boolean;
   }) => Promise<void>>(async () => {});
+  const pushRestProgressToWatchRef = useRef<() => Promise<void>>(async () => {});
   const watchHandlersRef = useRef<{
     finish: () => void;
     cancel: () => void;
   }>({ finish: () => {}, cancel: () => {} });
+  const watchSwapExerciseRef = useRef<(exerciseIndex: number, toExerciseName?: string | null) => Promise<void> | void>(() => {});
   const watchLogSetChainRef = useRef<Promise<void>>(Promise.resolve());
   // handlersRef is updated further down once handleFinish / onCancel
   // are in scope (see the `watchHandlersRef.current = ...` assignment
@@ -872,13 +905,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             (async () => {
               try {
                 const { pushWorkoutToWatch } = await import('../utils/watchSync');
-                await pushWorkoutToWatch(workout as any, {
+                await pushWorkoutToWatch(buildWatchWorkoutSnapshotRef.current(), {
                   dateISO: dateKey(new Date()),
                   status: 'active',
                   sessionId: watchSessionId.current,
                   warmupSteps: warmupStepsRef.current,
                   reason: 'pull_state',
                 });
+                await pushRestProgressToWatchRef.current();
               } catch { /* bridge optional */ }
             })();
             return;
@@ -908,6 +942,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 );
               });
             watchLogSetChainRef.current.catch(() => undefined);
+          } else if (command === 'swap_exercise') {
+            const exIdx = Number(payload?.exerciseIndex ?? -1);
+            const toExerciseName = typeof payload?.toExerciseName === 'string'
+              ? payload.toExerciseName
+              : null;
+            if (Number.isFinite(exIdx) && exIdx >= 0) {
+              Promise.resolve(watchSwapExerciseRef.current(exIdx, toExerciseName)).catch(() => undefined);
+            }
           } else if (command === 'end_workout') {
             (async () => {
               await watchLogSetChainRef.current.catch(() => undefined);
@@ -987,12 +1029,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       sets: [],
       aiRecommendation: undefined,
       image_url: (ex as any).image_url,
+      video_id: (ex as any).video_id ?? null,
       // Preserve planner-propagated targets + slug so weight-rec calls can
       // use them as anchors (tier 2 in the backend's layered pipeline).
       targetWeightLbs: (ex as any).targetWeightLbs ?? null,
       slug: (ex as any).slug ?? (ex as any).exerciseSlug ?? null,
-      primaryMuscle: (ex as any).primary_muscle ?? (ex as any).primaryMuscle ?? null,
+      primaryMuscle: (ex as any).primary_muscle ?? (ex as any).primaryMuscle ?? (ex as any)._primary_muscle ?? null,
       isCompound: (ex as any).is_compound ?? (ex as any).isCompound ?? null,
+      slotRole: (ex as any).slotRole ?? (ex as any).slot_role ?? (ex as any)._role ?? null,
+      slotLabel: (ex as any).slotLabel ?? (ex as any).slot_label ?? (ex as any)._slot ?? null,
+      prescriptionType: (ex as any).prescriptionType ?? (ex as any).prescription_type ?? null,
       weightRecommendationSource: (ex as any).weightRecommendationSource ?? null,
     }));
   });
@@ -1429,6 +1475,36 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   useEffect(() => { restNextTargetRef.current = restNextTarget; }, [restNextTarget]);
   useEffect(() => { restCueRef.current = restCue; }, [restCue]);
 
+  pushRestProgressToWatchRef.current = async () => {
+    const startedAtMs = restStartAtRef.current;
+    const totalSeconds = restTotalSecondsRef.current;
+    if (!startedAtMs || !totalSeconds) return;
+    const endAtMs = startedAtMs + totalSeconds * 1000;
+    const remaining = Math.max(0, Math.ceil((endAtMs - Date.now()) / 1000));
+    if (remaining <= 0) return;
+    const exerciseName = restExerciseNameRef.current;
+    const exerciseIndex = exerciseName
+      ? exercisesRef.current.findIndex(ex => ex.name === exerciseName)
+      : activeExIdx;
+    const exercise = exerciseIndex >= 0 ? exercisesRef.current[exerciseIndex] : undefined;
+    const targetSetCount = exercise && exerciseIndex >= 0
+      ? getEffectiveTargetSetCount(exerciseIndex, exercise, exercise.sets.length + 1)
+      : undefined;
+    const nextSetNumber = exercise && targetSetCount
+      ? Math.min(targetSetCount, exercise.sets.length + 1)
+      : undefined;
+    const { pushProgressToWatch } = await import('../utils/watchSync');
+    await pushProgressToWatch({
+      exerciseIndex: exerciseIndex >= 0 ? exerciseIndex : undefined,
+      setNumber: nextSetNumber,
+      restRemainingSec: remaining,
+      restStartedAtMs: startedAtMs,
+      restDurationSec: totalSeconds,
+      restEndsAtMs: endAtMs,
+      recommendation: restNextTargetRef.current,
+    });
+  };
+
   // Timed exercise timer: keyed by "exIdx-setSlot".
   //
   // Wall-clock based so it survives screen lock / app backgrounding.
@@ -1588,6 +1664,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [feedbackResult, setFeedbackResult] = useState<string | null>(null);
   const [shareLoading, setShareLoading] = useState(false);
   const [showShareWorkoutModal, setShowShareWorkoutModal] = useState(false);
+  // Per-session gear picker — fires at workout completion when 2+ active
+  // gear items keyword-match the workout. The resolver hands back the
+  // selected gear IDs (or [] for "none today") so the completion path
+  // can pass them through to logWorkoutDone instead of letting the
+  // backend keyword-auto-match double-credit two pairs of running shoes.
+  const [gearPickerCandidates, setGearPickerCandidates] = useState<GearItem[]>([]);
+  const [gearPickerResolver, setGearPickerResolver] = useState<((ids: number[] | null) => void) | null>(null);
   const summaryCardRef = useRef<ViewShot>(null);
   const repsInputRef = useRef<TextInput>(null);
 
@@ -1626,8 +1709,227 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const deferredExerciseSearch = useDeferredValue(exerciseSearch);
   const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
   const [exerciseLibrary, setExerciseLibrary] = useState<ExerciseLibraryItem[]>([]);
+  const exerciseLibraryRef = useRef<ExerciseLibraryItem[]>([]);
   const [aiExerciseResults, setAiExerciseResults] = useState<AIExerciseResult[]>([]);
   const [aiExerciseLoading, setAiExerciseLoading] = useState(false);
+
+  useEffect(() => {
+    exerciseLibraryRef.current = exerciseLibrary;
+  }, [exerciseLibrary]);
+
+  const loadExerciseLibraryRows = useCallback(async (): Promise<ExerciseLibraryItem[]> => {
+    let customs: ExerciseLibraryItem[] = [];
+    try {
+      const raw = await AsyncStorage.getItem('userProfile');
+      if (raw) {
+        const prof = JSON.parse(raw);
+        customs = ((prof.customExercises ?? []) as any[]).map(ce => ({
+          id: ce.id,
+          name: ce.name,
+          slug: ce.slug ?? null,
+          primary_muscle: ce.primary_muscle,
+          secondary_muscles: ce.secondary_muscles ?? [],
+          equipment: ce.equipment,
+          movement_pattern: ce.movement_pattern ?? null,
+          image_url: ce.image_url ?? null,
+          video_id: ce.video_id ?? null,
+          is_compound: ce.is_compound ?? null,
+          description: ce.description ?? '',
+          is_custom: true,
+        })) as unknown as ExerciseLibraryItem[];
+      }
+    } catch {}
+    const timedActivities: ExerciseLibraryItem[] = [
+      { name: 'Boxing', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Kickboxing', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Shadow Boxing', equipment: 'bodyweight', primary_muscle: 'shoulders' },
+      { name: 'Bag Work', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Yoga', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Vinyasa Yoga', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Stretching', equipment: 'bodyweight', primary_muscle: 'full_body' },
+      { name: 'Mobility Flow', equipment: 'bodyweight', primary_muscle: 'full_body' },
+    ];
+    try {
+      const rows = await getExercises();
+      const existingNames = new Set([...customs, ...rows].map(e => e.name.toLowerCase()));
+      const newTimed = timedActivities.filter(t => !existingNames.has(t.name.toLowerCase()));
+      return [...customs, ...newTimed, ...rows];
+    } catch {
+      const existingNames = new Set(customs.map(e => e.name.toLowerCase()));
+      return [
+        ...customs,
+        ...timedActivities.filter(t => !existingNames.has(t.name.toLowerCase())),
+      ];
+    }
+  }, []);
+
+  const ensureExerciseLibrary = useCallback(async (): Promise<ExerciseLibraryItem[]> => {
+    if (exerciseLibraryRef.current.length > 0) return exerciseLibraryRef.current;
+    setExerciseLibraryLoading(true);
+    try {
+      const rows = await loadExerciseLibraryRows();
+      exerciseLibraryRef.current = rows;
+      setExerciseLibrary(rows);
+      return rows;
+    } finally {
+      setExerciseLibraryLoading(false);
+    }
+  }, [loadExerciseLibraryRows]);
+
+  useEffect(() => {
+    ensureExerciseLibrary().catch(() => undefined);
+  }, [ensureExerciseLibrary]);
+
+  const swapCandidatesForExercise = useCallback((
+    ex: SessionExercise,
+    library: ExerciseLibraryItem[] = exerciseLibraryRef.current,
+    limit = 5,
+  ): SmartSwapItem[] => {
+    const base = library.find(li => li.name.toLowerCase() === ex.name.toLowerCase()) ?? {
+      name: ex.name,
+      equipment: ex.equipment,
+      primary_muscle: ex.primaryMuscle ?? undefined,
+      is_compound: ex.isCompound ?? undefined,
+    };
+    const scored: Array<{ item: ExerciseLibraryItem; score: number; historySignal?: ExerciseHistorySignal }> = [];
+    for (const item of library) {
+      if (item.name.toLowerCase() === ex.name.toLowerCase()) continue;
+      if (!isExerciseUsableWithEquipment(item, ownedEquipment)) continue;
+      if (candidateConflictsWithActiveInjuries(item, activeInjuryTokens)) continue;
+      const score = scoreSwapCandidate(base, item);
+      if (score <= 0) continue;
+      const historySignal = exerciseHistorySignals[exerciseHistoryKey(item.name)];
+      const historyBonus = Math.min(SMART_SWAP_HISTORY_BONUS_MAX, (historySignal?.count ?? 0) * 1.25);
+      scored.push({ item, score: score + historyBonus, historySignal });
+    }
+    scored.sort((a, b) => {
+      const scoreDelta = b.score - a.score;
+      if (scoreDelta !== 0) return scoreDelta;
+      const historyDelta = (b.historySignal?.count ?? 0) - (a.historySignal?.count ?? 0);
+      if (historyDelta !== 0) return historyDelta;
+      return a.item.name.localeCompare(b.item.name);
+    });
+    return scored.slice(0, limit).map(({ item, score, historySignal }) => ({
+      ...item,
+      _overlap: Math.min(100, Math.round((score / SMART_SWAP_MAX_SCORE) * 100)),
+      _swapNotes: buildSwapNotes(item, base, historySignal, activeInjuryTokens),
+    }));
+  }, [activeInjuryTokens, exerciseHistorySignals, ownedEquipment]);
+
+  const buildWatchWorkoutSnapshot = useCallback((
+    sourceExercises: SessionExercise[] = exercisesRef.current,
+    opts?: { skipHintIndex?: number },
+  ): any => ({
+    ...workout,
+    exercises: sourceExercises.map((ex, index) => {
+      const hint = index === opts?.skipHintIndex ? undefined : preSetHints[index];
+      const recommendedWeight = hint?.recommendedWeight ?? ex.targetWeightLbs ?? null;
+      const recommendation = hint?.recommendedWeight != null
+        ? `Try ${Math.round(hint.recommendedWeight)} lbs${hint.recommendedReps ? ` x ${hint.recommendedReps}` : ''}`
+        : ex.aiRecommendation;
+      return {
+        name: ex.name,
+        sets: getTargetSetCount(ex.targetSets),
+        reps: ex.targetReps,
+        restSeconds: ex.targetRestSeconds,
+        equipment: ex.equipment,
+        targetWeightLbs: recommendedWeight,
+        recommendedWeightLbs: recommendedWeight,
+        recommendation,
+        slot_role: (ex as any).slotRole ?? (ex as any).slot_role ?? null,
+        prescriptionType: (ex as any).prescriptionType ?? (ex as any).prescription_type ?? null,
+        swapOptions: swapCandidatesForExercise(ex).map(option => ({
+          name: option.name,
+          equipment: exerciseEquipmentLabel(option) ?? option.equipment ?? null,
+          primaryMuscle: option.primary_muscle ?? null,
+          overlap: option._overlap ?? null,
+        })),
+      };
+    }),
+  }), [preSetHints, swapCandidatesForExercise, workout]);
+
+  buildWatchWorkoutSnapshotRef.current = buildWatchWorkoutSnapshot;
+
+  const performWatchExerciseSwap = useCallback(async (
+    exerciseIndex: number,
+    toExerciseName?: string | null,
+  ) => {
+    const current = exercisesRef.current[exerciseIndex];
+    if (!current) return;
+    const library = await ensureExerciseLibrary();
+    const candidates = swapCandidatesForExercise(current, library, 8);
+    const requestedName = normalizeSwapText(toExerciseName);
+    const selected = requestedName
+      ? candidates.find(item => normalizeSwapText(item.name) === requestedName)
+      : candidates[0];
+    if (!selected) return;
+
+    const updated = exercisesRef.current.slice();
+    const previous = updated[exerciseIndex];
+    if (!previous) return;
+    updated[exerciseIndex] = {
+      ...previous,
+      name: selected.name,
+      equipment: exerciseEquipmentLabel(selected) ?? selected.equipment ?? previous.equipment,
+      image_url: selected.image_url ?? previous.image_url,
+      video_id: selected.video_id ?? previous.video_id ?? null,
+      slug: selected.slug ?? null,
+      primaryMuscle: selected.primary_muscle ?? previous.primaryMuscle ?? null,
+      isCompound: selected.is_compound ?? previous.isCompound ?? null,
+      aiRecommendation: undefined,
+      targetWeightLbs: null,
+      weightRecommendationSource: null,
+      targetSets: previous.targetSets,
+      targetReps: previous.targetReps,
+      targetRestSeconds: previous.targetRestSeconds,
+      sets: previous.sets ?? [],
+    };
+
+    setExercises(updated);
+    setActiveExIdx(exerciseIndex);
+    setPreSetHints(prev => {
+      const next = { ...prev };
+      delete next[exerciseIndex];
+      return next;
+    });
+    setSetInputs(prev => {
+      const next: typeof prev = {};
+      Object.entries(prev).forEach(([key, value]) => {
+        if (!key.startsWith(`${exerciseIndex}-`)) next[key] = value;
+      });
+      return next;
+    });
+    clearRestStateRef.current?.();
+
+    try {
+      const { pushWorkoutToWatch } = await import('../utils/watchSync');
+      await pushWorkoutToWatch(buildWatchWorkoutSnapshot(updated, { skipHintIndex: exerciseIndex }), {
+        dateISO: dateKey(new Date()),
+        status: 'active',
+        sessionId: watchSessionId.current,
+        warmupSteps: warmupStepsRef.current,
+        reason: 'active_snapshot',
+      });
+    } catch { /* watch bridge optional */ }
+  }, [buildWatchWorkoutSnapshot, ensureExerciseLibrary, setExercises, swapCandidatesForExercise]);
+
+  watchSwapExerciseRef.current = performWatchExerciseSwap;
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (watchWorkoutEndedRef.current) return;
+      import('../utils/watchSync')
+        .then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(buildWatchWorkoutSnapshot(), {
+          dateISO: dateKey(new Date()),
+          status: 'active',
+          sessionId: watchSessionId.current,
+          warmupSteps: warmupStepsRef.current,
+          reason: 'active_snapshot',
+        }).catch(() => {}))
+        .catch(() => {});
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [buildWatchWorkoutSnapshot, exercises, warmupSteps]);
 
   // Elapsed workout timer
   useEffect(() => {
@@ -1968,7 +2270,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       (async () => {
         try {
           const { pushProgressToWatch } = await import('../utils/watchSync');
-          await pushProgressToWatch({ restRemainingSec: restSeconds, recommendation: nextSetLabel });
+          const startedAtMs = restStartAtRef.current || Date.now();
+          await pushProgressToWatch({
+            exerciseIndex: exIdx,
+            setNumber: cleanSets.length + 1,
+            restRemainingSec: restSeconds,
+            restStartedAtMs: startedAtMs,
+            restDurationSec: restSeconds,
+            restEndsAtMs: startedAtMs + restSeconds * 1000,
+            recommendation: nextSetLabel,
+          });
         } catch { /* watch bridge optional */ }
       })();
       await rescheduleRestNotificationsRef.current({
@@ -2005,53 +2316,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setAddExerciseModalVisible(true);
     setAiExerciseResults([]);
     setAiExerciseLoading(false);
-    if (exerciseLibrary.length > 0) return;
-    setExerciseLibraryLoading(true);
-    let customs: ExerciseLibraryItem[] = [];
-    try {
-      const raw = await AsyncStorage.getItem('userProfile');
-      if (raw) {
-        const prof = JSON.parse(raw);
-        customs = ((prof.customExercises ?? []) as any[]).map(ce => ({
-          id: ce.id,
-          name: ce.name,
-          primary_muscle: ce.primary_muscle,
-          secondary_muscles: ce.secondary_muscles ?? [],
-          equipment: ce.equipment,
-          movement_pattern: ce.movement_pattern ?? null,
-          image_url: ce.image_url ?? null,
-          video_id: ce.video_id ?? null,
-          is_compound: ce.is_compound ?? null,
-          description: ce.description ?? '',
-          is_custom: true,
-        })) as unknown as ExerciseLibraryItem[];
-      }
-    } catch {}
-    const timedActivities: ExerciseLibraryItem[] = [
-      { name: 'Boxing', equipment: 'bodyweight', primary_muscle: 'full_body' },
-      { name: 'Kickboxing', equipment: 'bodyweight', primary_muscle: 'full_body' },
-      { name: 'Shadow Boxing', equipment: 'bodyweight', primary_muscle: 'shoulders' },
-      { name: 'Bag Work', equipment: 'bodyweight', primary_muscle: 'full_body' },
-      { name: 'Yoga', equipment: 'bodyweight', primary_muscle: 'full_body' },
-      { name: 'Vinyasa Yoga', equipment: 'bodyweight', primary_muscle: 'full_body' },
-      { name: 'Stretching', equipment: 'bodyweight', primary_muscle: 'full_body' },
-      { name: 'Mobility Flow', equipment: 'bodyweight', primary_muscle: 'full_body' },
-    ];
-    try {
-      const rows = await getExercises();
-      const existingNames = new Set([...customs, ...rows].map(e => e.name.toLowerCase()));
-      const newTimed = timedActivities.filter(t => !existingNames.has(t.name.toLowerCase()));
-      setExerciseLibrary([...customs, ...newTimed, ...rows]);
-    } catch {
-      const existingNames = new Set(customs.map(e => e.name.toLowerCase()));
-      setExerciseLibrary([
-        ...customs,
-        ...timedActivities.filter(t => !existingNames.has(t.name.toLowerCase())),
-      ]);
-    } finally {
-      setExerciseLibraryLoading(false);
-    }
-  }, [exerciseLibrary.length]);
+    if (exerciseLibraryRef.current.length > 0) return;
+    await ensureExerciseLibrary().catch(() => undefined);
+  }, [ensureExerciseLibrary]);
 
   const handleAddExercise = useCallback((item: ExerciseLibraryItem) => {
     const timed = isTimedExercise(item.name);
@@ -2077,13 +2344,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       // work the user did on the old lift.
       if (swapTargetIdx != null && swapTargetIdx >= 0 && swapTargetIdx < prev.length) {
         const updated = prev.slice();
-        const carryOverSets = updated[swapTargetIdx].sets ?? [];
+        const previous = updated[swapTargetIdx];
+        const carryOverSets = previous.sets ?? [];
         updated[swapTargetIdx] = {
+          ...previous,
           ...nextExercise,
           sets: carryOverSets,
-          targetSets: updated[swapTargetIdx].targetSets,
-          targetReps: updated[swapTargetIdx].targetReps,
-          targetRestSeconds: updated[swapTargetIdx].targetRestSeconds,
+          targetSets: previous.targetSets,
+          targetReps: previous.targetReps,
+          targetRestSeconds: previous.targetRestSeconds,
         };
         setActiveExIdx(swapTargetIdx);
         return updated;
@@ -2246,11 +2515,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const durationSeconds = Math.max(1, seconds);
         const nextTarget = snapNextTarget ?? 'Next set';
         const nextCue = snapCue;
-        const currentExercise = exercisesRef.current.find(ex => ex.name === exerciseName);
+        const currentExerciseIndex = exercisesRef.current.findIndex(ex => ex.name === exerciseName);
+        const currentExercise = currentExerciseIndex >= 0 ? exercisesRef.current[currentExerciseIndex] : undefined;
+        const totalSets = currentExercise
+          ? getEffectiveTargetSetCount(currentExerciseIndex, currentExercise)
+          : 3;
+        const displaySetIndex = Math.min(
+          parseDisplaySetIndex(nextTarget),
+          Math.max(0, totalSets - 1),
+        );
         const id = await startRestActivity({
           exerciseName,
-          setNumber: parseDisplaySetIndex(nextTarget),
-          totalSets: getTargetSetCount(currentExercise?.targetSets),
+          setNumber: displaySetIndex,
+          totalSets,
           startedAtMs,
           durationSeconds,
           endDateMs: startedAtMs + durationSeconds * 1000,
@@ -2284,6 +2561,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         restEndedAtRef.current = Date.now();
         setPostRestIdleSecs(0);
         AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
+        import('../utils/watchSync').then(({ pushProgressToWatch }) =>
+          pushProgressToWatch({ restRemainingSec: 0 })
+        ).catch(() => undefined);
         import('../utils/feedback').then(f => {
           // Stop the silent keepalive loop before playing the chime so
           // both don't compete on the audio output buffer.
@@ -2315,7 +2595,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }
       }
     }, 500); // 500ms tick for smooth countdown without drift
-  }, [theme.colors.primary, workout.focus]);
+  }, [getEffectiveTargetSetCount, theme.colors.primary, workout.focus]);
   startRestTimerRef.current = startRestTimer;
 
   // Force-update timers when app returns from background. Also re-persist
@@ -2463,6 +2743,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     restStartAtRef.current = 0;
     restTotalSecondsRef.current = 0;
     restExerciseNameRef.current = null;
+    import('../utils/watchSync').then(({ pushProgressToWatch }) =>
+      pushProgressToWatch({ restRemainingSec: 0 })
+    ).catch(() => undefined);
     AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
     cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
     restNotificationIds.current = null;
@@ -2533,7 +2816,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Capture synchronously before any state updates
     const exIdx = logExIdx;
     const ex    = exercises[exIdx];
-    const targetSetCount = getTargetSetCount(ex.targetSets);
+    const targetSetCount = getEffectiveTargetSetCount(exIdx, ex, ex.sets.length + 1);
     console.log('[LOG_SET] Processing set for exercise:', ex.name, 'current sets:', ex.sets.length, 'target sets:', targetSetCount);
 
     const newSet: CompletedSet = { setNumber: ex.sets.length + 1, reps: repsNum, weightLbs: weightNum };
@@ -2569,7 +2852,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       (async () => {
         try {
           const { pushProgressToWatch } = await import('../utils/watchSync');
-          await pushProgressToWatch({ restRemainingSec: restSeconds, recommendation: nextSetLabel });
+          const startedAtMs = restStartAtRef.current || Date.now();
+          await pushProgressToWatch({
+            exerciseIndex: exIdx,
+            setNumber: ex.sets.length + 2,
+            restRemainingSec: restSeconds,
+            restStartedAtMs: startedAtMs,
+            restDurationSec: restSeconds,
+            restEndsAtMs: startedAtMs + restSeconds * 1000,
+            recommendation: nextSetLabel,
+          });
         } catch { /* watch bridge optional */ }
       })();
       await rescheduleRestNotifications({
@@ -2611,6 +2903,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Restart the timestamp-based timer with the adjusted duration
     startRestTimer(nextRemaining, restForExercise);
     setRestRemaining(nextRemaining);
+    pushRestProgressToWatchRef.current().catch(() => {});
     // Also persist the new rest duration on the exercise so the next set uses it
     setExercises(prev => prev.map(ex =>
       ex.name === restForExercise ? { ...ex, targetRestSeconds: nextRemaining } : ex
@@ -2857,6 +3150,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   };
 
   const cancelActiveWorkoutFromWatch = useCallback(() => {
+    watchWorkoutEndedRef.current = true;
     clearRestState();
     setActiveWatchSessionId(null);
     AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
@@ -2864,7 +3158,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
     AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
     import('../utils/watchSync')
-      .then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(workout as any, {
+      .then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(buildWatchWorkoutSnapshotRef.current(), {
         dateISO: dateKey(new Date()),
         status: 'skipped',
         sessionId: watchSessionId.current,
@@ -2882,6 +3176,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   };
 
   const handleFinish = async () => {
+    watchWorkoutEndedRef.current = true;
     import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
     AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {}); AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
     setActiveWatchSessionId(null);
@@ -2911,7 +3206,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     await saveWorkoutSession(session);
     // Push completed status immediately so the watch exits active state.
     import('../utils/watchSync').then(({ pushWorkoutToWatch }) =>
-      pushWorkoutToWatch(workout as any, {
+      pushWorkoutToWatch(buildWatchWorkoutSnapshotRef.current(), {
         dateISO: dateKey(new Date()),
         status: 'completed',
         sessionId: watchSessionId.current,
@@ -2974,12 +3269,41 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const cardioLikeFocus = /cardio|conditioning|zone\s*2|interval|hiit|run|bike|row|swim/i.test(focusText);
         const pureCardioFocus = !liftPlusCardioFocus
           && /^(cardio|conditioning|zone\s*2(?:\s*cardio)?|short intervals|long intervals|tempo)$/i.test(focusText);
+
+        // Per-session gear disambiguation. If two or more gear items keyword-
+        // match this workout (common when the user has multiple pairs of
+        // running shoes), prompt them to pick which were used. Single match
+        // or zero matches → no prompt, backend keyword-auto-match handles it.
+        let gearIdsForLog: number[] | undefined = undefined;
+        try {
+          const { listGear } = await import('../services/api');
+          const gear = await listGear(authToken);
+          const focusLower = workout.focus.toLowerCase();
+          const exerciseNamesLower = workout.exercises.map(ex => ex.name.toLowerCase());
+          const matches = gear.filter(g => {
+            const kws = (g.auto_track_keywords ?? []).map(k => k.toLowerCase());
+            if (kws.length === 0) return false;
+            return kws.some(kw => focusLower.includes(kw) || exerciseNamesLower.some(n => n.includes(kw)));
+          });
+          if (matches.length >= 2) {
+            const picked = await new Promise<number[] | null>((resolve) => {
+              setGearPickerCandidates(matches);
+              setGearPickerResolver(() => resolve);
+            });
+            // null = user dismissed (treat as default keyword match — pass undefined).
+            // [] = explicit "no gear today". [ids] = exact selection.
+            gearIdsForLog = picked ?? undefined;
+          }
+        } catch {
+          // Network or auth flake — fall back to legacy keyword auto-match.
+        }
+
         const completeResp = await logWorkoutDone(authToken, dateKey(now), workout.focus, actualDurationSeconds, exercisesPayload, {
           category: pureCardioFocus ? 'cardio' : 'strength',
           subtype: workout.focus.toLowerCase().replace(/\s+/g, '_'),
           intensity: workout.stimulus === 'strength' ? 'hard' : workout.stimulus === 'volume' ? 'easy' : 'moderate',
           cardioStyle: cardioLikeFocus ? (/interval|hiit/i.test(workout.focus) ? 'intervals' : 'steady') : undefined,
-        }, healthMetrics);
+        }, healthMetrics, undefined, gearIdsForLog);
         console.log('[workout] logWorkoutDone OK — fatigue should update on next load');
 
         // Refresh the daily health snapshot so today's workout minutes
@@ -3478,13 +3802,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           text: 'Cancel',
           style: 'destructive',
           onPress: () => {
+            watchWorkoutEndedRef.current = true;
             clearRestState();
             AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
             AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
             AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
             AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
             import('../utils/watchSync')
-              .then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(workout as any, {
+              .then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(buildWatchWorkoutSnapshotRef.current(), {
                 dateISO: dateKey(new Date()),
                 status: 'skipped',
                 sessionId: watchSessionId.current,
@@ -3751,18 +4076,41 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               }, null)
             : null;
           const restLabel       = `${Math.max(15, ex.targetRestSeconds || 60)}s rest`;
+          const circuitRun = coreCircuitRunAt(exercises, i);
+          const isCircuitItem = circuitRun.length >= 2;
+          const circuitPosition = isCircuitItem ? circuitRun.indexOf(i) : -1;
+          const isFirstCircuitItem = circuitPosition === 0;
+          const circuitRounds = isCircuitItem
+            ? Math.max(...circuitRun.map(idx => getTargetSetCount(exercises[idx]?.targetSets)))
+            : targetSetCount;
+          const circuitRestSeconds = isCircuitItem
+            ? Math.max(...circuitRun.map(idx => Number(exercises[idx]?.targetRestSeconds) || 0))
+            : 0;
           return (
-            <View
-              key={i}
-              style={[
-                styles.exerciseCard,
-                isDone && styles.exerciseCardDone,
-                isActive && styles.exerciseCardActive,
-                isActive && {
-                  borderColor: workoutPalette.strong,
-                  shadowColor: workoutPalette.strong,
-                },
-              ]}>
+            <Fragment key={i}>
+              {isFirstCircuitItem && (
+                <View style={[styles.liveCircuitBanner, { borderColor: workoutPalette.strong + '55', backgroundColor: workoutPalette.soft }]}>
+                  <View style={styles.liveCircuitTitleRow}>
+                    <Ionicons name="repeat" size={14} color={workoutPalette.strong} />
+                    <Text style={[styles.liveCircuitTitle, { color: workoutPalette.strong }]}>Core Circuit</Text>
+                  </View>
+                  <Text style={[styles.liveCircuitMeta, { color: themeColors.textMuted }]}>
+                    {circuitRun.length} moves · {circuitRounds} rounds · {circuitRestSeconds > 0 ? `${circuitRestSeconds}s between moves` : 'move exercise to exercise'}
+                  </Text>
+                </View>
+              )}
+              <View
+                style={[
+                  styles.exerciseCard,
+                  isCircuitItem && styles.liveCircuitExerciseCard,
+                  isCircuitItem && { borderLeftColor: workoutPalette.strong },
+                  isDone && styles.exerciseCardDone,
+                  isActive && styles.exerciseCardActive,
+                  isActive && {
+                    borderColor: workoutPalette.strong,
+                    shadowColor: workoutPalette.strong,
+                  },
+                ]}>
               {isActive && (
                 <View
                   pointerEvents="none"
@@ -3811,6 +4159,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   ) : null;
                 })()}
                 <View style={{ flex: 1, minWidth: 0 }}>
+                  {isCircuitItem && (
+                    <Text style={[styles.liveCircuitStationText, { color: workoutPalette.strong }]}>
+                      Station A{circuitPosition + 1}
+                    </Text>
+                  )}
                   <Text
                     style={[styles.exerciseName, isDone && styles.exerciseNameDone]}
                     numberOfLines={isActive ? 3 : 1}
@@ -3823,7 +4176,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     numberOfLines={isActive ? 2 : 1}
                     ellipsizeMode="tail"
                   >
-                    {targetSetCount} × {ex.targetReps}  ·  {restLabel}
+                    {isCircuitItem ? `${targetSetCount} rounds · ${ex.targetReps}` : `${targetSetCount} × ${ex.targetReps}`}  ·  {restLabel}
                     {formatEquipmentLabel(ex.equipment) ? `  ·  ${formatEquipmentLabel(ex.equipment)}` : ''}
                   </Text>
                   {timed && hrZones.length > 0 && (() => {
@@ -4577,6 +4930,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 </View>
               )}
             </View>
+            </Fragment>
           );
         })}
 
@@ -5498,6 +5852,25 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         />
       )}
 
+      {/* Per-session gear disambiguation — only shown when 2+ active gear
+          items keyword-match this workout. Resolves the promise that
+          gates logWorkoutDone, so the completion path waits on the user. */}
+      <GearPickerModal
+        visible={gearPickerCandidates.length > 0 && gearPickerResolver !== null}
+        candidates={gearPickerCandidates}
+        themeName={themeName}
+        onPick={(ids) => {
+          gearPickerResolver?.(ids);
+          setGearPickerResolver(null);
+          setGearPickerCandidates([]);
+        }}
+        onSkip={() => {
+          gearPickerResolver?.(null);
+          setGearPickerResolver(null);
+          setGearPickerCandidates([]);
+        }}
+      />
+
       {showStartCountdown && (
         <StartCountdownOverlay
           themeName={themeName}
@@ -5700,6 +6073,28 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
 
   scroll:        { flex: 1 },
   scrollContent: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 40 },
+  liveCircuitBanner: {
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 6,
+  },
+  liveCircuitTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  liveCircuitTitle: { fontSize: 13, fontWeight: '900' },
+  liveCircuitMeta: { fontSize: 11, lineHeight: 15, marginTop: 3, fontWeight: '700' },
+  liveCircuitExerciseCard: {
+    borderLeftWidth: 3,
+    marginBottom: 6,
+  },
+  liveCircuitStationText: {
+    fontSize: 10,
+    lineHeight: 13,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 2,
+  },
 
   exerciseCard: {
     backgroundColor: tc.surface,

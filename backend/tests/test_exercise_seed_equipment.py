@@ -179,6 +179,7 @@ def test_scan_equipment_list_covers_new_equipment_names() -> None:
     from app.seed_exercises_data import SEED_EQUIPMENT
     known_equipment = [entry["name"] for entry in SEED_EQUIPMENT]
     required = {
+        "Bodyweight / no equipment",
         "Adjustable dumbbells",
         "Mini band (loop)",
         "Swiss / stability ball",
@@ -196,6 +197,46 @@ def test_scan_equipment_list_covers_new_equipment_names() -> None:
     _ok(f"{len(required)} new/exact equipment names present")
 
 
+def test_bodyweight_conditioning_replaces_generic_hiit_placeholder() -> None:
+    print("\n[test] bodyweight conditioning uses concrete exercises")
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.planner import PlannerInputs, Slot, pick_for_slot
+
+    by_slug = {e["slug"]: e for e in SEED_EXERCISES}
+    required = {
+        "jumping_jacks",
+        "high_knees",
+        "butt_kicks",
+        "fast_feet",
+        "plank_jacks",
+        "squat_thrusts",
+        "skater_hops",
+        "line_hops",
+    }
+    missing = required - set(by_slug)
+    assert not missing, f"missing no-equipment conditioning drills: {sorted(missing)}"
+    assert by_slug["hiit_circuit"].get("deprecated") is True
+
+    pick = pick_for_slot(
+        SEED_EXERCISES,
+        Slot("Circuit Cardio Burst", "cardio", None, "isolation"),
+        PlannerInputs(
+            goal="fat_loss",
+            days_per_week=3,
+            experience="beginner",
+            equipment_slugs=("bodyweight",),
+            rng_seed=9,
+        ),
+        set(),
+        set(),
+        accepts_types=frozenset({"cardio"}),
+    )
+    assert pick is not None, "expected a bodyweight cardio pick"
+    assert pick["slug"] != "hiit_circuit", f"retired HIIT placeholder was selected: {pick}"
+    assert pick["name"] != "HIIT Circuit"
+    _ok(f"circuit cardio pick is concrete: {pick['name']}")
+
+
 cases = [
     test_seed_exercise_equipment_references_are_canonical,
     test_wger_import_equipment_map_uses_seed_slugs,
@@ -205,6 +246,7 @@ cases = [
     test_adjustable_dumbbells_unlock_dumbbell_library,
     test_strength_load_settings_snap_to_available_weights,
     test_scan_equipment_list_covers_new_equipment_names,
+    test_bodyweight_conditioning_replaces_generic_hiit_placeholder,
 ]
 
 

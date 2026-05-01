@@ -240,6 +240,43 @@ def test_generated_core_slots_match_their_slot_category() -> None:
     _ok(f"{len(core_exs)} generated core rows match their slot labels")
 
 
+def test_generated_core_circuits_use_mixed_categories() -> None:
+    """Long fat-loss core circuits should use mixed categories instead
+    of two loaded-carry variants back to back."""
+    print("\n[test] generated core circuits use mixed categories")
+    inputs = _make_inputs(goal="fat_loss", days_per_week=6, session_minutes=60)
+    plan = generate_workout_plan(inputs, SEED_EXERCISES)
+    core_days = []
+    for day in plan.get("workout_plan", {}).get("days", []):
+        core_exs = [
+            ex for ex in day.get("exercises", [])
+            if ex.get("_role") == "core"
+        ]
+        if core_exs:
+            core_days.append((day, core_exs))
+    assert core_days, "expected at least one generated core circuit"
+
+    saw_three_move_circuit = False
+    for day, core_exs in core_days:
+        slots = [ex.get("_slot") for ex in core_exs]
+        assert len(slots) == len(set(slots)), (
+            f"{day.get('day')} duplicated core slot categories: {slots}"
+        )
+        carry_like = [
+            ex.get("name")
+            for ex in core_exs
+            if "carry" in (ex.get("name") or "").lower()
+        ]
+        assert len(carry_like) <= 1, (
+            f"{day.get('day')} has back-to-back carry work: {carry_like}"
+        )
+        if len(core_exs) >= 3:
+            saw_three_move_circuit = True
+
+    assert saw_three_move_circuit, "expected at least one 3-move core circuit"
+    _ok(f"{len(core_days)} core days use mixed categories")
+
+
 # ── Patch rehydration ─────────────────────────────────────────────
 
 def _sample_plan() -> dict:
@@ -1240,6 +1277,7 @@ cases = [
     test_weekly_core_injection_does_not_crash,
     test_weekly_core_actually_injects_core_for_fat_loss,
     test_generated_core_slots_match_their_slot_category,
+    test_generated_core_circuits_use_mixed_categories,
     test_swap_exercise_rebuilds_derived_fields,
     test_add_exercise_builds_derived_fields,
     test_change_sets_reps_refreshes_set_scheme,

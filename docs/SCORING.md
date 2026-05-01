@@ -35,7 +35,7 @@ Companion docs:
 
 | Pillar | Max | Logic |
 |---|---:|---|
-| Duration | 32 | 7–9h → full · 6.5–7 / 9–9.5 → 72% · 6–6.5 / 9.5–10 → 48% · 5–6 → 25% · else → 5–20% |
+| Duration | 32 | Smooth log-normal curve around a 7–9h target. 7–9h → full; below 7h falls faster than above 9h; very short sleep floors near 5% before caps; long sleep floors near 20% before caps |
 | Efficiency (asleep÷inBed) | 18 | ≥0.92 → full · ≥0.88 → 85% · ≥0.83 → 65% · ≥0.78 → 42% · else → 15% · missing → 50% |
 | HRV (age-adjusted) | 20 | ratio = hrvMs / `ageHrvReference(age)`. ≥1.15 → 20 · ≥1.00 → 16 · ≥0.88 → 11 · ≥0.75 → 6 · else → 2 · missing → 8 |
 | Deep sleep | 10 | Full-length nights use absolute minutes: ≥90m full · ≥70m 75% · ≥50m 50% · else 15%. Short nights use deep/total ratio. Missing → 50% |
@@ -49,7 +49,7 @@ Companion docs:
 
 | Pillar | Max | Difference vs MVP |
 |---|---:|---|
-| Duration | 28 | Slightly less weight (history reduces noise elsewhere) |
+| Duration | 28 | Same smooth log-normal curve as MVP, lighter weight |
 | Efficiency | 17 | Same band shape as MVP |
 | HRV vs personal baseline | 18 | ratio = hrvMs / `rollingMedian(hrvHistory)`. ≥1.10 full · ≥0.98 80% · ≥0.92 60% · ≥0.85 35% · else 10%. Falls back to age-adjusted HRV if baseline invalid |
 | **Regularity** *(new)* | 15 | Circular SD of bedtimes, handles midnight wrap. ≤30min → 15 · ≤45 → 11 · ≤60 → 7 · ≤90 → 3 · else → 0 |
@@ -61,10 +61,12 @@ Companion docs:
 ### Hard caps
 Certain red-flag nights cap the final score after pillar summing so one good signal cannot hide a bad recovery night:
 
-- Short sleep: <5h caps at 45; <6h at 59; <6.5h at 69.
+- Short sleep: <5h caps at 45; <6h at 59; <6.5h at 69; <7h at 84.
+- Long sleep: >10.5h caps at 88; >11.5h caps at 79. 9–10.5h is handled by the smooth duration curve unless recovery markers are also off.
 - Low efficiency: <75% caps at 59; <80% at 69; <85% at 79.
 - Wake after sleep onset: ≥180m caps at 35; ≥135m at 44; ≥105m at 49; ≥75m at 59; >45m at 69.
 - Corroborating stress markers: multiple off markers (low HRV, elevated RHR vs baseline, elevated respiratory rate vs baseline, low/dropping SpO₂) cap at 49–59.
+- Long sleep plus stress markers: >10h plus 2+ off markers caps at 69; >10h plus 1 off marker caps at 84.
 - Fragmented sleep plus stress markers: ≥105m awake plus 2+ off markers caps at 39; ≥105m plus 1 off marker caps at 42.
 
 ### Rating bands
@@ -72,6 +74,7 @@ Certain red-flag nights cap the final score after pillar summing so one good sig
 
 ### Design rules
 - Duration + efficiency drive the score (most reliable signals)
+- Duration uses a smooth curve, not hard bands, so neighboring nights do not jump categories because of a few minutes of wearable variance.
 - Stage data is noisy → light weight, broad bands
 - HRV becomes relative as soon as 14-night baseline exists
 - SpO₂ + respiratory rate are deduction-only

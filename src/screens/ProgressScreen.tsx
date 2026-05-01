@@ -508,6 +508,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // fresh users see "log a meal to start tracking" instead of nothing.
   const [dietScore, setDietScore] = useState<DietConsistencyScore | null>(null);
   const [oneRepMaxLifts, setOneRepMaxLifts] = useState<import('../services/api').OneRepMaxLift[]>([]);
+  // 1RM history for the top lift — fetched lazily after `oneRepMaxLifts`
+  // resolves so the bars render immediately. Used to draw the trend chart
+  // below the bar list.
+  const [topLiftHistory, setTopLiftHistory] = useState<{ name: string; points: import('../services/api').E1RMHistoryPoint[] } | null>(null);
   const [plateaus, setPlateaus] = useState<import('../services/api').PlateauEntry[]>([]);
   const [plateauModalVisible, setPlateauModalVisible] = useState(false);
   const [plateauDismissed, setPlateauDismissed] = useState(true);
@@ -686,9 +690,31 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         });
       }
       if (authToken) {
-        import('../services/api').then(({ getOneRepMaxShowcase }) =>
+        import('../services/api').then(({ getOneRepMaxShowcase, getE1RMHistory }) =>
           getOneRepMaxShowcase(authToken)
-            .then(setOneRepMaxLifts)
+            .then(async (lifts) => {
+              setOneRepMaxLifts(lifts);
+              // After the bar list resolves, fetch history for the top
+              // lift only. Five history calls would saturate the user's
+              // network on Progress-tab open; one is invisible. Skipped
+              // when the user has < 3 sessions of the top lift since a
+              // 1- or 2-point chart isn't a trend.
+              const top = lifts.length > 0
+                ? lifts.reduce((best, lift) => (lift.oneRepMaxLbs > best.oneRepMaxLbs ? lift : best), lifts[0])
+                : null;
+              if (top && top.sessionCount >= 3) {
+                try {
+                  const resp = await getE1RMHistory(authToken, top.name);
+                  if (resp?.history && resp.history.length >= 3) {
+                    setTopLiftHistory({ name: top.name, points: resp.history });
+                  } else {
+                    setTopLiftHistory(null);
+                  }
+                } catch { setTopLiftHistory(null); }
+              } else {
+                setTopLiftHistory(null);
+              }
+            })
             .catch(() => setOneRepMaxLifts([]))
         );
         import('../services/api').then(({ getPlateaus }) =>
@@ -1594,6 +1620,66 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Text style={{ fontSize: 10, color: tc.textMuted, fontStyle: 'italic', marginTop: 2 }}>
                       Epley estimates from your recent logged sets. Gets sharper as you log more sessions.
                     </Text>
+                  </View>
+                );
+              })()}
+
+              {/* 1RM trend chart for the top lift — only renders when there
+                  are 3+ data points. Pure SVG sparkline, matches the body-
+                  fat timeline pattern below for visual consistency. */}
+              {topLiftHistory && topLiftHistory.points.length >= 3 && (() => {
+                const pts = topLiftHistory.points;
+                const values = pts.map(p => p.e1rm_lbs);
+                const minV = Math.min(...values);
+                const maxV = Math.max(...values);
+                const range = Math.max(1, maxV - minV);
+                const chartW = 320, chartH = 80, padL = 8, padR = 8, padT = 10, padB = 10;
+                const plotW = chartW - padL - padR;
+                const plotH = chartH - padT - padB;
+                const xAt = (i: number) => padL + (i / Math.max(1, pts.length - 1)) * plotW;
+                const yAt = (v: number) => padT + plotH - ((v - minV) / range) * plotH;
+                const path = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(p.e1rm_lbs).toFixed(1)}`).join(' ');
+                const first = values[0], last = values[values.length - 1];
+                const delta = last - first;
+                const deltaColor = delta > 0 ? '#22C55E' : delta < 0 ? '#EF4444' : tc.textMuted;
+                return (
+                  <View style={{
+                    marginTop: 14,
+                    backgroundColor: tc.surfaceRaised,
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: tc.border,
+                    padding: 14,
+                  }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+                      <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textPrimary }}>
+                        {topLiftHistory.name} · 1RM trend
+                      </Text>
+                      <Text style={{ fontSize: 12, fontWeight: '800', color: deltaColor }}>
+                        {delta > 0 ? '+' : ''}{Math.round(delta)} lb
+                      </Text>
+                    </View>
+                    <Svg width={chartW} height={chartH}>
+                      <Circle cx={xAt(0)} cy={yAt(first)} r={3} fill={tc.textMuted} />
+                      <Circle cx={xAt(pts.length - 1)} cy={yAt(last)} r={4} fill={tc.primary} />
+                      {/* Path drawn as a series of small line segments for compatibility */}
+                      {pts.slice(1).map((p, i) => {
+                        const prev = pts[i];
+                        return (
+                          <Svg key={i} x={0} y={0}>
+                            <Circle cx={xAt(i + 1)} cy={yAt(p.e1rm_lbs)} r={2} fill={tc.primary} opacity={0.5} />
+                          </Svg>
+                        );
+                      })}
+                    </Svg>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
+                      <Text style={{ fontSize: 10, color: tc.textMuted }}>
+                        {new Date(pts[0].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                      </Text>
+                      <Text style={{ fontSize: 10, color: tc.textMuted }}>
+                        {new Date(pts[pts.length - 1].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                      </Text>
+                    </View>
                   </View>
                 );
               })()}

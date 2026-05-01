@@ -11,8 +11,9 @@ This module isolates the inference in one place. Everywhere else in
 the planner that needs to ask "is this a hard interval exercise?"
 calls `classify_cardio()` instead of reading `is_compound` directly.
 
-If and when the seed grows an explicit `cardio_intensity` field, the
-only change needed is here — all call sites keep working unchanged.
+The seed can optionally carry an explicit `cardio_intensity` field for
+ambiguous names. When present, that field wins; keyword inference is the
+fallback for older rows and imported exercises.
 """
 from __future__ import annotations
 
@@ -20,6 +21,8 @@ from typing import Literal
 
 
 CardioIntensity = Literal["intervals", "steady", "easy", "not_cardio"]
+
+_EXPLICIT_INTENSITIES: set[str] = {"intervals", "steady", "easy"}
 
 
 # Keywords in exercise names that strongly signal intervals regardless
@@ -30,10 +33,13 @@ _INTERVAL_KEYWORDS = (
     "interval", "hiit", "sprint", "hill", "tabata",
     "battle rope", "burpee", "mountain climber", "assault",
     "jump rope",  # high-intensity, not suitable for zone 2
+    "jumping jack", "high knee", "butt kick", "fast feet",
+    "plank jack", "squat thrust", "skater", "line hop",
+    "shuttle", "shuffle", "boxing",
 )
 
 _EASY_KEYWORDS = (
-    "walk", "jog", "easy", "zone 2", "zone2", "recovery",
+    "easy", "recovery", "jogging",
 )
 
 # Exercises suitable for steady-state / zone 2 work. If the exercise
@@ -41,6 +47,8 @@ _EASY_KEYWORDS = (
 _STEADY_KEYWORDS = (
     "treadmill", "bike", "stationary", "elliptical", "stair climber",
     "rowing", "run", "cycling", "swim", "jog", "walk", "incline",
+    "zone 2", "zone2", "brisk", "hike", "hiking", "ruck", "aerobics",
+    "low-impact", "low impact",
 )
 
 
@@ -49,21 +57,26 @@ def classify_cardio(exercise: dict) -> CardioIntensity:
 
     Decision order:
       1. If the exercise isn't cardio at all, return `"not_cardio"`.
-      2. Name pattern: "interval" / "hiit" / "sprint" / "hill" /
+      2. Explicit seed `cardio_intensity`, when present.
+      3. Name pattern: "interval" / "hiit" / "sprint" / "hill" /
          "tabata" → `"intervals"`.
-      3. Name pattern: "walk" / "jog" / "easy" / "zone 2" / "recovery"
+      4. Name pattern: "easy" / "recovery"
          → `"easy"`.
-      4. Fallback: the seed's `is_compound` flag is used as the last
+      5. Fallback: the seed's `is_compound` flag is used as the last
          resort — the seed uses it as an interval indicator
          (`treadmill_intervals=True`, `treadmill_run=False`). This
          stays inside this module so nothing else depends on it.
-      5. Otherwise `"steady"`.
+      6. Otherwise `"steady"`.
 
     This helper is intentionally small and keyword-driven. If the
     seed grows an explicit `cardio_intensity` field, replace this
     body and every call site keeps working."""
     if not _is_cardio_row(exercise):
         return "not_cardio"
+
+    explicit = str(exercise.get("cardio_intensity") or "").lower().strip()
+    if explicit in _EXPLICIT_INTENSITIES:
+        return explicit  # type: ignore[return-value]
 
     name = (exercise.get("name") or "").lower()
 

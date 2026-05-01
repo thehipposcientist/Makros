@@ -421,6 +421,8 @@ def filter_candidates(
         family_muscles = _FOCUS_FAMILY_MUSCLES.get(day_focus_family)
     out: list[dict] = []
     for ex in all_exercises:
+        if ex.get("deprecated") or ex.get("retired"):
+            continue
         if (ex.get("name") or "").lower() in disliked_set:
             continue
         ex_type = ex.get("exercise_type") or "strength"
@@ -695,6 +697,8 @@ def score_candidate(
             "interval" in label_lower
             or "sprint" in label_lower
             or "main" in label_lower
+            or "circuit" in label_lower
+            or "burst" in label_lower
         )
         wants_steady = (
             "steady" in label_lower
@@ -1559,98 +1563,6 @@ def generate_workout_plan(
         if lifting_split
         else profile.planner_mode.replace("_", " ").title()
     )
-    # ── Weekly core injection ────────────────────────────────────────
-    # Instead of hardcoding core into every template (which steals
-    # accessories), inject core into the best days based on weekly
-    # targets. Days that already have core from their template are
-    # counted toward the target.
-    from .core_planning import select_core_days, make_core_slot
-    try:
-        recipe_values = [a.value for a in recipe] if recipe else [d.get("_archetype", "") for d in days_out]
-        core_day_indices = select_core_days(recipe_values, inputs.goal, inputs.days_per_week)
-
-        for day_idx in core_day_indices:
-            if day_idx >= len(days_out):
-                continue
-            day = days_out[day_idx]
-            exercises = day.get("exercises", [])
-            # Skip if this day already has core from its template
-            already_has_core = any(
-                ex.get("_role") == "core"
-                or ex.get("_primary_muscle") == "core"
-                or ex.get("_slot") == "Core"
-                or "core" in (ex.get("name", "") or "").lower()
-                for ex in exercises
-            )
-            if already_has_core:
-                continue
-
-            # Create and fill a core slot using the same Slot dataclass
-            # + pick_for_slot selection path the main loop uses. Any
-            # deviation here (e.g. stale kwargs on pick_for_slot) would
-            # silently break core injection.
-            core_slot_def = make_core_slot(day_idx)
-            core_slot = Slot(
-                label=core_slot_def.label,
-                movement_pattern=core_slot_def.movement_pattern,
-                primary_muscle_hint="core",
-                role="core",
-            )
-            # Per-day "used slugs" seed so we don't pick the exact
-            # exercise already on this day. We pass a temporarily merged
-            # set to the scorer rather than mutating the weekly set.
-            day_used_slugs = {
-                ex.get("_slug", "") for ex in exercises if ex.get("_slug")
-            }
-            _core_used_slugs = used_exercise_slugs | day_used_slugs
-            core_ex = pick_for_slot(
-                all_exercises, core_slot, inputs,
-                used_substitution_groups, _core_used_slugs,
-                history_familiarity,
-                volume_targets=targets,
-                volume_assigned=assigned,
-                injury_blocked_patterns=blocked_patterns,
-                accepts_types=frozenset({"strength"}),
-                day_focus_family=None,
-            )
-            if core_ex:
-                archetype_for_day = recipe[day_idx] if recipe and day_idx < len(recipe) else None
-                archetype_val = archetype_for_day.value if archetype_for_day is not None else None
-                meta_for_day = ARCHETYPE_META.get(archetype_for_day) if archetype_for_day is not None else None
-                training_type_for_day = meta_for_day.training_type if meta_for_day is not None else None
-                if archetype_for_day is not None:
-                    core_prescription = prescribe_for_slot(archetype_for_day, core_slot, core_ex, inputs)
-                else:
-                    # Fallback prescription so the injected exercise is
-                    # still fully-formed even without an archetype.
-                    core_prescription = Prescription(sets=3, reps="10-15", rest_seconds=45, rir_target=2.0)
-                core_out = build_planner_exercise(
-                    core_ex,
-                    prescription=core_prescription,
-                    slot_label=core_slot.label,
-                    role="core",
-                    archetype_value=archetype_val,
-                    training_type=training_type_for_day,
-                    goal_bucket=goal_bucket,
-                    experience=inputs.experience,
-                    perf_profiles=perf_profiles,
-                    all_exercises_by_slug=all_exercises_by_slug,
-                    load_equipment_settings=inputs.load_equipment_settings,
-                )
-                exercises.append(core_out)
-                day["exercises"] = exercises
-                if core_ex.get("slug"):
-                    used_exercise_slugs.add(core_ex["slug"])
-
-        core_count = sum(1 for d in days_out
-            for ex in d.get("exercises", [])
-            if ex.get("_primary_muscle") == "core" or ex.get("_role") == "core")
-        logger.debug(f"[planner] weekly core: target={len(core_day_indices)} injected, total={core_count} across {len(days_out)} days")
-    except Exception:
-        # Never fatal — log the full trace so the failure is diagnosable
-        # next regeneration instead of silently swallowed.
-        logger.exception("[planner] weekly core injection failed (non-fatal)")
-
     # Age-adjusted warm-up: for 50+ users, prepend an extra joint-prep
     # warmup to every lift day. Older joints benefit from more prep work,
     # and the cost (~3-5 min) is a worthwhile trade for injury reduction.

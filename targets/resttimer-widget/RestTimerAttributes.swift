@@ -10,6 +10,7 @@ public struct RestTimerAttributes: ActivityAttributes {
     public struct ContentState: Codable, Hashable {
         // Timing context lets the widget animate the lock-screen ring locally
         // without needing update pushes every second.
+        public var mode: String?
         public var startedAtMs: Double
         public var durationSeconds: Double
         public var endDateMs: Double
@@ -18,8 +19,11 @@ public struct RestTimerAttributes: ActivityAttributes {
         public var totalSets: Int
         public var nextSetRecommendation: String
         public var themeColorHex: String
+        public var paused: Bool?
+        public var elapsedSeconds: Double?
 
         public init(
+            mode: String? = "rest",
             startedAtMs: Double,
             durationSeconds: Double,
             endDateMs: Double,
@@ -27,8 +31,11 @@ public struct RestTimerAttributes: ActivityAttributes {
             setNumber: Int,
             totalSets: Int,
             nextSetRecommendation: String,
-            themeColorHex: String
+            themeColorHex: String,
+            paused: Bool? = false,
+            elapsedSeconds: Double? = 0
         ) {
+            self.mode = mode
             self.startedAtMs = startedAtMs
             self.durationSeconds = durationSeconds
             self.endDateMs = endDateMs
@@ -37,6 +44,8 @@ public struct RestTimerAttributes: ActivityAttributes {
             self.totalSets = totalSets
             self.nextSetRecommendation = nextSetRecommendation
             self.themeColorHex = themeColorHex
+            self.paused = paused
+            self.elapsedSeconds = elapsedSeconds
         }
     }
 

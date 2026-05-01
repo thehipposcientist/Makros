@@ -555,12 +555,13 @@ def test_split_change_fresh_days_rotate_via_modulo():
 def test_dpw_increase_4_to_5_midweek():
     """User on 4d/wk completes Mon (Push), then bumps to 5d. New pattern
     adds Wed as a training day."""
-    today = date.today()
-    monday = today - timedelta(days=1)  # today is Tue
-    pw, days = _build_week(monday, locked_indexes=(0,))
+    monday = _monday_of_current_week()
+    fake_today = monday + timedelta(days=1)  # Tuesday
+    pw, days = _build_week(monday, locked_indexes=(0,), rest_indexes=(2,))
     pw.days_per_week = 4
     days[0].workout_json = {"focus": "Push"}
-    with _patch_get_week_days(days):
+    with _patch_get_week_days(days), patch.object(week_manager, "date") as fake_date:
+        fake_date.today.return_value = fake_today
         # New 5d pattern: Mon Tue Wed Thu Fri
         fresh = [{"focus": "Pull"}, {"focus": "Legs"}, {"focus": "Push"}, {"focus": "Pull"}]
         week_manager.regenerate_remaining_days(

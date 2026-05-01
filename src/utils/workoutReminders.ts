@@ -64,6 +64,16 @@ export async function scheduleWorkoutReminder(settings: ReminderSettings): Promi
   const granted = await requestPermissions();
   if (!granted) return;
 
+  // Suppress when the configured fire-time falls inside the user's quiet
+  // hours window. Better to skip than reschedule to "wake them up just
+  // outside DND" — the user picked this time, the conflict is theirs to
+  // resolve in Settings.
+  const { hourIsQuietNow } = await import('./notificationPrefs');
+  if (await hourIsQuietNow(settings.hour)) {
+    await cancelWorkoutReminders();
+    return;
+  }
+
   await cancelWorkoutReminders();
 
   const trainingDays = await readTrainingDays();

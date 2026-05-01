@@ -6,7 +6,7 @@ individually lockable. Replaces the cycling-array model for new clients.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -88,6 +88,8 @@ class PlanWeekResponse(BaseModel):
     goal: str
     days_per_week: int
     preferred_split: str | None = None
+    paused_until: str | None = None
+    pause_reason: str | None = None
     days: list[PlanDayResponse]
 
 
@@ -182,16 +184,22 @@ def _plan_day_to_response(pd: PlanDay) -> PlanDayResponse:
 
 
 def _plan_week_to_response(pw: PlanWeek, days: list[PlanDay]) -> PlanWeekResponse:
+    paused_until = getattr(pw, "paused_until", None)
+    # Past pauses auto-expire — don't surface a stale paused_until that's
+    # already in the rear-view mirror.
+    paused_until_str = paused_until.isoformat() if paused_until and paused_until >= date.today() else None
     return PlanWeekResponse(
         id=pw.id,
         start_date=pw.start_date.isoformat(),
         end_date=pw.end_date.isoformat(),
         status=pw.status,
-        needs_new_week=week_needs_renewal(pw),
+        needs_new_week=False if paused_until_str else week_needs_renewal(pw),
         planner_version=pw.planner_version,
         goal=pw.goal,
         days_per_week=pw.days_per_week,
         preferred_split=pw.preferred_split,
+        paused_until=paused_until_str,
+        pause_reason=getattr(pw, "pause_reason", None) if paused_until_str else None,
         days=[_plan_day_to_response(d) for d in days],
     )
 
@@ -217,9 +225,18 @@ def get_active_plan_week(
     # one IN-clause query for sessions, one UPDATE per stale day. Keeps
     # the UI honest (calendar dots, streak, weekly review) without
     # requiring the user to manually mark every missed day.
-    if _auto_skip_unlogged_past_days(db, current_user.id, days):
+    # Suppressed while the plan is paused (travel / illness) — we don't
+    # want the user's streak silently demolished by a known-off window.
+    if not _is_plan_paused(pw) and _auto_skip_unlogged_past_days(db, current_user.id, days):
         days = get_week_days(db, pw.id)
     return _plan_week_to_response(pw, days)
+
+
+def _is_plan_paused(pw: PlanWeek) -> bool:
+    """True when `paused_until` is set to a future date. Past pauses are
+    treated as expired automatically (no need to clear the column)."""
+    pu = getattr(pw, "paused_until", None)
+    return pu is not None and pu >= date.today()
 
 
 def _auto_skip_unlogged_past_days(
@@ -280,6 +297,65 @@ def _auto_skip_unlogged_past_days(
     if changed:
         db.commit()
     return changed
+
+
+# ─── Plan pause (travel / illness) ───────────────────────────────────────────
+
+
+class PausePlanRequest(BaseModel):
+    """Resume date — defaults to a 7-day pause if omitted. Reason is free-form
+    but the UI typically sends one of: 'travel' / 'illness' / 'other'."""
+    paused_until: date | None = None
+    reason: str | None = None
+
+
+@router.post("/week/pause")
+def pause_active_week(
+    body: PausePlanRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> PlanWeekResponse:
+    """Pause the active plan until a future date.
+
+    While paused, auto-renew, auto-skip-unlogged, and reminder scheduling
+    all suspend so the user's streak + adherence metrics don't degrade
+    over a known-off window. Resume is a separate endpoint so the user
+    can come back early without arithmetic.
+    """
+    pw = get_active_week(db, current_user.id)
+    if not pw:
+        raise HTTPException(status_code=404, detail="No active plan to pause")
+    target = body.paused_until or (date.today() + timedelta(days=7))
+    if target <= date.today():
+        raise HTTPException(status_code=400, detail="paused_until must be in the future")
+    pw.paused_until = target
+    pw.paused_at = datetime.now(timezone.utc)
+    pw.pause_reason = (body.reason or "other").strip() or "other"
+    db.add(pw)
+    db.commit()
+    db.refresh(pw)
+    days = get_week_days(db, pw.id)
+    return _plan_week_to_response(pw, days)
+
+
+@router.post("/week/resume")
+def resume_active_week(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+) -> PlanWeekResponse:
+    """End the pause early. Auto-renew, auto-skip, and reminders resume on
+    the next active-week fetch."""
+    pw = get_active_week(db, current_user.id)
+    if not pw:
+        raise HTTPException(status_code=404, detail="No active plan")
+    pw.paused_until = None
+    pw.paused_at = None
+    pw.pause_reason = None
+    db.add(pw)
+    db.commit()
+    db.refresh(pw)
+    days = get_week_days(db, pw.id)
+    return _plan_week_to_response(pw, days)
 
 
 @router.post("/start-new-week")
@@ -456,6 +532,18 @@ def auto_renew(
     from app.models import PlanWeekCheckin
 
     pw = get_active_week(db, current_user.id)
+    # Suspended pause window: auto-renew refuses to fire so the user's
+    # streak isn't quietly closed out by a no-op week boundary.
+    if pw and _is_plan_paused(pw):
+        days = get_week_days(db, pw.id)
+        return AutoRenewResponse(
+            plan_week=_plan_week_to_response(pw, days),
+            review_headline=f"Plan paused until {pw.paused_until.isoformat()}.",
+            review_summary={},
+            auto_applied=[],
+            needs_review=[],
+            explanation="Auto-renew is suspended while your plan is paused. Resume from Settings when you're ready.",
+        )
     if pw and not week_needs_renewal(pw):
         days = get_week_days(db, pw.id)
         return AutoRenewResponse(

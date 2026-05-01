@@ -9,8 +9,9 @@
 //                       heartRate: Int?, recommendation: String? }
 //
 // We also respond to the phone's `sendMessage` requests when the watch
-// initiates a session ("start workout", "skip today"). Phone handles
-// the network + persistence — watch is a view + input surface only.
+// initiates a session ("start workout", "skip today") and send commands
+// like `log_set` / `swap_exercise` back to the phone. Phone handles the
+// network + persistence — watch is a view + input surface only.
 
 import Foundation
 import WatchConnectivity

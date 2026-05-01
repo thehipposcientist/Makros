@@ -63,6 +63,14 @@ DEFAULT_ROTATION = [
     CAT_FLEXION,
 ]
 
+_HIGH_CORE_CIRCUIT_GOALS = frozenset({
+    "fat_loss",
+    "endurance",
+    "athletic_performance",
+    "hyrox",
+    "body_recomp",
+})
+
 # Movement_pattern each category maps to at slot-build time. The
 # exercise picker already resolves these against seed data.
 _CATEGORY_TO_MOVEMENT: dict[str, str] = {
@@ -269,11 +277,13 @@ def _core_exercise_count(bucket: str, goal: str) -> int:
         # 1 exercise so main work isn't displaced.
         return 1
     if bucket == "medium":
+        if goal in _HIGH_CORE_CIRCUIT_GOALS:
+            return 2
         return 1
-    # Long sessions: 1-2 by default, 2 for fat_loss / endurance which
-    # have a higher weekly exposure target.
-    if goal in ("fat_loss", "endurance", "athletic_performance", "hyrox", "body_recomp"):
-        return 2
+    # Long sessions: high core-endurance goals get a real 3-move
+    # circuit. Other goals keep direct trunk work minimal.
+    if goal in _HIGH_CORE_CIRCUIT_GOALS:
+        return 3
     return 1
 
 
@@ -397,6 +407,7 @@ class CoreDecision:
     category: Optional[str]   # None when add=False
     count: int                # number of exercises to append
     reason: str               # diagnostic string for logs
+    categories: tuple[str, ...] = ()
     # Circuit structure hints passed to the prescriber so it can emit
     # round-based prescriptions instead of generic strength sets.
     rounds: int = 3           # target rounds per exercise
@@ -417,6 +428,67 @@ def _is_session_dense(slots_count: int, session_minutes: Optional[int]) -> bool:
     if m <= 30: return slots_count >= 6
     if m <= 45: return slots_count >= 8
     return slots_count >= 10
+
+
+def _dedupe_categories(categories: list[str]) -> list[str]:
+    out: list[str] = []
+    for category in categories:
+        if category not in out:
+            out.append(category)
+    return out
+
+
+def _ordered_categories(
+    *,
+    prefs: list[str],
+    recent_core_categories: list[str],
+    hip_flexor_recent: bool,
+) -> list[str]:
+    """Return category candidates in best-to-worst order for this day.
+
+    `recent_core_categories` represents the last couple of core
+    sessions, not the entire week. Repeated categories are still usable
+    as a fallback, but loaded carries are pushed behind every other
+    option when they appeared recently so users don't see carry-heavy
+    core blocks in close succession.
+    """
+    base = _dedupe_categories([*prefs, *DEFAULT_ROTATION])
+    recent = set(recent_core_categories)
+    fresh = [c for c in base if c not in recent]
+    ordered = fresh + [c for c in base if c not in fresh]
+
+    # Avoid stacking hip-flexor-heavy work when the recent window had
+    # it. Flexion (hanging leg raise, reverse crunch) and strict
+    # anti-extension rollouts both pull the hip flexors. When the user
+    # had any of those recently, bias toward anti-rotation or lateral
+    # stability instead.
+    if hip_flexor_recent:
+        hip_flexor_categories = (CAT_FLEXION, CAT_ANTI_EXTENSION)
+        ordered = [c for c in ordered if c not in hip_flexor_categories] + \
+                  [c for c in ordered if c in hip_flexor_categories]
+
+    if CAT_POSTERIOR_BRACING in recent:
+        ordered = [c for c in ordered if c != CAT_POSTERIOR_BRACING] + \
+                  [CAT_POSTERIOR_BRACING]
+
+    return _dedupe_categories(ordered)
+
+
+def _pick_circuit_categories(ordered: list[str], count: int) -> tuple[str, ...]:
+    """Pick distinct categories for one core circuit.
+
+    The old implementation duplicated one slot category N times. That
+    let a "Carry / Bracing" circuit become Suitcase Carry immediately
+    followed by Farmer Carry. A circuit should mix demands instead.
+    """
+    picked: list[str] = []
+    for category in ordered:
+        if category in picked:
+            continue
+        picked.append(category)
+        if len(picked) >= count:
+            break
+    return tuple(picked)
 
 
 def decide_core_for_day(
@@ -457,42 +529,34 @@ def decide_core_for_day(
     if _is_session_dense(slots_count, session_minutes):
         return CoreDecision(False, None, 0, "session_dense")
 
-    # Pick category. Preference list tailored to the day type, with
+    # Pick categories. Preference list tailored to the day type, with
     # recently-used categories pushed to the back so we rotate.
     if is_recovery_day:
         prefs = _DAY_CATEGORY_PREFERENCE.get("recovery", DEFAULT_ROTATION)
     else:
         prefs = _DAY_CATEGORY_PREFERENCE.get(day_type or "upper", DEFAULT_ROTATION)
 
-    # Drop the last two categories used so we avoid back-to-back
-    # repeats. If all remaining preferences are "recently used", we
-    # still fall through and pick the best option we have — just not
-    # the very last one.
-    last_used = set(recent_core_categories[-2:])
-    fresh = [c for c in prefs if c not in last_used]
-    ordered = fresh + [c for c in prefs if c not in fresh]
-
-    # Avoid stacking hip-flexor-heavy work when the recent window had
-    # it. Flexion (hanging leg raise, reverse crunch) and strict
-    # anti-extension rollouts both pull the hip flexors. When the
-    # user had any of those recently, bias toward anti-rotation or
-    # lateral stability instead.
-    if hip_flexor_recent:
-        ordered = [c for c in ordered if c not in (CAT_FLEXION, CAT_ANTI_EXTENSION)] + \
-                  [c for c in ordered if c in (CAT_FLEXION, CAT_ANTI_EXTENSION)]
+    ordered = _ordered_categories(
+        prefs=prefs,
+        recent_core_categories=recent_core_categories,
+        hip_flexor_recent=hip_flexor_recent,
+    )
 
     if not ordered:
         return CoreDecision(False, None, 0, "no_category_available")
 
-    category = ordered[0]
     count = _core_exercise_count(bucket, goal)
     # Recovery days stay minimal regardless of bucket.
     if is_recovery_day:
         count = 1
+    categories = _pick_circuit_categories(ordered, count)
+    if not categories:
+        return CoreDecision(False, None, 0, "no_category_available")
 
     return CoreDecision(
-        True, category, count,
-        f"ok:day={day_type},bucket={bucket},cat={category}",
+        True, categories[0], len(categories),
+        f"ok:day={day_type},bucket={bucket},cats={','.join(categories)}",
+        categories=categories,
     )
 
 
@@ -518,8 +582,7 @@ def program_core_across_week(
     """
     freq = weekly_core_target(goal, days_per_week)
     remaining_budget = freq.default
-    used_categories: list[str] = []
-    hip_flexor_window: list[bool] = []
+    used_category_sessions: list[tuple[str, ...]] = []
     rng = random.Random(seed)
 
     out: list = []
@@ -531,26 +594,31 @@ def program_core_across_week(
             out.append((name, slots, archetype, gen_day))
             continue
 
-        # Recent hip-flexor flag: look at last 2 categories used.
+        recent_categories = [
+            c
+            for session_categories in used_category_sessions[-2:]
+            for c in session_categories
+        ]
+        # Recent hip-flexor flag: look at the last 2 core sessions.
         recent_hf = any(c in (CAT_FLEXION, CAT_ANTI_EXTENSION)
-                        for c in used_categories[-2:])
+                        for c in recent_categories)
 
         decision = decide_core_for_day(
             archetype=archetype,
             slots_count=len(slots),
             session_minutes=session_minutes,
             goal=goal,
-            recent_core_categories=used_categories,
+            recent_core_categories=recent_categories,
             hip_flexor_recent=recent_hf,
             is_recovery_day=False,
             remaining_weekly_budget=remaining_budget,
         )
 
-        if decision.add and decision.category:
-            core_slot = build_core_slot(decision.category)
-            new_slots = list(slots) + [core_slot] * decision.count
+        if decision.add and decision.categories:
+            core_slots = [build_core_slot(category) for category in decision.categories]
+            new_slots = list(slots) + core_slots
             out.append((name, new_slots, archetype, gen_day))
-            used_categories.append(decision.category)
+            used_category_sessions.append(decision.categories)
             remaining_budget -= 1
         else:
             out.append((name, slots, archetype, gen_day))

@@ -37,18 +37,18 @@ struct RestTimerWidget: Widget {
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    TimerText(endDateMs: context.state.endDateMs,
+                    TimerText(state: context.state,
                               accent: Color(hex: context.state.themeColorHex))
                         .font(.system(size: 26, weight: .heavy, design: .rounded))
                         .monospacedDigit()
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(recommendationText(context.state.nextSetRecommendation))
+                        Text(statusText(context.state))
                             .font(.footnote)
                             .foregroundStyle(.white)
                             .lineLimit(2)
-                        if #available(iOSApplicationExtension 17.0, *) {
+                        if #available(iOSApplicationExtension 17.0, *), isRestTimer(context.state) {
                             RestAdjustControls(workoutId: context.attributes.workoutId, accent: Color(hex: context.state.themeColorHex))
                         }
                     }
@@ -57,7 +57,7 @@ struct RestTimerWidget: Widget {
                 Image(systemName: "timer")
                     .foregroundStyle(Color(hex: context.state.themeColorHex))
             } compactTrailing: {
-                TimerText(endDateMs: context.state.endDateMs,
+                TimerText(state: context.state,
                           accent: Color(hex: context.state.themeColorHex))
                     .monospacedDigit()
                     .font(.caption.bold())
@@ -79,7 +79,7 @@ private struct LockScreenView: View {
             TimerCircle(state: state, accent: accent)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("REST")
+                Text(isElapsedWorkout(state) ? "WORKOUT" : "REST")
                     .font(.system(size: 11, weight: .heavy))
                     .foregroundStyle(accent)
                     .tracking(1.5)
@@ -91,11 +91,11 @@ private struct LockScreenView: View {
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.75))
                     .lineLimit(1)
-                Text("Next: \(recommendationText(state.nextSetRecommendation))")
+                Text(statusText(state))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white)
                     .lineLimit(2)
-                if #available(iOSApplicationExtension 17.0, *) {
+                if #available(iOSApplicationExtension 17.0, *), isRestTimer(state) {
                     RestAdjustControls(workoutId: workoutId, accent: accent)
                         .padding(.top, 2)
                 }
@@ -116,30 +116,45 @@ private struct TimerCircle: View {
         ZStack {
             Circle()
                 .stroke(accent.opacity(0.22), lineWidth: 5)
-            // ProgressView(timerInterval:) auto-animates in Live Activities
-            // without burning the widget's refresh budget. .circular renders
-            // a system ring; we tint it to match the theme.
-            ProgressView(timerInterval: startDate...endDate, countsDown: true) {
-                EmptyView()
-            } currentValueLabel: {
-                EmptyView()
+            if isElapsedWorkout(state) {
+                Image(systemName: state.paused == true ? "pause.fill" : "timer")
+                    .font(.system(size: 12, weight: .heavy))
+                    .foregroundStyle(accent.opacity(0.75))
+                    .offset(y: -18)
+                TimerText(state: state, accent: accent)
+                    .font(.system(size: 17, weight: .heavy, design: .rounded))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.62)
+                    .frame(width: 58, height: 26, alignment: .center)
+                    .multilineTextAlignment(.center)
+                    .offset(y: 5)
+            } else {
+                // ProgressView(timerInterval:) auto-animates in Live Activities
+                // without burning the widget's refresh budget. .circular renders
+                // a system ring; we tint it to match the theme.
+                ProgressView(timerInterval: startDate...endDate, countsDown: true) {
+                    EmptyView()
+                } currentValueLabel: {
+                    EmptyView()
+                }
+                .progressViewStyle(.circular)
+                .tint(accent)
+                .frame(width: 68, height: 68)
+                // Text(timerInterval:countsDown:) is the ONLY pattern that ticks
+                // reliably on the lock screen — TimelineView(.periodic) gets
+                // throttled to ~1/min by ActivityKit when the app is
+                // backgrounded, which is why the previous version showed a
+                // frozen number.
+                Text(timerInterval: startDate...endDate, countsDown: true)
+                    .font(.system(size: 18, weight: .heavy, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(accent)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                    .frame(width: 48, height: 24, alignment: .center)
+                    .multilineTextAlignment(.center)
             }
-            .progressViewStyle(.circular)
-            .tint(accent)
-            .frame(width: 68, height: 68)
-            // Text(timerInterval:countsDown:) is the ONLY pattern that ticks
-            // reliably on the lock screen — TimelineView(.periodic) gets
-            // throttled to ~1/min by ActivityKit when the app is
-            // backgrounded, which is why the previous version showed a
-            // frozen number.
-            Text(timerInterval: startDate...endDate, countsDown: true)
-                .font(.system(size: 18, weight: .heavy, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(accent)
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-                .frame(width: 48, height: 24, alignment: .center)
-                .multilineTextAlignment(.center)
         }
         .frame(width: 68, height: 68, alignment: .center)
     }
@@ -181,13 +196,24 @@ private struct RestAdjustControls: View {
 // pattern for ticking text. TimelineView(.periodic) gets refresh-budgeted
 // by ActivityKit and visibly stalls when the app is backgrounded.
 private struct TimerText: View {
-    let endDateMs: Double
+    let state: RestTimerAttributes.ContentState
     let accent: Color
 
     var body: some View {
-        let end = Date(timeIntervalSince1970: endDateMs / 1000.0)
-        Text(timerInterval: Date()...end, countsDown: true)
-            .foregroundStyle(accent)
+        if isElapsedWorkout(state) {
+            if state.paused == true {
+                Text(formatElapsed(Int(state.elapsedSeconds ?? 0)))
+                    .foregroundStyle(accent)
+            } else {
+                let start = Date(timeIntervalSince1970: state.startedAtMs / 1000.0)
+                Text(timerInterval: start...Date.distantFuture, countsDown: false)
+                    .foregroundStyle(accent)
+            }
+        } else {
+            let end = Date(timeIntervalSince1970: state.endDateMs / 1000.0)
+            Text(timerInterval: Date()...end, countsDown: true)
+                .foregroundStyle(accent)
+        }
     }
 }
 
@@ -212,8 +238,38 @@ private func formatRemaining(_ seconds: Int) -> String {
 }
 
 private func setProgressText(_ state: RestTimerAttributes.ContentState) -> String {
-    let setNumber = max(1, state.setNumber + 1)
+    if isElapsedWorkout(state) {
+        return state.paused == true ? "Paused" : "Live timer"
+    }
+    let displaySet = max(1, state.setNumber + 1)
+    let setNumber = state.totalSets > 0 ? min(displaySet, state.totalSets) : displaySet
     return state.totalSets > 0 ? "Set \(setNumber) of \(state.totalSets)" : "Set \(setNumber)"
+}
+
+private func isElapsedWorkout(_ state: RestTimerAttributes.ContentState) -> Bool {
+    return state.mode == "elapsed"
+}
+
+private func isRestTimer(_ state: RestTimerAttributes.ContentState) -> Bool {
+    return !isElapsedWorkout(state)
+}
+
+private func statusText(_ state: RestTimerAttributes.ContentState) -> String {
+    if isElapsedWorkout(state) {
+        return state.paused == true ? "Paused" : recommendationText(state.nextSetRecommendation)
+    }
+    return "Next: \(recommendationText(state.nextSetRecommendation))"
+}
+
+private func formatElapsed(_ seconds: Int) -> String {
+    let clamped = max(0, seconds)
+    let hours = clamped / 3600
+    let minutes = (clamped % 3600) / 60
+    let remainder = clamped % 60
+    if hours > 0 {
+        return String(format: "%d:%02d:%02d", hours, minutes, remainder)
+    }
+    return String(format: "%d:%02d", minutes, remainder)
 }
 
 private func recommendationText(_ text: String) -> String {

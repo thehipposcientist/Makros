@@ -183,39 +183,50 @@ interface PillarResult {
 // Duration — the single biggest factor. Full credit requires a full
 // recovery window; short nights are intentionally capped later so good
 // stage ratios can't make a 5h night look excellent.
-// Both modes share the same band shape and just scale to a different max
-// (32 in MVP, 28 in Personalized) — factored through `scoreDurationBanded`
-// so we only edit one place if the curve needs tuning.
-function scoreDurationBanded(hours: number, max: number): PillarResult {
-  let frac: number;
+//
+// Use a smooth log-normal curve outside the 7-9h target instead of
+// hard bands. This keeps nearby nights nearby in score: 6.49h and
+// 6.51h should not feel like different categories. The lower side is
+// a little steeper than the upper side because short sleep is usually
+// a clearer recovery limiter than sleeping long after accumulated
+// fatigue, travel, or illness.
+function scoreDurationSmooth(hours: number, max: number): PillarResult {
+  const targetMin = 7;
+  const targetMax = 9;
+  if (hours >= targetMin && hours <= targetMax) {
+    return { points: max };
+  }
+
+  const isShort = hours < targetMin;
+  const boundary = isShort ? targetMin : targetMax;
+  const sigma = isShort ? 0.22 : 0.24;
+  const distance = Math.abs(Math.log(hours / boundary));
+  const curve = Math.exp(-(distance * distance) / (2 * sigma * sigma));
+  const floor = isShort ? 0.05 : 0.20;
+  const frac = clamp(curve, floor, 1);
+
   let insight: string | undefined;
-  if (hours >= 7 && hours <= 9) frac = 1.0;
-  else if ((hours >= 6.5 && hours < 7) || (hours > 9 && hours <= 9.5)) {
-    frac = 0.72;
-    insight = hours < 7 ? 'Sleep duration slightly below target' : undefined;
-  } else if ((hours >= 6 && hours < 6.5) || (hours > 9.5 && hours <= 10)) {
-    frac = 0.48;
-    insight = hours < 6.5
-      ? 'Sleep duration below target'
-      : 'Long sleep duration — often tied to accumulated fatigue or schedule drift';
-  } else if (hours >= 5 && hours < 6) {
-    frac = 0.25;
-    insight = 'Sleep duration below target';
-  } else {
-    frac = hours < 5 ? 0.05 : 0.20;
+  if (isShort) {
     insight = hours < 5
       ? 'Very short sleep — prioritise rest'
-      : 'Long sleep duration — often tied to accumulated fatigue or schedule drift';
+      : hours < 6.5
+        ? 'Sleep duration below target'
+        : 'Sleep duration slightly below target';
+  } else if (hours > 10.5) {
+    insight = 'Very long sleep duration — often tied to accumulated fatigue, illness, or schedule drift';
+  } else if (hours > 9.5) {
+    insight = 'Long sleep duration — often tied to accumulated fatigue or schedule drift';
   }
+
   return { points: Math.round(max * frac), insight };
 }
 
 function scoreDuration(hours: number): PillarResult {
-  return scoreDurationBanded(hours, 32);
+  return scoreDurationSmooth(hours, 32);
 }
 
 function scoreDurationPersonalized(hours: number): PillarResult {
-  return scoreDurationBanded(hours, 28);
+  return scoreDurationSmooth(hours, 28);
 }
 
 // Efficiency — time asleep / time in bed. Low = fragmented sleep.
@@ -504,8 +515,8 @@ function sleepScoreCaps(
   else if (hours < 6) applyCap(59, 'Short sleep caps recovery today');
   else if (hours < 6.5) applyCap(69, 'Sleep duration limits recovery today');
   else if (hours < 7) applyCap(84, 'Slightly short sleep limits top-end recovery');
-  else if (hours > 10) applyCap(79, 'Long sleep can signal accumulated fatigue');
-  else if (hours > 9.5) applyCap(88, 'Long sleep can signal accumulated fatigue');
+  else if (hours > 11.5) applyCap(79, 'Very long sleep can signal accumulated fatigue or illness');
+  else if (hours > 10.5) applyCap(88, 'Long sleep can signal accumulated fatigue');
 
   const eff = signals.efficiency.ratio;
   if (eff != null) {
@@ -545,6 +556,11 @@ function sleepScoreCaps(
   const stress = recoveryStressSignals(input, hrvRatio);
   if (stress.severeCount >= 2) applyCap(49, 'Multiple recovery markers were off overnight');
   else if (stress.count >= 2) applyCap(59, 'Recovery markers limit training readiness today');
+  if (hours > 10 && stress.count >= 2) {
+    applyCap(69, 'Long sleep plus off recovery markers caps recovery today');
+  } else if (hours > 10 && stress.count >= 1) {
+    applyCap(84, 'Long sleep plus an off recovery marker limits top-end recovery');
+  }
   if (awakeMin != null && awakeMin >= 105 && stress.count >= 2) {
     applyCap(39, 'Fragmented sleep plus stress markers caps recovery today');
   } else if (awakeMin != null && awakeMin >= 105 && stress.count >= 1) {

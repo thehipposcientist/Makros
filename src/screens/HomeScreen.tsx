@@ -28,10 +28,10 @@ import FriendsModal from '../components/FriendsModal';
 // ShareWorkoutModal hidden — will re-enable when social feed is active
 // import ShareWorkoutModal from '../components/ShareWorkoutModal';
 import LiveActivityTracker from '../components/LiveActivityTracker';
+import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 import CollapsibleSection from '../components/CollapsibleSection';
-import BodyHeatMap, { HeatMuscleKey } from '../components/BodyHeatMap';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 import { StatusBar } from 'expo-status-bar';
@@ -83,7 +83,6 @@ import SearchInput from '../components/SearchInput';
 // CoachCheckinModal removed — coach chat handles check-ins now
 import { APP_THEMES, THEME_PICKER_ORDER, colors, elevations, getTheme, isLightThemeName, radius, resolveThemeName, typography } from '../constants/theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
 // Inline-rendered tab content. Goals and Progress used to be modal
 // overlays via parent callbacks; they now mount inside the tab body
 // so the bottom nav stays pinned and feels like a single-page app.
@@ -278,75 +277,6 @@ const ExerciseLibraryRow = React.memo(function ExerciseLibraryRow({
         ) : null}
       </View>
       <Ionicons name="chevron-forward" size={16} color={themeColors.textMuted} />
-    </TouchableOpacity>
-  );
-});
-
-const MuscleLibraryRow = React.memo(function MuscleLibraryRow({
-  muscle,
-  themeColors,
-  muscleFatigue,
-  onOpen,
-}: {
-  muscle: MuscleEntry;
-  themeColors: any;
-  muscleFatigue?: Record<string, number>;
-  onOpen: (muscle: MuscleEntry) => void;
-}) {
-  const fatigueKeyFor: Record<string, string> = {
-    lats: 'back',
-    traps: 'back',
-    deltoids: 'shoulders',
-  };
-  const fatigueKey = fatigueKeyFor[muscle.id] ?? muscle.id;
-  const fatigueRaw = muscleFatigue?.[fatigueKey];
-  const recovery = fatigueRaw == null
-    ? null
-    : Math.max(0, Math.min(100, Math.round(100 - fatigueRaw * 100)));
-  const fatigueLabel = recovery == null ? null
-    : recovery >= 70 ? 'Fresh'
-    : recovery >= 40 ? 'Moderate'
-    : 'Fatigued';
-  const fatigueColor = recovery == null ? themeColors.textMuted
-    : recovery >= 70 ? themeColors.success
-    : recovery >= 40 ? themeColors.warning
-    : themeColors.error;
-
-  return (
-    <TouchableOpacity
-      accessibilityRole="button"
-      accessibilityLabel={`Open ${muscle.commonName} muscle guide`}
-      style={[styles.libraryItem, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}
-      activeOpacity={0.8}
-      onPress={() => onOpen(muscle)}
-    >
-      <View style={styles.muscleItemRow}>
-        <View style={[styles.muscleItemEmoji, { backgroundColor: muscle.tagColor + '18', borderRadius: 14, width: 52, height: 52 }]}>
-          {muscle.emoji ? (
-            <Text style={{ fontSize: 28 }}>{muscle.emoji}</Text>
-          ) : (
-            <Ionicons name={(muscle.icon || 'body-outline') as any} size={24} color={muscle.tagColor} />
-          )}
-        </View>
-        <View style={styles.muscleItemBody}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <Text style={[styles.libraryItemName, { color: themeColors.textPrimary, flexShrink: 1 }]} numberOfLines={1}>
-              {muscle.commonName}
-            </Text>
-            {fatigueLabel && (
-              <View style={{ paddingHorizontal: 7, paddingVertical: 2, borderRadius: 8, backgroundColor: fatigueColor + '22' }}>
-                <Text style={{ fontSize: 10, fontWeight: '800', color: fatigueColor, letterSpacing: 0.4 }}>
-                  {fatigueLabel.toUpperCase()}
-                </Text>
-              </View>
-            )}
-          </View>
-          <Text style={[styles.libraryItemMeta, { color: muscle.tagColor }]} numberOfLines={1}>
-            {muscle.name} · {muscle.bodyRegion}
-          </Text>
-          <Text style={[styles.libraryItemDesc, { color: themeColors.textSecondary }]} numberOfLines={2}>{muscle.shortDescription}</Text>
-        </View>
-      </View>
     </TouchableOpacity>
   );
 });
@@ -1369,7 +1299,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const workoutPalette = theme.sections.workout;
   const mealPalette = theme.sections.meals;
   const plannerPalette = theme.sections.planner;
-  const aiPalette = theme.sections.ai;
 
   const [workoutPlan, setWorkoutPlan]     = useState<WorkoutPlan | null>(null);
   // The persisted 7-day plan from /plans/week/active. Source of truth for
@@ -1404,9 +1333,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     AsyncStorage.setItem('lastActiveTab', tab).catch(() => {});
   }, [activeTab, bottomNavFloat, progressFade]);
   // Sub-tab inside each main tab.
-  // Workouts: plan | exercises | muscles | equipment
+  // Workouts: plan | library | equipment | history
   // Meals:    plan | foods     | supplements | macros
-  const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'library' | 'exercises' | 'muscles' | 'equipment' | 'history'>('plan');
+  const [workoutSubTab, setWorkoutSubTab] = useState<'plan' | 'library' | 'equipment' | 'history'>('plan');
   const renderedWorkoutSubTab = useDeferredValue(workoutSubTab);
   const [workoutHistoryList, setWorkoutHistoryList] = useState<WorkoutSession[]>([]);
   const [workoutHistorySummaries, setWorkoutHistorySummaries] = useState<any[]>([]);
@@ -1569,7 +1498,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     exerciseName: string;
     dayKey: string;
   } | null>(null);
-  const [libraryActiveTab, setLibraryActiveTab] = useState<'exercises' | 'muscles'>('exercises');
   const [showSupplementLibrary, setShowSupplementLibrary] = useState(false);
   const [selectedSupplement, setSelectedSupplement] = useState<SupplementEntry | null>(null);
   const [suppLibSearch, setSuppLibSearch] = useState('');
@@ -1584,8 +1512,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const exerciseLibraryLoadPromiseRef = useRef<Promise<ExerciseLibraryItem[]> | null>(null);
   const ensureExerciseLibraryRef = useRef<(() => Promise<ExerciseLibraryItem[]>) | null>(null);
   const [selectedExercise, setSelectedExercise] = useState<ExerciseLibraryItem | null>(null);
-  const [selectedMuscle, setSelectedMuscle] = useState<MuscleEntry | null>(null);
-  const [muscleRegionFilter, setMuscleRegionFilter] = useState<string>('all');
   const [exerciseSearch, setExerciseSearch] = useState('');
   const deferredExerciseSearch = useDeferredValue(exerciseSearch);
   // AI exercise search state — mirrors the food search flow. Results live
@@ -4040,11 +3966,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return matchesSearch && matchesMuscle && matchesEquipment;
   }), [exerciseLibrary, deferredExerciseSearch, exerciseMuscleFilter, exerciseEquipmentFilter]);
 
-  const filteredMuscleLibrary = useMemo(
-    () => MUSCLE_LIBRARY.filter(m => muscleRegionFilter === 'all' || m.bodyRegion.toLowerCase().includes(muscleRegionFilter.toLowerCase())),
-    [muscleRegionFilter],
-  );
-
   const summarizeTrainerUpdate = useCallback((
     prevWorkout: WorkoutPlan | null,
     nextWorkout: WorkoutPlan | null,
@@ -5426,9 +5347,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       movement_pattern: (item as any).movement_pattern ?? null,
     });
   }, [openExerciseVideo]);
-  const openLibraryMuscle = useCallback((muscle: MuscleEntry) => {
-    setSelectedMuscle(muscle);
-  }, []);
   const renderExerciseLibraryItem = useCallback(({ item }: { item: ExerciseLibraryItem }) => (
     <ExerciseLibraryRow
       item={item}
@@ -5438,16 +5356,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       onPlayVideo={playLibraryExerciseVideo}
     />
   ), [openLibraryExercise, playLibraryExerciseVideo, themeColors, workoutPalette]);
-  const renderMuscleLibraryItem = useCallback(({ item }: { item: MuscleEntry }) => (
-    <MuscleLibraryRow
-      muscle={item}
-      themeColors={themeColors}
-      muscleFatigue={readinessScore?.muscleFatigue}
-      onOpen={openLibraryMuscle}
-    />
-  ), [openLibraryMuscle, readinessScore?.muscleFatigue, themeColors]);
   const exerciseLibraryKeyExtractor = useCallback((item: ExerciseLibraryItem) => String(item.id ?? item.name), []);
-  const muscleLibraryKeyExtractor = useCallback((item: MuscleEntry) => item.id, []);
 
   // MUST be called BEFORE any conditional return — hooks have to fire
   // in the same order every render. The previous version sat below
@@ -5684,10 +5593,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           end={{ x: 0, y: 1 }}
           style={[styles.fixedSubTabBar, { top: insets.top + 68, borderBottomColor: 'transparent' }]}>
           <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface + 'E8', borderColor: themeColors.border + '99' }]}>
-            <SubTabBtn label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
-            <SubTabBtn label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setLibraryActiveTab('exercises'); setSelectedExercise(null); setSelectedMuscle(null); setShowExerciseLibrary(true); ensureExerciseLibrary().catch(() => {}); }} />
-            <SubTabBtn label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); }} />
-            <SubTabBtn label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedMuscle(null); requestAnimationFrame(() => { loadWorkoutHistory().then(setWorkoutHistoryList).catch(() => {}); }); }} />
+            <SubTabBtn label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
+            <SubTabBtn label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setSelectedExercise(null); setShowExerciseLibrary(true); ensureExerciseLibrary().catch(() => {}); }} />
+            <SubTabBtn label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
+            <SubTabBtn label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); requestAnimationFrame(() => { loadWorkoutHistory().then(setWorkoutHistoryList).catch(() => {}); }); }} />
           </View>
         </LinearGradient>
       )}
@@ -6599,7 +6508,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   optionWarnings={optionWarnings}
                   showSwitchOptions={switchDayIdx === i}
                   onToggleSwitch={() => { import('../utils/feedback').then(f => f.hapticLight()).catch(() => {}); setSwitchDayIdx(switchDayIdx === i ? -1 : i); }}
-                  hasPlateauedExercises={plateauedExercises.size > 0 && (item.workout?.exercises ?? []).some(ex => plateauedExercises.has(ex.name.toLowerCase()))}
+                  hasPlateauedExercises={plateauedExercises.size > 0 && (item.workout?.exercises ?? []).some((ex: any) => plateauedExercises.has(ex.name.toLowerCase()))}
                   isRegenerating={(() => {
                     const idx = workoutPlan ? workoutPlan.days.indexOf(item.workout as any) : -1;
                     return idx >= 0 && regeneratingDayIdxs.has(idx);
@@ -6656,14 +6565,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       setSelectedExercise(hit);
                       setShowExerciseLibrary(true);
                       setWorkoutSubTab('library');
-                      setLibraryActiveTab('exercises');
                     } else {
                       // No match — still route the user to Library so
                       // they can search manually rather than silently
                       // doing nothing.
                       setWorkoutSubTab('library');
                       setShowExerciseLibrary(true);
-                      setLibraryActiveTab('exercises');
                       setExerciseSearch(exName);
                     }
                   }}
@@ -6745,44 +6652,72 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onReadinessTap={isToday ? () => setShowReadiness(true) : undefined}
                 />
                 </FadeInView>
-                <View style={{ gap: 6, marginBottom: 12, marginTop: -4 }}>
-                  <View style={{ flexDirection: 'row', gap: 6 }}>
-                    <TouchableOpacity
-                      style={{
-                        flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                        paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
-                        borderColor: themeColors.primary + '55',
-                        backgroundColor: themeColors.primary + '0E',
+                {isToday ? (
+                  <View style={styles.todayPlanCardsWrap}>
+                    <TodayWorkoutPlanActivityCards
+                      themeName={userProfile.themePreference}
+                      sessions={workoutHistoryList.filter((s) => {
+                        if (!s?.manualActivity || s.skipped) return false;
+                        const d = (s.startedAt ?? s.date ?? '').slice(0, 10);
+                        return d === key;
+                      })}
+                      onStartCustom={() => setShowLiveTracker(true)}
+                      onLogActivity={() => setShowLogActivity(true)}
+                      onEditPlan={() => setWorkoutSubTab('equipment')}
+                    />
+                    <DetectedWorkoutsCard
+                      themeName={userProfile.themePreference}
+                      authToken={authToken}
+                      onAfterImport={async () => {
+                        try {
+                          const { history, summaries } = await loadWorkoutHistoryBundle();
+                          setWorkoutHistoryList(history);
+                          setWorkoutHistorySummaries(summaries);
+                        } catch {}
+                        loadDayStatus();
                       }}
-                      onPress={() => setShowLiveTracker(true)}
-                      activeOpacity={0.7}>
-                      <Ionicons name="flash" size={14} color={themeColors.primary} />
-                      <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Custom</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={{
-                        flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                        paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
-                        borderColor: themeColors.primary + '33',
-                      }}
-                      onPress={() => setShowLogActivity(true)}
-                      activeOpacity={0.7}>
-                      <Ionicons name="add-circle" size={14} color={themeColors.primary} />
-                      <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Log</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={{
-                        flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
-                        paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
-                        borderColor: themeColors.border,
-                      }}
-                      onPress={() => setWorkoutSubTab('equipment')}
-                      activeOpacity={0.7}>
-                      <Ionicons name="settings-sharp" size={14} color={themeColors.textMuted} />
-                      <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.3 }}>Edit</Text>
-                    </TouchableOpacity>
+                    />
                   </View>
-                </View>
+                ) : (
+                  <View style={{ gap: 6, marginBottom: 12, marginTop: -4 }}>
+                    <View style={{ flexDirection: 'row', gap: 6 }}>
+                      <TouchableOpacity
+                        style={{
+                          flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                          paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
+                          borderColor: themeColors.primary + '55',
+                          backgroundColor: themeColors.primary + '0E',
+                        }}
+                        onPress={() => setShowLiveTracker(true)}
+                        activeOpacity={0.7}>
+                        <Ionicons name="flash" size={14} color={themeColors.primary} />
+                        <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Custom</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={{
+                          flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                          paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
+                          borderColor: themeColors.primary + '33',
+                        }}
+                        onPress={() => setShowLogActivity(true)}
+                        activeOpacity={0.7}>
+                        <Ionicons name="add-circle" size={14} color={themeColors.primary} />
+                        <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Log</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={{
+                          flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+                          paddingVertical: 7, borderRadius: 10, borderWidth: 1, gap: 5,
+                          borderColor: themeColors.border,
+                        }}
+                        onPress={() => setWorkoutSubTab('equipment')}
+                        activeOpacity={0.7}>
+                        <Ionicons name="settings-sharp" size={14} color={themeColors.textMuted} />
+                        <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.3 }}>Edit</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
                 </React.Fragment>
               );
             })()}
@@ -7369,7 +7304,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     ]} />
                   )}
                   <TouchableOpacity
-                    style={[styles.mealAccordionHeader, { backgroundColor: 'transparent', borderBottomColor: themeColors.border }]}
+                    style={[styles.mealAccordionHeader, { backgroundColor: 'transparent' }]}
                     onPress={() => {
                       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
                       setExpandedMealDays(prev => {
@@ -8468,42 +8403,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           same destinations as an inline list. */}
 
       {/* Exercise library — inline View inside HomeScreen's render tree.
-          No more Modal portal, no more internal header/tab bar — the
-          outer workout sub-tab bar drives which content (exercises vs
-          muscles) shows via `libraryActiveTab`, which my sub-tab buttons
-          already set. Only a thin back header appears when the user
-          drills into a specific exercise or muscle detail. */}
+          No more Modal portal; the workout Library is now exercise-only.
+          A thin back header appears when the user drills into a specific
+          exercise detail. */}
       {showExerciseLibrary && renderedWorkoutSubTab === 'library' && (
         <View style={[styles.libraryInlineWrap, { top: insets.top + 70 + 52, backgroundColor: themeColors.background }]}>
           <View style={[styles.librarySheet, { backgroundColor: themeColors.surface }]}>
 
-            {/* Library sub-toggle: Exercises / Muscles */}
-            {!selectedExercise && !selectedMuscle && (
-              <View style={{ flexDirection: 'row', gap: 0, borderRadius: 8, overflow: 'hidden', marginBottom: 10, borderWidth: 1, borderColor: themeColors.border }}>
-                <TouchableOpacity
-                  style={{ flex: 1, paddingVertical: 8, alignItems: 'center', backgroundColor: libraryActiveTab === 'exercises' ? themeColors.primary + '18' : 'transparent' }}
-                  onPress={() => setLibraryActiveTab('exercises')}>
-                  <Text style={{ fontSize: 13, fontWeight: '700', color: libraryActiveTab === 'exercises' ? themeColors.primary : themeColors.textMuted }}>Exercises</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={{ flex: 1, paddingVertical: 8, alignItems: 'center', backgroundColor: libraryActiveTab === 'muscles' ? themeColors.primary + '18' : 'transparent' }}
-                  onPress={() => setLibraryActiveTab('muscles')}>
-                  <Text style={{ fontSize: 13, fontWeight: '700', color: libraryActiveTab === 'muscles' ? themeColors.primary : themeColors.textMuted }}>Muscles</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-
             {/* Back header — only when drilled into a detail view. */}
-            {(selectedExercise || selectedMuscle) && (
+            {selectedExercise && (
               <View style={styles.libraryHeader}>
-                <TouchableOpacity onPress={() => {
-                  if (selectedExercise) { setSelectedExercise(null); return; }
-                  if (selectedMuscle) { setSelectedMuscle(null); return; }
-                }}>
+                <TouchableOpacity onPress={() => setSelectedExercise(null)}>
                   <Text style={[styles.libraryClose, { color: themeColors.primary }]}>← Back</Text>
                 </TouchableOpacity>
                 <Text style={[styles.libraryTitle, { color: themeColors.textPrimary, marginLeft: 12, flex: 1 }]}>
-                  {selectedExercise ? selectedExercise.name : selectedMuscle!.name}
+                  {selectedExercise.name}
                 </Text>
               </View>
             )}
@@ -8534,43 +8448,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         })}
                       />
                       <View style={[styles.detailTopCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '40' }]}>
-                        {/* Primary muscle is now a tappable cross-link.
-                            Resolves the exercise's primary_muscle (e.g.
-                            'shoulders', 'back') against the Library entry
-                            (which uses 'deltoids', 'lats') via a tiny
-                            backend→library mapping. Falls back to a plain
-                            text label when no Library entry matches. */}
-                        {(() => {
-                          const muscleId = selectedExercise.primary_muscle;
-                          const libraryIdFor: Record<string, string> = {
-                            shoulders: 'deltoids', back: 'lats',
-                          };
-                          const libId = libraryIdFor[muscleId ?? ''] ?? muscleId;
-                          const muscleEntry = MUSCLE_LIBRARY.find(m => m.id === libId);
-                          const muscleLabel = humanizeToken(muscleId);
-                          if (muscleEntry) {
-                            return (
-                              <TouchableOpacity
-                                onPress={() => {
-                                  setSelectedExercise(null);
-                                  setLibraryActiveTab('muscles');
-                                  setSelectedMuscle(muscleEntry);
-                                }}
-                                activeOpacity={0.7}
-                                hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-                              >
-                                <Text style={[styles.detailMeta, { color: workoutPalette.text }]}>
-                                  {muscleEntry.emoji ? `${muscleEntry.emoji}  ` : ''}
-                                  Primary: <Text style={{ textDecorationLine: 'underline', fontWeight: '700' }}>{muscleLabel}</Text>
-                                  {' '}→
-                                </Text>
-                              </TouchableOpacity>
-                            );
-                          }
-                          return (
-                            <Text style={[styles.detailMeta, { color: workoutPalette.text }]}>Primary: {muscleLabel}</Text>
-                          );
-                        })()}
+                        <Text style={[styles.detailMeta, { color: workoutPalette.text }]}>
+                          Primary: {humanizeToken(selectedExercise.primary_muscle)}
+                        </Text>
                         {selectedExercise.secondary_muscles?.length ? (
                           <Text style={[styles.detailMeta, { color: workoutPalette.text + 'BB' }]}>Also hits: {selectedExercise.secondary_muscles.map(humanizeToken).join(', ')}</Text>
                         ) : null}
@@ -8763,237 +8643,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 })()}
               </ScrollView>
 
-            /* ── MUSCLE DETAIL ──────────────────────────────────────────────── */
-            ) : selectedMuscle ? (
-              (() => {
-                // Map library IDs to BodyHeatMap muscle keys so we can
-                // render the anatomy diagram with this muscle highlighted.
-                const heatKeyFor: Record<string, HeatMuscleKey | null> = {
-                  biceps: 'biceps', triceps: 'triceps', chest: 'chest',
-                  lats: 'lats', traps: 'upper_back', deltoids: 'shoulders',
-                  quads: 'quads', hamstrings: 'hamstrings', glutes: 'glutes',
-                  core: 'abs', calves: 'calves',
-                };
-                const heatKey = heatKeyFor[selectedMuscle.id] ?? null;
-                // Real fatigue value for THIS muscle so the anatomy
-                // diagram shows the user's current state, not a flat
-                // "100% recovered" placeholder.
-                const fatigueKeyFor: Record<string, string> = {
-                  lats: 'back', traps: 'back', deltoids: 'shoulders',
-                };
-                const fatigueKey = fatigueKeyFor[selectedMuscle.id] ?? selectedMuscle.id;
-                const fatigueRaw = readinessScore?.muscleFatigue?.[fatigueKey];
-                const recovery = fatigueRaw == null ? 100
-                  : Math.max(0, Math.min(100, Math.round(100 - fatigueRaw * 100)));
-                const heatRecovery = heatKey ? { [heatKey]: recovery } as any : {};
-                // Try to resolve "Barbell Curl — heaviest load…" into a
-                // matching exercise library entry by stripping the trailing
-                // explanation. Returns the entry or null.
-                const findExerciseForBullet = (bullet: string) => {
-                  const head = bullet.split(/[—–-]/, 1)[0]?.trim() ?? '';
-                  if (!head) return null;
-                  const lc = head.toLowerCase();
-                  return exerciseLibrary.find(e => e.name.toLowerCase() === lc)
-                    ?? exerciseLibrary.find(e => e.name.toLowerCase().includes(lc))
-                    ?? null;
-                };
-                return (
-                  <ScrollView contentContainerStyle={styles.detailContent}>
-                    {/* Hero card — emoji + region + short description.
-                        Keeps the entry-point summary above the fold so
-                        users get the gist without expanding any section. */}
-                    <View style={[styles.detailTopCard, { backgroundColor: selectedMuscle.tagColor + '22', borderColor: selectedMuscle.tagColor + '55', alignItems: 'center' }]}>
-                      <View style={{ width: 72, height: 72, borderRadius: 18, backgroundColor: selectedMuscle.tagColor + '22', alignItems: 'center', justifyContent: 'center', marginBottom: 10 }}>
-                        {selectedMuscle.emoji ? (
-                          <Text style={{ fontSize: 38 }}>{selectedMuscle.emoji}</Text>
-                        ) : (
-                          <Ionicons name={(selectedMuscle.icon || 'body-outline') as any} size={32} color={selectedMuscle.tagColor} />
-                        )}
-                      </View>
-                      <Text style={[styles.detailMeta, { color: selectedMuscle.tagColor, fontWeight: '700', fontSize: 13, letterSpacing: 0.5 }]}>
-                        {selectedMuscle.commonName.toUpperCase()} · {selectedMuscle.bodyRegion}
-                      </Text>
-                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 6, textAlign: 'center' }]}>
-                        {selectedMuscle.shortDescription}
-                      </Text>
-                    </View>
-
-                    {/* Anatomy diagram — the body figure with THIS muscle
-                        highlighted. Reuses the recovery card's BodyHeatMap
-                        but in spotlight mode (no toggle, no legend). */}
-                    {heatKey && (
-                      <View style={{ marginBottom: 14, alignItems: 'center', paddingTop: 4 }}>
-                        <BodyHeatMap
-                          recovery={heatRecovery}
-                          themeName={userProfile.themePreference}
-                          height={220}
-                          defaultSelected={heatKey}
-                          hideSideToggle
-                          hideLegend
-                        />
-                      </View>
-                    )}
-
-                    {/* Contraction phases — kept as a prominent block
-                        because it's the highest-value content here.
-                        Stays expanded by default. */}
-                    <View style={[styles.detailPhaseBlock, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
-                      <Text style={[styles.detailPhaseTitle, { color: themeColors.textPrimary }]}>Contraction Phases</Text>
-                      <View style={styles.detailPhaseRow}>
-                        <View style={[styles.detailPhaseBadge, { backgroundColor: workoutPalette.strong + '22' }]}>
-                          <Text style={[styles.detailPhaseBadgeLabel, { color: workoutPalette.strong }]}>↑ CONCENTRIC</Text>
-                        </View>
-                        <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.concentric}</Text>
-                      </View>
-                      <View style={[styles.detailPhaseDivider, { backgroundColor: themeColors.border }]} />
-                      <View style={styles.detailPhaseRow}>
-                        <View style={[styles.detailPhaseBadge, { backgroundColor: mealPalette.strong + '22' }]}>
-                          <Text style={[styles.detailPhaseBadgeLabel, { color: mealPalette.strong }]}>↓ ECCENTRIC</Text>
-                        </View>
-                        <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.eccentric}</Text>
-                      </View>
-                      {selectedMuscle.phases.isometric && (
-                        <>
-                          <View style={[styles.detailPhaseDivider, { backgroundColor: themeColors.border }]} />
-                          <View style={styles.detailPhaseRow}>
-                            <View style={[styles.detailPhaseBadge, { backgroundColor: aiPalette.strong + '22' }]}>
-                              <Text style={[styles.detailPhaseBadgeLabel, { color: aiPalette.strong }]}>■ ISOMETRIC</Text>
-                            </View>
-                            <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{selectedMuscle.phases.isometric}</Text>
-                          </View>
-                        </>
-                      )}
-                    </View>
-
-                    {/* Best Exercises — high value, default expanded.
-                        Each bullet is now a tappable row that opens the
-                        exercise's detail page when we can resolve it
-                        against the live library. */}
-                    <CollapsibleSection
-                      title="Best Exercises"
-                      defaultExpanded
-                      surfaceColor={themeColors.surfaceRaised}
-                      borderColor={themeColors.border}
-                      textPrimary={themeColors.textPrimary}
-                      textMuted={themeColors.textMuted}
-                      accentColor={selectedMuscle.tagColor}
-                    >
-                      {selectedMuscle.bestExercises.map((ex, i) => {
-                        const match = findExerciseForBullet(ex);
-                        const head = ex.split(/[—–-]/, 1)[0]?.trim() ?? ex;
-                        const tail = ex.replace(head, '').replace(/^[\s—–-]+/, '');
-                        return (
-                          <TouchableOpacity
-                            key={i}
-                            disabled={!match}
-                            activeOpacity={match ? 0.7 : 1}
-                            onPress={() => { if (match) { setSelectedMuscle(null); setSelectedExercise(match); } }}
-                            style={{
-                              flexDirection: 'row', alignItems: 'flex-start',
-                              paddingVertical: 6, gap: 6,
-                            }}
-                          >
-                            <Text style={{ color: themeColors.textMuted, fontSize: 13 }}>•</Text>
-                            <View style={{ flex: 1 }}>
-                              <Text style={{ fontSize: 13, fontWeight: match ? '700' : '600', color: match ? selectedMuscle.tagColor : themeColors.textPrimary }}>
-                                {head}{match ? ' →' : ''}
-                              </Text>
-                              {tail ? (
-                                <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 1 }]}>
-                                  {tail}
-                                </Text>
-                              ) : null}
-                            </View>
-                          </TouchableOpacity>
-                        );
-                      })}
-                    </CollapsibleSection>
-
-                    {/* Function & Anatomy — merged from the prior three
-                        sections (Primary Function + Location + Structure)
-                        which all described the same idea from three angles.
-                        Kept default-expanded so users see the function
-                        first; the deeper anatomy stays one tap away. */}
-                    <CollapsibleSection
-                      title="Function & Anatomy"
-                      defaultExpanded
-                      surfaceColor={themeColors.surfaceRaised}
-                      borderColor={themeColors.border}
-                      textPrimary={themeColors.textPrimary}
-                      textMuted={themeColors.textMuted}
-                    >
-                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
-                        {selectedMuscle.primaryFunction}
-                      </Text>
-                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 8 }]}>
-                        {selectedMuscle.location}
-                      </Text>
-                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 8 }]}>
-                        {selectedMuscle.structure}
-                      </Text>
-                    </CollapsibleSection>
-
-                    {/* Feel & Focus — merged howToFeel + mindMuscleConnection.
-                        Both speak to the same coaching idea: focus your
-                        attention on this muscle. Default-collapsed since
-                        most readers want anatomy + best exercises first. */}
-                    <CollapsibleSection
-                      title="Feel & Focus"
-                      surfaceColor={themeColors.surfaceRaised}
-                      borderColor={themeColors.border}
-                      textPrimary={themeColors.textPrimary}
-                      textMuted={themeColors.textMuted}
-                    >
-                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
-                        {selectedMuscle.howToFeel}
-                      </Text>
-                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary, marginTop: 8 }]}>
-                        {selectedMuscle.mindMuscleConnection}
-                      </Text>
-                    </CollapsibleSection>
-
-                    <CollapsibleSection
-                      title="Common Mistakes"
-                      titleColor={themeColors.error ?? '#FF4444'}
-                      surfaceColor={themeColors.surfaceRaised}
-                      borderColor={themeColors.border}
-                      textPrimary={themeColors.textPrimary}
-                      textMuted={themeColors.textMuted}
-                    >
-                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
-                        {selectedMuscle.commonMistakes}
-                      </Text>
-                    </CollapsibleSection>
-
-                    <CollapsibleSection
-                      title="Growth Tip"
-                      surfaceColor={themeColors.surfaceRaised}
-                      borderColor={themeColors.border}
-                      textPrimary={themeColors.textPrimary}
-                      textMuted={themeColors.textMuted}
-                    >
-                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
-                        {selectedMuscle.growthTip}
-                      </Text>
-                    </CollapsibleSection>
-
-                    <CollapsibleSection
-                      title="Recovery"
-                      surfaceColor={themeColors.surfaceRaised}
-                      borderColor={themeColors.border}
-                      textPrimary={themeColors.textPrimary}
-                      textMuted={themeColors.textMuted}
-                    >
-                      <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
-                        {selectedMuscle.recoveryNote}
-                      </Text>
-                    </CollapsibleSection>
-                  </ScrollView>
-                );
-              })()
-
             /* ── EXERCISES LIST ──────────────────────────────────────────────── */
-            ) : libraryActiveTab === 'exercises' ? (
+            ) : (
               exerciseLibraryLoading ? (
                 <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
               ) : (
@@ -9148,45 +8799,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   )}
                 />
               )
-
-            /* ── MUSCLE LIST ──────────────────────────────────────────────────── */
-            ) : (
-              <FlatList
-                style={styles.libraryVirtualList}
-                contentContainerStyle={styles.libraryList}
-                data={filteredMuscleLibrary}
-                keyExtractor={muscleLibraryKeyExtractor}
-                renderItem={renderMuscleLibraryItem}
-                initialNumToRender={12}
-                maxToRenderPerBatch={8}
-                windowSize={7}
-                removeClippedSubviews={Platform.OS !== 'web'}
-                ListHeaderComponent={(
-                  <>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.libraryFilterRow}>
-                      {['all', 'Arms', 'Chest', 'Back', 'Shoulders', 'Legs', 'Glutes', 'Core'].map((region) => {
-                        const active = muscleRegionFilter === region;
-                        return (
-                          <TouchableOpacity
-                            key={region}
-                            accessibilityRole="button"
-                            accessibilityLabel={`Filter muscles by ${region === 'all' ? 'all regions' : region}`}
-                            style={[styles.libraryFilterChip, active && { backgroundColor: aiPalette.strong, borderColor: aiPalette.strong }]}
-                            onPress={() => setMuscleRegionFilter(region)}>
-                            <Text style={[styles.libraryFilterText, active && { color: '#FFFFFF' }]}>
-                              {region === 'all' ? 'All Muscles' : region}
-                            </Text>
-                          </TouchableOpacity>
-                        );
-                      })}
-                    </ScrollView>
-
-                    <Text style={[styles.libraryResultText, { color: themeColors.textMuted, marginBottom: 8 }]}>
-                      {filteredMuscleLibrary.length} muscle{filteredMuscleLibrary.length === 1 ? '' : 's'}
-                    </Text>
-                  </>
-                )}
-              />
             )}
           </View>
         </View>
@@ -10087,8 +9699,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
                   {([
                     { key: 'hapticsEnabled' as const, label: 'Haptic Feedback', desc: 'Vibrate on taps and actions' },
-                    { key: 'soundsEnabled' as const, label: 'Sounds', desc: 'Play tone when rest timer ends (in-app, mixes with music)' },
-                    { key: 'restNotificationSoundEnabled' as const, label: 'Background Alert Sound', desc: 'Sound on the rest-end notification when the app is closed. iOS briefly ducks music — leave OFF if you listen to Spotify mid-workout.' },
+                    { key: 'soundsEnabled' as const, label: 'Sounds', desc: 'Play tone when rest timer ends while the app is open' },
+                    { key: 'restNotificationSoundEnabled' as const, label: 'Background Alert Sound', desc: 'Sound/keepalive when the app is closed. iOS can interrupt music — leave OFF if you listen to Spotify mid-workout.' },
                     { key: 'vibrationEnabled' as const, label: 'Vibration', desc: 'Vibrate on rest timer and alerts' },
                   ]).map(opt => (
                     <View key={opt.key} style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
@@ -11236,6 +10848,134 @@ function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
   );
 }
 
+// ── Today activity cards ──────────────────────────────────────────────────────
+
+function formatActivityDuration(seconds?: number): string {
+  const total = Math.max(0, Math.round((seconds ?? 0) / 60));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${Math.max(1, m)}m`;
+}
+
+function activityTitle(session: WorkoutSession): string {
+  const activity = session.manualActivity;
+  const subtype = activity?.subtype ? humanizeToken(activity.subtype) : '';
+  const category = activity?.category ? humanizeToken(activity.category) : '';
+  return subtype || category || session.focus || 'Workout';
+}
+
+function activitySourceLabel(source?: string): string {
+  if (source === 'apple_health') return 'Imported';
+  if (source === 'live_tracker') return 'Custom';
+  return 'Manual';
+}
+
+function activityIcon(session: WorkoutSession): string {
+  const category = session.manualActivity?.category;
+  const subtype = (session.manualActivity?.subtype ?? '').toLowerCase();
+  if (category === 'mobility') return 'body-outline';
+  if (category === 'strength') return 'barbell-outline';
+  if (category === 'sport') return subtype.includes('basket') ? 'basketball-outline' : 'tennisball-outline';
+  if (subtype.includes('ride') || subtype.includes('bike') || subtype.includes('spin')) return 'bicycle-outline';
+  if (subtype.includes('walk') || subtype.includes('hike')) return 'footsteps-outline';
+  if (subtype.includes('swim')) return 'water-outline';
+  return 'walk-outline';
+}
+
+function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onLogActivity, onEditPlan }: {
+  themeName?: import('../types').AppThemeName;
+  sessions: WorkoutSession[];
+  onStartCustom: () => void;
+  onLogActivity: () => void;
+  onEditPlan: () => void;
+}) {
+  const theme = getTheme(themeName);
+  const tc = theme.colors;
+  const sortedSessions = [...sessions].sort((a, b) => {
+    const aMs = new Date(a.startedAt ?? a.date ?? 0).getTime();
+    const bMs = new Date(b.startedAt ?? b.date ?? 0).getTime();
+    return bMs - aMs;
+  });
+
+  return (
+    <View style={styles.todayActivitySection}>
+      <View style={styles.todayActivityHeaderRow}>
+        <Text style={[styles.todayActivityHeader, { color: tc.textPrimary }]}>Extra workouts</Text>
+        {sortedSessions.length > 0 ? (
+          <Text style={[styles.todayActivityCount, { color: tc.textMuted }]}>
+            {sortedSessions.length} logged
+          </Text>
+        ) : null}
+      </View>
+
+      {sortedSessions.map((session) => {
+        const source = activitySourceLabel(session.manualActivity?.source as any);
+        const activity = session.manualActivity;
+        const pieces = [
+          source,
+          formatActivityDuration(session.durationSeconds),
+          activity?.distanceMiles ? `${activity.distanceMiles.toFixed(1)} mi` : null,
+          activity?.caloriesBurned ? `${Math.round(activity.caloriesBurned)} kcal` : null,
+          activity?.avgHeartRate ? `${Math.round(activity.avgHeartRate)} bpm` : null,
+        ].filter(Boolean);
+        return (
+          <View
+            key={session.id}
+            style={[
+              styles.todayActivityLoggedCard,
+              { backgroundColor: tc.surface, borderColor: source === 'Imported' ? tc.primary + '55' : tc.border },
+            ]}>
+            <View style={[styles.todayActivityIconBubble, { backgroundColor: tc.primary + '18' }]}>
+              <Ionicons name={activityIcon(session) as any} size={17} color={tc.primary} />
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={[styles.todayActivityTitle, { color: tc.textPrimary }]} numberOfLines={1}>
+                {activityTitle(session)}
+              </Text>
+              <Text style={[styles.todayActivityMeta, { color: tc.textMuted }]} numberOfLines={1}>
+                {pieces.join(' · ')}
+              </Text>
+            </View>
+          </View>
+        );
+      })}
+
+      <TouchableOpacity
+        style={[styles.todayActivityActionCard, { backgroundColor: tc.primary + '10', borderColor: tc.primary + '55' }]}
+        onPress={onStartCustom}
+        activeOpacity={0.78}>
+        <View style={[styles.todayActivityActionIcon, { backgroundColor: tc.primary + '18' }]}>
+          <Ionicons name="flash" size={18} color={tc.primary} />
+        </View>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Text style={[styles.todayActivityActionTitle, { color: tc.textPrimary }]}>Custom workout</Text>
+          <Text style={[styles.todayActivityActionMeta, { color: tc.textMuted }]} numberOfLines={1}>Run · Yoga · Ride · Lift</Text>
+        </View>
+        <Ionicons name="play-circle" size={22} color={tc.primary} />
+      </TouchableOpacity>
+
+      <View style={styles.todayActivitySecondaryRow}>
+        <TouchableOpacity
+          style={[styles.todayActivitySecondaryCard, { backgroundColor: tc.surface, borderColor: tc.border }]}
+          onPress={onLogActivity}
+          activeOpacity={0.75}>
+          <Ionicons name="add-circle-outline" size={16} color={tc.primary} />
+          <Text style={[styles.todayActivitySecondaryText, { color: tc.textPrimary }]}>Log completed</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.todayActivitySecondaryCard, { backgroundColor: tc.surface, borderColor: tc.border }]}
+          onPress={onEditPlan}
+          activeOpacity={0.75}>
+          <Ionicons name="settings-sharp" size={16} color={tc.textMuted} />
+          <Text style={[styles.todayActivitySecondaryText, { color: tc.textPrimary }]}>Edit plan</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+}
+
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
 function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, sessionMinutes, onSwapExercise, onViewExercise, onOpenExerciseVideo, readinessBadge, onReadinessTap }: {
@@ -12134,7 +11874,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
 
-  // ── Sub-tab bar (Plan / Exercises / Muscles, etc.) ──────────────────────
+  // ── Sub-tab bar (Plan / Library / Settings / History) ──────────────────
   subTabBar: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -12419,6 +12159,49 @@ const styles = StyleSheet.create({
 
   completedBanner:     { backgroundColor: colors.success + '1A', borderRadius: radius.md, padding: 14, alignItems: 'center', borderWidth: 1, borderColor: colors.success },
   completedBannerText: { fontSize: 14, fontWeight: '700', color: colors.success },
+
+  todayPlanCardsWrap: { marginTop: -4, marginBottom: 12, gap: 10 },
+  todayActivitySection: { gap: 8 },
+  todayActivityHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  todayActivityHeader: { fontSize: 13, fontWeight: '900', letterSpacing: 0.2 },
+  todayActivityCount: { fontSize: 11, fontWeight: '700' },
+  todayActivityLoggedCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  todayActivityIconBubble: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  todayActivityTitle: { fontSize: 14, fontWeight: '800' },
+  todayActivityMeta: { fontSize: 11, marginTop: 2 },
+  todayActivityActionCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 11,
+    paddingHorizontal: 13,
+    paddingVertical: 13,
+    borderRadius: 8,
+    borderWidth: 1,
+  },
+  todayActivityActionIcon: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
+  todayActivityActionTitle: { fontSize: 15, fontWeight: '900' },
+  todayActivityActionMeta: { fontSize: 11, marginTop: 2 },
+  todayActivitySecondaryRow: { flexDirection: 'row', gap: 8 },
+  todayActivitySecondaryCard: {
+    flex: 1,
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    paddingHorizontal: 8,
+  },
+  todayActivitySecondaryText: { fontSize: 12, fontWeight: '800' },
 
   actionRow:       { flexDirection: 'row', gap: 10, marginTop: 12 },
   skipLink:        { alignSelf: 'center', paddingVertical: 8, paddingHorizontal: 4 },

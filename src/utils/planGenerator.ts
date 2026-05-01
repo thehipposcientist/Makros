@@ -218,7 +218,8 @@ function cardioPool(equipment: string[]): Exercise[] {
     { name: 'Sprint Intervals',  sets: 6,  reps: '100m sprint / 90s walk', restSeconds: 90,  equipment: 'Bodyweight' },
     { name: 'Jogging',           sets: 1,  reps: '20-30 min easy pace',     restSeconds: 0,   equipment: 'Bodyweight' },
     { name: 'Burpees',           sets: 4,  reps: '10-15',                   restSeconds: 60,  equipment: 'Bodyweight' },
-    { name: 'HIIT Circuit',      sets: 4,  reps: '40s work / 20s rest',     restSeconds: 20,  equipment: 'Bodyweight' },
+    { name: 'Jumping Jacks',     sets: 4,  reps: '40s work / 20s rest',     restSeconds: 20,  equipment: 'Bodyweight' },
+    { name: 'High Knees',        sets: 4,  reps: '30s fast / 30s easy',     restSeconds: 30,  equipment: 'Bodyweight' },
     { name: 'Mountain Climbers', sets: 3,  reps: '30s',                     restSeconds: 30,  equipment: 'Bodyweight' },
     { name: 'Jump Squats',       sets: 3,  reps: '12-15',                   restSeconds: 45,  equipment: 'Bodyweight' },
     { name: 'Running (Outdoor)', sets: 1,  reps: '20-30 min',               restSeconds: 0,   equipment: 'Bodyweight' },
@@ -238,7 +239,7 @@ function cardioFinisher(equipment: string[]): Exercise {
   if (bike) return { name: 'Stationary Bike Intervals', sets: 6, reps: '30s all-out / 90s easy', restSeconds: 0, equipment: 'Stationary Bike' };
   if (rowing) return { name: 'Rowing Machine', sets: 1, reps: '10 min steady pace', restSeconds: 0, equipment: 'Rowing Machine' };
   if (rope) return { name: 'Jump Rope HIIT', sets: 5, reps: '1 min on / 30s off', restSeconds: 30, equipment: 'Jump Rope' };
-  return { name: 'HIIT Circuit', sets: 4, reps: '40s work / 20s rest', restSeconds: 20, equipment: 'Bodyweight' };
+  return { name: 'Jumping Jacks', sets: 4, reps: '40s work / 20s rest', restSeconds: 20, equipment: 'Bodyweight' };
 }
 
 // ─── Workout generation ───────────────────────────────────────────────────────

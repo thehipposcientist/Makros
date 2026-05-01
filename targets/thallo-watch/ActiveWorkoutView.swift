@@ -16,6 +16,7 @@
 import SwiftUI
 import Combine
 import WatchKit
+import Foundation
 
 // ─── Flow state owned by the watch ─────────────────────────────────
 
@@ -24,6 +25,8 @@ final class ActiveWorkoutState: ObservableObject {
     @Published var setNumber: Int = 1 { didSet { persist() } }   // 1-indexed within the current exercise
     @Published var restRemaining: Int? = nil { didSet { persist() } }   // seconds; nil = not resting
     @Published var paused: Bool = false { didSet { persist() } }
+    private var restEndAtMs: Double? = nil { didSet { persist() } }
+    private var sessionId: String? = nil { didSet { persist() } }
     // Log-set inputs. Seeded from the exercise's planned target on
     // entry so a first-time user already has a reasonable number.
     @Published var pendingWeight: Double = 0 { didSet { persist() } }
@@ -55,7 +58,12 @@ final class ActiveWorkoutState: ObservableObject {
                     self.exerciseIndex = idx
                 }
                 if let setN = info["setNumber"] as? Int { self.setNumber = setN }
-                if let rest = info["restRemainingSec"] as? Int { self.restRemaining = rest }
+                if let rest = Self.flexibleInt(info["restRemainingSec"]) {
+                    let endAt = Self.flexibleDouble(info["restEndsAtMs"])
+                    self.setRest(seconds: rest, endAtMs: endAt)
+                } else if info.keys.contains("restRemainingSec") {
+                    self.clearRest()
+                }
                 if let rec = info["recommendation"] as? String {
                     self.currentRecommendation = rec
                 } else if info.keys.contains("recommendation") {
@@ -80,6 +88,8 @@ final class ActiveWorkoutState: ObservableObject {
             "pendingReps": pendingReps,
         ]
         if let restRemaining { blob["restRemaining"] = restRemaining }
+        if let restEndAtMs { blob["restEndAtMs"] = restEndAtMs }
+        if let sessionId { blob["sessionId"] = sessionId }
         if let lastLoggedWeight { blob["lastLoggedWeight"] = lastLoggedWeight }
         if let lastLoggedReps { blob["lastLoggedReps"] = lastLoggedReps }
         if let currentRecommendation { blob["currentRecommendation"] = currentRecommendation }
@@ -92,12 +102,15 @@ final class ActiveWorkoutState: ObservableObject {
         if let v = blob["exerciseIndex"] as? Int { exerciseIndex = v }
         if let v = blob["setNumber"] as? Int { setNumber = v }
         if let v = blob["restRemaining"] as? Int { restRemaining = v }
+        if let v = blob["restEndAtMs"] as? Double { restEndAtMs = v }
+        if let v = blob["sessionId"] as? String { sessionId = v }
         if let v = blob["paused"] as? Bool { paused = v }
         if let v = blob["pendingWeight"] as? Double { pendingWeight = v }
         if let v = blob["pendingReps"] as? Int { pendingReps = v }
         if let v = blob["lastLoggedWeight"] as? Double { lastLoggedWeight = v }
         if let v = blob["lastLoggedReps"] as? Int { lastLoggedReps = v }
         if let v = blob["currentRecommendation"] as? String { currentRecommendation = v }
+        reconcileRestClock()
         hydrating = false
     }
 
@@ -110,6 +123,102 @@ final class ActiveWorkoutState: ObservableObject {
 
     static func clearPersistedStore() {
         UserDefaults.standard.removeObject(forKey: Self.kPersistKey)
+    }
+
+    func attach(to workout: WatchWorkout) {
+        let nextSessionId = workout.sessionId ?? "\(workout.dateISO)|\(workout.focus)"
+        if let sessionId, sessionId != nextSessionId {
+            resetForSession(nextSessionId)
+        } else if sessionId == nil {
+            if hasNonDefaultState {
+                resetForSession(nextSessionId)
+            } else {
+                self.sessionId = nextSessionId
+            }
+        }
+        if !workout.exercises.indices.contains(exerciseIndex) {
+            exerciseIndex = 0
+            setNumber = 1
+            clearRest()
+        } else {
+            let maxSets = max(1, workout.exercises[exerciseIndex].sets)
+            setNumber = min(max(1, setNumber), maxSets)
+        }
+        reconcileRestClock()
+    }
+
+    private var hasNonDefaultState: Bool {
+        exerciseIndex != 0
+        || setNumber != 1
+        || restRemaining != nil
+        || paused
+        || pendingWeight != 0
+        || pendingReps != 0
+        || lastLoggedWeight != nil
+        || lastLoggedReps != nil
+        || currentRecommendation != nil
+    }
+
+    private func resetForSession(_ nextSessionId: String) {
+        exerciseIndex = 0
+        setNumber = 1
+        clearRest()
+        pendingWeight = 0
+        pendingReps = 0
+        lastLoggedWeight = nil
+        lastLoggedReps = nil
+        currentRecommendation = nil
+        sessionId = nextSessionId
+    }
+
+    func setRest(seconds: Int?, endAtMs: Double? = nil) {
+        guard let seconds, seconds > 0 else {
+            clearRest()
+            return
+        }
+        let endAt = endAtMs ?? (Self.nowMs() + Double(seconds) * 1000)
+        restEndAtMs = endAt
+        restRemaining = max(0, Int(ceil((endAt - Self.nowMs()) / 1000)))
+        paused = false
+    }
+
+    func clearRest() {
+        restRemaining = nil
+        restEndAtMs = nil
+        paused = false
+    }
+
+    func reconcileRestClock(playHaptic: Bool = false) {
+        guard !paused, let endAt = restEndAtMs else { return }
+        let previous = restRemaining ?? 0
+        let next = max(0, Int(ceil((endAt - Self.nowMs()) / 1000)))
+        restRemaining = next
+        if next == 0 {
+            restEndAtMs = nil
+            if previous > 0, playHaptic {
+                WKInterfaceDevice.current().play(.notification)
+            }
+        }
+    }
+
+    private static func nowMs() -> Double {
+        Date().timeIntervalSince1970 * 1000
+    }
+
+    private static func flexibleInt(_ value: Any?) -> Int? {
+        if let v = value as? Int { return v }
+        if let v = value as? Double, v.isFinite { return Int(v.rounded()) }
+        if let v = value as? NSNumber { return v.intValue }
+        if let v = value as? String { return Int(v.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return nil
+    }
+
+    private static func flexibleDouble(_ value: Any?) -> Double? {
+        if let v = value as? Double, v.isFinite { return v }
+        if let v = value as? Int { return Double(v) }
+        if let v = value as? NSNumber { return v.doubleValue }
+        if let v = value as? String { return Double(v.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return nil
     }
 
     /// Prime the weight / reps inputs for the current exercise.
@@ -142,14 +251,7 @@ final class ActiveWorkoutState: ObservableObject {
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self, !self.paused else { return }
-                guard let r = self.restRemaining, r > 0 else { return }
-                let next = r - 1
-                self.restRemaining = next
-                if next == 0 {
-                    // Rest over — double-notification haptic. Same
-                    // pattern Apple Workout uses on interval ends.
-                    WKInterfaceDevice.current().play(.notification)
-                }
+                self.reconcileRestClock(playHaptic: true)
             }
     }
     func stopTick() { timer?.cancel(); timer = nil }
@@ -164,8 +266,10 @@ struct ActiveWorkoutView: View {
     let onCancelWorkout: () -> Void
 
     @EnvironmentObject var theme: ThemeStore
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var state = ActiveWorkoutState()
     @State private var showCountdown: Bool = true
+    @State private var lastExerciseName: String? = nil
 
     var body: some View {
         ZStack {
@@ -200,11 +304,21 @@ struct ActiveWorkoutView: View {
         }
         .onAppear {
             HeartRateStore.saveDiag("ActiveView.onAppear")
+            state.attach(to: workout)
             state.startTick()
+            seedCurrentExerciseIfNeeded()
+        }
+        .onChange(of: workout.sessionId) { _, _ in
+            state.attach(to: workout)
             seedCurrentExerciseIfNeeded()
         }
         .onChange(of: workout.exercises) { _, _ in seedCurrentExerciseIfNeeded() }
         .onChange(of: state.exerciseIndex) { _, _ in seedCurrentExerciseIfNeeded() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                state.reconcileRestClock()
+            }
+        }
         .onDisappear { state.stopTick() }
     }
 
@@ -213,7 +327,7 @@ struct ActiveWorkoutView: View {
         if !workout.exercises.indices.contains(state.exerciseIndex) {
             state.exerciseIndex = 0
             state.setNumber = 1
-            state.restRemaining = nil
+            state.clearRest()
             state.pendingWeight = 0
             state.pendingReps = 0
             state.lastLoggedWeight = nil
@@ -221,7 +335,17 @@ struct ActiveWorkoutView: View {
             state.currentRecommendation = nil
         }
         if workout.exercises.indices.contains(state.exerciseIndex) {
-            state.seed(for: workout.exercises[state.exerciseIndex])
+            let ex = workout.exercises[state.exerciseIndex]
+            state.setNumber = min(max(1, state.setNumber), max(1, ex.sets))
+            if let lastExerciseName, lastExerciseName != ex.name {
+                state.pendingWeight = 0
+                state.pendingReps = 0
+                state.lastLoggedWeight = nil
+                state.lastLoggedReps = nil
+                state.currentRecommendation = nil
+            }
+            lastExerciseName = ex.name
+            state.seed(for: ex)
         }
     }
 }
@@ -362,6 +486,8 @@ private struct ExerciseTab: View {
     // between weight and reps without buttons.
     @State private var crownTarget: CrownTarget = .weight
     @State private var showMenu: Bool = false
+    @State private var showSwapSheet: Bool = false
+    @State private var pendingSwapName: String? = nil
 
     enum CrownTarget { case weight, reps }
 
@@ -379,6 +505,10 @@ private struct ExerciseTab: View {
     var isLastSet: Bool {
         guard let ex = currentExercise else { return false }
         return state.setNumber >= ex.sets
+    }
+
+    private func displaySetNumber(for ex: WatchExercise) -> Int {
+        min(max(1, state.setNumber), max(1, ex.sets))
     }
 
     var isLastExercise: Bool {
@@ -476,8 +606,25 @@ private struct ExerciseTab: View {
             }
         }
         .confirmationDialog("Exercise options", isPresented: $showMenu) {
+            if let ex = currentExercise, !ex.swapOptions.isEmpty {
+                Button("Swap exercise") { showSwapSheet = true }
+            }
             Button("Skip exercise", role: .destructive) { advanceExercise() }
             Button("Cancel", role: .cancel) {}
+        }
+        .sheet(isPresented: $showSwapSheet) {
+            if let ex = currentExercise {
+                SwapExerciseSheet(
+                    exercise: ex,
+                    pendingName: pendingSwapName,
+                    onSelect: requestSwap,
+                )
+            }
+        }
+        .onChange(of: currentExercise?.name) { _, newName in
+            if pendingSwapName == newName {
+                pendingSwapName = nil
+            }
         }
     }
 
@@ -571,7 +718,7 @@ private struct ExerciseTab: View {
                 Text("SET")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundColor(theme.textMuted)
-                Text("\(state.setNumber) of \(ex.sets)")
+                Text("\(displaySetNumber(for: ex)) of \(ex.sets)")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(theme.textPrimary)
                 Text("·")
@@ -600,6 +747,12 @@ private struct ExerciseTab: View {
                     .font(.system(size: 10))
                     .foregroundColor(theme.textMuted)
             }
+            if let pendingSwapName {
+                Text("Swapping to \(pendingSwapName)…")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(theme.warning)
+                    .lineLimit(1)
+            }
         }
     }
 
@@ -607,6 +760,7 @@ private struct ExerciseTab: View {
 
     private func logSetCard(_ ex: WatchExercise) -> some View {
         VStack(alignment: .leading, spacing: 10) {
+            recommendedWeightRow(ex)
             // Weight row — pill + stepper buttons. Stepper gives the
             // user an obvious way to change the number without having
             // to know the Digital Crown is the input device. Crown
@@ -703,6 +857,48 @@ private struct ExerciseTab: View {
         )
     }
 
+    @ViewBuilder
+    private func recommendedWeightRow(_ ex: WatchExercise) -> some View {
+        if let recommended = ex.plannedTargetWeightLbs, recommended > 0 {
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("RECOMMENDED")
+                        .font(.system(size: 8, weight: .heavy))
+                        .tracking(0.8)
+                        .foregroundColor(theme.textMuted)
+                    Text("\(formatWeight(recommended)) lb")
+                        .font(.system(size: 16, weight: .black, design: .rounded))
+                        .foregroundColor(theme.textPrimary)
+                    Text(ex.reps)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(theme.textSecondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    state.pendingWeight = recommended
+                    WKInterfaceDevice.current().play(.click)
+                } label: {
+                    Text("Use")
+                        .font(.system(size: 11, weight: .bold))
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(theme.primary.opacity(0.18))
+                        .foregroundColor(theme.primary)
+                        .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(8)
+            .background(theme.primary.opacity(0.1))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(theme.primary.opacity(0.35), lineWidth: 1)
+            )
+            .cornerRadius(10)
+        }
+    }
+
     private func crownPill(_ label: String, value: String, active: Bool, onTap: @escaping () -> Void) -> some View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 1) {
@@ -782,12 +978,14 @@ private struct ExerciseTab: View {
 
     @ViewBuilder
     private func upNextLine() -> some View {
-        if isLastSet, let next = nextExercise {
-            Text("Up next: \(next.name) · \(next.sets) × \(next.reps)")
-                .lineLimit(2)
-        } else if let ex = currentExercise {
-            Text("Up next: set \(state.setNumber + 1) of \(ex.sets) · \(ex.reps)")
-                .lineLimit(1)
+        if let ex = currentExercise {
+            if state.setNumber > ex.sets, let next = nextExercise {
+                Text("Up next: \(next.name) · \(next.sets) × \(next.reps)")
+                    .lineLimit(2)
+            } else {
+                Text("Up next: set \(displaySetNumber(for: ex)) of \(ex.sets) · \(ex.reps)")
+                    .lineLimit(1)
+            }
         } else {
             Text("")
         }
@@ -855,9 +1053,10 @@ private struct ExerciseTab: View {
         // Ship the log to the phone so history + recommendations stay
         // aligned. Phone handler parses and feeds the deterministic
         // weight-rec engine for the next set.
+        let setNumber = displaySetNumber(for: ex)
         var payload: [String: Any] = [
             "exerciseIndex": state.exerciseIndex,
-            "setNumber": state.setNumber,
+            "setNumber": setNumber,
             "weightLbs": state.pendingWeight,
             "reps": state.pendingReps,
             "exerciseName": ex.name,
@@ -869,14 +1068,26 @@ private struct ExerciseTab: View {
         state.lastLoggedWeight = state.pendingWeight
         state.lastLoggedReps = state.pendingReps
 
-        if state.setNumber >= ex.sets {
+        if setNumber >= ex.sets {
             // Last set of this exercise → advance to next exercise.
             advanceExercise()
         } else {
             // Next set of same exercise → start rest.
             state.setNumber += 1
-            state.restRemaining = ex.restSeconds
+            state.setRest(seconds: ex.restSeconds)
         }
+    }
+
+    private func requestSwap(_ option: WatchSwapOption) {
+        pendingSwapName = option.name
+        showSwapSheet = false
+        state.clearRest()
+        WKInterfaceDevice.current().play(.click)
+        conn.sendCommand("swap_exercise", payload: [
+            "exerciseIndex": state.exerciseIndex,
+            "fromExerciseName": currentExercise?.name ?? "",
+            "toExerciseName": option.name,
+        ])
     }
 
     private func advanceExercise() {
@@ -889,7 +1100,7 @@ private struct ExerciseTab: View {
         let nextIdx = state.exerciseIndex + 1
         state.exerciseIndex = nextIdx
         state.setNumber = 1
-        state.restRemaining = nil
+        state.clearRest()
         // Seed weight/reps for the new exercise so Crown starts at
         // a useful value.
         state.pendingWeight = 0
@@ -901,7 +1112,7 @@ private struct ExerciseTab: View {
     }
 
     private func skipRest() {
-        state.restRemaining = nil
+        state.clearRest()
         WKInterfaceDevice.current().play(.click)
     }
 
@@ -933,6 +1144,69 @@ private struct ExerciseTab: View {
         let mm = s / 60
         let ss = s % 60
         return String(format: "%d:%02d", mm, ss)
+    }
+
+    private func formatWeight(_ value: Double) -> String {
+        let rounded = (value * 10).rounded() / 10
+        return rounded.rounded() == rounded ? "\(Int(rounded))" : String(format: "%.1f", rounded)
+    }
+}
+
+private struct SwapExerciseSheet: View {
+    let exercise: WatchExercise
+    let pendingName: String?
+    let onSelect: (WatchSwapOption) -> Void
+
+    @EnvironmentObject var theme: ThemeStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(exercise.swapOptions) { option in
+                        Button {
+                            onSelect(option)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 5) {
+                                    Text(option.name)
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundColor(theme.textPrimary)
+                                        .lineLimit(2)
+                                    if pendingName == option.name {
+                                        Image(systemName: "clock")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundColor(theme.warning)
+                                    }
+                                }
+                                HStack(spacing: 5) {
+                                    if let equipment = option.equipment {
+                                        Text(equipment)
+                                    }
+                                    if let overlap = option.overlap {
+                                        Text("\(overlap)% match")
+                                    }
+                                }
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(theme.textMuted)
+                                .lineLimit(1)
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                } header: {
+                    Text("Keeps \(exercise.sets) × \(exercise.reps)")
+                }
+            }
+            .listStyle(.carousel)
+            .navigationTitle("Swap")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
     }
 }
 

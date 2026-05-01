@@ -400,17 +400,40 @@ def get_meal_history(
 # ─── Rolling averages ────────────────────────────────────────────────────────
 
 def get_rolling_averages(user_id: int, window: int = 7, *, db: Session) -> dict:
-    """Compute rolling nutrition averages: calories, protein, carbs, fat, fiber, meals_per_day.
+    """Compute rolling nutrition averages: calories, protein, carbs, fat,
+    meals/day. Aggregates directly from meals + meal_items tables.
 
-    Aggregates directly from meals + meal_items tables.
+    Returns BOTH a window-divided "true daily average" and a
+    days-with-data-divided "average when logged":
+
+      avg_calories            — sum / window_days. Honest per-day mean.
+                                A user who logged 1 day at 2000cal across
+                                a 7-day window reads as 286 cal/day, which
+                                is the actual signal — they're undertracking
+                                and/or undereating.
+      avg_calories_when_logged — sum / days_with_data. Average for the days
+                                the user actually tracked. Useful for
+                                "your typical eating day" framing without
+                                punishing imperfect tracking.
+
+    Earlier version only returned the second flavor under the name
+    `avg_calories`, which let sparse-loggers' downstream signals
+    (supplement recs, readiness's nutrition pillar, weekly review) read
+    as if their averages were target-aligned. Switching the headline to
+    the honest window denominator is the user-visible bug fix; the
+    `_when_logged` variants stay available for narrative copy.
     """
     from app.models import Meal, MealItem
 
-    cutoff = date.today() - timedelta(days=window - 1)
+    today_d = date.today()
+    cutoff = today_d - timedelta(days=window - 1)
     meals = db.exec(
         select(Meal)
         .where(Meal.user_id == user_id)
         .where(col(Meal.meal_date) >= cutoff)
+        # Future-dated rows would otherwise inflate totals (timezone glitches,
+        # back-log entry typos). Cap at today.
+        .where(col(Meal.meal_date) <= today_d)
     ).all()
 
     daily: dict[date, dict] = defaultdict(lambda: {
@@ -434,23 +457,34 @@ def get_rolling_averages(user_id: int, window: int = 7, *, db: Session) -> dict:
             day_data["carbs_g"] += it.carbs_g
             day_data["fat_g"] += it.fat_g
 
-    # Adaptive denominator: divide by actual days-with-data so a user with 6
-    # days of logs in a 14-day window gets a true "6-day average" (not a
-    # /14 dilution). Sparse logs no longer read as fake low calories.
-    # Falls back to 1 if there's no data (returns zeroes cleanly).
-    denom = max(len(daily), 1)
+    days_with_data = len(daily)
+    window_denom = max(window, 1)
+    logged_denom = max(days_with_data, 1)
+
+    total_cal = sum(d["calories"] for d in daily.values())
+    total_pro = sum(d["protein_g"] for d in daily.values())
+    total_carb = sum(d["carbs_g"] for d in daily.values())
+    total_fat = sum(d["fat_g"] for d in daily.values())
+    total_meals = sum(d["meal_count"] for d in daily.values())
 
     return {
         "window_days": window,
-        "days_with_data": len(daily),
-        "avg_calories": round(sum(d["calories"] for d in daily.values()) / denom, 1),
-        "avg_protein_g": round(sum(d["protein_g"] for d in daily.values()) / denom, 1),
-        "avg_carbs_g": round(sum(d["carbs_g"] for d in daily.values()) / denom, 1),
-        "avg_fat_g": round(sum(d["fat_g"] for d in daily.values()) / denom, 1),
-        "avg_meals_per_day": round(
-            sum(d["meal_count"] for d in daily.values()) / denom, 1
-        ),
-        "total_meals_logged": sum(d["meal_count"] for d in daily.values()),
+        "days_with_data": days_with_data,
+        # Honest window-divided averages — the headline numbers callers
+        # should compare to daily targets (protein goal, calorie target).
+        "avg_calories": round(total_cal / window_denom, 1),
+        "avg_protein_g": round(total_pro / window_denom, 1),
+        "avg_carbs_g": round(total_carb / window_denom, 1),
+        "avg_fat_g": round(total_fat / window_denom, 1),
+        "avg_meals_per_day": round(total_meals / window_denom, 1),
+        # Per-tracked-day averages — for narrative ("your typical day looks
+        # like…") and the "when you do log, you're hitting protein" framing.
+        "avg_calories_when_logged": round(total_cal / logged_denom, 1),
+        "avg_protein_g_when_logged": round(total_pro / logged_denom, 1),
+        "avg_carbs_g_when_logged": round(total_carb / logged_denom, 1),
+        "avg_fat_g_when_logged": round(total_fat / logged_denom, 1),
+        "tracking_rate_pct": round(days_with_data / window_denom * 100, 1),
+        "total_meals_logged": total_meals,
     }
 
 
@@ -543,11 +577,15 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
     """Detect patterns: skipped meals, protein deficits, calorie trends, weekday vs weekend."""
     from app.models import Meal, MealItem, UserGoal, UserProfile
 
-    cutoff = date.today() - timedelta(days=days)
+    today_d = date.today()
+    cutoff = today_d - timedelta(days=days)
     meals = db.exec(
         select(Meal)
         .where(Meal.user_id == user_id)
         .where(col(Meal.meal_date) >= cutoff)
+        # Future-dated rows would inflate totals (timezone glitches,
+        # back-log typos). Cap at today.
+        .where(col(Meal.meal_date) <= today_d)
     ).all()
 
     # Build daily aggregates
@@ -605,9 +643,17 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
     avg_weekday = round(sum(weekday_cals) / max(len(weekday_cals), 1), 0)
     avg_weekend = round(sum(weekend_cals) / max(len(weekend_cals), 1), 0)
 
-    # Average daily protein
-    protein_days = [data["protein_g"] for data in daily.values() if data["meal_count"] > 0]
-    avg_protein = round(sum(protein_days) / max(len(protein_days), 1), 1)
+    # Average daily protein — divide by the FULL window, not just logged days.
+    # Sparse loggers used to read as "on target" because dividing by 1-2
+    # logged days made any single high-protein day look like the daily
+    # average. The honest signal — total_protein / window_days — is what
+    # downstream consumers (insights, supplement recs) need to compare
+    # against the protein target. `avg_protein_when_logged` stays available
+    # for narrative copy ("your typical eating day").
+    all_daily_protein = [data["protein_g"] for data in daily.values()]
+    logged_protein = [data["protein_g"] for data in daily.values() if data["meal_count"] > 0]
+    avg_protein = round(sum(all_daily_protein) / max(days, 1), 1)
+    avg_protein_when_logged = round(sum(logged_protein) / max(len(logged_protein), 1), 1)
 
     # Protein target from user goal/profile
     protein_target = None
@@ -635,9 +681,13 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
     processed_count = sum(1 for f in all_foods if _classify_food(f) == "processed")
     unknown_count = len(all_foods) - whole_count - processed_count
 
-    # Average calories
-    cal_days = [data["calories"] for data in daily.values() if data["meal_count"] > 0]
-    avg_calories = round(sum(cal_days) / max(len(cal_days), 1), 0)
+    # Average calories — same window-divided treatment as protein above.
+    # The headline "avg_calories" is the honest per-day signal; the
+    # "_when_logged" companion is for "your typical eating day" framing.
+    all_daily_cal = [data["calories"] for data in daily.values()]
+    logged_cal = [data["calories"] for data in daily.values() if data["meal_count"] > 0]
+    avg_calories = round(sum(all_daily_cal) / max(days, 1), 0)
+    avg_calories_when_logged = round(sum(logged_cal) / max(len(logged_cal), 1), 0)
 
     ordered_days = sorted(daily.keys())
     midpoint = max(1, len(ordered_days) // 2)
@@ -645,18 +695,29 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
     recent_days = ordered_days[midpoint:]
 
     def _adherence_window(day_keys: list[date]) -> dict:
+        # `logged` = days in this segment that have at least one meal.
+        # Compare-vs-prior-week deltas need an APPLES-TO-APPLES denominator,
+        # which is the full segment length — otherwise a user who logs 1
+        # day at 3000 cal in week A vs 4 days at 2000 cal in week B reads
+        # as "week A is higher" (3000 > 2000) even though week B's actual
+        # daily intake was higher. Window denominator is the truthful one.
         logged = [daily[d] for d in day_keys if daily[d]["meal_count"] > 0]
+        segment_days = max(len(day_keys), 1)
         protein_hits = 0
         if protein_target:
             protein_hits = sum(1 for data in logged if data["protein_g"] >= protein_target * 0.9)
         return {
             "days": len(day_keys),
             "logged_days": len(logged),
-            "tracking_rate_pct": round(len(logged) / max(len(day_keys), 1) * 100, 0),
-            "avg_calories": round(sum(d["calories"] for d in logged) / max(len(logged), 1), 0),
-            "avg_protein_g": round(sum(d["protein_g"] for d in logged) / max(len(logged), 1), 1),
+            "tracking_rate_pct": round(len(logged) / segment_days * 100, 0),
+            # Honest segment-divided averages (sum / segment_days).
+            "avg_calories": round(sum(d["calories"] for d in (daily[k] for k in day_keys)) / segment_days, 0),
+            "avg_protein_g": round(sum(d["protein_g"] for d in (daily[k] for k in day_keys)) / segment_days, 1),
+            # Per-tracked-day flavor for narrative copy.
+            "avg_calories_when_logged": round(sum(d["calories"] for d in logged) / max(len(logged), 1), 0),
+            "avg_protein_g_when_logged": round(sum(d["protein_g"] for d in logged) / max(len(logged), 1), 1),
             "protein_hit_days": protein_hits,
-            "protein_hit_pct": round(protein_hits / max(len(logged), 1) * 100, 0) if protein_target and logged else None,
+            "protein_hit_pct": round(protein_hits / segment_days * 100, 0) if protein_target else None,
         }
 
     recent_adherence = _adherence_window(recent_days)
@@ -694,8 +755,14 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
         "days_tracked": len(days_with_meals),
         "skipped_days": skipped_days,
         "skipped_day_count": len(skipped_days),
+        # Honest window-divided headlines — what a user expects to see when
+        # they read "your average daily protein."
         "avg_calories": avg_calories,
         "avg_protein_g": avg_protein,
+        # Per-tracked-day flavor — for "your typical eating day" copy.
+        "avg_calories_when_logged": avg_calories_when_logged,
+        "avg_protein_g_when_logged": avg_protein_when_logged,
+        "tracking_rate_pct": round(len(days_with_meals) / max(days, 1) * 100, 0),
         "protein_target_g": protein_target,
         "weekday_avg_calories": avg_weekday,
         "weekend_avg_calories": avg_weekend,

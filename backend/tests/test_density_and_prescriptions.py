@@ -407,6 +407,44 @@ def test_decide_core_rotates_categories():
     _ok(f"rotated: {cat1} → {d2.category}")
 
 
+def test_decide_core_long_metabolic_uses_mixed_circuit():
+    """Long metabolic sessions should get a mixed 3-move core circuit."""
+    print("\n[test] core: long metabolic circuit uses mixed categories")
+    decision = decide_core_for_day(
+        archetype=DayArchetype.LIFT_PUSH,
+        slots_count=5, session_minutes=60, goal="fat_loss",
+        recent_core_categories=[], hip_flexor_recent=False,
+        is_recovery_day=False, remaining_weekly_budget=3,
+    )
+    assert decision.add
+    assert decision.count == 3, f"expected 3 core slots, got {decision.count}"
+    assert len(decision.categories) == 3
+    assert len(set(decision.categories)) == 3, decision.categories
+    assert decision.categories.count(CAT_POSTERIOR_BRACING) <= 1
+    _ok(f"mixed circuit categories: {decision.categories}")
+
+
+def test_decide_core_does_not_repeat_recent_carry_when_alternatives_exist():
+    """Carry/bracing should not appear in back-to-back core sessions
+    when other category options can fill the circuit."""
+    print("\n[test] core: recent carry is pushed behind alternatives")
+    decision = decide_core_for_day(
+        archetype=DayArchetype.LIFT_PULL,
+        slots_count=5, session_minutes=60, goal="fat_loss",
+        recent_core_categories=[
+            CAT_ANTI_EXTENSION,
+            CAT_FLEXION,
+            CAT_POSTERIOR_BRACING,
+        ],
+        hip_flexor_recent=True,
+        is_recovery_day=False, remaining_weekly_budget=3,
+    )
+    assert decision.add
+    assert decision.count == 3
+    assert CAT_POSTERIOR_BRACING not in decision.categories, decision.categories
+    _ok(f"recent carry avoided: {decision.categories}")
+
+
 def test_build_core_slot_uses_true_flexion_pattern():
     """Lower-ab slots should target trunk flexion, not generic isolation."""
     print("\n[test] core: lower-ab slot uses flexion pattern")
@@ -535,6 +573,27 @@ def test_program_core_across_week_budget_honored():
     _ok(f"core added to {core_days} days (budget={freq.default}), legs skipped")
 
 
+def test_program_core_across_week_does_not_duplicate_carry_slots():
+    """A multi-exercise circuit should not duplicate carry/bracing slots."""
+    print("\n[test] core: programmed circuit avoids duplicate carry slots")
+    from app.services.workout.slots import Slot as S
+    templates = [
+        ("Push", [S("A", "horizontal_press", "chest", "primary"),
+                  S("B", "isolation", "triceps", "secondary")],
+         DayArchetype.LIFT_PUSH, None),
+    ]
+    result = program_core_across_week(
+        templates=templates, goal="fat_loss",
+        days_per_week=4, session_minutes=60, seed=42,
+    )
+    slots = result[0][1] or []
+    core_labels = [s.label for s in slots if s.role == "core"]
+    assert len(core_labels) == 3, core_labels
+    assert len(set(core_labels)) == 3, core_labels
+    assert sum(1 for label in core_labels if "Carry" in label) <= 1
+    _ok(f"core labels: {core_labels}")
+
+
 # ─── Main ──────────────────────────────────────────────────────────────────
 
 cases = [
@@ -567,11 +626,14 @@ cases = [
     test_decide_core_skips_short_session_non_metabolic,
     test_decide_core_allows_short_session_fat_loss,
     test_decide_core_rotates_categories,
+    test_decide_core_long_metabolic_uses_mixed_circuit,
+    test_decide_core_does_not_repeat_recent_carry_when_alternatives_exist,
     test_build_core_slot_uses_true_flexion_pattern,
     test_core_slot_accepts_only_true_anti_extension_exercises,
     test_core_slot_accepts_lateral_only_side_plank_family,
     test_core_slot_accepts_flexion_family_only,
     test_program_core_across_week_budget_honored,
+    test_program_core_across_week_does_not_duplicate_carry_slots,
 ]
 
 

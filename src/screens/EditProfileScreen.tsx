@@ -36,7 +36,6 @@ import {
   launchGoalIdFor,
 } from '../constants/goalConfig';
 import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
-import { MUSCLE_LIBRARY, MuscleEntry } from '../constants/muscleLibrary';
 import SearchInput from '../components/SearchInput';
 import { ExerciseLibraryItem, humanizeToken, buildExerciseGuide } from '../utils/exerciseGuide';
 import { tierOf } from '../utils/subscription';
@@ -607,9 +606,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [exerciseEquipmentFilter, setExerciseEquipmentFilter] = useState<string>('all');
   const [selectedExercise, setSelectedExercise] = useState<ExerciseLibraryItem | null>(null);
   const [videoExerciseName, setVideoExerciseName] = useState<string | null>(null);
-  const [selectedMuscle, setSelectedMuscle] = useState<MuscleEntry | null>(null);
-  const [exerciseSubTab, setExerciseSubTab] = useState<'exercises' | 'muscles'>('exercises');
-  const [muscleRegionFilter, setMuscleRegionFilter] = useState<string>('all');
 
   useEffect(() => {
     loadMealRoutines().then(setMealRoutinesState);
@@ -2270,23 +2266,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
         {workoutTab === 'exercises' && (
         <View style={styles.section}>
-          {/* Sub-tabs: Exercises / Muscles */}
-          <View style={styles.subTabBar}>
-            <TouchableOpacity
-              style={[styles.subTab, exerciseSubTab === 'exercises' && styles.subTabActive]}
-              onPress={() => setExerciseSubTab('exercises')}>
-              <Text style={[styles.subTabText, exerciseSubTab === 'exercises' && styles.subTabTextActive]}>Exercises</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.subTab, exerciseSubTab === 'muscles' && styles.subTabActive]}
-              onPress={() => setExerciseSubTab('muscles')}>
-              <Text style={[styles.subTabText, exerciseSubTab === 'muscles' && styles.subTabTextActive]}>Muscles</Text>
-            </TouchableOpacity>
-          </View>
-
-          {exerciseSubTab === 'exercises' ? (
-            selectedExercise ? (
-              /* ── Full exercise detail view ── */
+          {selectedExercise ? (
+            /* ── Full exercise detail view ── */
               <View style={{ gap: 14 }}>
                 {/* Back bar */}
                 <TouchableOpacity
@@ -2533,98 +2514,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   </>
                 )}
               </>
-            )
-          ) : (
-            /* ── Muscles sub-tab ── */
-            <>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
-                {['all', 'Arms', 'Chest', 'Back', 'Shoulders', 'Legs', 'Glutes', 'Core'].map(region => {
-                  const active = muscleRegionFilter === region;
-                  return (
-                    <TouchableOpacity
-                      key={region}
-                      style={[styles.filterChip, active && styles.filterChipActive]}
-                      onPress={() => setMuscleRegionFilter(region)}>
-                      <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>
-                        {region === 'all' ? 'All' : region}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
-
-              {selectedMuscle ? (
-                /* Muscle detail view */
-                <View style={{ gap: 12 }}>
-                  <TouchableOpacity onPress={() => setSelectedMuscle(null)} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                    <Text style={{ fontSize: 14, color: tc.primary, fontWeight: '600' }}><Ionicons name="arrow-back" size={14} /> Back</Text>
-                  </TouchableOpacity>
-                  <View style={{ gap: 4 }}>
-                    <Text style={{ fontSize: 24 }}>{selectedMuscle.emoji}</Text>
-                    <Text style={{ fontSize: 20, fontWeight: '800', color: tc.textPrimary }}>{selectedMuscle.commonName}</Text>
-                    <Text style={{ fontSize: 12, color: tc.textMuted, fontStyle: 'italic' }}>{selectedMuscle.name} · {selectedMuscle.bodyRegion}</Text>
-                  </View>
-                  <Text style={{ fontSize: 14, color: tc.textSecondary, lineHeight: 20 }}>{selectedMuscle.shortDescription}</Text>
-
-                  <View style={styles.muscleSection}>
-                    <Text style={styles.muscleSectionTitle}>Location</Text>
-                    <Text style={styles.muscleSectionBody}>{selectedMuscle.location}</Text>
-                  </View>
-                  <View style={styles.muscleSection}>
-                    <Text style={styles.muscleSectionTitle}>Function</Text>
-                    <Text style={styles.muscleSectionBody}>{selectedMuscle.primaryFunction}</Text>
-                  </View>
-                  <View style={styles.muscleSection}>
-                    <Text style={styles.muscleSectionTitle}>Mind-Muscle Connection</Text>
-                    <Text style={styles.muscleSectionBody}>{selectedMuscle.mindMuscleConnection}</Text>
-                  </View>
-                  <View style={styles.muscleSection}>
-                    <Text style={styles.muscleSectionTitle}>Best Exercises</Text>
-                    {selectedMuscle.bestExercises.map((ex, i) => (
-                      <Text key={i} style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19, marginTop: 2 }}>• {ex}</Text>
-                    ))}
-                  </View>
-                  <View style={styles.muscleSection}>
-                    <Text style={styles.muscleSectionTitle}>Growth Tip</Text>
-                    <Text style={styles.muscleSectionBody}>{selectedMuscle.growthTip}</Text>
-                  </View>
-                  <View style={styles.muscleSection}>
-                    <Text style={styles.muscleSectionTitle}>Common Mistakes</Text>
-                    <Text style={styles.muscleSectionBody}>{selectedMuscle.commonMistakes}</Text>
-                  </View>
-                  <View style={styles.muscleSection}>
-                    <Text style={styles.muscleSectionTitle}>Recovery</Text>
-                    <Text style={styles.muscleSectionBody}>{selectedMuscle.recoveryNote}</Text>
-                  </View>
-                </View>
-              ) : (
-                /* Muscle list */
-                <>
-                  {MUSCLE_LIBRARY
-                    .filter(m => muscleRegionFilter === 'all' || m.bodyRegion.toLowerCase().includes(muscleRegionFilter.toLowerCase()))
-                    .map(muscle => (
-                      <TouchableOpacity
-                        key={muscle.id}
-                        style={styles.muscleCard}
-                        onPress={() => setSelectedMuscle(muscle)}
-                        activeOpacity={0.7}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                          <View style={[styles.muscleEmoji, { backgroundColor: muscle.tagColor + '22' }]}>
-                            <Text style={{ fontSize: 20 }}>{muscle.emoji}</Text>
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.muscleCardName}>{muscle.commonName}</Text>
-                            <Text style={styles.muscleCardRegion}>{muscle.bodyRegion}</Text>
-                          </View>
-                          <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
-                        </View>
-                        <Text style={styles.muscleCardDesc} numberOfLines={2}>{muscle.shortDescription}</Text>
-                      </TouchableOpacity>
-                    ))}
-                </>
-              )}
-            </>
-          )}
+            )}
         </View>
         )}
         </>

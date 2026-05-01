@@ -30,6 +30,7 @@ struct AdjustRestTimerIntent: AppIntent {
         let nowMs = now.timeIntervalSince1970 * 1000
         for activity in Activity<RestTimerAttributes>.activities where activity.attributes.workoutId == workoutId {
             let state = activity.content.state
+            if state.mode == "elapsed" { continue }
             let remainingSeconds = max(0, ceil((state.endDateMs - nowMs) / 1000))
             let nextRemainingSeconds = max(0, remainingSeconds + Double(deltaSeconds))
 
@@ -41,6 +42,7 @@ struct AdjustRestTimerIntent: AppIntent {
             let elapsedSeconds = max(0, (nowMs - state.startedAtMs) / 1000)
             let nextDurationSeconds = max(1, elapsedSeconds + nextRemainingSeconds)
             let nextState = RestTimerAttributes.ContentState(
+                mode: state.mode,
                 startedAtMs: state.startedAtMs,
                 durationSeconds: nextDurationSeconds,
                 endDateMs: nowMs + nextRemainingSeconds * 1000,
@@ -48,7 +50,9 @@ struct AdjustRestTimerIntent: AppIntent {
                 setNumber: state.setNumber,
                 totalSets: state.totalSets,
                 nextSetRecommendation: state.nextSetRecommendation,
-                themeColorHex: state.themeColorHex
+                themeColorHex: state.themeColorHex,
+                paused: state.paused,
+                elapsedSeconds: state.elapsedSeconds
             )
             await activity.update(.init(state: nextState, staleDate: nil))
         }

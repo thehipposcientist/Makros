@@ -15,6 +15,7 @@ public struct RestTimerAttributes: ActivityAttributes {
     public typealias RestTimerState = ContentState
 
     public struct ContentState: Codable, Hashable {
+        public var mode: String?
         public var startedAtMs: Double
         public var durationSeconds: Double
         public var endDateMs: Double
@@ -23,6 +24,8 @@ public struct RestTimerAttributes: ActivityAttributes {
         public var totalSets: Int
         public var nextSetRecommendation: String
         public var themeColorHex: String
+        public var paused: Bool?
+        public var elapsedSeconds: Double?
     }
 
     public var workoutId: String
@@ -42,6 +45,17 @@ private func intValue(_ value: Any?, fallback: Int) -> Int {
     return fallback
 }
 
+private func boolValue(_ value: Any?, fallback: Bool) -> Bool {
+    if let value = value as? Bool { return value }
+    if let value = value as? NSNumber { return value.boolValue }
+    if let value = value as? String {
+        let lower = value.lowercased()
+        if lower == "true" || lower == "1" { return true }
+        if lower == "false" || lower == "0" { return false }
+    }
+    return fallback
+}
+
 public class ThalloLiveActivityModule: Module {
     public func definition() -> ModuleDefinition {
         Name("ThalloLiveActivityModule")
@@ -57,6 +71,7 @@ public class ThalloLiveActivityModule: Module {
             let startedAtMs = doubleValue(payload["startedAtMs"], fallback: fallbackStartMs)
             let durationSeconds = doubleValue(payload["durationSeconds"], fallback: max(1, (endDateMs - startedAtMs) / 1000))
             let state = RestTimerAttributes.ContentState(
+                mode: (payload["mode"] as? String) ?? "rest",
                 startedAtMs: startedAtMs,
                 durationSeconds: durationSeconds,
                 endDateMs: endDateMs,
@@ -64,7 +79,9 @@ public class ThalloLiveActivityModule: Module {
                 setNumber: intValue(payload["setNumber"], fallback: 0),
                 totalSets: intValue(payload["totalSets"], fallback: 0),
                 nextSetRecommendation: (payload["nextSetRecommendation"] as? String) ?? "",
-                themeColorHex: (payload["themeColorHex"] as? String) ?? "#15C7B8"
+                themeColorHex: (payload["themeColorHex"] as? String) ?? "#15C7B8",
+                paused: boolValue(payload["paused"], fallback: false),
+                elapsedSeconds: doubleValue(payload["elapsedSeconds"], fallback: 0)
             )
             let attrs = RestTimerAttributes(
                 workoutId: (payload["workoutId"] as? String) ?? UUID().uuidString
@@ -90,6 +107,7 @@ public class ThalloLiveActivityModule: Module {
                 let startedAtMs = doubleValue(payload["startedAtMs"], fallback: activity.content.state.startedAtMs)
                 let endDateMs = doubleValue(payload["endDateMs"], fallback: activity.content.state.endDateMs)
                 let state = RestTimerAttributes.ContentState(
+                    mode: (payload["mode"] as? String) ?? activity.content.state.mode,
                     startedAtMs: startedAtMs,
                     durationSeconds: doubleValue(payload["durationSeconds"], fallback: activity.content.state.durationSeconds),
                     endDateMs: endDateMs,
@@ -97,7 +115,9 @@ public class ThalloLiveActivityModule: Module {
                     setNumber: intValue(payload["setNumber"], fallback: activity.content.state.setNumber),
                     totalSets: intValue(payload["totalSets"], fallback: activity.content.state.totalSets),
                     nextSetRecommendation: (payload["nextSetRecommendation"] as? String) ?? activity.content.state.nextSetRecommendation,
-                    themeColorHex: (payload["themeColorHex"] as? String) ?? activity.content.state.themeColorHex
+                    themeColorHex: (payload["themeColorHex"] as? String) ?? activity.content.state.themeColorHex,
+                    paused: boolValue(payload["paused"], fallback: activity.content.state.paused ?? false),
+                    elapsedSeconds: doubleValue(payload["elapsedSeconds"], fallback: activity.content.state.elapsedSeconds ?? 0)
                 )
                 await activity.update(.init(state: state, staleDate: nil))
                 return true
@@ -110,6 +130,7 @@ public class ThalloLiveActivityModule: Module {
             for activity in Activity<RestTimerAttributes>.activities where activity.id == activityId {
                 let state = activity.content.state
                 return [
+                    "mode": state.mode ?? "rest",
                     "startedAtMs": state.startedAtMs,
                     "durationSeconds": state.durationSeconds,
                     "endDateMs": state.endDateMs,
@@ -118,6 +139,8 @@ public class ThalloLiveActivityModule: Module {
                     "totalSets": state.totalSets,
                     "nextSetRecommendation": state.nextSetRecommendation,
                     "themeColorHex": state.themeColorHex,
+                    "paused": state.paused ?? false,
+                    "elapsedSeconds": state.elapsedSeconds ?? 0,
                     "workoutId": activity.attributes.workoutId
                 ]
             }

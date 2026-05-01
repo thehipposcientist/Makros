@@ -19,12 +19,19 @@ import {
 import {
   loadMealReminderSettings, saveMealReminderSettings, type MealReminderSettings,
 } from '../utils/mealReminders';
+import {
+  loadQuietHours, saveQuietHours, type QuietHoursSettings,
+} from '../utils/notificationPrefs';
 import type { WeightUnit, DistanceUnit } from '../utils/units';
 
 interface Props {
   visible: boolean;
   profile: UserProfile;
   themeName?: AppThemeName;
+  /** Auth token — passed in so the Plan Pause section can hit the
+   *  pause/resume endpoints. Optional because the Settings screen also
+   *  renders correctly for anonymous / not-yet-signed-in callers. */
+  authToken?: string | null;
   onClose: () => void;
   /** Persist a partial profile update. Same signature the parent uses
    *  for other preference toggles so we don't introduce a new path. */
@@ -41,12 +48,14 @@ function formatTime(hour: number, minute: number): string {
   return `${h12}:${pad2(minute)} ${am ? 'AM' : 'PM'}`;
 }
 
-export default function SettingsScreen({ visible, profile, themeName, onClose, onProfileUpdate }: Props) {
+export default function SettingsScreen({ visible, profile, themeName, authToken, onClose, onProfileUpdate }: Props) {
   const insets = useSafeAreaInsets();
   const tc = getTheme(themeName).colors;
 
   const [workoutReminder, setWorkoutReminder] = useState<ReminderSettings>({ enabled: false, hour: 8, minute: 0 });
   const [mealReminder, setMealReminder] = useState<MealReminderSettings>({ enabled: true, hour: 21, minute: 0 });
+  const [quietHours, setQuietHours] = useState<QuietHoursSettings>({ enabled: false, startHour: 22, endHour: 7 });
+  const [pausedUntil, setPausedUntil] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   // Load reminder settings on every open so toggles reflect actual stored
@@ -56,15 +65,26 @@ export default function SettingsScreen({ visible, profile, themeName, onClose, o
     if (!visible) return;
     (async () => {
       try {
-        const [wr, mr] = await Promise.all([
+        const [wr, mr, qh] = await Promise.all([
           loadReminderSettings(),
           loadMealReminderSettings(),
+          loadQuietHours(),
         ]);
         setWorkoutReminder(wr);
         setMealReminder(mr);
+        setQuietHours(qh);
       } catch {}
+      // Surface the active plan's pause status, if any. Best-effort —
+      // a 404 / network glitch just leaves the section showing "Not paused".
+      if (authToken) {
+        try {
+          const { getActivePlanWeek } = await import('../services/api');
+          const pw = await getActivePlanWeek(authToken);
+          setPausedUntil(pw?.paused_until ?? null);
+        } catch {}
+      }
     })();
-  }, [visible]);
+  }, [visible, authToken]);
 
   if (!visible) return null;
 
@@ -88,6 +108,22 @@ export default function SettingsScreen({ visible, profile, themeName, onClose, o
     setLoading(true);
     try {
       await saveMealReminderSettings(next);
+    } catch (e: any) {
+      Alert.alert('Could not update', e?.message ?? 'Try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateQuietHours = async (next: QuietHoursSettings) => {
+    setQuietHours(next);
+    setLoading(true);
+    try {
+      await saveQuietHours(next);
+      // Re-run the active reminder schedulers so the change takes effect
+      // immediately — the schedulers consult quiet-hours when scheduling.
+      if (workoutReminder.enabled) await saveReminderSettings(workoutReminder);
+      if (mealReminder.enabled) await saveMealReminderSettings(mealReminder);
     } catch (e: any) {
       Alert.alert('Could not update', e?.message ?? 'Try again.');
     } finally {
@@ -203,6 +239,65 @@ export default function SettingsScreen({ visible, profile, themeName, onClose, o
               </View>
             </View>
           )}
+
+          {/* Quiet hours — global do-not-disturb window for workout + meal
+              reminders. Rest-timer notifications stay active during a live
+              workout regardless (user-initiated). When enabled, any reminder
+              whose configured time falls inside the window is suppressed. */}
+          <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Quiet hours</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Silence reminders during this window. Rest-timer alerts mid-workout still fire.
+              </Text>
+            </View>
+            <Switch
+              value={quietHours.enabled}
+              onValueChange={(v) => updateQuietHours({ ...quietHours, enabled: v })}
+              disabled={loading}
+              trackColor={{ false: tc.border, true: tc.primary }}
+            />
+          </View>
+          {quietHours.enabled && (
+            <>
+              <View style={[styles.timeRow, { borderTopColor: tc.border }]}>
+                <Text style={[styles.rowSub, { color: tc.textSecondary }]}>Start (quiet from)</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <TouchableOpacity
+                    onPress={() => updateQuietHours({ ...quietHours, startHour: (quietHours.startHour + 23) % 24 })}
+                    style={[styles.timeBtn, { borderColor: tc.border }]}>
+                    <Ionicons name="remove" size={16} color={tc.textSecondary} />
+                  </TouchableOpacity>
+                  <Text style={[styles.timeValue, { color: tc.textPrimary }]}>
+                    {formatTime(quietHours.startHour, 0)}
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => updateQuietHours({ ...quietHours, startHour: (quietHours.startHour + 1) % 24 })}
+                    style={[styles.timeBtn, { borderColor: tc.border }]}>
+                    <Ionicons name="add" size={16} color={tc.textSecondary} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+              <View style={[styles.timeRow, { borderTopColor: tc.border }]}>
+                <Text style={[styles.rowSub, { color: tc.textSecondary }]}>End (quiet until)</Text>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <TouchableOpacity
+                    onPress={() => updateQuietHours({ ...quietHours, endHour: (quietHours.endHour + 23) % 24 })}
+                    style={[styles.timeBtn, { borderColor: tc.border }]}>
+                    <Ionicons name="remove" size={16} color={tc.textSecondary} />
+                  </TouchableOpacity>
+                  <Text style={[styles.timeValue, { color: tc.textPrimary }]}>
+                    {formatTime(quietHours.endHour, 0)}
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => updateQuietHours({ ...quietHours, endHour: (quietHours.endHour + 1) % 24 })}
+                    style={[styles.timeBtn, { borderColor: tc.border }]}>
+                    <Ionicons name="add" size={16} color={tc.textSecondary} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </>
+          )}
         </View>
 
         {/* ── Units ─────────────────────────────────────────────────── */}
@@ -268,6 +363,72 @@ export default function SettingsScreen({ visible, profile, themeName, onClose, o
         <Text style={{ fontSize: 11, color: tc.textMuted, lineHeight: 16, marginTop: 4, paddingHorizontal: 4 }}>
           Unit changes apply to display only — your underlying training history isn't re-converted, so charts and PRs stay continuous.
         </Text>
+
+        {/* ── Plan pause ─────────────────────────────────────────────── */}
+        {authToken && (
+          <>
+            <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>PLAN</Text>
+            <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+              <View style={styles.row}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>
+                    {pausedUntil ? `Paused until ${pausedUntil}` : 'Pause plan'}
+                  </Text>
+                  <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                    {pausedUntil
+                      ? 'Auto-renew, auto-skip, and reminders are suspended. Streak protected.'
+                      : 'Travel or sick? Suspend the plan so missed days don\'t mark as skipped.'}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  disabled={loading}
+                  onPress={async () => {
+                    setLoading(true);
+                    try {
+                      const api = await import('../services/api');
+                      if (pausedUntil) {
+                        const pw = await api.resumePlanWeek(authToken);
+                        setPausedUntil(pw.paused_until ?? null);
+                      } else {
+                        // Quick presets — keep the modal-free UX. Default = 7 days.
+                        const choice = await new Promise<number | null>((resolve) => {
+                          Alert.alert(
+                            'Pause plan',
+                            'How long?',
+                            [
+                              { text: 'Cancel', style: 'cancel', onPress: () => resolve(null) },
+                              { text: '3 days', onPress: () => resolve(3) },
+                              { text: '7 days', onPress: () => resolve(7) },
+                              { text: '14 days', onPress: () => resolve(14) },
+                            ],
+                          );
+                        });
+                        if (choice == null) { setLoading(false); return; }
+                        const target = new Date();
+                        target.setDate(target.getDate() + choice);
+                        const iso = target.toISOString().slice(0, 10);
+                        const pw = await api.pausePlanWeek(authToken, { paused_until: iso, reason: 'other' });
+                        setPausedUntil(pw.paused_until ?? null);
+                      }
+                    } catch (e: any) {
+                      Alert.alert('Could not update', e?.message ?? 'Try again.');
+                    } finally {
+                      setLoading(false);
+                    }
+                  }}
+                  style={{
+                    paddingVertical: 8, paddingHorizontal: 14, borderRadius: 8,
+                    backgroundColor: pausedUntil ? tc.primary : tc.surface,
+                    borderWidth: 1, borderColor: pausedUntil ? tc.primary : tc.border,
+                  }}>
+                  <Text style={{ fontSize: 12, fontWeight: '800', color: pausedUntil ? '#fff' : tc.textPrimary }}>
+                    {pausedUntil ? 'Resume' : 'Pause'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </>
+        )}
 
         {/* ── Permissions footer ────────────────────────────────────── */}
         <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>PERMISSIONS</Text>

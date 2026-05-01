@@ -415,6 +415,27 @@ def test_cardio_classification_is_single_source_of_truth() -> None:
         "movement_pattern": "cardio",
         "is_compound": False,   # name pattern beats the flag
     })
+    assert is_interval_cardio({
+        "name": "Jumping Jacks",
+        "exercise_type": "cardio",
+        "movement_pattern": "cardio",
+        "is_compound": False,
+    })
+    # Explicit seed intensity wins over misleading names / legacy flags.
+    assert classify_cardio({
+        "name": "Bike Zone 2",
+        "exercise_type": "cardio",
+        "movement_pattern": "cardio",
+        "is_compound": True,
+        "cardio_intensity": "steady",
+    }) == "steady"
+    assert classify_cardio({
+        "name": "Low-Impact Cardio Circuit",
+        "exercise_type": "cardio",
+        "movement_pattern": "cardio",
+        "is_compound": True,
+        "cardio_intensity": "easy",
+    }) == "easy"
     # Name-based easy detection
     assert is_easy_cardio({
         "name": "Jogging",

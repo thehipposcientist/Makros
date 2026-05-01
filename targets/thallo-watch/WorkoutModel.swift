@@ -42,6 +42,26 @@ private extension KeyedDecodingContainer {
 
 // ─── Workout ─────────────────────────────────────────────────────────
 
+struct WatchSwapOption: Codable, Identifiable, Equatable {
+    var id: String { name }
+    let name: String
+    let equipment: String?
+    let primaryMuscle: String?
+    let overlap: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case name, equipment, primaryMuscle, overlap
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = c.decodeFlexibleStringIfPresent(forKey: .name) ?? "Exercise"
+        self.equipment = c.decodeFlexibleStringIfPresent(forKey: .equipment)
+        self.primaryMuscle = c.decodeFlexibleStringIfPresent(forKey: .primaryMuscle)
+        self.overlap = c.decodeFlexibleIntIfPresent(forKey: .overlap)
+    }
+}
+
 struct WatchExercise: Codable, Identifiable, Equatable {
     var id: String { name }
     let name: String
@@ -55,9 +75,13 @@ struct WatchExercise: Codable, Identifiable, Equatable {
     /// — shown as a badge on the active card so the user knows to
     /// dial intensity up or down for that slot. Optional for back-compat.
     let slotRole: String?
+    /// Phone-ranked same-slot substitutions. The watch only displays
+    /// these and sends the chosen name back; the phone validates and
+    /// applies the swap to keep planner metadata authoritative.
+    let swapOptions: [WatchSwapOption]
 
     enum CodingKeys: String, CodingKey {
-        case name, sets, reps, restSeconds, equipment, plannedTargetWeightLbs, recommendation, slotRole
+        case name, sets, reps, restSeconds, equipment, plannedTargetWeightLbs, recommendation, slotRole, swapOptions
     }
 
     init(
@@ -68,7 +92,8 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         equipment: String?,
         plannedTargetWeightLbs: Double?,
         recommendation: String?,
-        slotRole: String?
+        slotRole: String?,
+        swapOptions: [WatchSwapOption] = []
     ) {
         self.name = name
         self.sets = sets
@@ -78,6 +103,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         self.plannedTargetWeightLbs = plannedTargetWeightLbs
         self.recommendation = recommendation
         self.slotRole = slotRole
+        self.swapOptions = swapOptions
     }
 
     init(from decoder: Decoder) throws {
@@ -90,6 +116,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         self.plannedTargetWeightLbs = c.decodeFlexibleDoubleIfPresent(forKey: .plannedTargetWeightLbs)
         self.recommendation = c.decodeFlexibleStringIfPresent(forKey: .recommendation)
         self.slotRole = c.decodeFlexibleStringIfPresent(forKey: .slotRole)
+        self.swapOptions = (try? c.decodeIfPresent([WatchSwapOption].self, forKey: .swapOptions)) ?? []
     }
 }
 

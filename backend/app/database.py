@@ -1181,6 +1181,27 @@ def _ensure_plan_week_snapshot_columns() -> None:
         print(f"[migration] plan_weeks snapshot columns failed (non-fatal): {e}")
 
 
+def _ensure_plan_week_pause_columns() -> None:
+    """Add travel/illness pause columns to plan_weeks. While `paused_until`
+    is in the future, auto-renew + auto-skip suspend so the user's streak
+    and metrics don't degrade during a known-off period."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE plan_weeks ADD COLUMN IF NOT EXISTS paused_until DATE"
+            ))
+            conn.execute(text(
+                "ALTER TABLE plan_weeks ADD COLUMN IF NOT EXISTS paused_at TIMESTAMPTZ"
+            ))
+            conn.execute(text(
+                "ALTER TABLE plan_weeks ADD COLUMN IF NOT EXISTS pause_reason VARCHAR"
+            ))
+    except Exception as e:
+        print(f"[migration] plan_weeks pause columns failed (non-fatal): {e}")
+
+
 def _ensure_skip_reason_columns() -> None:
     """Add human-readable skip reasons to day-state and PlanDay rows."""
     if engine.dialect.name != "postgresql":
@@ -1276,6 +1297,7 @@ def create_db_and_tables():
     _ensure_user_reports_table()
     _ensure_plan_week_tables()
     _ensure_plan_week_snapshot_columns()
+    _ensure_plan_week_pause_columns()
     _ensure_skip_reason_columns()
     _ensure_plan_week_checkins_table()
 

@@ -128,6 +128,12 @@ export type WatchExerciseClient = {
   plannedTargetWeightLbs?: number | null;
   recommendation?: string | null;
   slotRole?: string | null;
+  swapOptions?: Array<{
+    name: string;
+    equipment?: string | null;
+    primaryMuscle?: string | null;
+    overlap?: number | null;
+  }>;
 };
 
 /** Build the compact watch payload from the day AND its current
@@ -172,21 +178,35 @@ export function buildWatchWorkoutPayload(
   // Every exercise is shipped (including warmup slots — the watch's
   // active-workout view treats warmup as its own sequence step and
   // badges it so users know to dial intensity down).
-  const exercises: WatchExerciseClient[] = (day.exercises ?? []).map((e: any) => ({
-    name: String(e.name || 'Exercise'),
-    sets: positiveInt(e.sets, 3),
-    reps: String(e.reps ?? ''),
-    restSeconds: positiveInt(e.restSeconds ?? e.rest_seconds, 60),
-    equipment: nullableString(e.equipment),
-    plannedTargetWeightLbs: finiteNumber(
-      e.plannedTargetWeightLbs
-        ?? e.targetWeightLbs
-        ?? e.recommendedWeightLbs
-        ?? e.weight,
-    ),
-    recommendation: nullableString(e.recommendation),
-    slotRole: nullableString(e.slot_role ?? e.slotRole),
-  }));
+  const exercises: WatchExerciseClient[] = (day.exercises ?? []).map((e: any) => {
+    const swapOptions = Array.isArray(e.swapOptions)
+      ? e.swapOptions
+        .map((option: any) => ({
+          name: String(option?.name ?? '').trim(),
+          equipment: nullableString(option?.equipment),
+          primaryMuscle: nullableString(option?.primaryMuscle ?? option?.primary_muscle),
+          overlap: finiteNumber(option?.overlap),
+        }))
+        .filter((option: any) => option.name.length > 0)
+        .slice(0, 5)
+      : [];
+    return {
+      name: String(e.name || 'Exercise'),
+      sets: positiveInt(e.sets, 3),
+      reps: String(e.reps ?? ''),
+      restSeconds: positiveInt(e.restSeconds ?? e.rest_seconds, 60),
+      equipment: nullableString(e.equipment),
+      plannedTargetWeightLbs: finiteNumber(
+        e.plannedTargetWeightLbs
+          ?? e.targetWeightLbs
+          ?? e.recommendedWeightLbs
+          ?? e.weight,
+      ),
+      recommendation: nullableString(e.recommendation),
+      slotRole: nullableString(e.slot_role ?? e.slotRole),
+      ...(swapOptions.length > 0 ? { swapOptions } : {}),
+    };
+  });
   const durationMinutes = positiveInt((day as any).durationMinutes ?? (day as any).duration, 60);
   return {
     focus: String(day.focus || 'Workout'),

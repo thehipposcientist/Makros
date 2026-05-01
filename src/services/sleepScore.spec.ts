@@ -16,7 +16,10 @@
 //   3. Low deep on a 7+ hour night triggers the deep-sleep insight +
 //      a sub-max deepSleep pillar (absolute-minutes floor).
 //   4. >60 min awake reduces the awakeFragmentation pillar.
-//   5. Bonus — verifies pillar weights sum to 100 in MVP mode.
+//   5. Smooth duration scoring avoids hard pillar cliffs at band edges.
+//   6. Long clean sleep is not automatically hard-capped, but long sleep
+//      with off recovery markers is still clamped.
+//   7. Bonus — verifies pillar weights sum to 100 in MVP mode.
 
 import { scoreSleep, scoreSleepMVP, scoreSleepPersonalized } from './sleepScore';
 import type { SleepScoreInput } from './sleepScore';
@@ -126,6 +129,83 @@ console.log('\n[case] Short night → no absolute floor; deep ratio drives scori
     `5h with 20% deep ratio → deepSleep pillar should be max=10, got ${shortNightGoodRatio.pillars.deepSleep}`);
   expect(shortNightGoodRatio.score <= 59,
     `5h should cap below Good even with a good deep ratio; got score=${shortNightGoodRatio.score}`);
+}
+
+
+// ─── Case 3b: smooth duration curve avoids hard band cliffs ─────────────────
+console.log('\n[case] Smooth duration curve avoids hard duration-pillar cliffs');
+{
+  const justBelow = scoreSleepMVP(baseInput({
+    totalSleepHours: 6.49,
+    inBedMinutes: Math.round(6.9 * 60),
+    deepSleepHours: 1.0,
+    remSleepHours: 1.2,
+    stages: { core: 4.29, deep: 1.0, rem: 1.2, awake: 0.25, total: 6.49 },
+  }))!;
+  const justAbove = scoreSleepMVP(baseInput({
+    totalSleepHours: 6.51,
+    inBedMinutes: Math.round(6.9 * 60),
+    deepSleepHours: 1.0,
+    remSleepHours: 1.2,
+    stages: { core: 4.31, deep: 1.0, rem: 1.2, awake: 0.25, total: 6.51 },
+  }))!;
+  const clearlyShort = scoreSleepMVP(baseInput({
+    totalSleepHours: 5.5,
+    inBedMinutes: Math.round(5.9 * 60),
+    deepSleepHours: 1.0,
+    remSleepHours: 1.0,
+    stages: { core: 3.5, deep: 1.0, rem: 1.0, awake: 0.25, total: 5.5 },
+  }))!;
+
+  expect(
+    Math.abs(justBelow.pillars.duration - justAbove.pillars.duration) <= 1,
+    `duration pillar should be smooth across 6.5h; below=${justBelow.pillars.duration}, above=${justAbove.pillars.duration}`,
+  );
+  expect(
+    clearlyShort.pillars.duration < justBelow.pillars.duration,
+    `5.5h duration=${clearlyShort.pillars.duration} should score below 6.49h duration=${justBelow.pillars.duration}`,
+  );
+}
+
+
+// ─── Case 3c: long sleep is context-aware, not automatically harsh ───────────
+console.log('\n[case] Long sleep is context-aware');
+{
+  const longClean = scoreSleepMVP(baseInput({
+    totalSleepHours: 10.2,
+    inBedMinutes: 630,
+    deepSleepHours: 1.6,
+    remSleepHours: 2.1,
+    hrvMs: 75,
+    restingHeartRate: 55,
+    spo2Percent: 98,
+    respiratoryRate: 15,
+    stages: { core: 6.5, deep: 1.6, rem: 2.1, awake: 0.2, total: 10.2 },
+  }))!;
+  expect(
+    longClean.score > 88,
+    `10.2h with clean vitals should not be old hard-capped; got score=${longClean.score}`,
+  );
+  expect(
+    longClean.insights.some(s => s.toLowerCase().includes('long sleep duration')),
+    `expected long-sleep context insight; got: ${JSON.stringify(longClean.insights)}`,
+  );
+
+  const longStressed = scoreSleepMVP(baseInput({
+    totalSleepHours: 10.2,
+    inBedMinutes: 630,
+    deepSleepHours: 1.6,
+    remSleepHours: 2.1,
+    hrvMs: 35,
+    restingHeartRate: 98,
+    spo2Percent: 93,
+    respiratoryRate: 23,
+    stages: { core: 6.5, deep: 1.6, rem: 2.1, awake: 0.2, total: 10.2 },
+  }))!;
+  expect(
+    longStressed.score <= 69,
+    `10.2h plus off recovery markers should stay capped; got score=${longStressed.score}`,
+  );
 }
 
 

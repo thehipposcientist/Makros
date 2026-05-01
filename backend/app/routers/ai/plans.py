@@ -129,8 +129,8 @@ def build_user_exercise_library(equipment_slugs: list[str] | None) -> list[dict]
 
     Filters `SEED_EXERCISES` by the user's owned equipment: an exercise is
     eligible if every `required=True` equipment entry on it is in the
-    user's owned set, OR the exercise has no required equipment (pure
-    bodyweight). Bodyweight-bucket exercises are always eligible.
+    user's owned set, or if it has no required equipment (pure
+    bodyweight). Required support gear still gates bodyweight variants.
 
     Each returned entry is the minimum the prompt + canonicalizer need:
         {
@@ -145,7 +145,7 @@ def build_user_exercise_library(equipment_slugs: list[str] | None) -> list[dict]
     no qualifier or "Leg Press" listed under the leg extension machine.
     Forcing the choice into a closed set kills both classes of bug.
     """
-    from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
+    from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES, RETIRED_EXERCISE_SLUGS
 
     # The frontend stores `UserProfile.equipment` as DISPLAY NAMES
     # ("Dumbbells", "Flat bench") while the seed exercise library is keyed
@@ -168,28 +168,17 @@ def build_user_exercise_library(equipment_slugs: list[str] | None) -> list[dict]
             owned.add(slug)
     _expand_owned_equipment_aliases(owned)
 
-    # Also accept the legacy bucket strings so a user with `equipment:
-    # ["bodyweight"]` still gets bodyweight exercises even though
-    # "bodyweight" isn't an Equipment slug.
-    owned_buckets = {"bodyweight", "home", "dumbbells", "gym", "other"} & set(equipment_slugs or [])
-
     print(f"[workout_library] resolved {len(owned)}/{len(equipment_slugs or [])} equipment entries → slugs: {sorted(owned)[:8]}{'...' if len(owned) > 8 else ''}")
 
     library: list[dict] = []
     for ex in SEED_EXERCISES:
+        if ex.get("deprecated") or ex.get("slug") in RETIRED_EXERCISE_SLUGS:
+            continue
         eq_entries = ex.get("equipment") or []
         required_slugs = [e["slug"] for e in eq_entries if e.get("required")]
 
-        # Eligibility:
-        #   - bodyweight bucket → always eligible (no required equipment, or
-        #     all required equipment is owned)
-        #   - other buckets → every required slug must be in `owned`
-        bucket = ex.get("equipment_bucket")
         if required_slugs and not all(s in owned for s in required_slugs):
-            # Required equipment missing — skip unless it's bodyweight
-            # bucket AND the user owns "bodyweight" as a legacy bucket.
-            if not (bucket == "bodyweight" and "bodyweight" in owned_buckets):
-                continue
+            continue
 
         # Build a human-readable equipment label from the primary + support
         # entries. Optional entries are deliberately omitted to keep the

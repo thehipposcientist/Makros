@@ -7,11 +7,12 @@
 //     are immediate.
 //   • syncTheme({...palette}) — pushes the user's current theme colors.
 //   • updateProgress({exerciseIndex, setNumber, restRemainingSec,
-//                     recommendation}) — live mid-workout updates.
+//                     restEndsAtMs, recommendation}) — live mid-workout
+//     updates. Absolute rest timestamps let the watch recover after sleep.
 //
 // Watch → Phone commands arrive via `addCommandListener`:
 //   "start_workout", "skip_workout", "end_workout", "start_rest",
-//   "skip_rest", "log_set".
+//   "skip_rest", "log_set", "swap_exercise".
 
 import { requireOptionalNativeModule } from 'expo';
 
@@ -24,6 +25,14 @@ export type WatchExercise = {
   plannedTargetWeightLbs?: number | null;
   recommendation?: string | null;
   slotRole?: string | null;
+  swapOptions?: WatchSwapOption[];
+};
+
+export type WatchSwapOption = {
+  name: string;
+  equipment?: string | null;
+  primaryMuscle?: string | null;
+  overlap?: number | null;
 };
 
 export type WatchWorkoutStatus = 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest';
@@ -171,6 +180,9 @@ export type WatchProgress = {
   exerciseIndex?: number;
   setNumber?: number;
   restRemainingSec?: number | null;
+  restStartedAtMs?: number;
+  restDurationSec?: number;
+  restEndsAtMs?: number;
   heartRate?: number | null;
   recommendation?: string | null;
 };
