@@ -5396,11 +5396,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // modal card so it renders immediately without a blank → pop-in flash.
   const bgPrepDataRef = useRef<import('../services/preparedness').PreparednessResult | null>(null);
 
-  if (!userProfile || !workoutPlan) return <View style={styles.container} />;
-
-  const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label
-    ?? PRIMARY_GOALS.find(g => g.id === userProfile.goal)?.label
-    ?? userProfile.goal;
   // Prefer the persisted PlanWeek (dated, stable for 7 days). Fall back
   // to the legacy rolling-from-today schedule only for users who don't
   // have a PlanWeek row yet (network failure on first run, mid-migration).
@@ -5410,13 +5405,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // which cascades into DayCard re-renders even when nothing changed.
   // Pairs with the React.memo wrapper on DayCard so item-prop identity
   // is stable across re-renders.
-  const scheduleRaw = useMemo(() => (
-    planWeek?.days?.length
+  // MUST sit above the early return — hooks have to fire in the same
+  // order every render.
+  const scheduleRaw = useMemo(() => {
+    if (!userProfile || !workoutPlan) return [] as ReturnType<typeof get7DaySchedule>;
+    return planWeek?.days?.length
       ? getScheduleFromPlanWeek(planWeek)
       : workoutPlan?.days?.length
         ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates, droppedSkipDates, completedDates, userProfile.trainingDays)
-        : []
-  ), [planWeek, workoutPlan, userProfile.daysPerWeek, userProfile.trainingDays, skippedDates, droppedSkipDates, completedDates]);
+        : [];
+  }, [planWeek, workoutPlan, userProfile?.daysPerWeek, userProfile?.trainingDays, skippedDates, droppedSkipDates, completedDates]);
   // Overlay preserved completed workouts: any date the user has already
   // finished keeps its original WorkoutDay snapshot, so a plan regen can't
   // swap a done day's exercises out from under them.
@@ -5440,6 +5438,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       return item;
     })
   ), [scheduleRaw, preservedWorkouts]);
+
+  if (!userProfile || !workoutPlan) return <View style={styles.container} />;
+
+  const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label
+    ?? PRIMARY_GOALS.find(g => g.id === userProfile.goal)?.label
+    ?? userProfile.goal;
   // Free tier — strip all generated exercises and replace each scheduled day
   // with an "Empty" shell the user can start + populate manually. Past
   // preserved/completed workouts are left untouched so the user's history

@@ -2825,11 +2825,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   <Text style={[styles.sectionAddBtnText, { marginTop: 3 }]}>Manual</Text>
                 </TouchableOpacity>
                 {authToken && (
+                  // Match the visual treatment of Camera/Library/Manual —
+                  // outlined `sectionAddBtn` instead of a filled primary
+                  // block. The four buttons sit in the same row so they
+                  // should read as a single tier of options, not "three
+                  // suggestions and one CTA".
                   <TouchableOpacity
-                    style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 10, borderRadius: 10, backgroundColor: tc.primary, gap: 3 }}
+                    style={[styles.sectionAddBtn, { flex: 1, alignItems: 'center', paddingVertical: 10 }]}
                     onPress={() => setBarcodeScanVisible(true)}>
-                    <Ionicons name="barcode-outline" size={15} color="#fff" />
-                    <Text style={{ fontSize: 11, fontWeight: '700', color: '#fff', marginTop: 3 }}>Scan</Text>
+                    <Ionicons name="barcode-outline" size={15} color={tc.primary} />
+                    <Text style={[styles.sectionAddBtnText, { marginTop: 3 }]}>Scan</Text>
                   </TouchableOpacity>
                 )}
               </View>
