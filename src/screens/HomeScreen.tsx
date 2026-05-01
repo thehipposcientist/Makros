@@ -8088,22 +8088,34 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {/* ── You tab ─────────────────────────────────────────────────── */}
       {activeTab === 'you' && (<ErrorBoundary>{(() => {
         const ps = userProfile.physicalStats;
-        const heightStr = ps ? `${ps.heightFeet}'${ps.heightInches}"` : '—';
+        const cleanText = (value: string | null | undefined): string => {
+          const text = (value ?? '').trim();
+          return text && text.toLowerCase() !== 'undefined' && text.toLowerCase() !== 'null' ? text : '';
+        };
+        const validNumber = (value: unknown): value is number =>
+          typeof value === 'number' && Number.isFinite(value);
+        const displayName = cleanText(userProfile.firstName) || cleanText(username) || 'Your Profile';
+        const avatarLetter = (cleanText(userProfile.firstName) || cleanText(username) || cleanText(userProfile.goal) || 'U')[0].toUpperCase();
+        const metaParts = [
+          validNumber(ps?.weightLbs) && ps.weightLbs > 0 ? `${ps.weightLbs} lb` : null,
+          validNumber(ps?.heightFeet) && validNumber(ps?.heightInches) ? `${ps.heightFeet}'${ps.heightInches}"` : null,
+          validNumber(ps?.age) && ps.age > 0 ? `age ${ps.age}` : null,
+        ].filter((part): part is string => !!part);
         return (
         <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
           {/* User info header */}
           <View style={[styles.profileHero, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             <View style={[styles.profileAvatar, { backgroundColor: themeColors.primary + '22', borderColor: themeColors.primary + '55' }]}>
               <Text style={[styles.profileAvatarText, { color: themeColors.primary }]}>
-                {(userProfile.firstName?.[0] ?? username?.[0] ?? userProfile.goal?.[0] ?? 'U').toUpperCase()}
+                {avatarLetter}
               </Text>
             </View>
             <View style={{ flex: 1, gap: 2 }}>
               <Text style={[styles.profileHeroName, { color: themeColors.textPrimary }]}>
-                {userProfile.firstName || username || 'Your Profile'}
+                {displayName}
               </Text>
               <Text style={[styles.profileHeroMeta, { color: themeColors.textSecondary }]}>
-                {ps?.weightLbs ? `${ps.weightLbs} lb` : '—'}  ·  {heightStr}  ·  age {ps?.age ?? '—'}
+                {metaParts.length > 0 ? metaParts.join('  ·  ') : 'Profile details incomplete'}
               </Text>
             </View>
             <TouchableOpacity
