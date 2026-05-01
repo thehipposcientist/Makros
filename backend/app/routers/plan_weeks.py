@@ -481,14 +481,17 @@ def start_new_week(
         pass
 
     today = date.today()
-    # Anchor the week on the most recent Monday so the front-page schedule
-    # is a stable Mon-Sun calendar week. This keeps yesterday's completed
-    # workout visible (still inside the active week) and lines auto-renewal
-    # up with the natural week boundary instead of a rolling 7-day window
-    # that drifts every time the user reinstalls.
-    weekday = today.weekday()  # Mon=0 .. Sun=6
-    from datetime import timedelta
-    week_start = today - timedelta(days=weekday)
+    # Anchor the FIRST plan week to the user's sign-up / start day rather
+    # than a calendar Monday. Two reasons:
+    #   1. UX — a user who signs up Friday wants their plan + check-in
+    #      cadence to feel personal ("my week ends next Thursday"), not
+    #      jammed into a Sunday-night calendar boundary.
+    #   2. Engagement — anchoring to sign-up day means the weekly review
+    #      always lands on the day they originally engaged, which tends
+    #      to be a high-intent day for them.
+    # Auto-renewal uses prev.end_date + 1 so this anchor sticks across
+    # week boundaries (Friday-Thursday cycle persists every week).
+    week_start = today
     training_pattern = default_training_pattern(days_per_week)
 
     pw = create_plan_week(

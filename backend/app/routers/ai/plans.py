@@ -460,8 +460,13 @@ def _persist_active_workout_plan(
                     f"id={active_week.id} start={active_week.start_date}"
                 )
             elif workout_days and dpw:
+                # Anchor to today (sign-up day) so the user's plan +
+                # weekly review cadence follows the day they engaged,
+                # not the calendar Monday boundary. Mirrors the logic
+                # in `plan_weeks.start_new_week`. Auto-renewal advances
+                # by 7 from prev.end_date so the anchor sticks.
                 today = _date2.today()
-                week_start = today - _td2(days=today.weekday())
+                week_start = today
                 create_plan_week(
                     db, user_id,
                     start_date=week_start,

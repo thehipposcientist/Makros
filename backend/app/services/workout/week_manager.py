@@ -635,8 +635,23 @@ def auto_renew_week(
     except Exception:
         pass
 
+    # Anchor the new week to the day after the expiring week's end so
+    # the user's sign-up-day cadence sticks across weeks (Friday → Thu
+    # → Friday → Thu → ...). When the user has been away long enough
+    # that the next slot is already in the past, advance by full 7-day
+    # cycles until the new week contains today — preserves the original
+    # weekday anchor instead of jumping to "today + 6" and breaking
+    # the rhythm.
     today = date.today()
-    week_start = today - timedelta(days=today.weekday())
+    if expiring_pw and expiring_pw.end_date:
+        week_start = expiring_pw.end_date + timedelta(days=1)
+        while week_start + timedelta(days=6) < today:
+            week_start += timedelta(days=7)
+    else:
+        # First-ever week (no prior PlanWeek to anchor against) — start
+        # today. Mirrors the initial-creation path in
+        # `plan_weeks.start_new_week` and `ai/plans._dual_write_plan_week`.
+        week_start = today
     training_pattern = default_training_pattern(days_per_week)
 
     pw = create_plan_week(
