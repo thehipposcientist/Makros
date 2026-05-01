@@ -2378,15 +2378,41 @@ def _est_exercise_time(ex: dict) -> float:
 
 
 def _pick_exercises_for_time(pool: list[dict], target_minutes: int) -> list[dict]:
-    """Pick exercises from pool until we fill the target time."""
-    result = []
+    """Pick exercises from pool until we fill the target time.
+
+    Two-pass strategy: first walk the pool greedily until we're close to
+    the budget, then keep scanning to slot in any *smaller* remaining
+    exercises that still fit. The previous version `break`-ed at the
+    first non-fit, which left short workouts noticeably under-budget
+    when a long exercise sat early in the pool. This caused the
+    "exercises not filling up requested time" bug for recovery,
+    mobility, and cardio days. Lift days build their slot list via a
+    separate density-trimming pass and are unaffected.
+    """
+    result: list[dict] = []
     total = 0.0
-    for ex in pool:
+    used = set()
+    # Pass 1: greedy fill in pool order so we keep the recipe's
+    # intended progression (high-priority moves first).
+    for idx, ex in enumerate(pool):
         t = _est_exercise_time(ex)
+        if total + t > target_minutes + 2:
+            continue
+        result.append(ex)
+        total += t
+        used.add(idx)
+    # Pass 2: if there's still slack, top up with the smallest
+    # remaining exercises that still fit.
+    remaining = sorted(
+        ((idx, ex, _est_exercise_time(ex)) for idx, ex in enumerate(pool) if idx not in used),
+        key=lambda r: r[2],
+    )
+    for idx, ex, t in remaining:
         if total + t > target_minutes + 2:
             break
         result.append(ex)
         total += t
+        used.add(idx)
     return result
 
 

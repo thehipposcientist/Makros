@@ -1041,7 +1041,12 @@ export default function Index() {
 
   const handleProfileComplete = async (profile: UserProfile) => {
     const stamped = stampGoalStart(profile, null);
-    let stampedWithTier: UserProfile = { ...stamped, subscriptionTier: stamped.subscriptionTier ?? 'free' };
+    // Beta default: every new sign-up starts on Pro so the AI plan
+    // generator (a Pro-gated backend feature) doesn't 403 the very
+    // first request. Backend `register` endpoint persists the same
+    // value, and `getMe` below overwrites with the authoritative
+    // server tier. Flip back to 'free' when paid tiers ship.
+    let stampedWithTier: UserProfile = { ...stamped, subscriptionTier: stamped.subscriptionTier ?? 'pro' };
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
 
     if (!authToken) {
@@ -1277,7 +1282,15 @@ export default function Index() {
     // shape. Mealplan was previously skipped — added so users get the
     // same "applies next Monday" heads-up when changing meals/day,
     // variety, or allergens mid-week.
-    if (effectiveMode === 'goal' || effectiveMode === 'workout' || effectiveMode === 'mealplan') {
+    //
+    // CRITICAL: only show the warning when an existing plan is in
+    // flight. First-time setup (right after onboarding) has no prior
+    // userProfile — every field comparison evaluates to "changed" and
+    // would intercept the very first save, blocking initial plan
+    // generation. The warning is only meaningful for users who have an
+    // active week being disrupted.
+    const hasExistingPlan = !!userProfile && !!userProfile.goal;
+    if (hasExistingPlan && (effectiveMode === 'goal' || effectiveMode === 'workout' || effectiveMode === 'mealplan')) {
       const willRegen = effectiveMode === 'goal'
         ? (userProfile?.goal !== updated.goal || userProfile?.goalDetails?.pace !== updated.goalDetails?.pace)
         : effectiveMode === 'mealplan'

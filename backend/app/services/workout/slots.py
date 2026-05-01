@@ -736,6 +736,45 @@ def density_adjust_slots(
     budget = max(20, min(180, int(session_minutes)))
     cost = _ROLE_MINUTES_BY_CATEGORY.get(category, _DEFAULT_ROLE_MINUTES)
     total = sum(cost.get(s.role, 6) for s in slots)
+
+    # ── Underfill case ─────────────────────────────────────────────────
+    # Recipes are fixed-length templates; without this pass, picking a
+    # 90-min session with a 5-slot template leaves the workout ~25 min
+    # short of the user's ask ("exercises not filling up requested
+    # time"). Append isolation slots — the cheapest, safest way to
+    # extend without disrupting the recipe's primary/secondary
+    # progression. Cap the additions so a runaway budget (180 min)
+    # doesn't bloat lift days into 14-exercise marathons.
+    if total < budget - 4:
+        # Lift / hybrid days fill with isolation; cardio fills with
+        # secondary cardio blocks; mobility/recovery don't expand
+        # (those days have qualitative pacing, not exercise count).
+        if category in ("lift", "hybrid"):
+            fill_role = "isolation"
+        elif category == "cond":
+            fill_role = "secondary"
+        else:
+            fill_role = None
+        if fill_role:
+            fill_cost = cost.get(fill_role, 6)
+            primary_muscle_hint = None
+            for s in slots:
+                if getattr(s, "primary_muscle_hint", None):
+                    primary_muscle_hint = s.primary_muscle_hint
+                    break
+            extras_cap = 4  # never add more than 4 fill slots
+            kept = list(slots)
+            while total + fill_cost <= budget and extras_cap > 0:
+                kept.append(Slot(
+                    label=f"Accessory ({fill_role})",
+                    movement_pattern="isolation" if fill_role == "isolation" else "accessory",
+                    primary_muscle_hint=primary_muscle_hint,
+                    role=fill_role,
+                ))
+                total += fill_cost
+                extras_cap -= 1
+            return kept
+        return list(slots)
     if total <= budget:
         return list(slots)
 

@@ -154,6 +154,13 @@ def register(body: UserCreate, request: Request, session: Session = Depends(get_
         ai_disclaimer_version=legal_version,
         email_verification_token_hash=hash_password(email_token),
         email_verification_expires_at=_token_expiry(),
+        # Beta default: every new sign-up starts on Pro so plan
+        # generation, AI features, and coach chat work out of the box.
+        # The frontend `freeBetaFullAccess` flag handles client-side
+        # gates; this aligns the BACKEND so `require_pro_feature`
+        # endpoints (plan_weeks, /ai/*, /coach/*) don't 403 fresh users.
+        # Flip back to "free" once paid tiers ship.
+        subscription_tier="pro",
     )
     session.add(user)
     session.commit()
