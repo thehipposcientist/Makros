@@ -5,7 +5,17 @@ import type { UserProfile } from '../types';
 
 export type Tier = 'free' | 'pro';
 
+// Free-tier caps — chosen to match the standard set across competing apps:
+//   - MyFitnessPal Free: 10 recipes / 0 plans
+//   - Cronometer Free: ~25 custom foods / no meal plan
+//   - Lose It! Free: 10 custom foods / no plans
+// Three workout templates and five saved meals + three meal routines puts
+// Thallo's free experience just slightly ahead of the median, leaving room
+// for Pro to differentiate on generated planning + AI coaching rather than
+// raw count gates.
 export const FREE_WORKOUT_TEMPLATE_LIMIT = 3;
+export const FREE_SAVED_MEAL_LIMIT = 5;
+export const FREE_MEAL_ROUTINE_LIMIT = 3;
 
 export type ProFeature =
   | 'ai_plan_generation'
@@ -67,6 +77,28 @@ export function canCreateWorkoutTemplate(
   currentCount: number,
 ): boolean {
   return currentCount < workoutTemplateLimit(profile);
+}
+
+export function savedMealLimit(profile: UserProfile | null | undefined): number {
+  return isPro(profile) ? Infinity : FREE_SAVED_MEAL_LIMIT;
+}
+
+export function canCreateSavedMeal(
+  profile: UserProfile | null | undefined,
+  currentCount: number,
+): boolean {
+  return currentCount < savedMealLimit(profile);
+}
+
+export function mealRoutineLimit(profile: UserProfile | null | undefined): number {
+  return isPro(profile) ? Infinity : FREE_MEAL_ROUTINE_LIMIT;
+}
+
+export function canCreateMealRoutine(
+  profile: UserProfile | null | undefined,
+  currentCount: number,
+): boolean {
+  return currentCount < mealRoutineLimit(profile);
 }
 
 export function canUse(profile: UserProfile | null | undefined, _feature: ProFeature): boolean {

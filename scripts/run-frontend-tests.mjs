@@ -8,6 +8,8 @@ const tests = [
   ['src/utils/__tests__/notificationPrefs.test.mjs'],
   ['scripts/run-jestlike-test.mjs', 'src/constants/__tests__/legal.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/subscription.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/hydration.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/screens/__tests__/progressData.test.ts'],
 ];
 
 for (const args of tests) {

@@ -28,6 +28,7 @@ import FriendsModal from '../components/FriendsModal';
 // ShareWorkoutModal hidden — will re-enable when social feed is active
 // import ShareWorkoutModal from '../components/ShareWorkoutModal';
 import LiveActivityTracker from '../components/LiveActivityTracker';
+import WorkoutTemplateBuilderModal from '../components/WorkoutTemplateBuilderModal';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
@@ -1772,6 +1773,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showTrainerNote, setShowTrainerNote] = useState(false);
   const [showLogActivity, setShowLogActivity] = useState(false);
   const [showLiveTracker, setShowLiveTracker] = useState(false);
+  // Workout template builder modal — create a new template (or edit an
+  // existing one) without having to start an active workout. Distinct
+  // from the "Save as Template" button on the active-workout summary.
+  const [templateBuilderOpen, setTemplateBuilderOpen] = useState(false);
+  const [templateBuilderTarget, setTemplateBuilderTarget] = useState<SavedWorkoutTemplate | null>(null);
   // showWeeklyCheckin removed — weekly check-in is now handled by WeeklyCheckinCard in ProgressScreen
   const [showFriends, setShowFriends] = useState(false);
   const [showGoalEditor, setShowGoalEditor] = useState(false);
@@ -3451,7 +3457,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // Same policy as workout: backend is source of truth. Always overwrite
     // cache when backend returns a plan. Cache is a fallback ONLY for
     // network failure / 404 legacy users.
-    if (authToken) {
+    // Free tier: skip the entire nutrition plan hydration path. Free users
+    // don't get generated meals — every day starts empty and they fill it
+    // via Add Meal / saved meals / routines. Skipping the fetch here means
+    // no stale generated plan can re-appear if the user upgrades, then
+    // downgrades. The empty-plan fallback at the day-card render handles
+    // the rest.
+    const tierIsFree = tierOf(profile) === 'free';
+    if (authToken && !tierIsFree) {
       try {
         const { getActiveNutritionPlan } = await import('../services/api');
         const active = await getActiveNutritionPlan(authToken);
@@ -3483,27 +3496,34 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       }
     }
 
-    const rawPlans = await AsyncStorage.getItem('aiNutritionPlans');
+    // Free tier: never seed rotating templates from cache either. A user
+    // who downgraded after generating once would otherwise keep seeing
+    // their old generated meals forever. Empty array → every day-card
+    // falls through to the empty-plan scaffold and the user fills it
+    // manually.
     let rotatingTemplates: DailyNutritionPlan[] = [];
-    if (rawPlans) {
-      try {
-        const parsed = JSON.parse(rawPlans);
-        if (Array.isArray(parsed)) {
-          rotatingTemplates = parsed.filter(Boolean) as DailyNutritionPlan[];
-        }
-      } catch {}
-    }
-    if (rotatingTemplates.length === 0) {
-      const [rawA, rawB, rawC] = await Promise.all([
-        AsyncStorage.getItem('aiNutritionPlanA'),
-        AsyncStorage.getItem('aiNutritionPlanB'),
-        AsyncStorage.getItem('aiNutritionPlanC'),
-      ]);
-      rotatingTemplates = [
-        rawA ? JSON.parse(rawA) : null,
-        rawB ? JSON.parse(rawB) : null,
-        rawC ? JSON.parse(rawC) : null,
-      ].filter(Boolean) as DailyNutritionPlan[];
+    if (!tierIsFree) {
+      const rawPlans = await AsyncStorage.getItem('aiNutritionPlans');
+      if (rawPlans) {
+        try {
+          const parsed = JSON.parse(rawPlans);
+          if (Array.isArray(parsed)) {
+            rotatingTemplates = parsed.filter(Boolean) as DailyNutritionPlan[];
+          }
+        } catch {}
+      }
+      if (rotatingTemplates.length === 0) {
+        const [rawA, rawB, rawC] = await Promise.all([
+          AsyncStorage.getItem('aiNutritionPlanA'),
+          AsyncStorage.getItem('aiNutritionPlanB'),
+          AsyncStorage.getItem('aiNutritionPlanC'),
+        ]);
+        rotatingTemplates = [
+          rawA ? JSON.parse(rawA) : null,
+          rawB ? JSON.parse(rawB) : null,
+          rawC ? JSON.parse(rawC) : null,
+        ].filter(Boolean) as DailyNutritionPlan[];
+      }
     }
 
     // Use the active PlanWeek's dates (Mon-Sun anchor) so meal-plan
@@ -5460,7 +5480,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           ...item,
           workout: {
             day: item.workout?.day ?? DAY_NAMES[item.date.getDay()],
-            focus: 'Empty',
+            // Free users don't get a generated split — every forward day
+            // reads as "Custom" and they fill it via Live Tracker / Log
+            // Activity / one of their saved templates.
+            focus: 'Custom',
             exercises: [],
             stimulus: null,
           } as any,
@@ -6028,8 +6051,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             {/* Combined "Today's training readiness" — fuses Recovery (per-muscle
                 for today's focus) + Preparedness (sleep/HRV/nutrition/RHR).
-                Re-runs when today's focus changes (Switch Day picker). */}
-            {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (() => {
+                Re-runs when today's focus changes (Switch Day picker).
+                Free users see this too — the card gracefully drops AH-only
+                pillars (sleep, HRV, RHR) and reweights against just what's
+                present, so a free user with logged meals + workout history
+                still gets a meaningful score from nutrition + fatigue +
+                yesterday's strain. */}
+            {renderedWorkoutSubTab === 'plan' && authToken && (() => {
               const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
               // Find today by date — with the dated PlanWeek schedule,
               // today is no longer guaranteed to live at index 0.
@@ -6537,10 +6565,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onSkip={handleSkipToday}
                   onUnskip={() => handleUnskipDay(key)}
                   onUndoComplete={isToday ? () => handleUndoComplete(key) : undefined}
-                  splitOptions={sortedOptions}
-                  optionWarnings={optionWarnings}
-                  showSwitchOptions={switchDayIdx === i}
-                  onToggleSwitch={() => {
+                  // Free tier: hide every generation surface (Switch Day,
+                  // Change Focus, the readiness-vs-focus tile grid). The
+                  // free flow is template-driven only — no algorithmic
+                  // day rebuilds. Passing undefined here makes DayCard
+                  // skip the entire switcher block (gated on
+                  // `onChangeFocus && splitOptions`).
+                  splitOptions={isFreeTier ? undefined : sortedOptions}
+                  optionWarnings={isFreeTier ? undefined : optionWarnings}
+                  showSwitchOptions={!isFreeTier && switchDayIdx === i}
+                  onToggleSwitch={isFreeTier ? undefined : () => {
                     import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
                     configureExpandAnimation(280);
                     setSwitchDayIdx(switchDayIdx === i ? -1 : i);
@@ -6611,7 +6645,31 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       setExerciseSearch(exName);
                     }
                   }}
-                  onChangeFocus={async (newFocus) => {
+                  // Pro users get the full change-focus flow (regen via
+                  // backend). Free users get a stripped-down handler that
+                  // only honors 'Custom' / 'Empty' — used by the rest-day
+                  // "Switch to workout" CTA. Anything else is a no-op so
+                  // free users can't accidentally trigger generation.
+                  onChangeFocus={isFreeTier ? ((newFocus) => {
+                    if (!workoutPlan) return;
+                    if (newFocus !== 'Custom' && newFocus !== 'Empty') return;
+                    // Find the recipe slot for this calendar day so the
+                    // edit lands on the right entry. Same indexOf trick
+                    // as the Pro path.
+                    const recipeIdx = workoutPlan.days.indexOf(item.workout as any);
+                    if (recipeIdx < 0) return;
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+                    const updatedDays = [...workoutPlan.days];
+                    updatedDays[recipeIdx] = {
+                      ...updatedDays[recipeIdx],
+                      focus: newFocus,
+                      exercises: [],
+                    };
+                    const updatedPlan = { ...workoutPlan, days: updatedDays };
+                    setWorkoutPlan(updatedPlan);
+                    AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
+                  }) : async (newFocus) => {
                     setSwitchDayIdx(-1);
                     if (!workoutPlan || !item.workout) return;
                     // Map the tapped schedule item back to the matching
@@ -6623,6 +6681,23 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
+
+                    // 'Custom' / 'Empty' are blank-slate focuses — don't
+                    // hit the generator. Local update only so the day
+                    // becomes "fill it yourself" and the user can use Live
+                    // Tracker / templates / change-focus picker from there.
+                    if (newFocus === 'Custom' || newFocus === 'Empty') {
+                      const updatedDays = [...workoutPlan.days];
+                      updatedDays[dayIdx] = {
+                        ...updatedDays[dayIdx],
+                        focus: newFocus,
+                        exercises: [],
+                      };
+                      const updatedPlan = { ...workoutPlan, days: updatedDays };
+                      setWorkoutPlan(updatedPlan);
+                      AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
+                      return;
+                    }
 
                     if (newFocus !== 'Empty') {
                       const { requirePro } = await import('../utils/subscription');
@@ -6724,6 +6799,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onStartCustom={() => setShowLiveTracker(true)}
                       onLogActivity={() => setShowLogActivity(true)}
                       onEditPlan={() => setWorkoutSubTab('equipment')}
+                      onNewTemplate={() => {
+                        // Free-cap defense — backend helper also enforces.
+                        if (isFreeTier && workoutTemplates.length >= 3) {
+                          Alert.alert(
+                            'Template limit reached',
+                            'Free accounts can save up to 3 workout templates. Upgrade to Pro for unlimited.',
+                          );
+                          return;
+                        }
+                        setTemplateBuilderTarget(null);
+                        setTemplateBuilderOpen(true);
+                      }}
+                      onEditTemplate={(template) => {
+                        setTemplateBuilderTarget(template);
+                        setTemplateBuilderOpen(true);
+                      }}
                     />
                     <DetectedWorkoutsCard
                       themeName={userProfile.themePreference}
@@ -8155,6 +8246,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           polling. Saves via LogActivityModal on Finish so the session
           flows through the same fatigue + history path as any other
           manual activity. */}
+      {/* Workout template builder — modal flow for composing a saved
+          workout ahead of time (pick exercises, set reps/sets/rest, save).
+          Distinct from the active-workout "Save Template" button which
+          only fires post-completion. */}
+      <WorkoutTemplateBuilderModal
+        visible={templateBuilderOpen}
+        themeName={userProfile.themePreference}
+        editTarget={templateBuilderTarget}
+        onClose={() => {
+          setTemplateBuilderOpen(false);
+          setTemplateBuilderTarget(null);
+        }}
+        onSaved={async () => {
+          const next = await loadWorkoutTemplates();
+          setWorkoutTemplates(next);
+        }}
+      />
+
       <LiveActivityTracker
         visible={showLiveTracker}
         onClose={() => setShowLiveTracker(false)}
@@ -10206,7 +10315,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {/* Account + Sign out */}
                 <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>ACCOUNT</Text>
                 <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-                  <TouchableOpacity style={styles.profileMenuItem} onPress={onViewAccount}>
+                  <TouchableOpacity style={styles.profileMenuItem} onPress={() => {
+                    // Close Settings FIRST — iOS can't stack two modals,
+                    // so opening Account Details while Settings is still
+                    // visible renders the AccountInfoModal behind it
+                    // (the user only sees it after they manually back
+                    // out of Settings). 220ms is the slide-down duration.
+                    setShowSettings(false);
+                    setTimeout(() => onViewAccount(), 220);
+                  }}>
                     <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Account Details</Text>
                     <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
                   </TouchableOpacity>
@@ -11304,7 +11421,7 @@ function activityIcon(session: WorkoutSession): string {
   return 'walk-outline';
 }
 
-function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onLogActivity, onEditPlan, templates = [], isFreeTier = false, onStartTemplate, onDeleteTemplate }: {
+function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onLogActivity, onEditPlan, templates = [], isFreeTier = false, onStartTemplate, onDeleteTemplate, onNewTemplate, onEditTemplate }: {
   themeName?: import('../types').AppThemeName;
   sessions: WorkoutSession[];
   onStartCustom: () => void;
@@ -11314,6 +11431,10 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
   isFreeTier?: boolean;
   onStartTemplate?: (template: SavedWorkoutTemplate) => void;
   onDeleteTemplate?: (template: SavedWorkoutTemplate) => void;
+  /** Open the template-builder modal in create mode. */
+  onNewTemplate?: () => void;
+  /** Open the template-builder modal in edit mode for this template. */
+  onEditTemplate?: (template: SavedWorkoutTemplate) => void;
 }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -11390,16 +11511,43 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
         </TouchableOpacity>
       </View>
 
-      {templates.length > 0 && (
+      {(templates.length > 0 || onNewTemplate) && (
         <View style={styles.todayTemplateBlock}>
           <View style={styles.todayActivityHeaderRow}>
             <Text style={[styles.todayActivityHeader, { color: tc.textPrimary }]}>Saved templates</Text>
-            {isFreeTier ? (
-              <Text style={[styles.todayActivityCount, { color: tc.textMuted }]}>
-                {templates.length}/{FREE_WORKOUT_TEMPLATE_LIMIT}
-              </Text>
-            ) : null}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              {isFreeTier ? (
+                <Text style={[styles.todayActivityCount, { color: tc.textMuted }]}>
+                  {templates.length}/{FREE_WORKOUT_TEMPLATE_LIMIT}
+                </Text>
+              ) : null}
+              {onNewTemplate && (!isFreeTier || templates.length < FREE_WORKOUT_TEMPLATE_LIMIT) && (
+                <TouchableOpacity
+                  onPress={onNewTemplate}
+                  activeOpacity={0.7}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', gap: 4,
+                    paddingVertical: 5, paddingHorizontal: 10,
+                    borderRadius: 14, backgroundColor: tc.primary + '18',
+                    borderWidth: 1, borderColor: tc.primary + '55',
+                  }}>
+                  <Ionicons name="add" size={14} color={tc.primary} />
+                  <Text style={{ fontSize: 11, fontWeight: '800', color: tc.primary, letterSpacing: 0.4 }}>NEW</Text>
+                </TouchableOpacity>
+              )}
+            </View>
           </View>
+          {templates.length === 0 && onNewTemplate && (
+            <View style={{
+              padding: 16, borderWidth: 1, borderRadius: radius.md,
+              borderColor: tc.border, backgroundColor: tc.surface,
+              borderStyle: 'dashed' as any, alignItems: 'center',
+            }}>
+              <Text style={{ fontSize: 12, color: tc.textMuted, textAlign: 'center' }}>
+                Group your favorite exercises into a template — tap NEW to start.
+              </Text>
+            </View>
+          )}
           {templates.map((template) => {
             const exerciseCount = template.workout?.exercises?.length ?? 0;
             const setCount = (template.workout?.exercises ?? []).reduce((n, ex: any) => n + (Number(ex.sets) || Number(ex.targetSets) || 0), 0);
@@ -11511,6 +11659,13 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
   // (The meal side uses a hardcoded green instead so the two day cards
   // stay distinct even when a theme's workout/meal palettes are similar.)
   if (item.isRest) {
+    // Rest days aren't immutable — users can convert one to a workout day
+    // when life shifts (skipped a planned day, want to add a session). Pro
+    // users go through the change-focus picker (with archetype options).
+    // Free users get a single "Switch to Custom" CTA — there's no
+    // generation surface to expose, just the option to start filling the
+    // day with their own exercises / templates / live tracker.
+    const canSwitchOff = !!onChangeFocus;
     return (
       <View style={[
         styles.dayCard,
@@ -11534,6 +11689,24 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           </View>
         </View>
         <Text style={[styles.restHint, { color: tc.textMuted }]}>Recovery & light stretching</Text>
+        {canSwitchOff && (
+          <TouchableOpacity
+            onPress={() => onChangeFocus?.('Custom')}
+            activeOpacity={0.75}
+            style={{
+              marginTop: 10, alignSelf: 'flex-start',
+              flexDirection: 'row', alignItems: 'center', gap: 6,
+              paddingVertical: 7, paddingHorizontal: 12,
+              borderRadius: 8, borderWidth: 1,
+              borderColor: workoutPalette.strong + '55',
+              backgroundColor: workoutPalette.strong + '0E',
+            }}>
+            <Ionicons name="swap-horizontal-outline" size={14} color={workoutPalette.strong} />
+            <Text style={{ fontSize: 12, fontWeight: '700', color: workoutPalette.strong }}>
+              Switch to workout
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
     );
   }

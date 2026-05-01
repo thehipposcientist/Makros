@@ -39,6 +39,7 @@ import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
 import SearchInput from '../components/SearchInput';
 import { ExerciseLibraryItem, humanizeToken, buildExerciseGuide } from '../utils/exerciseGuide';
 import { tierOf } from '../utils/subscription';
+import RemindersModal from '../components/RemindersModal';
 import {
   DEFAULT_ADJUSTABLE_DUMBBELLS,
   DEFAULT_PLATE_PAIRS_LBS,
@@ -333,6 +334,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const styles = createStyles(tc);
   const meta = useMetaData();
   const { width: screenWidth } = useWindowDimensions();
+
+  // Reminders modal — opened from the Workout / Mealplan tab shortcuts.
+  const [reminderModalKind, setReminderModalKind] = useState<'workout' | 'meal' | null>(null);
 
   // Goal (hierarchical)
   const initialGoal = profile.goalSelection?.primaryGoal ?? profile.goal;
@@ -2117,6 +2121,30 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
           </View>
 
+          {/* Workout reminder shortcut — surfaces the schedule + skip
+              rules right next to the training-day selector instead of
+              forcing the user back to Profile → Settings. */}
+          <TouchableOpacity
+            onPress={() => setReminderModalKind('workout')}
+            style={{
+              flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+              padding: 14, borderRadius: radius.md,
+              borderWidth: 1, borderColor: tc.border, backgroundColor: tc.surfaceRaised,
+              marginBottom: 20,
+            }}
+            activeOpacity={0.8}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+              <Ionicons name="alarm-outline" size={20} color={tc.primary} />
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>Workout Reminders</Text>
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
+                  Set the time, schedule, and auto-skip rule.
+                </Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={tc.textMuted} />
+          </TouchableOpacity>
+
           {/* ── Training Split ── */}
           <View style={[styles.chipGroup, { marginBottom: 20 }]}>
             <Text style={styles.chipGroupLabel}>Training Split</Text>
@@ -3077,6 +3105,30 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </Text>
           </View>
 
+          {/* Meal reminder shortcut — opens the same dedicated modal as
+              the workout tab so users can configure the evening nudge
+              without backing out to Profile → Settings. */}
+          <TouchableOpacity
+            onPress={() => setReminderModalKind('meal')}
+            style={{
+              flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+              padding: 14, borderRadius: radius.md,
+              borderWidth: 1, borderColor: tc.border, backgroundColor: tc.surfaceRaised,
+              marginBottom: 20,
+            }}
+            activeOpacity={0.8}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 }}>
+              <Ionicons name="alarm-outline" size={20} color={tc.primary} />
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>Meal Log Reminder</Text>
+                <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>
+                  Set the time, schedule, and auto-skip rule.
+                </Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={tc.textMuted} />
+          </TouchableOpacity>
+
           {/* ── Allergens ──────────────────────────────────────────── */}
           <View style={[styles.chipGroup, { marginBottom: 20 }]}>
             <Text style={styles.chipGroupLabel}>Allergens / Intolerances</Text>
@@ -3457,6 +3509,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           </TouchableOpacity>
         </View>
       )}
+
+      {/* ── Reminders modal — opens from the Workout / Mealplan tab
+          shortcuts. Hosting it here (one mount, switched by `kind`) keeps
+          the EditProfile tree small and avoids two parallel modals. */}
+      <RemindersModal
+        visible={reminderModalKind !== null}
+        kind={(reminderModalKind ?? 'workout') as 'workout' | 'meal'}
+        themeName={profile.themePreference}
+        onClose={() => setReminderModalKind(null)}
+      />
 
       {/* ── Split picker modal ── */}
       <Modal visible={splitModalVisible} transparent animationType="slide" onRequestClose={() => setSplitModalVisible(false)}>

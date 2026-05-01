@@ -50,6 +50,7 @@ import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, sca
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
+import { dailyBarDenominator, headlineLoggedCalories, macrosHeadlineFromAverages, recentLoggedDays } from './progressData';
 
 interface ProgressScreenProps {
   onBack: () => void;
@@ -3342,15 +3343,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const directionLabel = direction === 'improving' ? 'Improving' : direction === 'slipping' ? 'Slipping' : 'Steady';
             const trackingDelta = Number(trends.tracking_delta_pct ?? 0);
             const proteinDelta = trends.protein_hit_delta_pct == null ? null : Number(trends.protein_hit_delta_pct);
-            // Use the SAME 14-day average as the Nutrition & Gut Facts
-            // card below for the headline calories number. Previously the
-            // Trend card showed only the recent half (last 7 of 14 days)
-            // which caused the headline to disagree with the Facts card
-            // even though both said "logged cal" — confusing for users.
+            // Sourced from the same helper as the Nutrition & Gut Facts
+            // card so the two surfaces can't drift. See progressData.ts /
+            // progressData.test.ts (the trendFactsCalorieDiff invariant).
             // Direction + delta still come from the half-window comparison
             // (that's what makes "improving" / "slipping" meaningful).
             const calendarCalorieAvg = Number(mealAverages?.avg_calories ?? recent.avg_calories ?? 0);
-            const calorieAvg = Number(mealAverages?.avg_calories_when_logged ?? recent.avg_calories_when_logged ?? recent.avg_calories ?? 0);
+            const calorieAvg = headlineLoggedCalories(mealAverages as any, trends as any);
             const calorieDelta = Number(trends.calorie_delta_when_logged ?? trends.calorie_delta ?? 0);
             return (
               <View style={[styles.vitalsCard, { marginTop: 0 }]}>
@@ -3431,11 +3430,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               {/* Nutrition macros — logged-day average first, with the
                   calendar-window average called out separately when it differs. */}
               {mealAverages && mealAverages.days_with_data >= 2 && (() => {
-                const loggedCal = mealAverages.avg_calories_when_logged ?? mealAverages.avg_calories;
-                const loggedProtein = mealAverages.avg_protein_g_when_logged ?? mealAverages.avg_protein_g;
-                const loggedCarbs = mealAverages.avg_carbs_g_when_logged ?? mealAverages.avg_carbs_g;
-                const loggedFat = mealAverages.avg_fat_g_when_logged ?? mealAverages.avg_fat_g;
-                const dailyRows = [...(mealAverages.daily ?? [])].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+                // Sourced from the same helpers the Trend card uses + tested
+                // in progressData.test.ts. Anything inline here should mirror.
+                const macrosHead = macrosHeadlineFromAverages(mealAverages as any);
+                const loggedCal = macrosHead.calories;
+                const loggedProtein = macrosHead.protein;
+                const loggedCarbs = macrosHead.carbs;
+                const loggedFat = macrosHead.fat;
+                const dailyRows = recentLoggedDays(mealAverages as any, 5);
                 return (
                 <View style={{ marginBottom: 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
                   <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>
@@ -3466,7 +3468,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     // used `loggedCal` (the avg), which clamped every
                     // above-average day to 100% — making them all look
                     // identical even when one day was far higher than another.
-                    const barMax = Math.max(loggedCal, ...dailyRows.map(r => r.calories), 1);
+                    const barMax = dailyBarDenominator(loggedCal, dailyRows);
                     return (
                     <View style={{ marginTop: 8, gap: 4 }}>
                       <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 2 }}>
