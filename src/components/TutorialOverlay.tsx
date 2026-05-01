@@ -252,9 +252,9 @@ function buildSteps(tier: TutorialTier, tc: any): Step[] {
     title: 'Three tabs, all you need',
     body: 'The whole app fits in three tabs at the bottom. Swipe between them — each one has its own sub-tabs for deeper detail.',
     bullets: [
-      { icon: 'barbell-outline', text: 'Workout — your weekly plan, exercise library, training settings', tint: tc.primary },
-      { icon: 'restaurant-outline', text: 'Meals — daily plan, food search, supplement stack', tint: tc.success },
-      { icon: 'pulse-outline', text: 'Progress — Apple Health vitals, body, PRs, charts', tint: tc.warning },
+      { icon: 'barbell-outline', text: 'Workout — sessions, templates, exercise library, training settings', tint: tc.primary },
+      { icon: 'restaurant-outline', text: 'Meals — food logging, hydration, saved meals, supplement stack', tint: tc.success },
+      { icon: 'pulse-outline', text: 'Progress — history, PRs, weight, measurements, charts', tint: tc.warning },
     ],
   };
 
@@ -272,24 +272,23 @@ function buildSteps(tier: TutorialTier, tc: any): Step[] {
   if (tier === 'free') {
     return [
       {
-        icon: 'sparkles-outline',
-        title: 'Your plan is ready',
-        body: 'Thallo built your first weekly workout and meal targets from what you told us. Open the Workout tab to see today\'s session — no AI calls used, every day is yours to keep.',
+        icon: 'barbell-outline',
+        title: 'Start with manual tracking',
+        body: 'Free gives you the training and nutrition logbook: custom workouts, meal logging, hydration, weight, and basic progress without generated plans or AI calls.',
       },
       tabsStep,
-      healthStep,
       {
         icon: 'lock-closed-outline',
         iconColor: tc.warning,
         title: 'On Free, you have',
-        body: 'Everything you need to train and eat better. A few coaching superpowers live behind Pro — here\'s the split so you know what\'s where.',
+        body: 'Everything you need to log consistently. The guided planning, scans, Apple Health readiness, and coaching surfaces unlock with Pro.',
         bullets: [
-          { icon: 'checkmark-circle', text: 'Full deterministic workout plan, every week', tint: tc.success },
-          { icon: 'checkmark-circle', text: 'Meal plan, food search, hydration, supplements', tint: tc.success },
-          { icon: 'checkmark-circle', text: 'Workout tracking, PRs, weight log, Apple Health', tint: tc.success },
+          { icon: 'checkmark-circle', text: 'Manual workouts and custom activity logging', tint: tc.success },
+          { icon: 'checkmark-circle', text: 'Manual meals, hydration, saved meals, and meal routines', tint: tc.success },
+          { icon: 'checkmark-circle', text: 'Weight, measurements, and basic history', tint: tc.success },
+          { icon: 'sparkles-outline', text: 'Generated workout PlanWeeks and AI meal plans — Pro', tint: tc.warning },
           { icon: 'sparkles-outline', text: 'AI Trainer chat — Pro', tint: tc.warning },
-          { icon: 'sparkles-outline', text: 'Photo food scan + AI meal plans — Pro', tint: tc.warning },
-          { icon: 'sparkles-outline', text: 'In-workout AI coach + form check — Pro', tint: tc.warning },
+          { icon: 'sparkles-outline', text: 'Scans, readiness, Apple Health, and advanced insights — Pro', tint: tc.warning },
         ],
         upsell: true,
       },

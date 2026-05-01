@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 from openai import OpenAI
 from fastapi import HTTPException, Depends
 
-from app.auth import get_current_user
+from app.entitlements import require_pro_feature
 from app.models import User
 
 from .router import router
@@ -24,7 +24,7 @@ from .utils import (
 
 
 @router.get("/smoke-test")
-async def smoke_test(model: str = "gpt-4o-mini", current_user: User = Depends(get_current_user)):
+async def smoke_test(model: str = "gpt-4o-mini", current_user: User = Depends(require_pro_feature("AI diagnostics"))):
     """
     Diagnostic endpoint — tests bare chat completions with no structured output.
     GET /ai/smoke-test?model=gpt-4o-mini
@@ -62,7 +62,7 @@ async def smoke_test(model: str = "gpt-4o-mini", current_user: User = Depends(ge
 @router.post("/trainer-question")
 def ask_trainer_question(
     body: TrainerQuestionRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Coach chat")),
     db=Depends(__import__('app.database', fromlist=['get_session']).get_session),
 ):
     """General trainer Q&A with broad plan/profile/progress context."""
@@ -897,7 +897,7 @@ def _workout_coach_server_context(
 @router.post("/workout-question")
 def ask_workout_question(
     body: WorkoutCoachQuestionRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("In-workout coach")),
     db=Depends(__import__('app.database', fromlist=['get_session']).get_session),
 ):
     """Workout-session scoped coach Q&A focused on form, pain flags, and

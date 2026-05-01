@@ -15,8 +15,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
-from app.auth import get_current_user
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import (
     AIDecision,
     CoachMemory,
@@ -71,7 +71,7 @@ class ApplyActionBody(BaseModel):
 @router.post("/apply-action")
 def apply_recommendation_action(
     body: ApplyActionBody,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Coach actions")),
     db: Session = Depends(get_session),
 ):
     """Translate a recommendation action into durable user state.
@@ -90,7 +90,7 @@ def apply_recommendation_action(
 @router.post("/recompute")
 def recompute(
     as_of: date | None = Query(default=None, description="Defaults to today"),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Coach insights")),
     db: Session = Depends(get_session),
 ):
     summary = recompute_user(db, current_user.id, as_of=as_of)
@@ -102,7 +102,7 @@ def recompute(
 @router.get("/rollups")
 def get_rollups(
     days: int = Query(default=7, ge=1, le=35),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Coach insights")),
     db: Session = Depends(get_session),
 ):
     today = date.today()
@@ -163,7 +163,7 @@ def get_rollups(
 
 @router.get("/flags")
 def get_flags(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Coach insights")),
     db: Session = Depends(get_session),
 ):
     flags = db.exec(
@@ -213,7 +213,7 @@ def _apply_delta(db: Session, user_id: int, delta: dict[str, Any] | None) -> int
 @router.post("/checkin")
 def post_checkin(
     body: CheckinRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Coach chat")),
     db: Session = Depends(get_session),
 ):
     """Run a full AI check-in cycle and return the coach's response."""
@@ -375,7 +375,7 @@ def post_checkin(
 @router.get("/nutrition-review")
 def get_nutrition_review(
     week_start: date | None = Query(default=None, description="Monday of the week to review (defaults to current week)"),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Nutrition review")),
     db: Session = Depends(get_session),
 ):
     """Deterministic weekly nutrition review.
@@ -394,7 +394,7 @@ def get_nutrition_review(
 @router.get("/history")
 def get_history(
     limit: int = Query(default=10, ge=1, le=50),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Coach history")),
     db: Session = Depends(get_session),
 ):
     rows = db.exec(

@@ -308,6 +308,7 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
     return {
       firstName:  data.first_name ?? undefined,
       lastName:   data.last_name ?? undefined,
+      subscriptionTier: data.subscription_tier === 'pro' ? 'pro' : 'free',
       goal:       goalTrack,
       goalDetails: {
         pace:             data.goal.pace,

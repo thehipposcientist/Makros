@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
 from app.database import get_session
+from app.entitlements import FREE_SAVED_MEAL_LIMIT, is_pro
 from app.models import Meal, MealItem, SavedMeal, User
 from app.enums import MealType, MealSource
 from app.auth import get_current_user
@@ -103,6 +104,15 @@ def create_saved_meal(
         raise HTTPException(status_code=422, detail="name is required")
     if not items:
         raise HTTPException(status_code=422, detail="at least one item is required")
+    if not is_pro(current_user):
+        existing_count = len(db.exec(
+            select(SavedMeal).where(SavedMeal.user_id == current_user.id)
+        ).all())
+        if existing_count >= FREE_SAVED_MEAL_LIMIT:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Free accounts can save up to {FREE_SAVED_MEAL_LIMIT} meals.",
+            )
 
     cal, p, c, f = _totals_from_items(items)
     row = SavedMeal(

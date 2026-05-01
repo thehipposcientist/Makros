@@ -449,7 +449,9 @@ def health():
 def ready():
     """Readiness probe — returns 200 only when the service can reach its
     dependencies (DB). App Runner / load balancers should wait for this
-    to succeed before routing user traffic."""
+    to succeed before routing user traffic. Email status is reported but
+    does not fail readiness so password-reset setup is visible during beta
+    smoke checks without taking the API offline."""
     try:
         with Session(engine) as s:
             s.exec(text("SELECT 1"))
@@ -457,4 +459,11 @@ def ready():
         logger.exception("ready_probe_failed")
         from fastapi import HTTPException
         raise HTTPException(status_code=503, detail="database unavailable")
-    return {"ready": True}
+    from app.services.email_delivery import is_email_delivery_configured
+    return {
+        "ready": True,
+        "dependencies": {
+            "database": "ok",
+            "email": "configured" if is_email_delivery_configured() else "missing",
+        },
+    }

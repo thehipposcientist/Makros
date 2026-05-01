@@ -19,8 +19,8 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
-from app.auth import get_current_user
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import SleepLog, SleepLogUpsert, User
 
 router = APIRouter(prefix="/sleep", tags=["sleep"])
@@ -29,7 +29,7 @@ router = APIRouter(prefix="/sleep", tags=["sleep"])
 @router.post("/nightly")
 def upsert_nightly_sleep(
     body: SleepLogUpsert,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Sleep and recovery tracking")),
     session: Session = Depends(get_session),
 ):
     """Upsert one night's sleep snapshot. Patch semantics — fields the
@@ -87,7 +87,7 @@ def upsert_nightly_sleep(
 @router.get("/history")
 def list_sleep_history(
     days: int = 30,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Sleep and recovery tracking")),
     session: Session = Depends(get_session),
 ) -> List[dict]:
     """Returns the last `days` nights of sleep, oldest-first. Powers
@@ -126,7 +126,7 @@ def list_sleep_history(
 
 @router.get("/today")
 def get_today_sleep(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Sleep and recovery tracking")),
     session: Session = Depends(get_session),
 ):
     """Single-night fetch for today (the row whose night_date is today's

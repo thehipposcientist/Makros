@@ -5,7 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as KeepAwake from 'expo-keep-awake';
-import { FREE_WORKOUT_TEMPLATE_LIMIT, tierOf } from '../src/utils/subscription';
+import { FREE_WORKOUT_TEMPLATE_LIMIT, isBetaFullAccessEnabled, tierOf } from '../src/utils/subscription';
 
 /** Keep the device awake while plan generation is in flight. iOS suspends
  *  JS execution ~30s after the app backgrounds or the screen locks, which
@@ -869,12 +869,10 @@ export default function Index() {
       try { profile = JSON.parse(stored); }
       catch { profile = null; await AsyncStorage.removeItem('userProfile').catch(() => {}); }
     }
-    if (!profile) {
-      const remote = await getMyProfile(token);
-      if (remote) {
-        await AsyncStorage.setItem('userProfile', JSON.stringify(remote));
-        profile = remote;
-      }
+    const remote = await getMyProfile(token);
+    if (remote) {
+      profile = profile ? { ...profile, ...remote, subscriptionTier: remote.subscriptionTier } : remote;
+      await AsyncStorage.setItem('userProfile', JSON.stringify(profile));
     }
     if (!profile) return;
     setUserProfile(profile);
@@ -1032,10 +1030,11 @@ export default function Index() {
 
   const handleProfileComplete = async (profile: UserProfile) => {
     const stamped = stampGoalStart(profile, null);
+    let stampedWithTier: UserProfile = { ...stamped, subscriptionTier: stamped.subscriptionTier ?? 'free' };
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
 
     if (!authToken) {
-      setUserProfile(stamped);
+      setUserProfile(stampedWithTier);
       return;
     }
     // Onboarding is complete — NOW persist the auth token so the user stays
@@ -1049,10 +1048,25 @@ export default function Index() {
       const me = await getMe(authToken);
       const uid = (me as any)?.id ?? (me as any)?.user_id ?? null;
       const uname = (me as any)?.username ?? null;
+      stampedWithTier = {
+        ...stamped,
+        subscriptionTier: (me as any)?.subscription_tier === 'pro' ? 'pro' : 'free',
+      };
+      await AsyncStorage.setItem('userProfile', JSON.stringify(stampedWithTier));
       if (uname) await AsyncStorage.setItem('user_username', uname);
       if (uid != null) await AsyncStorage.setItem(LAST_USER_ID_KEY, String(uid));
     } catch {}
-    syncOnboarding(authToken, stamped).catch(() => null);
+    syncOnboarding(authToken, stampedWithTier).catch(() => null);
+
+    if (tierOf(stampedWithTier) === 'free') {
+      await clearAllPlanCache().catch(() => null);
+      await clearPlanGenMarker().catch(() => null);
+      setUserProfile(stampedWithTier);
+      setIsLoading(false);
+      setIsWorkoutUpdating(false);
+      setIsNutritionUpdating(false);
+      return;
+    }
 
     // Show loading screen while generating the initial plan.
     // DON'T set userProfile yet — that would mount HomeScreen which
@@ -1063,7 +1077,7 @@ export default function Index() {
     holdPlanGenAwake();
     setPlanGenMarker('full').catch(() => null);
 
-    getAIPlans(authToken, stamped, stamped.lastWorkoutContext ? { extraContext: `Recent workout context from user: ${stamped.lastWorkoutContext}` } : undefined)
+    getAIPlans(authToken, stampedWithTier, stampedWithTier.lastWorkoutContext ? { extraContext: `Recent workout context from user: ${stampedWithTier.lastWorkoutContext}` } : undefined)
       .then(async (aiPlans) => {
         // Centralized handler: writes all storage keys, stamps the
         // templates with a fresh version, and wipes per-day nutrition
@@ -1072,13 +1086,13 @@ export default function Index() {
         await applyPlanResult(aiPlans);
         // Track when this week's plan started
         await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
-        await appendUserLog({ type: 'plan_generated', summary: `Initial plan generated for goal: ${stamped.goal.replace(/_/g, ' ')}` });
+        await appendUserLog({ type: 'plan_generated', summary: `Initial plan generated for goal: ${stampedWithTier.goal.replace(/_/g, ' ')}` });
         setPlanRefreshKey(k => k + 1);
 
         // Parse onboarding workout context into logged sessions
-        if (stamped.lastWorkoutContext && authToken) {
+        if (stampedWithTier.lastWorkoutContext && authToken) {
           try {
-            const parsed = await parseRecentWorkouts(authToken, stamped.lastWorkoutContext);
+            const parsed = await parseRecentWorkouts(authToken, stampedWithTier.lastWorkoutContext);
             console.log('[onboarding] parseRecentWorkouts response:', JSON.stringify(parsed));
             for (const s of (parsed.sessions ?? [])) {
               const session: WorkoutSession = {
@@ -1130,7 +1144,7 @@ export default function Index() {
       })
       .then(() => clearPlanGenMarker().catch(() => null))
       .finally(() => {
-        setUserProfile(stamped);  // NOW mount HomeScreen — plan data is ready
+        setUserProfile(stampedWithTier);  // NOW mount HomeScreen — plan data is ready
         setIsLoading(false);
         setIsWorkoutUpdating(false);
         setIsNutritionUpdating(false);
@@ -1180,12 +1194,10 @@ export default function Index() {
     // re-populated from AsyncStorage by loadProfile anyway.
   };
 
-  // Fired when the dev tier toggle flips free → pro. Kicks off a full
-  // plan regen (same end-state as a new signup completing onboarding) so
-  // the user sees their generated workout + nutrition immediately. Guard
-  // ensures we don't run if the user is already pro or there's no token.
+  // Refreshes generated Pro plans after the server reports a Pro tier.
+  // Client-side tier changes are intentionally ignored.
   const handleUpgradeToPro = async (updated: UserProfile) => {
-    if (!authToken) return;
+    if (!authToken || tierOf(updated) !== 'pro') return;
     setIsWorkoutUpdating(true);
     setIsNutritionUpdating(true);
     holdPlanGenAwake();
@@ -1713,7 +1725,7 @@ export default function Index() {
           visible={showTutorial}
           tier={tierOf(userProfile)}
           themeName={userProfile.themePreference}
-          onUpgrade={handleUpgradeToPro ? () => handleUpgradeToPro(userProfile) : undefined}
+          onUpgrade={tierOf(userProfile) === 'pro' ? () => handleUpgradeToPro(userProfile) : undefined}
           onClose={async ({ completed }) => {
             setShowTutorial(false);
             if (completed) {
@@ -2033,6 +2045,7 @@ function AccountInfoModal({
 }) {
   const tc = getTheme(profile.themePreference).colors;
   const c = tc; // alias for the new Developer-logs block below
+  const betaFullAccess = isBetaFullAccessEnabled();
   // Memoized — without this, every keystroke / state change in this
   // modal recreates the entire StyleSheet (40+ entries) and triggers
   // a re-mount of every styled child. Open felt sluggish.
@@ -2424,66 +2437,57 @@ function AccountInfoModal({
           </Modal>
           )}
 
-          {/* DEV: Subscription tier toggle. Flips between the current free
-              tracking surface and pro-only guided plan / AI surfaces. Writes
-              back to the profile immediately so gates take effect without
-              navigating away. */}
-          <View style={{
-            padding: 14, borderRadius: 12,
-            backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border,
-          }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
-              <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.8, flex: 1 }}>
-                DEVELOPER · SUBSCRIPTION TIER
+          {betaFullAccess ? (
+            <View style={{
+              padding: 14, borderRadius: 12,
+              backgroundColor: tc.primary + '16', borderWidth: 1, borderColor: tc.primary + '55',
+            }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Ionicons name="flask-outline" size={16} color={tc.primary} />
+                <Text style={{ fontSize: 10, fontWeight: '800', color: tc.primary, letterSpacing: 0.8, flex: 1 }}>
+                  FREE BETA ACCESS
+                </Text>
+                <TouchableOpacity onPress={() => setShowTierInfo(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.primary }}>What's included?</Text>
+                </TouchableOpacity>
+              </View>
+              <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 8, lineHeight: 15 }}>
+                All guided planning, AI, readiness, and Watch features are unlocked during this beta.
               </Text>
-              <TouchableOpacity onPress={() => setShowTierInfo(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Text style={{ fontSize: 11, fontWeight: '700', color: tc.primary }}>What's included?</Text>
-              </TouchableOpacity>
             </View>
-            <View style={{ flexDirection: 'row', gap: 6 }}>
-              {(['free', 'pro'] as const).map(t => {
-                const active = tierOf(profile) === t;
-                return (
-                  <TouchableOpacity
-                    key={t}
-                    activeOpacity={0.8}
-                    onPress={async () => {
-                      const wasFree = tierOf(profile) === 'free';
-                      const next: UserProfile = { ...profile, subscriptionTier: t };
-                      try {
-                        await AsyncStorage.setItem('userProfile', JSON.stringify(next));
-                        setUserProfile(next);
-                      } catch {}
-                      // Upgrading from free → pro rebuilds both plans so the
-                      // user sees their generated workout + nutrition right away.
-                      if (wasFree && t === 'pro') {
-                        onClose();
-                        onUpgradeToPro(next);
-                      }
-                    }}
-                    style={{
-                      flex: 1, paddingVertical: 10, borderRadius: 10,
-                      backgroundColor: active ? tc.primary : tc.surface,
-                      borderWidth: 1, borderColor: active ? tc.primary : tc.border,
-                      alignItems: 'center',
-                    }}
-                  >
-                    <Text style={{
-                      fontSize: 13, fontWeight: '800', letterSpacing: 0.6,
-                      color: active ? tc.background : tc.textSecondary,
-                    }}>
-                      {t === 'free' ? 'FREE' : 'PRO'}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
+          ) : (
+            <View style={{
+              padding: 14, borderRadius: 12,
+              backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border,
+            }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 8 }}>
+                <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.8, flex: 1 }}>
+                  SUBSCRIPTION TIER
+                </Text>
+                <TouchableOpacity onPress={() => setShowTierInfo(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.primary }}>What's included?</Text>
+                </TouchableOpacity>
+              </View>
+              <View style={{
+                paddingVertical: 10, borderRadius: 10,
+                backgroundColor: tierOf(profile) === 'pro' ? tc.primary : tc.surface,
+                borderWidth: 1, borderColor: tierOf(profile) === 'pro' ? tc.primary : tc.border,
+                alignItems: 'center',
+              }}>
+                <Text style={{
+                  fontSize: 13, fontWeight: '800', letterSpacing: 0.6,
+                  color: tierOf(profile) === 'pro' ? tc.background : tc.textSecondary,
+                }}>
+                  {tierOf(profile) === 'pro' ? 'PRO' : 'FREE'}
+                </Text>
+              </View>
+              <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
+                {tierOf(profile) === 'free'
+                  ? `Free: manual workout + meal logging, basic progress, and ${FREE_WORKOUT_TEMPLATE_LIMIT} saved workout templates.`
+                  : 'Pro: generated PlanWeeks, AI meal help, coach chat, scan features, readiness, and weekly insights.'}
+              </Text>
             </View>
-            <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
-              {tierOf(profile) === 'free'
-                ? `Free: manual workout + meal logging, basic progress, and ${FREE_WORKOUT_TEMPLATE_LIMIT} saved workout templates.`
-                : 'Pro: generated PlanWeeks, AI meal help, coach chat, scan features, readiness, and weekly insights.'}
-            </Text>
-          </View>
+          )}
 
           <TouchableOpacity
             style={am.signOutBtn}

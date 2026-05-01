@@ -148,6 +148,8 @@ Use plain text for each. **Do not leave any value blank** — App Runner rejects
 
 **Do NOT set `DEV_PASSWORD_RESET`.** Omitting it disables the dev-mode password reset endpoint in prod.
 
+Use a branded sender for beta if possible: `support@thallo.app` through Google Workspace, Postmark, SES, SendGrid, or any equivalent SMTP provider. A plain Gmail address can work for a tiny private pilot, but it looks less trustworthy in password-reset and verification emails.
+
 **Don't set `CORS_ORIGINS` either** (remove the row if the form creates an empty one) — iOS apps don't enforce CORS, and the backend falls back to `*` when the var is unset.
 
 ### Networking
@@ -240,9 +242,11 @@ You can leave metadata/screenshots blank — TestFlight doesn't need them.
 Edit `app.json` → `expo.extra.apiBaseUrl` → paste your App Runner URL:
 ```json
 "extra": {
-  "apiBaseUrl": "https://q4q8mjjhmp.us-east-1.awsapprunner.com"
+  "apiBaseUrl": "https://q4q8mjjhmp.us-east-1.awsapprunner.com",
+  "freeBetaFullAccess": true
 }
 ```
+`freeBetaFullAccess` should stay `true` for the free external beta. Turn it off only when StoreKit/RevenueCat and server-side entitlement checks are ready.
 Commit and push.
 
 ## 9. First iOS build (EAS)

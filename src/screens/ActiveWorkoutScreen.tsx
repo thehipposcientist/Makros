@@ -58,7 +58,7 @@ import { humanizeToken } from '../utils/exerciseGuide';
 import { shouldHideWeight, shouldHideReps, formatDurationTarget } from '../utils/exerciseDisplay';
 import { startRestActivity, updateRestActivity, getRestActivityState, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
 import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, scoreSwapCandidate } from '../utils/swapScoring';
-import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate } from '../utils/subscription';
+import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate, tierOf } from '../utils/subscription';
 
 /** Parse the top (ceiling) of a target rep string. Handles ranges like
  *  "8-12", AMRAP markers like "12+", singletons like "6", and junk.
@@ -674,10 +674,23 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // async after the initial push).
     const warmupStepsRef = useRef<string[]>(warmupSteps);
     useEffect(() => { warmupStepsRef.current = warmupSteps; }, [warmupSteps]);
+    const loadCachedProfile = useCallback(async (): Promise<UserProfile | null> => {
+      try {
+        const raw = await AsyncStorage.getItem('userProfile');
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    }, []);
+    const cachedProfileIsPro = useCallback(async (): Promise<boolean> => {
+      const profile = await loadCachedProfile();
+      return tierOf(profile) === 'pro';
+    }, [loadCachedProfile]);
     useEffect(() => {
       let cancelled = false;
       const loadWarmup = async () => {
         if (!authToken) return;
+        if (!(await cachedProfileIsPro())) return;
         const today = dateKey(new Date());
         const dayKey = (workout.day || workout.focus || 'session').replace(/\s+/g, '_');
         const cacheKey = `ai-warmup:${today}:${dayKey}`;
@@ -694,9 +707,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         try {
           let injuries: string[] = [];
           try {
-            const rawProfile = await AsyncStorage.getItem('userProfile');
-            if (rawProfile) {
-              const p = JSON.parse(rawProfile);
+            const p = await loadCachedProfile();
+            if (p) {
               injuries = (p.injuriesOrLimitations || p.injuries || [])
                 .map((i: any) => typeof i === 'string' ? i : (i?.label || i?.name || ''))
                 .filter(Boolean);
@@ -723,7 +735,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       };
       loadWarmup();
       return () => { cancelled = true; };
-    }, [authToken, workout.day, workout.focus]);
+    }, [authToken, workout.day, workout.focus, cachedProfileIsPro, loadCachedProfile]);
   const theme = getTheme(themeName);
   const themeColors = theme.colors;
   const workoutPalette = theme.sections.workout;
@@ -776,19 +788,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // Fetch HR zones for cardio prescription display
   useEffect(() => {
     if (!authToken) return;
-    const hasCardio = workout.exercises?.some((e: any) =>
-      /treadmill|bike|run|row|elliptical|stair|swim|cardio/i.test(e.name ?? '')
-    );
-    if (hasCardio) {
-      readHealthSummary?.().then?.((hs: any) => {
-        getHRZones(authToken, hs?.restingHeartRate, hs?.vo2Max)
-          .then(r => setHrZones(r.zones))
-          .catch(() => {});
-      }).catch(() => {
-        getHRZones(authToken).then(r => setHrZones(r.zones)).catch(() => {});
-      });
-    }
-  }, [authToken]);
+    let cancelled = false;
+    (async () => {
+      if (!(await cachedProfileIsPro()) || cancelled) return;
+      const hasCardio = workout.exercises?.some((e: any) =>
+        /treadmill|bike|run|row|elliptical|stair|swim|cardio/i.test(e.name ?? '')
+      );
+      if (hasCardio) {
+        readHealthSummary?.().then?.((hs: any) => {
+          getHRZones(authToken, hs?.restingHeartRate, hs?.vo2Max)
+            .then(r => setHrZones(r.zones))
+            .catch(() => {});
+        }).catch(() => {
+          getHRZones(authToken).then(r => setHrZones(r.zones)).catch(() => {});
+        });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authToken, cachedProfileIsPro, workout.exercises]);
   // Phone↔watch active-state sync. On mount we push `status: 'active'`
   // AND subscribe to WCSession reachability changes — when the user
   // opens Thallo on their watch, reachability flips to true and we
@@ -971,7 +988,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       token.cancelled = true;
       if (token.unsub) { try { token.unsub(); } catch {} }
     };
-  }, []);
+  }, [cachedProfileIsPro]);
 
   const restNotificationIds = useRef<{ startId?: string; warningId?: string; completeId?: string } | null>(null);
   const restDurationSeconds = useRef<number>(0);
@@ -995,6 +1012,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     let active = true;
     let interval: ReturnType<typeof setInterval> | null = null;
     (async () => {
+      if (!(await cachedProfileIsPro())) return;
       const healthOn = await isAppleHealthEnabled();
       if (!healthOn || !isHealthKitAvailable() || !active) return;
       const poll = async () => {
@@ -1150,6 +1168,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     let cancelled = false;
     (async () => {
       try {
+        if (!(await cachedProfileIsPro())) return;
         const { getWeightRecommendation } = await import('../services/api');
         const targets = exercises
           .map((ex, i) => ({ ex, i }))
@@ -2264,17 +2283,22 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
 
     // Capture current HR from Apple Watch and stamp it on the set (non-blocking)
-    getLatestHeartRate().then(hr => {
-      if (hr && hr > 0) {
-        setExercises(prev => prev.map((e, eIdx) => {
-          if (eIdx !== exIdx) return e;
-          const updated = [...e.sets];
-          const target = updated[setSlot];
-          if (target) updated[setSlot] = { ...target, heartRateAvg: hr };
-          return { ...e, sets: updated };
-        }));
-      }
-    }).catch(() => {});
+    cachedProfileIsPro()
+      .then((canUseHealth) => {
+        if (!canUseHealth) return undefined;
+        return getLatestHeartRate().then(hr => {
+          if (hr && hr > 0) {
+            setExercises(prev => prev.map((e, eIdx) => {
+              if (eIdx !== exIdx) return e;
+              const updated = [...e.sets];
+              const target = updated[setSlot];
+              if (target) updated[setSlot] = { ...target, heartRateAvg: hr };
+              return { ...e, sets: updated };
+            }));
+          }
+        });
+      })
+      .catch(() => {});
 
     const effectiveTotal = getEffectiveTargetSetCount(exIdx, ex, ex.sets.length + 1);
 
@@ -3037,6 +3061,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       return;
     }
 
+    if (!(await cachedProfileIsPro())) {
+      const setN = setsForExercise.length + 1;
+      const last = setsForExercise[setsForExercise.length - 1];
+      const baseTip = last && Number(last.weightLbs) > 0
+        ? `Set ${setN}: aim to match ${last.weightLbs} lbs for ${last.reps || ex.targetReps} reps with clean form.`
+        : `Set ${setN}: use a comfortable load for ${ex.targetReps} clean reps.`;
+      setRestNextTarget(`Set ${setN}: ${ex.targetReps} reps`);
+      setRestCue(baseTip);
+      setExercises(prev => prev.map((item, i) => i === exIdx ? { ...item, aiRecommendation: baseTip } : item));
+      return;
+    }
+
     setAiLoadingIdx(exIdx);
     try {
       const bests = await getExerciseBests(ex.name).catch(() => null);
@@ -3090,7 +3126,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } finally {
       setAiLoadingIdx(null);
     }
-  }, [authToken, exercises, getEffectiveTargetSetCount, goal, rescheduleRestNotifications, restForExercise, restRemaining, theme.colors.primary]);
+  }, [authToken, cachedProfileIsPro, exercises, getEffectiveTargetSetCount, goal, rescheduleRestNotifications, restForExercise, restRemaining, theme.colors.primary]);
 
   const maybeRefreshRecommendationForExercise = useCallback(async (
     exIdx: number,
@@ -3385,8 +3421,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         // + active energy land in the backend's daily_health_snapshots
         // row before the user moves on. Without this, the post-workout
         // numbers wouldn't push until the next app foreground.
-        import('../services/healthDataSummary')
-          .then(({ refreshHealthDataSummary }) => refreshHealthDataSummary())
+        cachedProfileIsPro()
+          .then((canUseHealth) => {
+            if (!canUseHealth) return undefined;
+            return import('../services/healthDataSummary')
+              .then(({ refreshHealthDataSummary }) => refreshHealthDataSummary())
+              .catch(() => undefined);
+          })
           .catch(() => undefined);
 
         // PR toast + persist on session for Progress history to show "🏆 PR!"
@@ -3413,14 +3454,25 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setSummaryLoading(true);
     setSummaryData(null);
     try {
-      if (authToken) {
-        const s = await getWorkoutSummary(authToken, {
+      const canUseAiSummary = !!authToken && await cachedProfileIsPro();
+      const s: WorkoutSummary | null = canUseAiSummary && authToken
+        ? await getWorkoutSummary(authToken, {
           exercises: session.exercises,
           durationSeconds: session.durationSeconds,
           focus: session.focus,
           goal,
           weightLbs,
-        });
+        })
+        : {
+          caloriesBurned: healthMetrics?.caloriesBurned ?? 0,
+          motivationMessage: 'Workout logged.',
+          achievements: [],
+          recommendations: [],
+          headline: 'Workout logged',
+          coachingPoint: 'Review your sets and add notes while the session is fresh.',
+          motivation: '',
+        };
+      if (s) {
         // Reuse Apple Health data fetched before logWorkoutDone — no second fetch.
         if (healthMetrics?.caloriesBurned) (s as any).caloriesBurned = healthMetrics.caloriesBurned;
         if (healthMetrics?.hrSummary) {
@@ -3431,7 +3483,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         // Compute training score from what we just gathered. Fed into
         // the summary view + persisted on StoredWorkoutSummary so the
         // Progress chart can plot it against the day's readiness.
-        try {
+        if (canUseAiSummary) try {
           const { computeTrainingScore, archetypeFromWorkout } = await import('../services/trainingScore');
           const setsCompleted = session.exercises.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0);
           const setsPlanned = session.exercises.reduce((sum, ex) => sum + (typeof ex.targetSets === 'number' ? ex.targetSets : 0), 0);
@@ -3510,6 +3562,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
     // ── Apple Health: read metrics after workout (non-blocking) ──────────
     try {
+      if (!(await cachedProfileIsPro())) return;
       const healthEnabled = await isAppleHealthEnabled();
       if (healthEnabled && isHealthKitAvailable()) {
         let profileAge: number | null = null;

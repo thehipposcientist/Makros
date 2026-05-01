@@ -10,8 +10,8 @@ from __future__ import annotations
 from fastapi import Depends
 from sqlmodel import Session
 
-from app.auth import get_current_user
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import User
 
 from .router import router
@@ -19,7 +19,7 @@ from .router import router
 
 @router.get("/weekly-digest")
 def weekly_digest(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Weekly progress digest")),
     db: Session = Depends(get_session),
 ):
     """Return the Sunday-style weekly review payload.
@@ -34,7 +34,7 @@ def weekly_digest(
 @router.get("/adherence-trend")
 def adherence_trend(
     weeks: int = 8,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
     db: Session = Depends(get_session),
 ):
     """Per-week adherence data for the last N weeks (default 8).
@@ -49,7 +49,7 @@ def adherence_trend(
 @router.get("/plateaus")
 def plateaus(
     window_weeks: int = 4,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
     db: Session = Depends(get_session),
 ):
     """Return exercises where the user's estimated 1RM has stalled.
@@ -65,7 +65,7 @@ def plateaus(
 @router.get("/muscle-balance")
 def muscle_balance(
     days: int = 14,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
     db: Session = Depends(get_session),
 ):
     """Per-muscle set volume distribution over the last N days.

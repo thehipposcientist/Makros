@@ -96,7 +96,14 @@ import { computeNutritionScore } from '../utils/nutritionScore';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { getActiveWatchSessionId, setActiveWatchSessionId } from '../utils/activeWatchSession';
 import { dynamicCompactTextProps, dynamicTextProps } from '../utils/dynamicType';
-import { FREE_WORKOUT_TEMPLATE_LIMIT, tierOf } from '../utils/subscription';
+import {
+  FREE_MEAL_ROUTINE_LIMIT,
+  FREE_SAVED_MEAL_LIMIT,
+  FREE_WORKOUT_TEMPLATE_LIMIT,
+  canCreateMealRoutine,
+  canCreateSavedMeal,
+  tierOf,
+} from '../utils/subscription';
 
 interface HomeScreenProps {
   authToken: string;
@@ -3166,7 +3173,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       return dayKey > today ? {} : checks;
     };
 
-    if (authToken) {
+    const canLoadRecoveryInsights = !!userProfile && tierOf(userProfile) === 'pro';
+    if (authToken && canLoadRecoveryInsights) {
       const states = await Promise.all(mealDays.map(d => getDayState(authToken, d.key).catch(() => null)));
       mealDays.forEach((d, i) => {
         const s = states[i] as any;
@@ -3277,6 +3285,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       );
     } else {
       setReadinessScore({ score: 100, label: 'Fresh', topFatigued: [] });
+      setPlateauedExercises(new Set());
     }
   };
 
@@ -3315,6 +3324,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       console.log('[loadPlans] skip-hydration flag consumed — trusting AsyncStorage');
     }
 
+    const tierIsFree = tierOf(profile) === 'free';
+    if (tierIsFree) {
+      aiWorkoutRaw = null;
+      planWeekRef.current = null;
+      setPlanWeek(null);
+      await AsyncStorage.removeItem('aiWorkoutPlan').catch(() => {});
+    }
+
     // Backend is the source of truth. Fetch the persisted 7-day PlanWeek;
     // if none exists yet (first run or pre-migration user), generate one
     // immediately via /plans/start-new-week. The PlanWeek's days are
@@ -3322,7 +3339,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // exactly what's persisted — no daily regeneration, no rolling
     // index. On network failure we fall back to the AsyncStorage cache
     // so offline users still see their last-known plan.
-    if (authToken && !skipBackendHydrationOnceRef.current) {
+    if (authToken && !tierIsFree && !skipBackendHydrationOnceRef.current) {
       try {
         const { getActivePlanWeek, startNewPlanWeek, autoRenewPlanWeek } = await import('../services/api');
         const cycle = await import('../services/appleHealth')
@@ -3463,7 +3480,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // no stale generated plan can re-appear if the user upgrades, then
     // downgrades. The empty-plan fallback at the day-card render handles
     // the rest.
-    const tierIsFree = tierOf(profile) === 'free';
     if (authToken && !tierIsFree) {
       try {
         const { getActiveNutritionPlan } = await import('../services/api');
@@ -3596,11 +3612,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         // without micronutrient data (e.g. local library foods).
         const savedIsUsable = saved && hasMealMacros(saved) && stampOk(saved);
         console.log(`[loadPlans] ${d.key}: saved=${!!saved} meals=${saved?.meals?.length ?? 0} usable=${savedIsUsable} savedStamp=${(saved as any)?._templatesVersion ?? 'NONE'} currentStamp=${currentVersion ?? 'NONE'}`);
-        if (savedIsUsable) {
+        if (!tierIsFree && savedIsUsable) {
           picked = normalize(saved);
           pickedPathRef.name = 'saved';
         }
-        if (!picked && authToken) {
+        if (!tierIsFree && !picked && authToken) {
           const remote = await getDayState(authToken, d.key).catch(() => null) as any;
           const remoteOk = remote?.nutrition_plan && hasMealMacros(remote.nutrition_plan) && stampOk(remote.nutrition_plan);
           if (remoteOk) {
@@ -3608,15 +3624,23 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             pickedPathRef.name = 'remote';
           }
         }
-        if (!picked && planWeekTemplate && hasMealMacros(planWeekTemplate as any)) {
+        if (tierIsFree && !picked) {
+          picked = {
+            meals: [],
+            removedMealIds: [],
+            targets: { calories: 0, protein: 0, carbs: 0, fat: 0 },
+          } as DailyNutritionPlan;
+          pickedPathRef.name = 'free-empty';
+        }
+        if (!tierIsFree && !picked && planWeekTemplate && hasMealMacros(planWeekTemplate as any)) {
           picked = normalize(planWeekTemplate);
           pickedPathRef.name = 'planWeek';
         }
-        if (!picked && freshTemplate && hasMealMacros(freshTemplate)) {
+        if (!tierIsFree && !picked && freshTemplate && hasMealMacros(freshTemplate)) {
           picked = normalize(freshTemplate);
           pickedPathRef.name = 'template';
         }
-        if (!picked) {
+        if (!tierIsFree && !picked) {
           picked = normalize(generateDailyNutritionForDate(profile, allFoodsWithCustom, d.key));
           pickedPathRef.name = 'fallback';
         }
@@ -3772,7 +3796,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // Routine meals are overlaid client-side and never go through the
     // server's post-assembly enrichment. Fire a background call to fill
     // in micros for any items that lack them.
-    if (authToken) {
+    if (authToken && !tierIsFree) {
       _enrichRoutineMealsMicros(raw, authToken, routines, setNutritionPlansByDate);
       _backfillFoodClassifications(raw, authToken, setNutritionPlansByDate);
     }
@@ -5024,6 +5048,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     const turningOn = !alreadyActive;
 
     if (turningOn) {
+      if (!canCreateMealRoutine(userProfile, routines.length)) {
+        Alert.alert(
+          'Routine limit reached',
+          `Free accounts can pin up to ${FREE_MEAL_ROUTINE_LIMIT} meal routines. Upgrade to Pro for unlimited routines.`,
+        );
+        return;
+      }
       const mealsPerDay = userProfile?.mealsPerDay ?? 3;
       if (routines.length >= mealsPerDay) {
         Alert.alert(
@@ -5093,7 +5124,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // because the persisted plan inherits the current templatesVersion).
     const appliedMap = applyRoutinesToAll(nutritionPlansByDate, nextRoutines);
     setNutritionPlansByDate(appliedMap);
-  }, [nutritionPlansByDate]);
+  }, [nutritionPlansByDate, userProfile]);
 
   const handleSkipToday = useCallback((focus: string) => {
     import('../utils/feedback').then(f => f.hapticWarning()).catch(() => {});
@@ -5329,6 +5360,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         reloadSavedMeals();
       } catch {}
     } else {
+      if (!canCreateSavedMeal(userProfile, savedMealLibrary.length)) {
+        Alert.alert(
+          'Saved meal limit reached',
+          `Free accounts can save up to ${FREE_SAVED_MEAL_LIMIT} meals. Upgrade to Pro for unlimited saved meals.`,
+        );
+        return;
+      }
       const items = (meal.items || meal.foods?.map((f, i) => ({
         name: f, quantity: 1, unit: 'serving',
         calories: 0, protein: 0, carbs: 0, fat: 0,
@@ -5348,7 +5386,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         reloadSavedMeals();
       } catch {}
     }
-  }, [authToken, savedMealLibrary, reloadSavedMeals]);
+  }, [authToken, savedMealLibrary, reloadSavedMeals, userProfile]);
 
   // When the add-from-saved picker fires on a day card we stash the
   // target date so the quick-log modal knows where to paste.
@@ -6052,12 +6090,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {/* Combined "Today's training readiness" — fuses Recovery (per-muscle
                 for today's focus) + Preparedness (sleep/HRV/nutrition/RHR).
                 Re-runs when today's focus changes (Switch Day picker).
-                Free users see this too — the card gracefully drops AH-only
-                pillars (sleep, HRV, RHR) and reweights against just what's
-                present, so a free user with logged meals + workout history
-                still gets a meaningful score from nutrition + fatigue +
-                yesterday's strain. */}
-            {renderedWorkoutSubTab === 'plan' && authToken && (() => {
+                Pro-only: this card calls the server readiness/fatigue endpoints. */}
+            {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (() => {
               const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
               // Find today by date — with the dated PlanWeek schedule,
               // today is no longer guaranteed to live at index 0.
@@ -6084,7 +6118,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             })()}
 
             {/* Menstrual cycle phase (auto-hides if no Apple Health data) */}
-            {renderedWorkoutSubTab === 'plan' && authToken && (
+            {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (
               <CyclePhaseCard themeName={userProfile.themePreference} />
             )}
 
@@ -6875,7 +6909,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             {/* Readiness detail modal — centered fade-in popup, single card */}
             <Modal
-              visible={showReadiness}
+              visible={showReadiness && !isFreeTier}
               animationType="fade"
               transparent
               onRequestClose={() => setShowReadiness(false)}
@@ -6994,7 +7028,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             {(mealsSubTab !== 'plan' && mealsSubTab !== 'history' && mealsSubTab !== 'supplements') && (
               <View style={{ flex: 1, marginHorizontal: -16, marginBottom: 96, backgroundColor: themeColors.background }}>
-                {mealsSubTab === 'foods' && (
+                {mealsSubTab === 'foods' && !isFreeTier && (
                   <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
                     <TouchableOpacity
                       onPress={() => setShowGroceryList(true)}
@@ -7546,7 +7580,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           {adjustedDailyTarget.note ? ` · ${adjustedDailyTarget.note}` : ''}
                         </Text>
                       )}
-                      {isToday && authToken ? (
+                      {isToday && authToken && !isFreeTier ? (
                         <View style={{ marginTop: 7 }}>
                           <FuelingRecoveryCard authToken={authToken} themeName={userProfile.themePreference} variant="button" />
                         </View>
@@ -7554,6 +7588,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     </View>
                     {/* Per-day nutrition score badge */}
                     {(() => {
+                      if (isFreeTier) return null;
                       const ds = computeNutritionScore(plan, userProfile.goal ?? 'body_recomp');
                       if (!ds || ds.score <= 0) return null;
                       const c = ds.score >= 70 ? themeColors.success : ds.score >= 45 ? themeColors.warning : themeColors.error;
@@ -7650,24 +7685,44 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {isToday && _todayMealDay && (
                   <View style={{ marginTop: -4 }}>
                     {isFreeTier ? (
-                      <FadeInView delay={20}>
-                        <View style={{
-                          flexDirection: 'row', alignItems: 'center', gap: 10,
-                          backgroundColor: themeColors.surface,
-                          borderRadius: 12, padding: 12, marginBottom: 10,
-                          borderWidth: 1, borderColor: themeColors.border,
-                        }}>
-                          <Ionicons name="restaurant-outline" size={18} color={themeColors.primary} />
-                          <View style={{ flex: 1 }}>
-                            <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
-                              Manual meal logging
-                            </Text>
-                            <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
-                              Add meals yourself — or pin routines to auto-fill. Upgrade to Pro for AI plans.
-                            </Text>
+                      <>
+                        <FadeInView delay={20}>
+                          <View style={{
+                            flexDirection: 'row', alignItems: 'center', gap: 10,
+                            backgroundColor: themeColors.surface,
+                            borderRadius: 12, padding: 12, marginBottom: 10,
+                            borderWidth: 1, borderColor: themeColors.border,
+                          }}>
+                            <Ionicons name="restaurant-outline" size={18} color={themeColors.primary} />
+                            <View style={{ flex: 1 }}>
+                              <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }}>
+                                Manual meal logging
+                              </Text>
+                              <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>
+                                Add meals yourself, use Favorites, or pin routines to auto-fill. Upgrade to Pro for AI plans.
+                              </Text>
+                            </View>
                           </View>
-                        </View>
-                      </FadeInView>
+                        </FadeInView>
+                        {authToken && (
+                          <SavedMealsSection
+                            authToken={authToken}
+                            themeName={userProfile.themePreference}
+                            onLogged={() => {
+                              loadDayStatus();
+                              if (userProfile) loadPlans(userProfile);
+                              reloadSavedMeals();
+                            }}
+                            onEditTemplate={(sm) => {
+                              setEditingSavedMeal({
+                                id: sm.id,
+                                name: sm.name,
+                                items: sm.items || [],
+                              });
+                            }}
+                          />
+                        )}
+                      </>
                     ) : authToken ? (
                       <>
                         <SavedMealsSection

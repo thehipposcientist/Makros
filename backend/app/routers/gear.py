@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import (
     GearItem, GearItemCreate, GearItemRead,
     GEAR_RETIREMENT_DEFAULTS, User,
@@ -277,7 +278,7 @@ class GearIdentifyResult(BaseModel):
 @router.post("/identify", response_model=GearIdentifyResult)
 def identify_gear(
     body: GearIdentifyBody,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Gear photo identification")),
 ):
     """Use the configured vision model to identify gear and estimate wear from photos."""
     api_key = get_openai_api_key() or ""

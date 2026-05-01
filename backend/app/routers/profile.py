@@ -6,6 +6,7 @@ from sqlmodel import Session, select
 from datetime import datetime, timezone, date, timedelta
 
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import (
     User, UserProfile, UserGoal, UserPreferences,
     ProfileUpsert, GoalUpsert, PreferencesUpsert, OnboardingSync,
@@ -318,6 +319,7 @@ def get_my_profile(
         "coaching": coaching,
         "first_name": current_user.first_name,
         "last_name": current_user.last_name,
+        "subscription_tier": current_user.subscription_tier or "free",
     }
 
 
@@ -389,6 +391,7 @@ def export_account_data(
             "health_disclaimer_version": current_user.health_disclaimer_version,
             "ai_disclaimer_accepted_at": current_user.ai_disclaimer_accepted_at.isoformat() if current_user.ai_disclaimer_accepted_at else None,
             "ai_disclaimer_version": current_user.ai_disclaimer_version,
+            "subscription_tier": current_user.subscription_tier or "free",
         },
         "profile": _dump_rows(session.exec(select(UserProfile).where(UserProfile.user_id == uid)).all()),
         "goals": _dump_rows(session.exec(select(UserGoal).where(UserGoal.user_id == uid)).all()),
@@ -714,7 +717,7 @@ def get_guardrails(
 @router.get("/coach-memory")
 def get_coach_memory(
     limit: int = 10,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Coach history")),
     session: Session = Depends(get_session),
 ):
     clamped = max(1, min(50, limit))
@@ -730,7 +733,7 @@ def get_coach_memory(
 # ──────────────────────────────────────────────────────────────────────────────
 @router.get("/nutrition-score", response_model=NutritionScoreResponse)
 def get_nutrition_score(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Nutrition scoring")),
     session: Session = Depends(get_session),
 ):
     """Compute today's nutrition score from DailyRollup + food quality data."""
@@ -856,7 +859,7 @@ class AdaptiveMacroRequest(BaseModel):
 @router.post("/adaptive-macros")
 def adaptive_macros(
     body: AdaptiveMacroRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Nutrition insights")),
     session: Session = Depends(get_session),
 ):
     """Return the weekly-check-in payload: estimated maintenance, the

@@ -9,8 +9,8 @@ from openai import OpenAI
 from fastapi import HTTPException, Depends
 from sqlmodel import Session, select
 
-from app.auth import get_current_user
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import Exercise, User
 
 from .router import router
@@ -238,7 +238,7 @@ def _primary_muscle_for(
 @router.post("/recommend-weight")
 def recommend_weight(
     body: WeightRecommendRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI weight recommendations")),
     db: Session = Depends(get_session),
 ):
     """Deterministic next-set recommendation based on recent performance and feedback.
@@ -694,7 +694,7 @@ _ONE_RM_SHOWCASE_SLUGS: tuple[str, ...] = (
 
 @router.get("/strength/one-rep-max")
 def one_rep_max_showcase(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
     db: Session = Depends(get_session),
 ):
     """Return estimated 1RM for the user's showcase compound lifts.
@@ -755,7 +755,7 @@ def fitness_composite_score(
     bodyweight_lbs: float | None = None,
     recent_sleep_hours: float | None = None,
     avg_session_rpe: float | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Advanced fitness score")),
     db: Session = Depends(get_session),
 ):
     """Compose the 4-pillar fitness score (Strength, Cardio,
@@ -1034,7 +1034,7 @@ def _met_for_focus(focus: str) -> float:
 @router.post("/workout-summary")
 def generate_workout_summary(
     body: WorkoutSummaryRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI workout summaries")),
     db: Session = Depends(get_session),
 ):
     """AI post-workout summary: calories burned, achievements, and personalised recommendations."""
@@ -1328,7 +1328,7 @@ def _deterministic_warmup(focus: str, first: str | None, second: str | None,
 @router.post("/warmup")
 def generate_warmup(
     body: WarmupRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI warmups")),
 ):
     """AI-generated warm-up tailored to today's workout + user injuries.
     Cheap call: ~300 input / ~200 output tokens on gpt-4o-mini.
@@ -1404,7 +1404,7 @@ def generate_warmup(
 @router.post("/pre-set-recommendation")
 def pre_set_recommendation(
     body: PreSetRecommendRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("In-workout set review")),
     db: Session = Depends(get_session),
 ):
     from app.services.workout.set_programming import (
@@ -1579,7 +1579,7 @@ _FOOD_VALIDATION_SCHEMA = {
 @router.post("/enrich-food-db")
 def enrich_food_db(
     limit: int = 0,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI food enrichment")),
     db: Session = Depends(get_session),
 ):
     """Bootstrap endpoint — seed every `food_nutrition` row that's
@@ -1732,7 +1732,7 @@ def enrich_food_db(
 @router.post("/backfill-food-processing")
 def backfill_food_processing(
     limit: int = 0,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Nutrition insights")),
 ):
     """Classify processing_bucket for every Food row that lacks a FoodMetadata
     entry at the current classifier version. Covers seeded, USDA-imported, and
@@ -1748,7 +1748,7 @@ def backfill_food_processing(
 @router.post("/validate-food-macros")
 def validate_food_macros(
     body: ValidateFoodMacrosRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI food enrichment")),
 ):
     """Validate one custom food's macros + micros against USDA reference.
 

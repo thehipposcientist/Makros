@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import User, Meal, MealItem, MealCreate, UserDayState, UserGoal
 from app.auth import get_current_user
 
@@ -26,7 +27,7 @@ class LogCheckedBody(BaseModel):
 @router.get("/grocery-list")
 def grocery_list(
     days: int = Query(default=3, ge=1, le=14),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI meal plans")),
     db: Session = Depends(get_session),
 ):
     """Build grocery list from saved day-state nutrition plans over next N days."""
@@ -66,7 +67,7 @@ def grocery_list(
 def meal_swap(
     meal_type: str,
     foods: list[str],
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI meal swaps")),
     db: Session = Depends(get_session),
 ):
     """Suggest simple swap candidates from the user's available foods in preferences."""
@@ -360,7 +361,7 @@ def common_meals(
 
 @router.get("/insights")
 def meal_insights(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Nutrition insights")),
     db: Session = Depends(get_session),
 ):
     """Return coaching-style nutrition insights and pattern analysis."""
@@ -374,7 +375,7 @@ def meal_insights(
 @router.get("/gut-health")
 def gut_health_signals(
     days: int = Query(default=7, ge=1, le=30),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Nutrition insights")),
     db: Session = Depends(get_session),
 ):
     """Return descriptive Gut & Plants facts for today + the rolling window.
@@ -441,7 +442,7 @@ def gut_health_signals(
 
 @router.get("/protein-breakdown")
 def protein_breakdown_today(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Nutrition insights")),
     db: Session = Depends(get_session),
 ):
     """Per-food plant vs animal protein contributions for today.
@@ -840,7 +841,7 @@ def get_hydration(
 @router.get("/score")
 def nutrition_score_endpoint(
     days: int = Query(default=7, ge=1, le=30),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Nutrition scoring")),
     db: Session = Depends(get_session),
 ):
     """Authoritative Nutrition Score for today + the rolling window.
@@ -856,7 +857,7 @@ def nutrition_score_endpoint(
 def recovery_flags_endpoint(
     days: int = Query(default=7, ge=5, le=30),
     thyroid_opt_in: bool = Query(default=False),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Recovery tracking")),
     db: Session = Depends(get_session),
 ):
     """Fueling & Recovery Signals. Flag-based (green/amber/red/not_enough_data).

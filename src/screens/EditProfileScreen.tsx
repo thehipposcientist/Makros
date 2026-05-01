@@ -393,11 +393,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     profile.goalDetails.targetEvent ?? ''
   );
   const [themePreference, setThemePreference] = useState<AppThemeName>(resolveThemeName(profile.themePreference));
-  // Dev toggle for the free/pro tier. Missing tier defaults to free so
-  // local UI cannot silently unlock Pro when the server has no billing state.
-  const [subscriptionTier, setSubscriptionTier] = useState<'free' | 'pro'>(
-    tierOf(profile),
-  );
+  const subscriptionTier = tierOf(profile);
 
   // Physical stats
   const [currentWeight, setCurrentWeight] = useState<string>(
@@ -2610,37 +2606,27 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
           </TouchableOpacity>
 
-          {/* DEV: Subscription tier toggle. Flips between the current free
-              tracking surface and pro-only guided plan / AI surfaces.
-              Remove / hide behind a debug flag once billing ships. */}
           <View style={{
             backgroundColor: tc.surfaceRaised, padding: 14, borderRadius: radius.lg,
             borderWidth: 1, borderColor: tc.border, marginBottom: 14,
           }}>
             <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.8, marginBottom: 8 }}>
-              DEVELOPER · SUBSCRIPTION TIER
+              SUBSCRIPTION TIER
             </Text>
-            <View style={{ flexDirection: 'row', gap: 6 }}>
-              {(['free', 'pro'] as const).map(t => {
-                const active = subscriptionTier === t;
-                return (
-                  <TouchableOpacity
-                    key={t}
-                    onPress={() => setSubscriptionTier(t)}
-                    activeOpacity={0.8}
-                    style={{
-                      flex: 1, paddingVertical: 10, borderRadius: 10,
-                      backgroundColor: active ? tc.primary : tc.surface,
-                      borderWidth: 1, borderColor: active ? tc.primary : tc.border,
-                      alignItems: 'center',
-                    }}
-                  >
-                    <Text style={{ fontSize: 13, fontWeight: '800', color: active ? tc.background : tc.textSecondary, letterSpacing: 0.6 }}>
-                      {t === 'free' ? 'FREE' : 'PRO'}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
+            <View style={{
+              paddingVertical: 10, borderRadius: 10,
+              backgroundColor: subscriptionTier === 'pro' ? tc.primary : tc.surface,
+              borderWidth: 1, borderColor: subscriptionTier === 'pro' ? tc.primary : tc.border,
+              alignItems: 'center',
+            }}>
+              <Text style={{
+                fontSize: 13,
+                fontWeight: '800',
+                color: subscriptionTier === 'pro' ? tc.background : tc.textSecondary,
+                letterSpacing: 0.6,
+              }}>
+                {subscriptionTier === 'pro' ? 'PRO' : 'FREE'}
+              </Text>
             </View>
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
               {subscriptionTier === 'free'

@@ -19,8 +19,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, col, select
 
-from app.auth import get_current_user
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import (
     RecoveryActivity,
     RecoveryActivityCreate,
@@ -39,7 +39,7 @@ _KNOWN_MODALITIES = {
 @router.post("/activities", status_code=201)
 def log_activity(
     body: RecoveryActivityCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Recovery tracking")),
     db: Session = Depends(get_session),
 ):
     """Log a recovery activity. Free-form `intensity` is intentional —
@@ -74,7 +74,7 @@ def list_activities(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     modality: Optional[str] = Query(default=None),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Recovery tracking")),
     db: Session = Depends(get_session),
 ):
     """Recent recovery activities, newest first. Default is the last
@@ -98,7 +98,7 @@ def list_activities(
 @router.delete("/activities/{activity_id}", status_code=204)
 def delete_activity(
     activity_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Recovery tracking")),
     db: Session = Depends(get_session),
 ):
     row = db.get(RecoveryActivity, activity_id)

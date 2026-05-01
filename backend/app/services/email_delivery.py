@@ -21,6 +21,10 @@ def _configured() -> bool:
     return bool(os.getenv("SMTP_HOST") and os.getenv("SMTP_FROM_EMAIL"))
 
 
+def is_email_delivery_configured() -> bool:
+    return _configured()
+
+
 def _auth_link(kind: str, email: str, token: str) -> str:
     template_env = "EMAIL_VERIFICATION_URL_TEMPLATE" if kind == "verify" else "PASSWORD_RESET_URL_TEMPLATE"
     template = os.getenv(template_env)

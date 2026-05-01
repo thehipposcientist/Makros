@@ -21,6 +21,7 @@ import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { scanFoodsPhoto, searchFoodNutrition, getMealInstructions } from '../services/api';
 import { ensureItems, syncLegacyFieldsFromItems, splitFoodString, convertQuantity, parseAmountString, guessUnitForFood, validUnitsForFood } from '../utils/mealItems';
+import type { ProFeature } from '../utils/subscription';
 
 interface Props {
   visible: boolean;
@@ -360,6 +361,21 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     }
   }, [visible, meal, dateKey]);
 
+  const requireStoredPro = async (feature: ProFeature): Promise<boolean> => {
+    try {
+      const [{ requirePro }, { default: AsyncStorage }] = await Promise.all([
+        import('../utils/subscription'),
+        import('@react-native-async-storage/async-storage'),
+      ]);
+      const raw = await AsyncStorage.getItem('userProfile');
+      const profile = raw ? JSON.parse(raw) : null;
+      return requirePro(profile, feature);
+    } catch {
+      Alert.alert('Upgrade to Pro', 'This AI feature is available with Thallo Pro.');
+      return false;
+    }
+  };
+
 
   const fetchInstructions = async () => {
     if (!authToken) return;
@@ -368,6 +384,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       setShowInstructions(true);
       return;
     }
+    if (!(await requireStoredPro('ai_meal_plan'))) return;
     setInstructionsLoading(true);
     try {
       const res = await getMealInstructions(authToken, {
@@ -394,19 +411,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const pickAndScan = async (source: 'camera' | 'library') => {
     if (!authToken) return;
     if (scanLock.current) return;
-    // Pro gate — food photo scan runs through OpenAI vision. We don't
-    // have a `profile` prop on this modal, so read the cached one from
-    // AsyncStorage to feed `requirePro`. Cheap (KB-scale) + matches the
-    // pattern used in `ActiveWorkoutScreen` for the template-cap check.
-    try {
-      const [{ requirePro }, { default: AsyncStorage }] = await Promise.all([
-        import('../utils/subscription'),
-        import('@react-native-async-storage/async-storage'),
-      ]);
-      const raw = await AsyncStorage.getItem('userProfile');
-      const profile = raw ? JSON.parse(raw) : null;
-      if (!requirePro(profile, 'ai_food_scan')) return;
-    } catch { /* if subscription module fails, fall through (dev / offline) */ }
+    if (!(await requireStoredPro('ai_food_scan'))) return;
     scanLock.current = true;
     if (source === 'camera') {
       const perm = await ImagePicker.requestCameraPermissionsAsync();
@@ -663,6 +668,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const handleMicToggle = async () => {
     if (!authToken) return;
     try {
+      if (!isRecording && !(await requireStoredPro('ai_meal_plan'))) return;
       if (!isRecording) {
         const AV = await import('expo-av');
         const { granted } = await AV.Audio.requestPermissionsAsync();
@@ -758,15 +764,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     // bound button at line ~1492 is `forceAi: true` which is what
     // this guard catches.
     if (opts?.forceAi) {
-      try {
-        const [{ requirePro }, { default: AsyncStorage }] = await Promise.all([
-          import('../utils/subscription'),
-          import('@react-native-async-storage/async-storage'),
-        ]);
-        const raw = await AsyncStorage.getItem('userProfile');
-        const profile = raw ? JSON.parse(raw) : null;
-        if (!requirePro(profile, 'ai_food_enrichment')) return;
-      } catch { /* dev / offline — fall through */ }
+      if (!(await requireStoredPro('ai_food_enrichment'))) return;
     }
     setAiSearchLoading(true);
     try {

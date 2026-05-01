@@ -7,6 +7,8 @@ This is the running launch-readiness list for Thallo. The doc was originally wri
 
 The short version remains the same: Thallo has a real product foundation. The next work should not be a broad feature push. It should be a launch-readiness pass — legal/account basics, signed-build native reliability, production entitlements, observability, and performance cleanup around the biggest screens.
 
+Beta decision as of 2026-05-01: external beta is free. `app.json` now sets `expo.extra.freeBetaFullAccess=true` so external testers get the full guided plan, AI, readiness, and Watch loop without StoreKit/RevenueCat.
+
 ## Highest Priority Summary
 
 Do these before a broad beta or paid launch.
@@ -20,7 +22,7 @@ Section A (Critical / Launch-Blocking) and section B (Legal, Privacy, Auth & Acc
 5. ~~Add an authenticated password-change endpoint for logged-in users~~ ✓ Done (A3).
 6. ~~Add session revocation / multi-device logout~~ ✓ Done (A4 — token_version column + bump on logout/change/reset).
 7. ~~Tighten Info.plist usage descriptions for Face ID, microphone, and photo library~~ ✓ Done (B1 — both app.json and raw plist).
-8. Replace the dev subscription tier toggle with real StoreKit 2 or RevenueCat entitlements.
+8. Keep the beta free/full-access; replace the beta access override with real StoreKit 2 or RevenueCat entitlements before charging.
 9. Add crash reporting, analytics, native bridge logging, Watch sync metrics, and AI cost/error tracking.
 10. Split and lazy-load the largest screens, especially `HomeScreen` and `ActiveWorkoutScreen`.
 11. Audit ActiveWorkoutScreen setInterval cleanup — 17 timer instances with overlapping responsibilities risk leaks and double-fires on resume.
@@ -405,7 +407,7 @@ Do not prioritize these before the P0/P1 work above:
 6. Add Sentry (H1). One PR.
 7. Add a Settings hub with notification preferences and unit preferences (D1, D2, E1).
 8. Add onboarding resume + dietary restrictions step (D3, D4).
-9. Choose StoreKit 2 or RevenueCat and start the integration spike.
+9. Keep beta access free/full-feature via `freeBetaFullAccess`; choose StoreKit 2 or RevenueCat only when moving toward paid testing.
 10. Run a 10–20 person TestFlight with a written QA checklist that includes the Watch native checklist above.
 
 ## Practical 60-Day Plan

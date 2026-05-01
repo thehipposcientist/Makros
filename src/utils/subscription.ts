@@ -1,8 +1,8 @@
 // Subscription tier helpers + feature-gating utilities.
 //
 // Single source of truth for "is this user pro?". All feature gates route
-// through `isPro()` so flipping the dev toggle instantly changes UI + API
-// behavior across the app.
+// through `isPro()` so beta/full-access and future entitlement changes apply
+// consistently across the app.
 //
 // FREE — manual tracking and starter tools:
 //   - Manual workouts + custom activity logging
@@ -20,46 +20,77 @@
 //   - Readiness, fatigue, sleep, and recovery cards
 
 import type { UserProfile } from '../types';
-import {
-  FEATURE_LABEL,
-  canCreateMealRoutine,
-  canCreateSavedMeal,
-  canCreateWorkoutTemplate,
-  canUse,
-  isFree,
-  isPro,
-  labelFor,
-  mealRoutineLimit,
-  savedMealLimit,
-  tierOf,
-  workoutTemplateLimit,
-  FREE_MEAL_ROUTINE_LIMIT,
-  FREE_SAVED_MEAL_LIMIT,
-  FREE_WORKOUT_TEMPLATE_LIMIT,
-  type ProFeature,
-  type Tier,
-} from './subscriptionCore';
+import Constants from 'expo-constants';
+import * as core from './subscriptionCore';
+import { FEATURE_LABEL, FREE_MEAL_ROUTINE_LIMIT, FREE_SAVED_MEAL_LIMIT, FREE_WORKOUT_TEMPLATE_LIMIT, type ProFeature, type Tier } from './subscriptionCore';
 
 export {
-  canCreateMealRoutine,
-  canCreateSavedMeal,
-  canCreateWorkoutTemplate,
-  canUse,
   FREE_MEAL_ROUTINE_LIMIT,
   FREE_SAVED_MEAL_LIMIT,
   FREE_WORKOUT_TEMPLATE_LIMIT,
-  isFree,
-  isPro,
-  labelFor,
-  mealRoutineLimit,
-  savedMealLimit,
-  tierOf,
-  workoutTemplateLimit,
   type ProFeature,
   type Tier,
 };
 
 declare const require: (moduleName: string) => any;
+
+export function isBetaFullAccessEnabled(): boolean {
+  const isDevRuntime = typeof __DEV__ !== 'undefined' && __DEV__ === true;
+  if (!isDevRuntime) return false;
+  const extra = Constants.expoConfig?.extra ?? {};
+  return extra.freeBetaFullAccess === true || process.env.EXPO_PUBLIC_FREE_BETA_FULL_ACCESS === '1';
+}
+
+export function tierOf(profile: UserProfile | null | undefined): Tier {
+  return isBetaFullAccessEnabled() ? 'pro' : core.tierOf(profile);
+}
+
+export function isPro(profile: UserProfile | null | undefined): boolean {
+  return tierOf(profile) === 'pro';
+}
+
+export function isFree(profile: UserProfile | null | undefined): boolean {
+  return tierOf(profile) === 'free';
+}
+
+export function workoutTemplateLimit(profile: UserProfile | null | undefined): number {
+  return isPro(profile) ? Infinity : FREE_WORKOUT_TEMPLATE_LIMIT;
+}
+
+export function canCreateWorkoutTemplate(
+  profile: UserProfile | null | undefined,
+  currentCount: number,
+): boolean {
+  return currentCount < workoutTemplateLimit(profile);
+}
+
+export function savedMealLimit(profile: UserProfile | null | undefined): number {
+  return isPro(profile) ? Infinity : FREE_SAVED_MEAL_LIMIT;
+}
+
+export function canCreateSavedMeal(
+  profile: UserProfile | null | undefined,
+  currentCount: number,
+): boolean {
+  return currentCount < savedMealLimit(profile);
+}
+
+export function mealRoutineLimit(profile: UserProfile | null | undefined): number {
+  return isPro(profile) ? Infinity : FREE_MEAL_ROUTINE_LIMIT;
+}
+
+export function canCreateMealRoutine(
+  profile: UserProfile | null | undefined,
+  currentCount: number,
+): boolean {
+  return currentCount < mealRoutineLimit(profile);
+}
+
+export function canUse(profile: UserProfile | null | undefined, _feature: ProFeature): boolean {
+  return isPro(profile);
+}
+
+export const labelFor = core.labelFor;
 
 /** Gate a pro feature. Returns true if the user can proceed; returns false
  *  AND shows an upgrade alert when they can't. Caller should short-circuit

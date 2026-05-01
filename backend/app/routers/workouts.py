@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import (
     User, WorkoutSession, WorkoutExercise, ExerciseSet,
     WorkoutSessionCreate, SetLog, WorkoutCompletion,
@@ -179,7 +180,7 @@ def _build_session_responses_batch(
 @router.get("/progression/{exercise_name}")
 def progression_insights(
     exercise_name: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
     db: Session = Depends(get_session),
 ):
     """Returns progression trend and plateau hint for a given exercise name."""
@@ -382,7 +383,7 @@ class GenerateWeekRequest(BaseModel):
 @router.post("/generate-day")
 def generate_single_day(
     body: GenerateDayRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated workout plans")),
     db: Session = Depends(get_session),
 ):
     print(f"[generate-day] ENTRY: session_minutes={body.session_minutes} focus_override={body.focus_override!r} goal={body.goal}")
@@ -727,7 +728,7 @@ def generate_single_day(
 @router.post("/generate-week")
 def generate_full_week(
     body: GenerateWeekRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated workout plans")),
     db: Session = Depends(get_session),
 ):
     """Build the full N-day rotation in a single coherent recipe. Used by
@@ -1968,7 +1969,7 @@ def get_weekly_review(
     avg_resting_hr: float | None = None,
     avg_steps: float | None = None,
     readiness_score: int | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
     db: Session = Depends(get_session),
 ):
     """Deterministic weekly plan review with full signal integration.
@@ -1997,7 +1998,7 @@ def get_weekly_review(
 @router.get("/weekly-volume")
 def get_weekly_volume(
     days: int = 7,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
     db: Session = Depends(get_session),
 ):
     """Per-muscle hard-set counts for the last `days` days.
@@ -2014,7 +2015,7 @@ def get_weekly_volume(
 def get_estimated_1rm(
     exercise_name: str = Query(..., description="Exercise name to compute e1RM for"),
     role: str = Query("primary", description="Exercise role (primary/isolation)"),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
     db: Session = Depends(get_session),
 ):
     """Rolling estimated 1RM for a specific exercise based on logged sets."""
@@ -2053,7 +2054,7 @@ def get_estimated_1rm(
 def get_e1rm_history(
     exercise_name: str = Query(..., description="Exercise name"),
     role: str = Query("primary", description="Exercise role"),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
     db: Session = Depends(get_session),
 ):
     """Rolling e1RM over time for chart display. Computes e1RM at each
@@ -2152,7 +2153,7 @@ def list_completions(
 def get_hr_zones(
     resting_hr: int | None = Query(default=None),
     vo2_max: float | None = Query(default=None),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Health-powered training zones")),
     db: Session = Depends(get_session),
 ):
     """Compute personalized HR training zones from age + optional Apple Health data."""
@@ -2180,7 +2181,7 @@ def get_hr_zones(
 def get_pace_history(
     exercise: str | None = Query(default=None, description="Filter by exercise name (case-insensitive)"),
     days: int = Query(default=90, ge=7, le=365),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
     db: Session = Depends(get_session),
 ):
     """Return pace/distance data points for cardio exercises over time.
@@ -2264,7 +2265,7 @@ def get_pace_history(
 
 @router.get("/fatigue", response_model=FatigueScoreResponse)
 def get_fatigue_score(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Recovery tracking")),
     db: Session = Depends(get_session),
 ):
     """Returns the user's current fatigue/recovery score based on recent activity."""

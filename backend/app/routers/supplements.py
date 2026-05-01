@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import (
     SupplementIngredient, UserSupplementStack, SupplementLog, User,
 )
@@ -313,7 +314,7 @@ def today_schedule(
 @router.get("/ai-recommendations")
 def ai_recommendations(
     force_refresh: bool = Query(default=False),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI supplement recommendations")),
     db: Session = Depends(get_session),
 ):
     """AI-augmented supplement suggestions BEYOND the deterministic floor.
@@ -578,7 +579,7 @@ def _legacy_recommendations(
 
 @router.get("/insights")
 def insights(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Supplement insights")),
     db: Session = Depends(get_session),
 ):
     """Compute daily-level insights from the user's supplement logs +

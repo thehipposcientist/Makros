@@ -41,6 +41,7 @@ def _user_read(user: User) -> UserRead:
         privacy_version=user.privacy_version,
         health_disclaimer_version=user.health_disclaimer_version,
         ai_disclaimer_version=user.ai_disclaimer_version,
+        subscription_tier=user.subscription_tier or "free",
     )
 
 

@@ -44,7 +44,8 @@ import {
   Goal, GoalPace, Gender, UserProfile, PhysicalStats, GoalDetails, GoalSelection, StrengthEquipmentSettings,
 } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
-import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal } from '../services/api';
+import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal, getMe } from '../services/api';
+import { requirePro, type ProFeature } from '../utils/subscription';
 import { APPLE_HEALTH_PERMISSION_COPY, isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistHealthEnabled } from '../utils/workoutHistory';
 import {
@@ -794,6 +795,15 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   // ─── Photo helpers ───────────────────────────────────────────────────────────
 
+  const requireServerPro = async (feature: ProFeature): Promise<boolean> => {
+    try {
+      const me = await getMe(authToken);
+      return requirePro({ subscriptionTier: (me as any)?.subscription_tier === 'pro' ? 'pro' : 'free' } as any, feature);
+    } catch {
+      return requirePro(null, feature);
+    }
+  };
+
   const pickImages = async (source: 'camera' | 'library'): Promise<string[]> => {
     const { status } = source === 'camera'
       ? await ImagePicker.requestCameraPermissionsAsync()
@@ -819,6 +829,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   };
 
   const handleScanEquipment = async (source: 'camera' | 'library') => {
+    if (!(await requireServerPro('ai_equipment_scan'))) return;
     const images = await pickImages(source);
     if (!images.length) return;
     setEquipScanLoading(true);
@@ -859,6 +870,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   };
 
   const handleScanFoods = async (source: 'camera' | 'library') => {
+    if (!(await requireServerPro('ai_food_scan'))) return;
     const images = await pickImages(source);
     if (!images.length) return;
     setFoodScanLoading(true);

@@ -27,6 +27,7 @@ interface Props {
 }
 
 type Section = 'today' | 'stack' | 'recommendations';
+type SupplementTiming = 'morning' | 'pre_workout' | 'post_workout' | 'with_meal' | 'evening' | 'bedtime';
 
 // Tier→color maps derive from theme so evidence/risk pills match the
 // active palette. Built fresh per render inside components (tc is
@@ -683,7 +684,7 @@ function AddSupplementModal({
   const [dose, setDose] = useState('');
   const [unit, setUnit] = useState('mg');
   const [freq, setFreq] = useState<'daily' | 'weekdays' | 'as_needed' | 'pre_workout'>('daily');
-  const [timing, setTiming] = useState<'morning' | 'evening' | 'with_meal' | 'pre_workout' | ''>('');
+  const [timing, setTiming] = useState<SupplementTiming | ''>('');
   // Free-text user-defined group. When set, overrides `timing` for the
   // grouped Today view + the "take group" action. e.g. "Stack 1",
   // "Travel pack", "Race day".

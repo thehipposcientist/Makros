@@ -14,9 +14,11 @@ Recommended launch pricing:
 - Monthly: $12.99
 - Annual: $79.99
 - Founding member annual: $59.99 for the first launch cohort
-- Closed beta: free, or fake-paywall only for purchase-intent measurement
+- Closed beta: free
 
 Do not charge publicly until StoreKit/RevenueCat, server-side entitlements, restore purchases, and paywall analytics are implemented. The current subscription state should be treated as a dev/product tier simulation, not real monetization.
+
+Decision as of 2026-05-01: the external beta is free and should run with `expo.extra.freeBetaFullAccess=true` so testers can exercise the full guided plan, AI, readiness, and Watch loop without billing infrastructure.
 
 ## Product Reality That Changes Pricing
 
@@ -155,7 +157,7 @@ Do not start there unless the Watch and HealthKit experience is demonstrably rel
 
 Recommended trial:
 
-- Closed beta: free.
+- Closed beta: free, full access.
 - Soft launch: 7-day Pro trial.
 - Public launch: test 7-day trial versus starter-week-first paywall.
 
@@ -263,6 +265,8 @@ Before charging:
 Audience: 10-30 users.
 
 Goal: prove the core loop works.
+
+Access: free, full-feature beta access. Keep paid language out of tester instructions and do not enable real IAP until entitlement infrastructure is ready.
 
 Track:
 
@@ -373,7 +377,7 @@ Cost and reliability:
 ## 30-Day Plan
 
 1. Finish native reliability QA on real devices.
-2. Decide whether beta is free or real paid trial.
+2. Run the external beta free with full access.
 3. Implement production IAP/RevenueCat if charging is still the goal.
 4. Add product analytics and crash/error reporting.
 5. Define Free versus Pro gates in code.

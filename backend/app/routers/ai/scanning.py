@@ -75,6 +75,7 @@ def _fix_image_mime(b64: str, declared_mime: str) -> tuple[str, str]:
         return b64, "image/jpeg"
 
 from app.auth import get_current_user
+from app.entitlements import ensure_pro, require_pro_feature
 from app.models import User
 
 from .router import router
@@ -97,7 +98,7 @@ from .utils import (
 @router.post("/food-photo")
 def analyze_food_photo(
     body: FoodPhotoRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Food photo scanning")),
 ):
     """Estimate meal contents and macros from a food photo."""
     api_key = get_openai_api_key()
@@ -159,7 +160,7 @@ def analyze_food_photo(
 @router.post("/scan-foods")
 def scan_foods_photo(
     body: ScanFoodsRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Food photo scanning")),
 ):
     """Identify multiple individual food items from one or more photos, each with macros per serving."""
     api_key = get_openai_api_key()
@@ -239,7 +240,7 @@ class SpeechToMealRequest(_PydanticBaseModel):
 @router.post("/speech-to-meal")
 def speech_to_meal(
     body: SpeechToMealRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Speech-to-meal")),
 ):
     """Two-stage: Whisper transcribes the audio, then gpt-4o-mini
     extracts structured food items with best-guess macros.
@@ -680,6 +681,7 @@ def food_nutrition_search(
         print(f"[food-search] force_ai=true, skipping USDA for '{body.query}'")
 
     # 2. Fallback to AI (or forced AI)
+    ensure_pro(current_user, "AI food lookup")
     api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="No USDA results and OpenAI API key not configured")
@@ -731,7 +733,7 @@ class ClassifyFoodsRequest(_PydanticBaseModel):
 @router.post("/classify-foods")
 def classify_foods_batch(
     body: ClassifyFoodsRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Nutrition insights")),
 ):
     """Classify a batch of food names. Returns protein_source, fermented,
     probiotic, omega3_rich, plant_count, food_quality for each."""
@@ -1005,6 +1007,7 @@ def exercise_ai_search(
 
     # 2. Fallback to AI
     print(f"[exercise-search] wger miss for '{body.query}', falling back to AI")
+    ensure_pro(current_user, "AI exercise search")
     api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="No wger results and OpenAI API key not configured")
@@ -1112,7 +1115,7 @@ def exercise_ai_search(
 @router.post("/exercise-suggest")
 def exercise_suggest(
     body: WorkoutSuggestRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI exercise suggestions")),
 ):
     """Return 10 exercise suggestions that fit the user's current live workout.
     AI-only — takes structured workout context instead of a free-text query so
@@ -1208,7 +1211,7 @@ def exercise_suggest(
 @router.post("/meal-instructions")
 def generate_meal_instructions(
     body: MealInstructionsRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI meal instructions")),
 ):
     """On-demand prep instructions for a single meal. Cheap, single AI call,
     returned as a short plain-text recipe. The client caches the result per
@@ -1300,7 +1303,7 @@ def generate_meal_instructions(
 @router.post("/supplement-info")
 def get_supplement_info(
     body: SupplementLookupRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI supplement lookup")),
 ):
     """Look up evidence-based info for any supplement by name."""
     api_key = get_openai_api_key()
@@ -1350,7 +1353,7 @@ def get_supplement_info(
 @router.post("/supplement-photo")
 def get_supplement_from_photo(
     body: SupplementPhotoRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Supplement photo scanning")),
 ):
     """Identify a supplement from a photo of its label/packaging and return evidence-based info."""
     api_key = get_openai_api_key()
@@ -1400,7 +1403,7 @@ def get_supplement_from_photo(
 @router.post("/scan-supplements")
 def scan_supplements_photo(
     body: SupplementPhotoRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Supplement photo scanning")),
 ):
     """Identify MULTIPLE supplements in a single photo — user snaps
     their whole stack on a counter and AI returns a list of detected
@@ -1487,7 +1490,7 @@ def scan_supplements_photo(
 @router.post("/scan-equipment")
 def scan_equipment_photo(
     body: FoodPhotoRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Equipment photo scanning")),
 ):
     """Identify gym equipment visible in a photo and return names matching the app's equipment library."""
     api_key = get_openai_api_key()
@@ -1540,7 +1543,7 @@ def scan_equipment_photo(
 @router.post("/form-photo")
 def analyze_form_photo(
     body: FormPhotoRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Form analysis")),
 ):
     """Analyze a form photo for quick coaching cues."""
     api_key = get_openai_api_key()
@@ -1592,7 +1595,7 @@ def analyze_form_photo(
 @router.post("/body-scan")
 def body_scan(
     body: BodyScanRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Body photo analysis")),
 ):
     """Estimate body composition from a photo using AI vision. Persists
     the result to `body_scans` so history survives reinstall / device
@@ -1708,7 +1711,7 @@ def body_scan(
 @router.get("/body-scans")
 def list_body_scans(
     limit: int = 20,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Body photo analysis")),
 ):
     """List the current user's body-scan history (newest first). Client
     uses this to hydrate `bodyScanHistory` on app open so scans taken
@@ -1808,7 +1811,7 @@ def match_goal(
 @router.post("/parse-meal-text")
 def parse_meal_text(
     body: ParseMealTextRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Speech-to-meal")),
 ):
     """Parse a natural-language meal description into structured food items with macros.
 

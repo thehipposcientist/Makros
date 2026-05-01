@@ -20,8 +20,8 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 
-from app.auth import get_current_user
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import DailyHealthSnapshot, DailyHealthSnapshotUpsert, User
 
 router = APIRouter(prefix="/health", tags=["health"])
@@ -54,7 +54,7 @@ def _row_to_dict(r: DailyHealthSnapshot) -> dict:
 @router.post("/snapshot")
 def upsert_snapshot(
     body: DailyHealthSnapshotUpsert,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Apple Health sync")),
     session: Session = Depends(get_session),
 ):
     """Upsert a single day's HealthKit snapshot. Patch semantics — only
@@ -107,7 +107,7 @@ def upsert_snapshot(
 @router.post("/snapshot/batch")
 def upsert_snapshot_batch(
     body: List[DailyHealthSnapshotUpsert],
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Apple Health sync")),
     session: Session = Depends(get_session),
 ):
     """Backfill helper — phone can push the last N days in one call when
@@ -160,7 +160,7 @@ def upsert_snapshot_batch(
 @router.get("/history")
 def list_snapshot_history(
     days: int = 30,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Apple Health sync")),
     session: Session = Depends(get_session),
 ) -> List[dict]:
     """Returns the last `days` daily snapshots, oldest-first. Used by
@@ -179,7 +179,7 @@ def list_snapshot_history(
 
 @router.get("/today")
 def get_today_snapshot(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Apple Health sync")),
     session: Session = Depends(get_session),
 ):
     """Single-day fetch for today. Returns null if not yet logged."""

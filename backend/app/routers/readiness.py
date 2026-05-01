@@ -14,8 +14,8 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlmodel import Session
 
-from app.auth import get_current_user
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import User
 from app.services.readiness.compute import compute_readiness
 
@@ -47,7 +47,7 @@ class ReadinessTodayBody(BaseModel):
 @router.post("/today")
 def readiness_today(
     body: ReadinessTodayBody = ReadinessTodayBody(),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Readiness tracking")),
     db: Session = Depends(get_session),
 ):
     """Compute today's canonical readiness for the authed user. Always

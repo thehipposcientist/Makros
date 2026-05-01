@@ -23,7 +23,11 @@ export type ProFeature =
   | 'ai_meal_plan'
   | 'ai_coach'
   | 'ai_food_scan'
+  | 'ai_equipment_scan'
+  | 'ai_supplement_scan'
+  | 'ai_meal_voice'
   | 'ai_form_analysis'
+  | 'ai_body_scan'
   | 'ai_weight_recommendation'
   | 'ai_plan_review'
   | 'ai_food_enrichment'
@@ -42,7 +46,11 @@ export const FEATURE_LABEL: Record<ProFeature, string> = {
   ai_meal_plan:             'AI meal plans',
   ai_coach:                 'Coach chat',
   ai_food_scan:             'Food photo scanning',
+  ai_equipment_scan:        'Equipment photo scanning',
+  ai_supplement_scan:       'Supplement photo scanning',
+  ai_meal_voice:            'Speech-to-meal',
   ai_form_analysis:         'Form analysis',
+  ai_body_scan:             'Body photo analysis',
   ai_weight_recommendation: 'AI starting-weight fallback',
   ai_plan_review:           'Plan review',
   ai_food_enrichment:       'AI food lookup',

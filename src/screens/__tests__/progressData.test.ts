@@ -14,11 +14,14 @@
 import {
   type MealAveragesShape,
   type AdherenceTrendsShape,
+  type MealHistoryEntryShape,
+  aggregateDailyFromHistory,
   calorieDeltaLabel,
   dailyBarDenominator,
   headlineLoggedCalories,
   macrosHeadlineFromAverages,
   recentLoggedDays,
+  selectDailyRows,
   trendDirectionInfo,
   trendFactsCalorieDiff,
 } from '../progressData.ts';
@@ -207,6 +210,101 @@ describe('Progress data layer', () => {
       expect(trendDirectionInfo('improving').label).toBe('Improving');
       expect(trendDirectionInfo('slipping').label).toBe('Slipping');
       expect(trendDirectionInfo('steady').label).toBe('Steady');
+    });
+  });
+
+  describe('aggregateDailyFromHistory — direct re-derivation', () => {
+    const history: MealHistoryEntryShape[] = [
+      // Two meals on 2026-04-25 — should sum into one row
+      { id: 1, meal_date: '2026-04-25', meal_type: 'breakfast', name: 'Oatmeal', source: 'logged', items: [], totals: { calories: 600, protein_g: 25, carbs_g: 80, fat_g: 12 } },
+      { id: 2, meal_date: '2026-04-25', meal_type: 'lunch', name: 'Chicken bowl', source: 'logged', items: [], totals: { calories: 900, protein_g: 65, carbs_g: 100, fat_g: 25 } },
+      // One meal on 2026-04-23
+      { id: 3, meal_date: '2026-04-23', meal_type: 'dinner', name: 'Pasta', source: 'logged', items: [], totals: { calories: 750, protein_g: 30, carbs_g: 110, fat_g: 18 } },
+    ];
+
+    it('sums all meals on the same date into one row', () => {
+      const rows = aggregateDailyFromHistory(history);
+      const apr25 = rows.find(r => r.date === '2026-04-25');
+      expect(apr25?.calories).toBe(1500);
+      expect(apr25?.protein_g).toBe(90);
+      expect(apr25?.meal_count).toBe(2);
+    });
+
+    it('preserves single-meal days as-is', () => {
+      const rows = aggregateDailyFromHistory(history);
+      const apr23 = rows.find(r => r.date === '2026-04-23');
+      expect(apr23?.calories).toBe(750);
+      expect(apr23?.meal_count).toBe(1);
+    });
+
+    it('returns rows sorted newest-first', () => {
+      const rows = aggregateDailyFromHistory(history);
+      expect(rows[0].date).toBe('2026-04-25');
+      expect(rows[1].date).toBe('2026-04-23');
+    });
+
+    it('handles empty input', () => {
+      expect(aggregateDailyFromHistory([]).length).toBe(0);
+    });
+
+    it('skips meals with missing meal_date', () => {
+      const dirty: MealHistoryEntryShape[] = [
+        ...history,
+        { id: 999, meal_date: '', meal_type: null, name: 'Bad', source: 'logged', items: [], totals: { calories: 9999, protein_g: 0, carbs_g: 0, fat_g: 0 } },
+      ];
+      const rows = aggregateDailyFromHistory(dirty);
+      // The 9999-cal junk row should not have inflated any real day.
+      const apr25 = rows.find(r => r.date === '2026-04-25');
+      expect(apr25?.calories).toBe(1500);
+    });
+
+    it('rounds to 1 decimal so the UI does not show floating-point noise', () => {
+      const noisy: MealHistoryEntryShape[] = [
+        { id: 1, meal_date: '2026-04-25', meal_type: 'breakfast', name: 'A', source: 'logged', items: [], totals: { calories: 100.111, protein_g: 5.222, carbs_g: 12.333, fat_g: 3.444 } },
+        { id: 2, meal_date: '2026-04-25', meal_type: 'lunch', name: 'B', source: 'logged', items: [], totals: { calories: 200.222, protein_g: 10.444, carbs_g: 24.666, fat_g: 6.888 } },
+      ];
+      const rows = aggregateDailyFromHistory(noisy);
+      // Should round to 1 dp — no 300.33299999999997 nonsense.
+      const decimals = String(rows[0].calories).split('.')[1] ?? '';
+      expect(decimals.length <= 1).toBe(true);
+    });
+  });
+
+  describe('selectDailyRows — history takes precedence', () => {
+    const history: MealHistoryEntryShape[] = [
+      { id: 1, meal_date: '2026-04-25', meal_type: 'breakfast', name: 'A', source: 'logged', items: [], totals: { calories: 1500, protein_g: 90, carbs_g: 180, fat_g: 37 } },
+    ];
+    const averagesDaily = [
+      { date: '2026-04-25', calories: 999, protein_g: 9, carbs_g: 9, fat_g: 9, meal_count: 1 },
+    ];
+
+    it('uses the history-derived rows when history is present', () => {
+      const rows = selectDailyRows(history, averagesDaily);
+      // History says 1500, averages.daily says 999 — history wins.
+      expect(rows[0].calories).toBe(1500);
+    });
+
+    it('falls back to averages.daily when history is empty / not loaded yet', () => {
+      const rows = selectDailyRows(null, averagesDaily);
+      expect(rows[0].calories).toBe(999);
+    });
+
+    it('returns an empty array when both sources are empty', () => {
+      const rows = selectDailyRows(null, undefined);
+      expect(rows.length).toBe(0);
+    });
+
+    it('respects the limit', () => {
+      const many: MealHistoryEntryShape[] = Array.from({ length: 10 }, (_, i) => ({
+        id: i + 1,
+        meal_date: `2026-04-${String(25 - i).padStart(2, '0')}`,
+        meal_type: 'breakfast',
+        name: `M${i}`,
+        source: 'logged',
+        items: [],
+        totals: { calories: 1000, protein_g: 50, carbs_g: 100, fat_g: 25 },
+      }));
+      expect(selectDailyRows(many, undefined, 3).length).toBe(3);
     });
   });
 });

@@ -123,3 +123,90 @@ export function trendFactsCalorieDiff(
   const trendOwn = Number(trends.recent?.avg_calories_when_logged ?? trends.recent?.avg_calories ?? 0);
   return Math.abs(headline - trendOwn);
 }
+
+// ─── Direct re-derivation from meal history ────────────────────────────
+//
+// `mealAverages.daily` is the backend's per-day rollup. Users repeatedly
+// reported the daily numbers looking "way off" vs what they see on the
+// meal tab — usually because the two surfaces went through slightly
+// different aggregation paths (dedupe windows, skip filters). To remove
+// any chance of drift, the screen now optionally re-derives the rows
+// client-side from the SAME `getMealHistory` payload the meal tab
+// renders. If the history is loaded, we trust it. Otherwise we fall back
+// to mealAverages.daily.
+
+export interface MealHistoryItemShape {
+  food_name: string;
+  quantity: number;
+  unit: string;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+}
+
+export interface MealHistoryEntryShape {
+  id: number;
+  meal_date: string;        // YYYY-MM-DD
+  meal_type: string | null;
+  name: string;
+  source: string | null;
+  consumed_at?: string | null;
+  created_at?: string | null;
+  items: MealHistoryItemShape[];
+  totals: { calories: number; protein_g: number; carbs_g: number; fat_g: number };
+}
+
+export interface DailyRowShape {
+  date: string;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+  meal_count: number;
+}
+
+/** Aggregate per-day totals straight from meal history. Mirrors the
+ *  meal-tab math exactly so the user sees one set of numbers across both
+ *  surfaces. Returns rows newest-first, only days with at least one meal. */
+export function aggregateDailyFromHistory(history: MealHistoryEntryShape[]): DailyRowShape[] {
+  const byDate = new Map<string, DailyRowShape>();
+  for (const m of history) {
+    const date = m.meal_date;
+    if (!date) continue;
+    const cur = byDate.get(date) ?? { date, calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0, meal_count: 0 };
+    // Trust meal.totals — that's the value the meal tab shows for the meal.
+    cur.calories += Number(m.totals?.calories ?? 0);
+    cur.protein_g += Number(m.totals?.protein_g ?? 0);
+    cur.carbs_g += Number(m.totals?.carbs_g ?? 0);
+    cur.fat_g += Number(m.totals?.fat_g ?? 0);
+    cur.meal_count += 1;
+    byDate.set(date, cur);
+  }
+  // Round to 1 decimal so the rendered numbers don't show 2049.99999…
+  const rows = Array.from(byDate.values()).map(r => ({
+    ...r,
+    calories: Math.round(r.calories * 10) / 10,
+    protein_g: Math.round(r.protein_g * 10) / 10,
+    carbs_g: Math.round(r.carbs_g * 10) / 10,
+    fat_g: Math.round(r.fat_g * 10) / 10,
+  }));
+  rows.sort((a, b) => b.date.localeCompare(a.date));
+  return rows;
+}
+
+/** Pick the most reliable daily-row source. Prefer client-aggregated
+ *  history (proven to match the meal tab); fall back to the server-rolled
+ *  averages.daily only when history isn't loaded yet. */
+export function selectDailyRows(
+  history: MealHistoryEntryShape[] | null | undefined,
+  averagesDaily: DailyRowShape[] | undefined,
+  limit = 5,
+): DailyRowShape[] {
+  if (history && history.length > 0) {
+    return aggregateDailyFromHistory(history).slice(0, limit);
+  }
+  const rows = [...(averagesDaily ?? [])];
+  rows.sort((a, b) => b.date.localeCompare(a.date));
+  return rows.slice(0, limit);
+}

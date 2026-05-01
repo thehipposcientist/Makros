@@ -96,6 +96,32 @@ def _ensure_user_recovery_columns() -> None:
         print(f"[migration] user recovery columns add failed (non-fatal): {e}")
 
 
+def _ensure_user_subscription_tier_column() -> None:
+    """Add server-authoritative subscription tier to users.
+
+    Client-side tier flags are display hints only; paid feature access
+    checks read this column on every authenticated request.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                'ALTER TABLE "user" '
+                "ADD COLUMN IF NOT EXISTS subscription_tier VARCHAR DEFAULT 'free'"
+            ))
+            conn.execute(text(
+                'UPDATE "user" SET subscription_tier = '
+                "COALESCE(NULLIF(subscription_tier, ''), 'free')"
+            ))
+            conn.execute(text(
+                'CREATE INDEX IF NOT EXISTS ix_user_subscription_tier '
+                'ON "user"(subscription_tier)'
+            ))
+    except Exception as e:
+        print(f"[migration] user subscription_tier column add failed (non-fatal): {e}")
+
+
 def _ensure_user_goal_track_column() -> None:
     """Persist rich frontend goal ids alongside the legacy GoalType enum."""
     if engine.dialect.name != "postgresql":
@@ -1295,6 +1321,7 @@ def create_db_and_tables():
     _ensure_user_supplement_stack_group_column()
     _ensure_coach_apply_state_columns()
     _ensure_user_recovery_columns()
+    _ensure_user_subscription_tier_column()
     _ensure_user_goal_track_column()
     _ensure_exercise_tracking_mode_column()
     _ensure_exercise_video_id_column()

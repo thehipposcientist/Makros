@@ -50,7 +50,8 @@ import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, sca
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
-import { dailyBarDenominator, headlineLoggedCalories, macrosHeadlineFromAverages, recentLoggedDays } from './progressData';
+import { dailyBarDenominator, headlineLoggedCalories, macrosHeadlineFromAverages, selectDailyRows } from './progressData';
+import { tierOf } from '../utils/subscription';
 
 interface ProgressScreenProps {
   onBack: () => void;
@@ -790,6 +791,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const tc = getTheme(themeName).colors;
   const styles = useMemo(() => createStyles(tc), [themeName]);
   const meta = useMetaData();
+  const isProTier = tierOf(userProfile) === 'pro';
   const [tab, setTab] = useState<'health' | 'body' | 'prs' | 'charts'>('health');
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
   const [showLogActivity, setShowLogActivity] = useState(false);
@@ -848,6 +850,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [measurementsModalVisible, setMeasurementsModalVisible] = useState(false);
   const [muscleFatigue, setMuscleFatigue] = useState<{ score: number; label: string; topFatigued: Array<{ muscle: string; value: number }>; muscleFatigue: Record<string, number> } | null>(null);
   const [mealAverages, setMealAverages] = useState<import('../services/api').MealAverages | null>(null);
+  // Raw meal history — same payload the meal tab renders. We re-derive
+  // the per-day rows in the Facts card from this so the user sees
+  // identical numbers across both surfaces (no drift from the backend's
+  // separate aggregation path).
+  const [mealHistory, setMealHistory] = useState<import('../services/api').MealHistoryEntry[] | null>(null);
   const [muscleBalance, setMuscleBalance] = useState<import('../services/api').MuscleBalanceResult | null>(null);
   const [muscleBalanceExpanded, setMuscleBalanceExpanded] = useState(false);
   const [nutritionGutExpanded, setNutritionGutExpanded] = useState(false);
@@ -998,7 +1005,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       setGoalHistory(g);
       setPlanChanges(c);
       setLoading(false);
-      if (authToken && p.length > 0) {
+      if (authToken && isProTier && p.length > 0) {
         getProgressionInsights(authToken, p[0].exerciseName)
           .then((r: any) => setProgressionHint(r?.suggestion ?? ''))
           .catch(() => null);
@@ -1024,7 +1031,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           }
         }).catch(() => null)
       );
-      if (authToken) {
+      if (authToken && isProTier) {
         import('../services/api').then(({ getFatigueScore }) => {
           getFatigueScore(authToken).then(fs => setMuscleFatigue({
             score: fs.readiness_score, label: fs.readiness_label,
@@ -1032,7 +1039,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })).catch(() => null);
         });
       }
-      if (authToken) {
+      if (authToken && isProTier) {
         import('../services/api').then(({ getOneRepMaxShowcase, getE1RMHistory }) =>
           getOneRepMaxShowcase(authToken)
             .then(async (lifts) => {
@@ -1080,60 +1087,82 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     if (authToken) {
       getInsights(authToken).then(setInsights).catch(() => null);
       getGuardrails(authToken).then(r => setGuardrails(r.warnings ?? [])).catch(() => null);
-      getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);
+      if (isProTier) {
+        getCoachMemory(authToken).then((rows: any[]) => setCoachMemory(rows.slice(0, 5))).catch(() => null);
+      } else {
+        setCoachMemory([]);
+      }
       import('../services/api').then(({ getMealAverages }) =>
         getMealAverages(authToken, 14).then(setMealAverages).catch(() => null)
       );
-      import('../services/api').then(({ getMealInsights }) =>
-        getMealInsights(authToken)
-          .then(r => setMealInsightPatterns(r.patterns ?? null))
-          .catch(() => setMealInsightPatterns(null))
+      // Pull the same meal history the meal tab uses; the Facts card's
+      // dailyRows will re-aggregate from this so both surfaces agree.
+      import('../services/api').then(({ getMealHistory }) =>
+        getMealHistory(authToken, 14)
+          .then(r => setMealHistory(r.meals ?? []))
+          .catch(() => setMealHistory(null))
       );
-      import('../services/api').then(({ getNutritionScore }) =>
-        getNutritionScore(authToken, 14)
-          .then(r => setNutritionScoreWeekly(r.weekly ?? null))
-          .catch(() => setNutritionScoreWeekly(null))
-      );
-      import('../services/api').then(({ getMuscleBalance }) =>
-        getMuscleBalance(authToken, 14).then(setMuscleBalance).catch(() => null)
-      );
-      import('../services/api').then(({ getGutHealth }) =>
-        getGutHealth(authToken, 14).then(r => {
-          setGutHealthWindow(r.window);
-        }).catch(() => null)
-      );
-    }
-    AsyncStorage.getItem('bodyScanHistory').then(async raw => {
-      const local: BodyScanEntry[] = raw ? (JSON.parse(raw) ?? []) : [];
-      // Cap in-memory history at the most recent 20 scans. Older entries
-      // stay in storage but aren't loaded into render state — body-scan
-      // entries carry full base64 image strings and a long-running user
-      // could otherwise keep hundreds of MBs of decoded images in JS heap.
-      // The history list UI only ever shows the recent slice anyway.
-      const RECENT_CAP = 20;
-      const localSorted = [...local].sort((a, b) => b.date.localeCompare(a.date));
-      if (localSorted.length > 0) setBodyScanHistory(localSorted.slice(0, RECENT_CAP));
-      if (authToken) {
-        try {
-          const { getBodyScanHistory } = await import('../services/api');
-          const remote = await getBodyScanHistory(authToken);
-          if (remote.length > 0) {
-            const merged = new Map<string, BodyScanEntry>();
-            for (const e of local) merged.set(e.date, e);
-            for (const e of remote) {
-              const key = (e as any).scan_date ?? (e as any).date ?? '';
-              if (!merged.has(key)) merged.set(key, { date: key, ...(e as any) });
-            }
-            const sorted = Array.from(merged.values()).sort((a, b) => b.date.localeCompare(a.date));
-            setBodyScanHistory(sorted.slice(0, RECENT_CAP));
-            await AsyncStorage.setItem('bodyScanHistory', JSON.stringify(sorted));
-          }
-        } catch { /* non-fatal */ }
+      if (isProTier) {
+        import('../services/api').then(({ getMealInsights }) =>
+          getMealInsights(authToken)
+            .then(r => setMealInsightPatterns(r.patterns ?? null))
+            .catch(() => setMealInsightPatterns(null))
+        );
+        import('../services/api').then(({ getNutritionScore }) =>
+          getNutritionScore(authToken, 14)
+            .then(r => setNutritionScoreWeekly(r.weekly ?? null))
+            .catch(() => setNutritionScoreWeekly(null))
+        );
+        import('../services/api').then(({ getMuscleBalance }) =>
+          getMuscleBalance(authToken, 14).then(setMuscleBalance).catch(() => null)
+        );
+        import('../services/api').then(({ getGutHealth }) =>
+          getGutHealth(authToken, 14).then(r => {
+            setGutHealthWindow(r.window);
+          }).catch(() => null)
+        );
+      } else {
+        setMealInsightPatterns(null);
+        setNutritionScoreWeekly(null);
+        setMuscleBalance(null);
+        setGutHealthWindow(null);
       }
-    }).catch(() => {});
+    }
+    if (!isProTier) {
+      setBodyScanHistory([]);
+    } else {
+      AsyncStorage.getItem('bodyScanHistory').then(async raw => {
+        const local: BodyScanEntry[] = raw ? (JSON.parse(raw) ?? []) : [];
+        // Cap in-memory history at the most recent 20 scans. Older entries
+        // stay in storage but aren't loaded into render state — body-scan
+        // entries carry full base64 image strings and a long-running user
+        // could otherwise keep hundreds of MBs of decoded images in JS heap.
+        // The history list UI only ever shows the recent slice anyway.
+        const RECENT_CAP = 20;
+        const localSorted = [...local].sort((a, b) => b.date.localeCompare(a.date));
+        if (localSorted.length > 0) setBodyScanHistory(localSorted.slice(0, RECENT_CAP));
+        if (authToken) {
+          try {
+            const { getBodyScanHistory } = await import('../services/api');
+            const remote = await getBodyScanHistory(authToken);
+            if (remote.length > 0) {
+              const merged = new Map<string, BodyScanEntry>();
+              for (const e of local) merged.set(e.date, e);
+              for (const e of remote) {
+                const key = (e as any).scan_date ?? (e as any).date ?? '';
+                if (!merged.has(key)) merged.set(key, { date: key, ...(e as any) });
+              }
+              const sorted = Array.from(merged.values()).sort((a, b) => b.date.localeCompare(a.date));
+              setBodyScanHistory(sorted.slice(0, RECENT_CAP));
+              await AsyncStorage.setItem('bodyScanHistory', JSON.stringify(sorted));
+            }
+          } catch { /* non-fatal */ }
+        }
+      }).catch(() => {});
+    }
 
     // ── Gut / longevity insights — compute from existing meal data ──
-    (async () => {
+    if (isProTier) (async () => {
       try {
         const today = new Date();
         const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
@@ -1172,11 +1201,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         console.warn('[Progress] gut insights failed:', e);
       }
     })();
+    else setGutInsights(null);
     // Load Apple Health data — cached value first, then refresh from HealthKit
     // so the vitals row reflects live data without requiring a workout finish.
-    loadHealthSummary().then(setHealthSummary);
-    loadHealthScore().then(setHealthScore);
-    (async () => {
+    if (isProTier) loadHealthSummary().then(setHealthSummary);
+    else setHealthSummary(null);
+    if (isProTier) loadHealthScore().then(setHealthScore);
+    else setHealthScore(null);
+    if (isProTier) (async () => {
       try {
         if (!isHealthKitAvailable()) return;
         const enabled = await isAppleHealthEnabled();
@@ -1219,7 +1251,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         try { setSleepHistoryCount((await loadSleepHistory()).length); } catch {}
       } catch {}
     })();
-  }, [userProfile.mealsPerDay, userProfile.physicalStats?.age]);
+    else {
+      setHealthEnabled(false);
+      setAppleHealthZone2Minutes(null);
+      setZone2DetectedWorkouts([]);
+    }
+  }, [authToken, isProTier, nutritionPlan, userProfile.goal, userProfile.mealsPerDay, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
 
   const handleShareBodyScan = async () => {
     try {
@@ -1265,7 +1302,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     // a paid feature. Surface the upgrade prompt before opening the
     // camera/library so free users don't even take a throwaway photo.
     const { requirePro } = await import('../utils/subscription');
-    if (!requirePro(userProfile, 'ai_form_analysis')) return;
+    if (!requirePro(userProfile, 'ai_body_scan')) return;
     try {
       const opts = {
         mediaTypes: 'images' as any,
@@ -1339,7 +1376,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // show a skeleton while it's in flight instead of an empty flash.
   const [compositeFitnessLoading, setCompositeFitnessLoading] = useState(true);
   useEffect(() => {
-    if (!authToken) { setCompositeFitnessLoading(false); return; }
+    if (!authToken || !isProTier) {
+      setCompositeFitness(null);
+      setCompositeFitnessLoading(false);
+      return;
+    }
     setCompositeFitnessLoading(true);
     import('../services/api').then(({ getFitnessCompositeScore }) =>
       getFitnessCompositeScore(authToken, {
@@ -1352,7 +1393,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         .catch(() => setCompositeFitness(null))
         .finally(() => setCompositeFitnessLoading(false))
     );
-  }, [authToken, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length]);
+  }, [authToken, isProTier, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length]);
 
   useEffect(() => {
     if (!authToken || !selectedExercise) { setE1rmHistory([]); return; }
@@ -2832,7 +2873,18 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'health' ? (
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
-          {authToken && (() => {
+          {!isProTier && (
+            <View style={styles.vitalsCard}>
+              <View style={{ alignItems: 'center', paddingVertical: 12 }}>
+                <Ionicons name="lock-closed-outline" size={32} color={tc.textMuted} />
+                <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary, marginTop: 8 }}>Health insights are Pro</Text>
+                <Text style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6 }}>
+                  Free keeps manual weight, body, workout, and meal history. Pro adds Apple Health, readiness, sleep, and nutrition scoring.
+                </Text>
+              </View>
+            </View>
+          )}
+          {isProTier && authToken && (() => {
             return (
               <Zone2TargetCard
                 authToken={authToken}
@@ -2843,7 +2895,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
 
-          {!isHealthKitAvailable() && (
+          {isProTier && !isHealthKitAvailable() && (
             <View style={styles.vitalsCard}>
               <View style={{ alignItems: 'center', paddingVertical: 12 }}>
                 <Ionicons name="heart-outline" size={34} color={tc.textMuted} />
@@ -2859,7 +2911,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           )}
 
-          {isHealthKitAvailable() && (
+          {isProTier && isHealthKitAvailable() && (
             <DetectedWorkoutsCard
               themeName={userProfile.themePreference}
               appleWorkouts={healthSummary?.workoutDetails ?? null}
@@ -2878,7 +2930,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             />
           )}
           {/* Apple Health vitals */}
-          {isHealthKitAvailable() && (() => {
+          {isProTier && isHealthKitAvailable() && (() => {
             const hs = healthSummary;
             const hasAnyData = hs && (
               hs.restingHeartRate != null || hs.avgSteps7d != null ||
@@ -3034,7 +3086,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {/* Fitness Age */}
-          {(() => {
+          {isProTier && (() => {
             const vo2 = healthSummary?.vo2Max;
             const age = userProfile.physicalStats?.age;
             const fa = vo2 != null && age != null ? computeFitnessAge(vo2, age) : null;
@@ -3073,7 +3125,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {/* Sleep Score */}
-          {healthSummary?.sleepScore && (() => {
+          {isProTier && healthSummary?.sleepScore && (() => {
             const ss = healthSummary.sleepScore;
             const scoreColor = ss.score >= 80 ? tc.success : ss.score >= 60 ? tc.warning : tc.error;
             const formatHM = (hours: number) => {
@@ -3251,7 +3303,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {/* Combined Health Score — backward-looking, requires 14 days */}
-          {(() => {
+          {isProTier && (() => {
             const completedWorkouts = history.filter(s => s.completed);
             const allDates = new Set(completedWorkouts.map(s => s.date?.slice(0, 10)).filter(Boolean));
             const daysOfData = allDates.size;
@@ -3326,7 +3378,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
 
-          {authToken && (
+          {isProTier && authToken && (
             <AdherenceTrendCard authToken={authToken} themeName={themeName} />
           )}
 
@@ -3389,7 +3441,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {/* Nutrition & Gut Facts — 7-day rolling window (facts only, no scores). */}
-          {(gutHealthWindow || mealAverages) && (
+          {isProTier && (gutHealthWindow || mealAverages) && (
             <View style={[styles.vitalsCard, { marginTop: 0 }]}>
               <TouchableOpacity
                 activeOpacity={0.7}
@@ -3437,7 +3489,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 const loggedProtein = macrosHead.protein;
                 const loggedCarbs = macrosHead.carbs;
                 const loggedFat = macrosHead.fat;
-                const dailyRows = recentLoggedDays(mealAverages as any, 5);
+                // Prefer client-aggregated history (matches the meal tab
+                // exactly). Falls back to the server-rolled averages.daily
+                // if history hasn't loaded yet.
+                const dailyRows = selectDailyRows(mealHistory as any, mealAverages.daily as any, 5);
                 return (
                 <View style={{ marginBottom: 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
                   <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>
@@ -3774,12 +3829,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         <ScrollView contentContainerStyle={styles.content}>
           {/* Per-muscle recovery (moved from Health tab) — shows fatigue across
               all 12 muscle groups with the full expanded bars. */}
-          {muscleFatigue && (
+          {isProTier && muscleFatigue && (
             <RecoveryCard data={muscleFatigue as any} themeName={themeName} defaultExpanded />
           )}
 
           {/* Muscle Balance — volume distribution across muscle groups (14d) */}
-          {muscleBalance && muscleBalance.total_sets > 0 && (() => {
+          {isProTier && muscleBalance && muscleBalance.total_sets > 0 && (() => {
             const entries = Object.entries(muscleBalance.muscles);
             const maxSets = entries.length ? Math.max(...entries.map(([, v]) => v.sets)) : 1;
             const BALANCE_MUSCLES = new Set(['chest', 'back', 'shoulders', 'biceps', 'triceps', 'quads', 'hamstrings', 'glutes']);
@@ -4079,7 +4134,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           </View>
 
           {/* Scan buttons */}
-          <View style={styles.bodyScanPrompt}>
+          {isProTier && <View style={styles.bodyScanPrompt}>
             <Ionicons name="body-outline" size={40} color={tc.primary} style={{ alignSelf: 'center' }} />
             <Text style={styles.bodyScanPromptTitle}>Body Check</Text>
             <Text style={styles.bodyScanPromptText}>
@@ -4102,10 +4157,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <Text style={{ fontSize: 10, color: tc.textMuted, textAlign: 'center', marginTop: 6, lineHeight: 14 }}>
               For best results: front-facing, good lighting, minimal clothing. Accuracy varies with lighting and angle.
             </Text>
-          </View>
+          </View>}
 
           {/* Loading */}
-          {bodyScanLoading && (
+          {isProTier && bodyScanLoading && (
             <View style={{ alignItems: 'center', paddingVertical: 30, gap: 10 }}>
               <ActivityIndicator size="large" color={tc.primary} />
               <Text style={{ fontSize: 13, color: tc.textSecondary }}>Analyzing...</Text>
@@ -4113,7 +4168,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           )}
 
           {/* Latest result */}
-          {bodyScanResult && !bodyScanLoading && (
+          {isProTier && bodyScanResult && !bodyScanLoading && (
             <>
             <ViewShot ref={bodyScanShareRef} options={{ format: 'png', quality: 1 }}>
             <View style={styles.bodyScanResultCard}>
@@ -4169,7 +4224,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </>
           )}
 
-          {bodyScanHistory.length > 0 && (() => {
+          {isProTier && bodyScanHistory.length > 0 && (() => {
             const fmt = (d: Date) => `${MONTH_NAMES[d.getMonth()].slice(0, 3)} ${d.getDate()}`;
             return (
               <View style={[styles.bodyScanHistoryCard, { marginTop: 12 }]}>
@@ -4226,7 +4281,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
 
-          {bodyScanHistory.length >= 2 && (() => {
+          {isProTier && bodyScanHistory.length >= 2 && (() => {
             const latest = bodyScanHistory[0];
             const prior = bodyScanHistory[1];
             if (!latest || !prior) return null;
@@ -4286,7 +4341,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               consistent across Progress. Muscle-mass tier is rendered as
               a colored chip strip below the chart since the value is
               categorical (low/below_average/average/above_average/high). */}
-          {bodyScanHistory.length >= 2 && (() => {
+          {isProTier && bodyScanHistory.length >= 2 && (() => {
             // History is stored newest-first; reverse for chronological plot.
             const sorted = [...bodyScanHistory].slice().reverse();
             const bfValues = sorted.map(e => Number(e.bodyFatPct) || 0).filter(v => v > 0);
@@ -4459,7 +4514,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {/* History */}
-          {bodyScanHistory.length > 0 && (
+          {isProTier && bodyScanHistory.length > 0 && (
             <>
               <Text style={[styles.sectionLabel, { marginTop: 16 }]}>Scan History</Text>
               {bodyScanHistory.map((entry, idx) => {

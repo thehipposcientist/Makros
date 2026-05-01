@@ -9,8 +9,8 @@ from openai import OpenAI
 from fastapi import BackgroundTasks, HTTPException, Depends
 from sqlmodel import Session, select
 
-from app.auth import get_current_user
 from app.database import engine, get_session
+from app.entitlements import require_pro_feature
 from app.models import PlanJob, User
 
 from .router import router
@@ -2662,7 +2662,7 @@ async def run_full_plan_generation(
 
 @router.get("/plans/active-workout")
 def get_active_workout_plan(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated workout plans")),
     db: Session = Depends(get_session),
 ):
     """Return the user's currently active `WorkoutPlan.plan_json`.
@@ -2700,7 +2700,7 @@ def get_active_workout_plan(
 
 @router.get("/plans/active-nutrition")
 def get_active_nutrition_plan(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI meal plans")),
     db: Session = Depends(get_session),
 ):
     """Return the user's currently active `NutritionPlan.plans_json`
@@ -2781,7 +2781,7 @@ def get_split_options_endpoint(
     daysPerWeek: int,
     experienceLevel: str = "intermediate",
     targetFocus: str | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated workout plans")),
 ):
     """Return scored split options for the user's goal + days + focus.
 
@@ -2812,7 +2812,7 @@ class EnrichItemsRequest(_BaseModel):
 @router.post("/plans/enrich-items")
 async def enrich_items_endpoint(
     req: EnrichItemsRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI food enrichment")),
 ):
     """Enrich a list of food items with micronutrients.
 
@@ -2856,7 +2856,7 @@ async def enrich_items_endpoint(
 @router.post("/plans")
 async def generate_plans(  # CODE_VERSION=NO_TEMP_2
     req: PlanRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated plans")),
     db: Session = Depends(get_session),
 ):
     """Sync plan generation (legacy). New client code should use the job
@@ -2921,7 +2921,7 @@ async def run_workout_only_generation(
 @router.post("/plans/workout")
 async def generate_workout_plan(
     req: WorkoutOnlyRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated workout plans")),
     db: Session = Depends(get_session),
 ):
     """Generate a workout plan only — called when equipment changes (sync legacy)."""
@@ -3124,7 +3124,7 @@ async def run_nutrition_only_generation(
 @router.post("/plans/nutrition")
 async def generate_nutrition_plan(
     req: NutritionOnlyRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI meal plans")),
     db: Session = Depends(get_session),
 ):
     """Generate a nutrition plan only — called when foods change (sync legacy).
@@ -3170,7 +3170,7 @@ async def generate_nutrition_plan(
 @router.post("/parse-workouts")
 def parse_recent_workouts(
     body: ParseWorkoutsRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("AI workout parsing")),
 ):
     """Parse natural language like 'legs yesterday, recovery today' into WorkoutSession objects."""
     api_key = get_openai_api_key()
@@ -3350,7 +3350,7 @@ async def enqueue_plan_job(
     req: PlanRequest,
     background_tasks: BackgroundTasks,
     kind: str = "full",
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated plans")),
     db: Session = Depends(get_session),
 ):
     """Enqueue a background plan-generation job. Returns the job id
@@ -3396,7 +3396,7 @@ async def enqueue_plan_job(
 @router.get("/plans/job/{job_id}")
 def get_plan_job(
     job_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated plans")),
     db: Session = Depends(get_session),
 ):
     """Poll for job status. On `completed`, the full result payload is
@@ -3413,7 +3413,7 @@ def get_plan_job(
 @router.delete("/plans/job/{job_id}")
 def cancel_plan_job(
     job_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated plans")),
     db: Session = Depends(get_session),
 ):
     """Cancel a queued or running job. If already completed / failed /
@@ -3431,7 +3431,7 @@ def cancel_plan_job(
 
 @router.get("/plans/jobs/latest")
 def get_latest_plan_job(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated plans")),
     db: Session = Depends(get_session),
 ):
     """Return the most recent plan job for this user, if any. Client uses

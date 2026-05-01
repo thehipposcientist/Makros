@@ -14,8 +14,8 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.database import get_session
+from app.entitlements import require_pro_feature
 from app.models import PlanWeek, PlanDay, User
-from app.routers.auth import get_current_user
 from app.services.workout.week_manager import (
     get_active_week,
     get_week_days,
@@ -209,7 +209,7 @@ def _plan_week_to_response(pw: PlanWeek, days: list[PlanDay]) -> PlanWeekRespons
 
 @router.get("/week/active")
 def get_active_plan_week(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanWeekResponse | None:
     """Return the active PlanWeek with all 7 PlanDay rows.
@@ -312,7 +312,7 @@ class PausePlanRequest(BaseModel):
 @router.post("/week/pause")
 def pause_active_week(
     body: PausePlanRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanWeekResponse:
     """Pause the active plan until a future date.
@@ -340,7 +340,7 @@ def pause_active_week(
 
 @router.post("/week/resume")
 def resume_active_week(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanWeekResponse:
     """End the pause early. Auto-renew, auto-skip, and reminders resume on
@@ -361,7 +361,7 @@ def resume_active_week(
 @router.post("/start-new-week")
 def start_new_week(
     body: StartNewWeekRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanWeekResponse:
     """Explicit user action: generate a fresh 7-day plan starting today.
@@ -513,7 +513,7 @@ def start_new_week(
 
 @router.post("/week/auto-renew")
 def auto_renew(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
     weight_slope_lbs_per_week: float | None = None,
     avg_sleep_hours: float | None = None,
@@ -601,7 +601,7 @@ def auto_renew(
 
 @router.get("/week/checkin-status")
 def get_checkin_status(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> dict:
     """Return whether a coaching check-in is pending, completed, or not due.
@@ -643,7 +643,7 @@ def get_checkin_status(
 @router.get("/week/{plan_week_id}/checkin")
 def get_plan_week_checkin(
     plan_week_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> dict:
     """Return the saved check-in record for a plan week (read-only recap)."""
@@ -664,7 +664,7 @@ def get_plan_week_checkin(
 def submit_plan_week_checkin(
     plan_week_id: int,
     body: PlanWeekCheckinSubmitRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> dict:
     """Submit the one-time coaching check-in for a plan week.
@@ -981,7 +981,7 @@ def submit_plan_week_checkin(
 @router.post("/week/{plan_week_id}/checkin/skip")
 def skip_plan_week_checkin(
     plan_week_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> AutoRenewResponse | dict:
     """Skip the check-in for a plan week and immediately auto-renew the next week."""
@@ -1065,7 +1065,7 @@ class ReviewAndApplyRequest(BaseModel):
 @router.post("/week/review-and-apply")
 def review_and_apply(
     body: ReviewAndApplyRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanWeekResponse:
     """User reviews recommendations and selects which to apply, then regenerates remaining days."""
@@ -1178,7 +1178,7 @@ def review_and_apply(
 def patch_workout(
     day_date: date,
     body: PatchDayWorkoutRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanDayResponse:
     """Surgical single-day workout swap. Only works on unlocked days."""
@@ -1204,7 +1204,7 @@ def patch_workout(
 def patch_nutrition(
     day_date: date,
     body: PatchDayNutritionRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanDayResponse:
     """Surgical single-day nutrition edit."""
@@ -1229,7 +1229,7 @@ def patch_nutrition(
 @router.post("/days/{day_date}/complete")
 def mark_day_complete(
     day_date: date,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanDayResponse:
     """Lock a day as completed."""
@@ -1255,7 +1255,7 @@ def mark_day_complete(
 def mark_day_skipped(
     day_date: date,
     body: SkipDayRequest | None = None,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanDayResponse:
     """Lock a day as skipped."""
@@ -1285,7 +1285,7 @@ def mark_day_skipped(
 @router.post("/days/{day_date}/unskip")
 def mark_day_unskipped(
     day_date: date,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanDayResponse:
     """Undo a manual skip, restoring the PlanDay to an unlocked planned state."""
@@ -1313,7 +1313,7 @@ def mark_day_unskipped(
 @router.post("/days/{day_date}/start")
 def mark_day_started(
     day_date: date,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanDayResponse:
     """Lock a day as started (user began the workout)."""
@@ -1338,7 +1338,7 @@ def mark_day_started(
 @router.post("/week/adapt-remaining")
 def adapt_remaining(
     body: AdaptRemainingRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanWeekResponse:
     """Re-fill exercises for all unlocked future days.
@@ -1441,7 +1441,7 @@ def adapt_remaining(
 @router.post("/week/regenerate-remaining")
 def regenerate_remaining(
     body: RegenerateRemainingRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanWeekResponse:
     """New recipe for remaining unlocked days.
@@ -1576,7 +1576,7 @@ def regenerate_remaining(
 
 @router.get("/week-summary")
 def get_week_summary(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> dict:
     """Return structured weekly summary for the check-in modal.
@@ -1614,7 +1614,7 @@ def get_week_summary(
 @router.post("/week-checkin")
 def submit_week_checkin(
     body: WeekCheckinAnswersRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> dict:
     """Accept structured check-in answers, return recommended adjustments,
