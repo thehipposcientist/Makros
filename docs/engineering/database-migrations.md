@@ -15,6 +15,7 @@ SQLModel `create_all` creates tables but does NOT ALTER existing columns. Idempo
 | `_ensure_food_category_enum_values` | Food category enum extension. |
 | `_ensure_food_nutrition_extras_column` | `FoodNutrition.extra_nutrients` JSONB. |
 | `_ensure_user_recovery_columns` | `recovery_question` + `recovery_answer_hash`. |
+| `_ensure_user_subscription_tier_column` | `User.subscription_tier` plus one-shot existing-user Pro backfill marker in `app_migrations`. |
 | `_ensure_workout_completion_stimulus_column` | Stimulus tracking on completions. |
 | `_ensure_workout_completion_health_columns` | Health signals on completions. |
 | `_ensure_user_preferences_equipment_settings_column` | `UserPreferences.equipment_settings` JSONB for plate/dumbbell loading constraints. |

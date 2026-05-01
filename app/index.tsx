@@ -2078,6 +2078,14 @@ function AccountInfoModal({
   const [accountBusy, setAccountBusy] = useState<string | null>(null);
   const [watchStatus, setWatchStatus] = useState<string>('No sync recorded yet');
   const showHealthToggle = Platform.OS === 'ios';
+  const physicalStats = (profile as Partial<UserProfile>).physicalStats;
+  const goalValue = typeof profile.goal === 'string' && profile.goal
+    ? profile.goal.replace(/_/g, ' ')
+    : '—';
+  const weightValue = physicalStats?.weightLbs != null
+    ? `${physicalStats.weightLbs} lbs`
+    : '—';
+  const ageValue = physicalStats?.age != null ? String(physicalStats.age) : '—';
 
   useEffect(() => {
     getMe(token)
@@ -2246,11 +2254,13 @@ function AccountInfoModal({
             )}
             <Row label="Email"        value={accountData?.email ?? (loading ? 'Loading…' : '—')} />
             <Row label="Username"     value={accountData?.username ?? (loading ? 'Loading…' : '—')} />
-            <Row label="Email Status" value={accountData ? (accountData.emailVerified ? 'Verified' : 'Not verified') : (loading ? 'Loading…' : '—')} />
+            {!betaFullAccess && (
+              <Row label="Email Status" value={accountData ? (accountData.emailVerified ? 'Verified' : 'Not verified') : (loading ? 'Loading…' : '—')} />
+            )}
             <Row label="Legal Version" value={accountData ? (accountData.legalAccepted ? LEGAL_VERSION : 'Needs review') : (loading ? 'Loading…' : '—')} />
-            <Row label="Goal"   value={profile.goal.replace(/_/g, ' ')} />
-            <Row label="Weight" value={`${profile.physicalStats.weightLbs} lbs`} />
-            <Row label="Age"    value={String(profile.physicalStats.age)} />
+            <Row label="Goal"   value={goalValue} />
+            <Row label="Weight" value={weightValue} />
+            <Row label="Age"    value={ageValue} />
             {!loading && !accountData && (
               <Text style={am.errorText}>Could not load full account info — tap retry by reopening.</Text>
             )}
@@ -2296,7 +2306,7 @@ function AccountInfoModal({
             onPress={() => setShowLegal(true)}
           />
 
-          {accountData && !accountData.emailVerified && (
+          {!betaFullAccess && accountData && !accountData.emailVerified && (
             <ActionRow
               label="Verify Email"
               desc="Sends a verification link to your account email."

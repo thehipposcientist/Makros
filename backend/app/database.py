@@ -105,15 +105,42 @@ def _ensure_user_subscription_tier_column() -> None:
     if engine.dialect.name != "postgresql":
         return
     try:
+        backfill_marker = "subscription_tier_existing_users_pro_backfill_20260501"
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "CREATE TABLE IF NOT EXISTS app_migrations ("
+                "name VARCHAR PRIMARY KEY, "
+                "applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()"
+                ")"
+            ))
             conn.execute(text(
                 'ALTER TABLE "user" '
                 "ADD COLUMN IF NOT EXISTS subscription_tier VARCHAR DEFAULT 'free'"
             ))
             conn.execute(text(
-                'UPDATE "user" SET subscription_tier = '
-                "COALESCE(NULLIF(subscription_tier, ''), 'free')"
+                'ALTER TABLE "user" '
+                "ALTER COLUMN subscription_tier SET DEFAULT 'free'"
             ))
+            conn.execute(text(
+                'UPDATE "user" SET subscription_tier = CASE '
+                "WHEN lower(trim(COALESCE(subscription_tier, ''))) = 'pro' THEN 'pro' "
+                "ELSE 'free' END"
+            ))
+            applied = conn.execute(
+                text("SELECT 1 FROM app_migrations WHERE name = :name"),
+                {"name": backfill_marker},
+            ).first()
+            if applied is None:
+                conn.execute(text(
+                    'UPDATE "user" SET subscription_tier = \'pro\' '
+                    "WHERE subscription_tier IS NULL "
+                    "OR subscription_tier = '' "
+                    "OR lower(subscription_tier) = 'free'"
+                ))
+                conn.execute(
+                    text("INSERT INTO app_migrations (name) VALUES (:name)"),
+                    {"name": backfill_marker},
+                )
             conn.execute(text(
                 'CREATE INDEX IF NOT EXISTS ix_user_subscription_tier '
                 'ON "user"(subscription_tier)'

@@ -62,6 +62,7 @@
     },
     "extra": {
       "apiBaseUrl": "https://q4q8mjjhmp.us-east-1.awsapprunner.com",
+      "freeBetaFullAccess": true,
       "eas": {
         "projectId": "89ef69c6-db5f-45ac-b7aa-64120d60f1b4"
       }
