@@ -8,7 +8,9 @@ export type AppThemeName =
   | 'butter'   | 'seaglass' | 'lilac'    | 'sky'
   | 'slate'    | 'ash'      | 'cosmos'
   | 'cinder'   | 'smoke'    | 'maroon'
-  | 'rose';
+  | 'rose'
+  // Minimalist monochrome — no color identity, just grayscale tiers.
+  | 'onyx'     | 'paper';
 
 export interface ThemeColors {
   background: string;
@@ -829,9 +831,82 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
+  // ── MONOCHROME / MINIMALIST ──────────────────────────────────────────────────
+  // Two intentionally colorless themes. Section palettes use neutral grays
+  // with an accent intensity ladder instead of hues — that's the whole
+  // point of "minimalist" so we keep it consistent across surfaces.
+
+  onyx: {
+    name: 'onyx',
+    label: 'Onyx',
+    description: 'Pure black with crisp white text. No color, just grayscale tiers.',
+    colors: {
+      background:    '#000000',
+      surface:       '#0E0E0E',
+      surfaceRaised: '#1A1A1A',
+      border:        '#2A2A2A',
+      // Primary is intentionally white in onyx — it's the brand color
+      // when stripped of all hue. Buttons read as solid blocks.
+      primary:       '#FFFFFF',
+      primaryDark:   '#D4D4D4',
+      primaryLight:  '#FAFAFA',
+      accent:        '#E5E5E5',
+      textPrimary:   '#FFFFFF',
+      textSecondary: '#B8B8B8',
+      textMuted:     '#6E6E6E',
+      // Tiny touches of color reserved for true semantic states only —
+      // the full spectrum of gray would erase the affordance of "this
+      // is bad" vs "this is good".
+      error:         '#FF5555',
+      warning:       '#E0A040',
+      success:       '#7AC07A',
+    },
+    sections: {
+      workout: { soft: '#1A1A1A', strong: '#FFFFFF', text: '#FFFFFF' },
+      meals:   { soft: '#161616', strong: '#E0E0E0', text: '#FFFFFF' },
+      ai:      { soft: '#1F1F1F', strong: '#CCCCCC', text: '#FFFFFF' },
+      planner: { soft: '#181818', strong: '#D8D8D8', text: '#FFFFFF' },
+      account: { soft: '#222222', strong: '#B0B0B0', text: '#FFFFFF' },
+    },
+  },
+
+  paper: {
+    name: 'paper',
+    label: 'Paper',
+    description: 'Pure white with deep black ink. Nothing but type, lines, and space.',
+    colors: {
+      background:    '#FFFFFF',
+      surface:       '#F7F7F7',
+      surfaceRaised: '#EFEFEF',
+      border:        '#D8D8D8',
+      // Primary is black — the ink. Bright color buttons would clash
+      // with the minimalist intent.
+      primary:       '#000000',
+      primaryDark:   '#000000',
+      primaryLight:  '#3A3A3A',
+      accent:        '#1A1A1A',
+      textPrimary:   '#000000',
+      textSecondary: '#3A3A3A',
+      textMuted:     '#7A7A7A',
+      error:         '#C03030',
+      warning:       '#B07020',
+      success:       '#3A7A3A',
+    },
+    sections: {
+      workout: { soft: '#EFEFEF', strong: '#000000', text: '#000000' },
+      meals:   { soft: '#F0F0F0', strong: '#1A1A1A', text: '#000000' },
+      ai:      { soft: '#EBEBEB', strong: '#2A2A2A', text: '#000000' },
+      planner: { soft: '#EDEDED', strong: '#222222', text: '#000000' },
+      account: { soft: '#E8E8E8', strong: '#3A3A3A', text: '#000000' },
+    },
+  },
+
 };
 
 export const THEME_PICKER_ORDER = [
+  // Surface the minimalist pair near the top — they're a distinct
+  // aesthetic and easy to miss buried under colored options.
+  'onyx', 'paper',
   'midnight', 'ocean', 'amethyst',
   'ember', 'wine', 'obsidian',
   'slate', 'blossom', 'void', 'dusk', 'lavender', 'aurora',
@@ -844,6 +919,10 @@ export const THEME_PICKER_ORDER = [
 export const LIGHT_THEME_NAMES = [
   'sunrise', 'parchment', 'linen', 'mint',
   'butter', 'seaglass', 'lilac', 'sky', 'rose',
+  // Paper is a light theme — drives status-bar style + "is light"
+  // branching in HomeScreen so the dark statusbar text shows up
+  // correctly against the white background.
+  'paper',
 ] as const satisfies readonly AppThemeName[];
 
 const LEGACY_THEME_ALIASES: Record<string, AppThemeName> = {
