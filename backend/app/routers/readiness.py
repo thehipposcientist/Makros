@@ -39,6 +39,7 @@ class ReadinessTodayBody(BaseModel):
     avg_hrv_ms: float | None = None
     last_night_sleep_score: int | None = None
     nutrition_adherence_pct: float | None = None
+    planned_focus: str | None = None
     cycle_phase: str | None = None       # "menses" | "follicular" | "ovulation" | "luteal"
     day_of_cycle: int | None = None
 
@@ -60,6 +61,7 @@ def readiness_today(
         avg_hrv_ms=body.avg_hrv_ms,
         last_night_sleep_score=body.last_night_sleep_score,
         nutrition_adherence_pct=body.nutrition_adherence_pct,
+        planned_focus=body.planned_focus,
         cycle_phase=body.cycle_phase,
         day_of_cycle=body.day_of_cycle,
     )

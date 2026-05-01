@@ -3683,6 +3683,7 @@ export async function getReadinessToday(
     avgHrvMs?: number | null;
     lastNightSleepScore?: number | null;
     nutritionAdherencePct?: number | null;
+    plannedFocus?: string | null;
     /** Optional cycle phase from `getCycleStatus()` — adds a "Cycle"
      *  factor to readiness that validates "luteal week feels harder."
      *  Skipped silently for male users / users without HK grant. */
@@ -3699,6 +3700,7 @@ export async function getReadinessToday(
       avg_hrv_ms: signals?.avgHrvMs ?? null,
       last_night_sleep_score: signals?.lastNightSleepScore ?? null,
       nutrition_adherence_pct: signals?.nutritionAdherencePct ?? null,
+      planned_focus: signals?.plannedFocus ?? null,
       cycle_phase: signals?.cyclePhase ?? null,
       day_of_cycle: signals?.dayOfCycle ?? null,
     }),

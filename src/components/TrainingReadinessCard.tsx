@@ -255,6 +255,8 @@ export default function TrainingReadinessCard({
           avgSleepHours: summary?.lastNightSleepHours ?? null,
           avgRestingHr: summary?.restingHeartRate ?? null,
           avgHrvMs: summary?.hrvAvg ?? null,
+          lastNightSleepScore: summary?.sleepScore?.score ?? null,
+          plannedFocus: todaysFocus ?? null,
           cyclePhase: cycle?.phase ?? null,
           dayOfCycle: cycle?.dayOfCycle ?? null,
         });
@@ -275,7 +277,8 @@ export default function TrainingReadinessCard({
           serverResp.label === 'Primed' ? 'Primed'
           : serverResp.label === 'Ready' ? 'Ready'
           : serverResp.label === 'Moderate' ? 'Moderate'
-          : 'Fatigued'
+          : serverResp.label === 'Fatigued' ? 'Fatigued'
+          : '—'
         );
         const pillarFromFactors = (factors: typeof serverResp.factors) => {
           const get = (lbl: string, max: number) => {
@@ -308,7 +311,7 @@ export default function TrainingReadinessCard({
           score: displayScore,
           label: displayLabel,
           pillars: serverPillars,
-          insights: [],
+          insights: serverResp.summary ? [serverResp.summary] : [],
           recommendations: serverRecs,
           missing: serverResp.missing,
           signalsPresent: serverResp.signals_present,
@@ -379,7 +382,7 @@ export default function TrainingReadinessCard({
   // Zero real signals → don't show a misleading "0 Fatigued" dial. Show
   // a neutral CTA instead. The user can still open Apple Health from
   // Settings to grant permissions.
-  if (prep.signalsPresent === 0) {
+  if (prep.label === '—' || prep.signalsPresent === 0) {
     return (
       <View style={{
         backgroundColor: tc.surface, borderRadius: radius.lg, padding: 14, marginBottom: 12,
@@ -387,7 +390,7 @@ export default function TrainingReadinessCard({
       }}>
         <Ionicons name="flash-outline" size={16} color={tc.textMuted} />
         <Text style={{ flex: 1, fontSize: 12, color: tc.textSecondary }}>
-          Apple Health is optional. Readiness gets better with sleep, HRV, and meal data, but the plan still works without it.
+          {prep.insights[0] ?? 'Apple Health is optional. Readiness gets better with sleep, HRV, and meal data, but the plan still works without it.'}
         </Text>
       </View>
     );

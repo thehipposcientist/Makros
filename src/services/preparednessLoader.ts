@@ -9,7 +9,7 @@
 // Pure orchestration — no UI, no state. Returns the input bundle the
 // caller can hand directly to scorePreparedness().
 
-import { isHealthKitAvailable, loadHealthSummary, loadSleepHistory, getCycleStatus } from './appleHealth';
+import { isHealthKitAvailable, readHealthSummary, loadSleepHistory, getCycleStatus } from './appleHealth';
 import { getFatigueScore, getMealAverages } from './api';
 import { loadWorkoutHistory } from '../utils/workoutHistory';
 import type { PreparednessInput } from './preparedness';
@@ -29,7 +29,7 @@ export interface PreparednessLoaderArgs {
 /** Builds the exact input bundle scorePreparedness expects. Caller
  *  computes the score themselves to keep this function pure. */
 export async function loadPreparednessInputs(opts: PreparednessLoaderArgs): Promise<PreparednessInput> {
-  const summary = opts.cachedHealthSummary ?? (await loadHealthSummary().catch(() => null));
+  const summary = opts.cachedHealthSummary ?? (await readHealthSummary({ age: opts.age ?? null }).catch(() => null));
   const ahAvailable = isHealthKitAvailable() && summary != null;
 
   const [history, f, meals, cycle] = await Promise.all([

@@ -42,6 +42,7 @@ async function test_wipe_preserves_safelist() {
     authToken: 'abc',
     userProfile: '{"goal":"muscle_gain"}',
     weightEntries: '[]',
+    workoutTemplates: '[]',
     workoutHistoryList: '[]',
     user_username: 'alice',
     themePreference: 'dark',
@@ -71,6 +72,7 @@ async function test_wipe_preserves_safelist() {
 
   const expectedKept = new Set([
     'authToken', 'userProfile', 'weightEntries',
+    'workoutTemplates',
     'workoutHistoryList', 'user_username', 'themePreference',
   ]);
   for (const k of expectedKept) {
@@ -129,7 +131,7 @@ async function test_empty_storage_noop() {
 function test_preserved_keys_shape() {
   const required = [
     'authToken', 'userProfile', 'weightEntries', 'workoutHistoryList',
-    'user_username', 'themePreference', 'metaData_v1',
+    'workoutTemplates', 'user_username', 'themePreference', 'metaData_v1',
   ];
   for (const r of required) {
     if (!PRESERVED_KEYS.includes(r)) {

@@ -132,6 +132,7 @@ def _readiness_cache_key(
     avg_hrv_ms: float | None,
     last_night_sleep_score: int | None,
     nutrition_adherence_pct: float | None,
+    planned_focus: str | None = None,
     cycle_phase: str | None = None,
     day_of_cycle: int | None = None,
 ) -> tuple:
@@ -142,6 +143,7 @@ def _readiness_cache_key(
         user_id,
         _r(avg_sleep_hours), _r(avg_resting_hr), _r(avg_hrv_ms),
         last_night_sleep_score, _r(nutrition_adherence_pct),
+        planned_focus,
         cycle_phase, day_of_cycle,
     )
 
@@ -221,14 +223,13 @@ def _score_hrv(hrv_ms: float | None, hrv_history: list[float] | None) -> tuple[i
     return int(round(W_HRV * 0.25)), f"{int(hrv_ms)}ms"
 
 
-def _score_fatigue(systemic_fatigue: float | None) -> tuple[int | None, str | None]:
-    """systemic_fatigue is a 0..1+ ratio from MuscleFatigue.systemic.
-    Higher = more fatigued. Map (1 - systemic) onto W_FATIGUE."""
-    if systemic_fatigue is None:
+def _score_fatigue(readiness_pct: float | None, detail: str | None = None) -> tuple[int | None, str | None]:
+    """Map fatigue readiness (0..100, higher=fresher) onto W_FATIGUE."""
+    if readiness_pct is None:
         return None, None
-    rel = max(0.0, min(1.0, 1.0 - systemic_fatigue))
-    pts = int(round(rel * W_FATIGUE))
-    return pts, f"systemic {int(systemic_fatigue * 100)}%"
+    readiness = max(0.0, min(100.0, readiness_pct))
+    pts = int(round((readiness / 100.0) * W_FATIGUE))
+    return pts, detail or f"{int(round(readiness))}% recovered"
 
 
 def _score_nutrition(adherence_pct: float | None) -> tuple[int | None, str | None]:
@@ -323,6 +324,7 @@ def compute_readiness(
     avg_hrv_ms: float | None = None,
     last_night_sleep_score: int | None = None,
     nutrition_adherence_pct: float | None = None,
+    planned_focus: str | None = None,
     # Cycle context — phone reads this from HealthKit via getCycleStatus()
     # and forwards as-is. Both fields are optional; if cycle_phase is None
     # or "unknown" the pillar is skipped (male users, no HK grant).
@@ -347,7 +349,7 @@ def compute_readiness(
         key = _readiness_cache_key(
             user_id, avg_sleep_hours, avg_resting_hr, avg_hrv_ms,
             last_night_sleep_score, nutrition_adherence_pct,
-            cycle_phase, day_of_cycle,
+            planned_focus, cycle_phase, day_of_cycle,
         )
         now_s = time.time()
         cached = _readiness_cache.get(key)
@@ -432,18 +434,30 @@ def compute_readiness(
         missing.append("hrv")
 
     # ── Fatigue (W_FATIGUE) ────────────────────────────────────────
-    systemic = None
+    fatigue_readiness = None
+    fatigue_detail = None
     try:
         from app.services.workout.activity_impact import compute_rolling_fatigue
-        snap = compute_rolling_fatigue(db, user_id)
-        if snap and snap.muscle_fatigue:
-            mf = snap.muscle_fatigue
-            systemic = float(getattr(mf, "systemic", 0.0) or 0.0)
+        from app.services.workout.focus_normalize import normalize_focus_to_family
+        from app.services.workout.history import get_recent_completions_for_fatigue
+
+        completions = get_recent_completions_for_fatigue(user_id, db)
+        if completions:
+            snap = compute_rolling_fatigue(completions)
+            focus_key = normalize_focus_to_family(planned_focus) if planned_focus else None
+            focus_value = snap.focus_readiness.get(focus_key) if focus_key else None
+            if focus_value is not None:
+                fatigue_readiness = round(float(focus_value) * 100)
+                fatigue_detail = f"{focus_key.replace('_', ' ')} {int(fatigue_readiness)}%"
+            else:
+                fatigue_readiness = snap.readiness_score
+                fatigue_detail = f"overall {snap.readiness_score}%"
     except Exception:
         # Fatigue compute can fail on cold start (no completions). Treat
         # as missing rather than crashing the readiness call.
-        systemic = None
-    pts, detail = _score_fatigue(systemic)
+        fatigue_readiness = None
+        fatigue_detail = None
+    pts, detail = _score_fatigue(fatigue_readiness, fatigue_detail)
     if pts is not None:
         pillar_scores["fatigue"] = (pts, W_FATIGUE)
         v100 = int(round((pts / W_FATIGUE) * 100))
@@ -603,7 +617,7 @@ def _no_data_summary(missing: list[str]) -> str:
     to which pillars are missing so the user knows what to do."""
     wearable_missing = ("sleep" in missing) and ("hrv" in missing) and ("rhr" in missing)
     if wearable_missing:
-        return "Not enough Apple Health data yet. Thallo still works without it, and readiness will fill in once sleep or heart-rate signals arrive."
+        return "Not enough Apple Health data yet. Wear your Apple Watch overnight or connect sleep and heart-rate signals to fill readiness in."
     if "sleep" in missing:
         return "Last night's sleep didn't sync yet. Check Apple Health when convenient, then refresh."
     return "Not enough signals yet — log meals or connect Apple Health for a fuller readiness read."

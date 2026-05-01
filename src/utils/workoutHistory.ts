@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { WorkoutSession, CompletedSet, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, MealRoutineEntry, DailyNutritionPlan, MealSuggestion, WorkoutDay } from '../types';
+import { WorkoutSession, CompletedSet, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, MealRoutineEntry, DailyNutritionPlan, MealSuggestion, WorkoutDay, SavedWorkoutTemplate } from '../types';
 import { migrateNutritionPlanShape } from './mealItems';
 
 const HISTORY_KEY        = 'workoutHistory';
@@ -8,6 +8,7 @@ const SUMMARIES_KEY      = 'workoutSummaries';
 const GOAL_HIST_KEY      = 'goalHistory';
 const PLAN_CHANGES_KEY   = 'planChangeHistory';
 const MEAL_ROUTINES_KEY  = 'mealRoutines';
+const WORKOUT_TEMPLATES_KEY = 'workoutTemplates';
 const PRESERVED_WORKOUTS_KEY = 'preservedCompletedWorkouts';
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -153,6 +154,43 @@ export async function loadPreservedCompletedWorkouts(): Promise<PreservedWorkout
   } catch {
     return {};
   }
+}
+
+// ── Workout templates ────────────────────────────────────────────────────────
+
+export async function loadWorkoutTemplates(): Promise<SavedWorkoutTemplate[]> {
+  try {
+    const raw = await AsyncStorage.getItem(WORKOUT_TEMPLATES_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveWorkoutTemplates(templates: SavedWorkoutTemplate[]): Promise<void> {
+  try {
+    await AsyncStorage.setItem(WORKOUT_TEMPLATES_KEY, JSON.stringify(templates));
+  } catch {}
+}
+
+export async function deleteWorkoutTemplate(templateId: string): Promise<void> {
+  if (!templateId) return;
+  const templates = await loadWorkoutTemplates();
+  const next = templates.filter(t => t.id !== templateId);
+  if (next.length !== templates.length) {
+    await saveWorkoutTemplates(next);
+  }
+}
+
+export async function upsertWorkoutTemplate(template: SavedWorkoutTemplate): Promise<SavedWorkoutTemplate[]> {
+  const templates = await loadWorkoutTemplates();
+  const idx = templates.findIndex(t => t.id === template.id);
+  const next = idx >= 0
+    ? templates.map(t => t.id === template.id ? template : t)
+    : [template, ...templates];
+  await saveWorkoutTemplates(next);
+  return next;
 }
 
 // ── Skipped days ──────────────────────────────────────────────────────────────

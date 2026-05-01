@@ -153,7 +153,7 @@ export default function PreparednessCard({
   // Zero real signals → don't pretend we have a score. The reweighted
   // total is 0 only when nothing was readable. Show an empty-state CTA
   // instead of "Fatigued (0)" which would alarm users with no AH data.
-  if (result.signalsPresent === 0) {
+  if (result.label === '—' || result.signalsPresent === 0) {
     return (
       <View style={{
         backgroundColor: tc.surface, borderRadius: radius.lg, padding: 14, marginBottom: 12,

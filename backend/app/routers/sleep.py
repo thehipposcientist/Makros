@@ -76,6 +76,11 @@ def upsert_nightly_sleep(
         )
         session.add(row)
     session.commit()
+    try:
+        from app.services.readiness.compute import invalidate_readiness_cache
+        invalidate_readiness_cache(current_user.id)
+    except Exception:
+        pass
     return {"status": "ok"}
 
 

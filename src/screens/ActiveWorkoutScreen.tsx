@@ -34,8 +34,8 @@ import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle } from 'react-native-svg';
-import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity } from '../types';
-import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests } from '../utils/workoutHistory';
+import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity, SavedWorkoutTemplate, UserProfile } from '../types';
+import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests, loadWorkoutTemplates, upsertWorkoutTemplate } from '../utils/workoutHistory';
 import { isHealthKitAvailable, readHealthSummary, getLatestHeartRate } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -57,6 +57,7 @@ import { humanizeToken } from '../utils/exerciseGuide';
 import { shouldHideWeight, shouldHideReps, formatDurationTarget } from '../utils/exerciseDisplay';
 import { startRestActivity, updateRestActivity, getRestActivityState, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
 import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, scoreSwapCandidate } from '../utils/swapScoring';
+import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate } from '../utils/subscription';
 
 /** Parse the top (ceiling) of a target rep string. Handles ranges like
  *  "8-12", AMRAP markers like "12+", singletons like "6", and junk.
@@ -1663,6 +1664,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
   const [feedbackResult, setFeedbackResult] = useState<string | null>(null);
   const [shareLoading, setShareLoading] = useState(false);
+  const [templateSaving, setTemplateSaving] = useState(false);
+  const [templateSaved, setTemplateSaved] = useState(false);
   const [showShareWorkoutModal, setShowShareWorkoutModal] = useState(false);
   // Per-session gear picker — fires at workout completion when 2+ active
   // gear items keyword-match the workout. The resolver hands back the
@@ -1690,6 +1693,77 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       Alert.alert('Error', 'Could not share the summary.');
     } finally {
       setShareLoading(false);
+    }
+  };
+
+  const handleSaveWorkoutTemplate = async () => {
+    if (templateSaving || templateSaved) return;
+    const sourceExercises = exercisesRef.current.length > 0 ? exercisesRef.current : exercises;
+    if (!sourceExercises.length) {
+      Alert.alert('No exercises', 'Add at least one exercise before saving a template.');
+      return;
+    }
+    setTemplateSaving(true);
+    try {
+      const existing = await loadWorkoutTemplates();
+      let profile: UserProfile | null = null;
+      try {
+        const raw = await AsyncStorage.getItem('userProfile');
+        profile = raw ? JSON.parse(raw) : null;
+      } catch {
+        profile = null;
+      }
+      if (!canCreateWorkoutTemplate(profile, existing.length)) {
+        Alert.alert(
+          'Template limit reached',
+          `Free accounts can save up to ${FREE_WORKOUT_TEMPLATE_LIMIT} workout templates. Upgrade to Pro for unlimited templates.`,
+        );
+        return;
+      }
+
+      const baseName = `${workout.focus && workout.focus !== 'Empty' ? workout.focus : 'Custom'} Template`;
+      const existingNames = new Set(existing.map(t => t.name.trim().toLowerCase()));
+      let name = baseName;
+      let suffix = 2;
+      while (existingNames.has(name.toLowerCase())) {
+        name = `${baseName} ${suffix}`;
+        suffix += 1;
+      }
+      const now = new Date().toISOString();
+      const templateWorkout: WorkoutDay = {
+        ...workout,
+        focus: workout.focus && workout.focus !== 'Empty' ? workout.focus : 'Custom',
+        exercises: sourceExercises.map((ex) => ({
+          name: ex.name,
+          sets: Math.max(getTargetSetCount(ex.targetSets), ex.sets?.length || 0),
+          reps: ex.targetReps || '8-12',
+          restSeconds: Number(ex.targetRestSeconds) || 60,
+          equipment: (ex.equipment || 'other') as any,
+          image_url: ex.image_url,
+          targetWeightLbs: ex.targetWeightLbs ?? null,
+          weightRecommendationSource: (ex.weightRecommendationSource as any) ?? null,
+          slug: ex.slug ?? undefined,
+          primary_muscle: ex.primaryMuscle ?? undefined,
+          is_compound: ex.isCompound ?? undefined,
+          _role: ex.slotRole ?? undefined,
+          _slot_label: ex.slotLabel ?? undefined,
+          prescription_type: ex.prescriptionType ?? undefined,
+        } as any)),
+      };
+      const template: SavedWorkoutTemplate = {
+        id: `workout_template_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        name,
+        workout: templateWorkout,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await upsertWorkoutTemplate(template);
+      setTemplateSaved(true);
+      Alert.alert('Saved', `${name} added to your templates.`);
+    } catch (e: any) {
+      Alert.alert('Save failed', e?.message ?? 'Could not save this workout template.');
+    } finally {
+      setTemplateSaving(false);
     }
   };
 
@@ -5522,6 +5596,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     Friends posts only include workout stats. Calories, macros, and body weight stay private.
                   </Text>
                 </View>
+
+                <TouchableOpacity
+                  style={[styles.summaryFeedbackBtn, { backgroundColor: templateSaved ? themeColors.success + '22' : themeColors.surfaceRaised, borderWidth: 1, borderColor: templateSaved ? themeColors.success : themeColors.border }]}
+                  onPress={handleSaveWorkoutTemplate}
+                  disabled={templateSaving || templateSaved}
+                  activeOpacity={0.85}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Ionicons name={templateSaved ? 'checkmark-circle-outline' : 'bookmark-outline'} size={15} color={templateSaved ? themeColors.success : themeColors.textPrimary} />
+                    <Text style={[styles.summaryFeedbackBtnText, { color: templateSaved ? themeColors.success : themeColors.textPrimary }]}>
+                      {templateSaving ? 'Saving…' : templateSaved ? 'Template Saved' : 'Save Template'}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
 
                 {/* Share image + Share-to-friends buttons.
                     "Share" exports an image; "Friends" sends the

@@ -36,7 +36,7 @@ import CollapsibleSection from '../components/CollapsibleSection';
 const { width: SCREEN_W } = Dimensions.get('window');
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
-import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood } from '../types';
+import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
 import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
 import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration } from '../services/api';
@@ -48,6 +48,8 @@ import {
   loadPreservedCompletedWorkouts,
   savePreservedCompletedWorkout,
   deleteWorkoutSession,
+  loadWorkoutTemplates,
+  deleteWorkoutTemplate,
 } from '../utils/workoutHistory';
 import { workoutSessionToLoggedPayload } from '../utils/workoutLogPayload';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
@@ -93,7 +95,7 @@ import { computeNutritionScore } from '../utils/nutritionScore';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { getActiveWatchSessionId, setActiveWatchSessionId } from '../utils/activeWatchSession';
 import { dynamicCompactTextProps, dynamicTextProps } from '../utils/dynamicType';
-import { tierOf } from '../utils/subscription';
+import { FREE_WORKOUT_TEMPLATE_LIMIT, tierOf } from '../utils/subscription';
 
 interface HomeScreenProps {
   authToken: string;
@@ -1339,6 +1341,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const renderedWorkoutSubTab = useDeferredValue(workoutSubTab);
   const [workoutHistoryList, setWorkoutHistoryList] = useState<WorkoutSession[]>([]);
   const [workoutHistorySummaries, setWorkoutHistorySummaries] = useState<any[]>([]);
+  const [workoutTemplates, setWorkoutTemplates] = useState<SavedWorkoutTemplate[]>([]);
   const workoutHistoryBundlePromiseRef = useRef<Promise<{
     history: WorkoutSession[];
     summaries: any[];
@@ -1965,6 +1968,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       .catch(() => {});
   }, [loadWorkoutHistoryBundle, planRefreshKey]);
 
+  useEffect(() => {
+    loadWorkoutTemplates().then(setWorkoutTemplates).catch(() => setWorkoutTemplates([]));
+  }, [planRefreshKey]);
+
   // Library sub-tab state sync. When the user leaves the Workout tab
   // (bottom tab change) while parked on Library and later returns,
   // `workoutSubTab` is still 'library' but `showExerciseLibrary` may be
@@ -2179,22 +2186,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         } else {
           try {
             if (authToken) {
-              const { scorePreparedness } = await import('../services/preparedness');
-              const { loadPreparednessInputs } = await import('../services/preparednessLoader');
-              const inputs = await loadPreparednessInputs({
-                authToken,
-                age: userProfile?.age ?? null,
-                proteinTarget: userProfile?.proteinGoal ?? null,
-                calorieTarget: userProfile?.calorieGoal ?? null,
-                todaysFocus: todayItem?.workout?.focus ?? null,
+              const { getReadinessToday } = await import('../services/api');
+              const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
+              const { getCycleStatus } = await import('../services/appleHealth');
+              const cached = await getCachedHealthDataSummary().catch(() => null);
+              const sleepHours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
+              const cycle = await getCycleStatus().catch(() => null);
+              const prep = await getReadinessToday(authToken, {
+                avgSleepHours: sleepHours,
+                avgRestingHr: cached?.restingHeartRate ?? null,
+                avgHrvMs: cached?.hrv ?? null,
+                lastNightSleepScore: cached?.raw?.sleepScore?.score ?? null,
+                plannedFocus: todayItem?.workout?.focus ?? todayWorkout?.focus ?? null,
+                cyclePhase: cycle?.phase ?? null,
+                dayOfCycle: cycle?.dayOfCycle ?? null,
               });
-              const prep = scorePreparedness(inputs);
               unifiedPrepScore = prep.score;
               unifiedPrepLabel = prep.label;
               // Update the ref so subsequent syncs reuse this value.
               canonicalPrepRef.current = { score: prep.score, label: prep.label, computedAt: Date.now() };
             }
-          } catch { /* fall back to backend score */ }
+          } catch { /* keep the last displayed readiness score */ }
         }
         const activeSessionId = status === 'active' ? getActiveWatchSessionId() : null;
         await pushWorkoutToWatch(todayWorkout, {
@@ -2550,6 +2562,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 avgSleepHours: sleepHours,
                 avgRestingHr: cached?.restingHeartRate ?? null,
                 avgHrvMs: cached?.hrv ?? null,
+                lastNightSleepScore: cached?.raw?.sleepScore?.score ?? null,
+                plannedFocus: todayItem?.workout?.focus ?? todayWorkout?.focus ?? null,
                 cyclePhase: cycle?.phase ?? null,
                 dayOfCycle: cycle?.dayOfCycle ?? null,
               }).catch(() => null);
@@ -2670,10 +2684,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const cached = await getCachedHealthDataSummary().catch(() => null);
         const sleepHours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
         const cycle = await getCycleStatus().catch(() => null);
+        const s = rePushStateRef.current;
+        const todayItem = resolveTodayScheduleItem(s.schedule, s.workoutPlan, s.planWeek);
+        const todayWorkout = todayItem?.workout ?? s.workoutPlan?.days?.[0] ?? null;
         const r = await getReadinessToday(authToken, {
           avgSleepHours: sleepHours,
           avgRestingHr: cached?.restingHeartRate ?? null,
           avgHrvMs: cached?.hrv ?? null,
+          lastNightSleepScore: cached?.raw?.sleepScore?.score ?? null,
+          plannedFocus: todayItem?.workout?.focus ?? todayWorkout?.focus ?? null,
           cyclePhase: cycle?.phase ?? null,
           dayOfCycle: cycle?.dayOfCycle ?? null,
         }).catch(() => null);
@@ -6661,6 +6680,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         const d = (s.startedAt ?? s.date ?? '').slice(0, 10);
                         return d === key;
                       })}
+                      templates={workoutTemplates}
+                      isFreeTier={isFreeTier}
+                      onStartTemplate={(template) => {
+                        import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {});
+                        onStartWorkout({
+                          ...template.workout,
+                          day: new Date().toLocaleDateString('en-US', { weekday: 'long' }),
+                        });
+                      }}
+                      onDeleteTemplate={(template) => {
+                        Alert.alert('Delete template?', `Remove ${template.name}?`, [
+                          { text: 'Cancel', style: 'cancel' },
+                          {
+                            text: 'Delete',
+                            style: 'destructive',
+                            onPress: async () => {
+                              await deleteWorkoutTemplate(template.id);
+                              const next = await loadWorkoutTemplates();
+                              setWorkoutTemplates(next);
+                            },
+                          },
+                        ]);
+                      }}
                       onStartCustom={() => setShowLiveTracker(true)}
                       onLogActivity={() => setShowLogActivity(true)}
                       onEditPlan={() => setWorkoutSubTab('equipment')}
@@ -10884,12 +10926,16 @@ function activityIcon(session: WorkoutSession): string {
   return 'walk-outline';
 }
 
-function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onLogActivity, onEditPlan }: {
+function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onLogActivity, onEditPlan, templates = [], isFreeTier = false, onStartTemplate, onDeleteTemplate }: {
   themeName?: import('../types').AppThemeName;
   sessions: WorkoutSession[];
   onStartCustom: () => void;
   onLogActivity: () => void;
   onEditPlan: () => void;
+  templates?: SavedWorkoutTemplate[];
+  isFreeTier?: boolean;
+  onStartTemplate?: (template: SavedWorkoutTemplate) => void;
+  onDeleteTemplate?: (template: SavedWorkoutTemplate) => void;
 }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -10972,6 +11018,66 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
           <Text style={[styles.todayActivitySecondaryText, { color: tc.textPrimary }]}>Edit plan</Text>
         </TouchableOpacity>
       </View>
+
+      {templates.length > 0 && (
+        <View style={styles.todayTemplateBlock}>
+          <View style={styles.todayActivityHeaderRow}>
+            <Text style={[styles.todayActivityHeader, { color: tc.textPrimary }]}>Saved templates</Text>
+            {isFreeTier ? (
+              <Text style={[styles.todayActivityCount, { color: tc.textMuted }]}>
+                {templates.length}/{FREE_WORKOUT_TEMPLATE_LIMIT}
+              </Text>
+            ) : null}
+          </View>
+          {templates.map((template) => {
+            const exerciseCount = template.workout?.exercises?.length ?? 0;
+            const setCount = (template.workout?.exercises ?? []).reduce((n, ex: any) => n + (Number(ex.sets) || Number(ex.targetSets) || 0), 0);
+            const meta = [
+              template.workout?.focus || 'Workout',
+              `${exerciseCount} exercise${exerciseCount === 1 ? '' : 's'}`,
+              setCount > 0 ? `${setCount} set${setCount === 1 ? '' : 's'}` : null,
+            ].filter(Boolean).join(' · ');
+            return (
+              <View
+                key={template.id}
+                style={[styles.todayActivityLoggedCard, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+                <TouchableOpacity
+                  style={styles.todayTemplateLaunchArea}
+                  onPress={() => onStartTemplate?.(template)}
+                  activeOpacity={0.78}>
+                  <View style={[styles.todayActivityIconBubble, { backgroundColor: tc.primary + '18' }]}>
+                    <Ionicons name="bookmark-outline" size={17} color={tc.primary} />
+                  </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text style={[styles.todayActivityTitle, { color: tc.textPrimary }]} numberOfLines={1}>
+                      {template.name}
+                    </Text>
+                    <Text style={[styles.todayActivityMeta, { color: tc.textMuted }]} numberOfLines={1}>
+                      {meta}
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+                {onDeleteTemplate ? (
+                  <TouchableOpacity
+                    style={styles.todayTemplateIconBtn}
+                    onPress={() => onDeleteTemplate(template)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    activeOpacity={0.72}>
+                    <Ionicons name="trash-outline" size={18} color={tc.textMuted} />
+                  </TouchableOpacity>
+                ) : null}
+                <TouchableOpacity
+                  style={styles.todayTemplateIconBtn}
+                  onPress={() => onStartTemplate?.(template)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  activeOpacity={0.72}>
+                  <Ionicons name="play-circle" size={22} color={tc.primary} />
+                </TouchableOpacity>
+              </View>
+            );
+          })}
+        </View>
+      )}
     </View>
   );
 }
@@ -12165,6 +12271,9 @@ const styles = StyleSheet.create({
   todayActivityHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   todayActivityHeader: { fontSize: 13, fontWeight: '900', letterSpacing: 0.2 },
   todayActivityCount: { fontSize: 11, fontWeight: '700' },
+  todayTemplateBlock: { gap: 8, marginTop: 4 },
+  todayTemplateLaunchArea: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  todayTemplateIconBtn: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   todayActivityLoggedCard: {
     flexDirection: 'row',
     alignItems: 'center',

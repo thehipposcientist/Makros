@@ -28,6 +28,8 @@ import type { UserProfile } from '../types';
 
 export type Tier = 'free' | 'pro';
 
+export const FREE_WORKOUT_TEMPLATE_LIMIT = 3;
+
 export type ProFeature =
   | 'ai_plan_generation'
   | 'ai_day_regenerate'
@@ -82,6 +84,17 @@ export function isPro(profile: UserProfile | null | undefined): boolean {
 
 export function isFree(profile: UserProfile | null | undefined): boolean {
   return tierOf(profile) === 'free';
+}
+
+export function workoutTemplateLimit(profile: UserProfile | null | undefined): number {
+  return isPro(profile) ? Infinity : FREE_WORKOUT_TEMPLATE_LIMIT;
+}
+
+export function canCreateWorkoutTemplate(
+  profile: UserProfile | null | undefined,
+  currentCount: number,
+): boolean {
+  return currentCount < workoutTemplateLimit(profile);
 }
 
 /** Gate a pro feature. Returns true if the user can proceed; returns false

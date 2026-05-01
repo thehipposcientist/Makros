@@ -349,6 +349,14 @@ export interface WorkoutPlan {
   trainerNote?: string;  // AI explanation of why this plan was structured this way
 }
 
+export interface SavedWorkoutTemplate {
+  id: string;
+  name: string;
+  workout: WorkoutDay;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ─── Nutrition plan types ─────────────────────────────────────────────────────
 
 export interface NutritionTargets {

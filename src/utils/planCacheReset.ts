@@ -97,6 +97,7 @@ export const PRESERVED_KEYS: ReadonlyArray<string> = Object.freeze([
   // Long-term history — never wiped by regen
   'weightEntries',
   'workoutHistory',
+  'workoutTemplates',
   'workoutHistoryList',
   'workoutHistorySummaries',
   'workoutSummaries',

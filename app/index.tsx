@@ -140,7 +140,7 @@ const USER_SCOPED_KEYS = [
   'trainerNote', 'nutritionistNote', 'supplementStack', 'metaData_v1',
   'weekStartDate', 'mealEdits', 'mealChecks',
   'workoutHistory', 'userLog', 'skippedWorkouts',
-  'mealRoutines', 'planChangeHistory', 'goalHistory',
+  'mealRoutines', 'workoutTemplates', 'planChangeHistory', 'goalHistory',
   // ── Per-user keys previously missing from sign-out wipe ─────────────
   // Without these, signing out + signing into a different account on
   // the same device left the prior user's workout summaries, checked
@@ -175,7 +175,7 @@ const SYNCED_STATE_KEYS = [
   // logWorkoutDone, but without the local blob a wipe loses per-set detail.
   'workoutHistory',
   'userLog', 'skippedWorkouts',
-  'mealRoutines', 'planChangeHistory', 'goalHistory',
+  'mealRoutines', 'workoutTemplates', 'planChangeHistory', 'goalHistory',
   // workoutSummaries excluded — local-only derivative of workoutHistory
   'preservedCompletedWorkouts', 'preservedCheckedMeals',
   'healthSummary', 'healthScoreResult',

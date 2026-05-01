@@ -243,6 +243,46 @@ def test_yesterday_strain_credits_rest_day():
     assert "rest day" in (yesterday.detail or "").lower()
 
 
+def test_fatigue_uses_recent_completion_and_planned_focus():
+    """Recent workout completions should feed the Recovery pillar, and
+    today's planned focus should use focus-specific muscle readiness
+    rather than only the systemic fatigue score."""
+    print("\n[test] readiness: leg focus uses recent leg fatigue")
+    from app.services.readiness.compute import compute_readiness
+    from app.models import WorkoutCompletion
+    from datetime import date, datetime, timezone
+
+    _, s, u = _setup()
+    s.add(WorkoutCompletion(
+        user_id=u.id,
+        workout_date=date.today(),
+        focus_label="Legs",
+        duration_seconds=75 * 60,
+        completed_at=datetime.now(timezone.utc),
+        resolved_muscle_fatigue={
+            "quads": 0.90,
+            "hamstrings": 0.80,
+            "glutes": 0.80,
+            "calves": 0.20,
+            "systemic": 0.15,
+        },
+    ))
+    s.commit()
+
+    r = compute_readiness(
+        s, u.id,
+        last_night_sleep_score=85,
+        avg_hrv_ms=60,
+        planned_focus="Legs",
+        use_cache=False,
+    )
+    recovery = next((f for f in r.factors if f.label == "Recovery"), None)
+    assert recovery is not None, f"Recovery factor should load recent completions, missing={r.missing}"
+    assert recovery.value <= 35, \
+        f"leg-specific fatigue should lower Recovery, got {recovery.value} ({recovery.detail})"
+    assert "legs" in (recovery.detail or "").lower()
+
+
 # ── Missed-watch / minimum-signals gate ──────────────────────────
 # These tests cover the user-reported bug: "wife forgot to wear her
 # Apple Watch last night, but our sleep score says 100." Root cause:

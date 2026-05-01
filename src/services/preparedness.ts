@@ -46,7 +46,7 @@ export interface PreparednessPillars {
 
 export interface PreparednessResult {
   score: number;
-  label: 'Primed' | 'Ready' | 'Moderate' | 'Fatigued';
+  label: 'Primed' | 'Ready' | 'Moderate' | 'Fatigued' | '—';
   pillars: PreparednessPillars;
   insights: string[];
   /** Concrete, actionable suggestions when a pillar comes back weak.

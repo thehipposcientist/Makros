@@ -7,7 +7,7 @@
 //
 // Pure functions only — no React Native runtime needed.
 
-import { tierOf, isPro, isFree, labelFor } from '../subscription';
+import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate, isFree, isPro, labelFor, tierOf, workoutTemplateLimit } from '../subscription';
 
 describe('subscription helpers', () => {
   describe('tierOf', () => {
@@ -51,6 +51,21 @@ describe('subscription helpers', () => {
         expect(typeof label).toBe('string');
         expect(label.length).toBeGreaterThan(0);
       }
+    });
+  });
+
+  describe('workout template limits', () => {
+    it('caps free users at three templates', () => {
+      const freeProfile = { subscriptionTier: 'free' } as any;
+      expect(workoutTemplateLimit(freeProfile)).toBe(FREE_WORKOUT_TEMPLATE_LIMIT);
+      expect(canCreateWorkoutTemplate(freeProfile, 2)).toBe(true);
+      expect(canCreateWorkoutTemplate(freeProfile, 3)).toBe(false);
+    });
+
+    it('allows unlimited templates for pro users', () => {
+      const proProfile = { subscriptionTier: 'pro' } as any;
+      expect(workoutTemplateLimit(proProfile)).toBe(Infinity);
+      expect(canCreateWorkoutTemplate(proProfile, 100)).toBe(true);
     });
   });
 });
