@@ -1,8 +1,4 @@
-"""Social router — friends + weekly digest only.
-
-No live feed, no posts, no reactions. The whole point is the stripped
-shape: friend list + once-a-week digest.
-"""
+"""Social router — friends, weekly digest, and bounded activity feed."""
 from __future__ import annotations
 
 import os
@@ -22,7 +18,9 @@ from app.models import (
 from app.services.social.digest import compute_digest, week_start_for, _accepted_friend_ids
 
 router = APIRouter(prefix="/social", tags=["social"])
-SOCIAL_FEED_ENABLED = os.getenv("SOCIAL_FEED_ENABLED", "0") == "1"
+_SOCIAL_FEED_FLAG = os.getenv("SOCIAL_FEED_ENABLED", "1").strip().lower()
+SOCIAL_FEED_ENABLED = _SOCIAL_FEED_FLAG not in {"0", "false", "no", "off"}
+FEED_EVENT_TYPES = ("workout_completed", "workout_post")
 
 
 # ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -584,6 +582,55 @@ class FeedItemRead(BaseModel):
     created_at: str
 
 
+def _sanitize_feed_payload_for_read(event_type: str, payload: dict | None) -> dict:
+    raw = payload if isinstance(payload, dict) else {}
+    if event_type == "workout_post":
+        clean: dict = {}
+        caption = raw.get("caption")
+        if isinstance(caption, str) and caption:
+            clean["caption"] = caption[:500]
+        photo = raw.get("photo_base64")
+        if isinstance(photo, str) and photo:
+            clean["photo_base64"] = photo
+        summary = raw.get("workout_summary")
+        if isinstance(summary, dict):
+            clean["workout_summary"] = _sanitize_workout_summary(summary)
+        return clean
+
+    if event_type == "workout_completed":
+        exercises = []
+        for ex in list(raw.get("exercises") or [])[:20]:
+            if not isinstance(ex, dict):
+                continue
+            sets = []
+            for s in list(ex.get("sets") or [])[:20]:
+                if not isinstance(s, dict):
+                    continue
+                sets.append({"reps": int(s.get("reps") or 0)})
+            exercises.append({
+                "name": str(ex.get("name") or "Exercise")[:80],
+                "sets": sets,
+            })
+        return {
+            "focus": str(raw.get("focus") or "Workout")[:80],
+            "duration_seconds": int(raw.get("duration_seconds") or 0),
+            "date": str(raw.get("date") or "")[:10],
+            "exercise_count": int(raw.get("exercise_count") or len(exercises)),
+            "exercises": exercises,
+        }
+
+    return {}
+
+
+def _can_view_feed_author(db: Session, viewer_id: int, author_id: int) -> bool:
+    if author_id == viewer_id:
+        return True
+    if author_id not in _accepted_friend_ids(db, viewer_id):
+        return False
+    prof = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == author_id)).first()
+    return bool(prof and prof.share_activity_enabled)
+
+
 @router.get("/feed")
 def get_feed(
     limit: int = 30,
@@ -605,6 +652,7 @@ def get_feed(
     q = (
         select(ActivityFeedItem)
         .where(ActivityFeedItem.user_id.in_(visible_ids))  # type: ignore[union-attr]
+        .where(ActivityFeedItem.event_type.in_(FEED_EVENT_TYPES))  # type: ignore[union-attr]
         .order_by(ActivityFeedItem.created_at.desc())  # type: ignore[union-attr]
         .limit(min(limit, 50))
     )
@@ -668,7 +716,7 @@ def get_feed(
             "username": uname,
             "display_name": dname or uname,
             "event_type": r.event_type,
-            "payload": r.payload,
+            "payload": _sanitize_feed_payload_for_read(r.event_type, r.payload),
             "created_at": r.created_at.isoformat() if r.created_at else "",
             "like_count": like_counts.get(r.id, 0),
             "liked_by_me": r.id in liked_by_me,
@@ -698,6 +746,7 @@ def get_user_feed(
     q = (
         select(ActivityFeedItem)
         .where(ActivityFeedItem.user_id == user_id)
+        .where(ActivityFeedItem.event_type.in_(FEED_EVENT_TYPES))
         .order_by(ActivityFeedItem.created_at.desc())
         .limit(min(limit, 50))
     )
@@ -740,7 +789,7 @@ def get_user_feed(
             "username": uname,
             "display_name": dname or uname,
             "event_type": r.event_type,
-            "payload": r.payload,
+            "payload": _sanitize_feed_payload_for_read(r.event_type, r.payload),
             "created_at": r.created_at.isoformat() if r.created_at else "",
             "like_count": like_counts.get(r.id, 0),
             "liked_by_me": r.id in liked_by_me,
@@ -751,10 +800,12 @@ def get_user_feed(
 def write_activity(db: Session, user_id: int, event_type: str, payload: dict) -> None:
     if not SOCIAL_FEED_ENABLED:
         return
+    if event_type not in FEED_EVENT_TYPES:
+        return
     db.add(ActivityFeedItem(
         user_id=user_id,
         event_type=event_type,
-        payload=payload,
+        payload=_sanitize_feed_payload_for_read(event_type, payload),
     ))
 
 
@@ -827,7 +878,7 @@ def create_post(
     item = ActivityFeedItem(
         user_id=current_user.id,
         event_type="workout_post",
-        payload=payload,
+        payload=_sanitize_feed_payload_for_read("workout_post", payload),
     )
     db.add(item)
     db.commit()
@@ -865,7 +916,9 @@ def toggle_like(
     if not SOCIAL_FEED_ENABLED:
         raise HTTPException(404, "social feed disabled")
     item = db.exec(select(ActivityFeedItem).where(ActivityFeedItem.id == item_id)).first()
-    if not item:
+    if not item or item.event_type not in FEED_EVENT_TYPES:
+        raise HTTPException(404, "item not found")
+    if not _can_view_feed_author(db, current_user.id, item.user_id):
         raise HTTPException(404, "item not found")
     existing = db.exec(
         select(FeedLike).where(

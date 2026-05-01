@@ -322,7 +322,8 @@ import TutorialOverlay from '../src/components/TutorialOverlay';
 import LegalDisclosureModal from '../src/components/LegalDisclosureModal';
 import { colors, getTheme, radius } from '../src/constants/theme';
 import { LEGAL_VERSION, SUPPORT_EMAIL } from '../src/constants/legal';
-import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, todayKey, isAppleHealthEnabled, setAppleHealthEnabled } from '../src/utils/workoutHistory';
+import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, savePlanChange, todayKey, isAppleHealthEnabled, setAppleHealthEnabled } from '../src/utils/workoutHistory';
+import { nextPlanWeekStart, formatPlanStartDateShort } from '../src/utils/planEffectiveDate';
 import { workoutSessionToLoggedPayload } from '../src/utils/workoutLogPayload';
 import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
 import { effectiveAge } from '../src/utils/age';
@@ -1271,11 +1272,18 @@ export default function Index() {
   const handleSaveProfile = async (updated: UserProfile, modeOverride?: typeof editMode) => {
     const effectiveMode = modeOverride ?? editMode;
 
-    // Goal/workout edits affect the next generated week, so ask before
-    // saving settings that will change the future plan shape.
-    if (effectiveMode === 'goal' || effectiveMode === 'workout') {
+    // Goal/workout/mealplan edits affect the next generated week, so
+    // confirm before saving any settings that change the future plan
+    // shape. Mealplan was previously skipped — added so users get the
+    // same "applies next Monday" heads-up when changing meals/day,
+    // variety, or allergens mid-week.
+    if (effectiveMode === 'goal' || effectiveMode === 'workout' || effectiveMode === 'mealplan') {
       const willRegen = effectiveMode === 'goal'
         ? (userProfile?.goal !== updated.goal || userProfile?.goalDetails?.pace !== updated.goalDetails?.pace)
+        : effectiveMode === 'mealplan'
+        ? (userProfile?.mealsPerDay !== updated.mealsPerDay
+            || userProfile?.mealVariety !== updated.mealVariety
+            || JSON.stringify(userProfile?.allergies ?? []) !== JSON.stringify(updated.allergies ?? []))
         : true;  // workout settings always regen
       if (willRegen) {
         setPendingSave({ profile: updated, mode: effectiveMode });
@@ -1869,18 +1877,46 @@ export default function Index() {
       {pendingSave && (() => {
         const tc = getTheme(userProfile?.themePreference).colors;
         const isGoal = pendingSave.mode === 'goal';
+        const isMealplan = pendingSave.mode === 'mealplan';
+        // Plan changes always apply to the NEXT plan week (Mondays)
+        // because mid-week regen would invalidate the user's in-flight
+        // schedule. Compute and show the exact date so they know when
+        // it kicks in.
+        const effectiveDate = nextPlanWeekStart();
+        const effectiveDateLabel = formatPlanStartDateShort(effectiveDate);
+        const titleText = isGoal
+          ? 'Save Goal Change?'
+          : isMealplan
+            ? 'Save Meal Plan Settings?'
+            : 'Save Workout Settings?';
+        const bodyText = isGoal
+          ? `Your active week stays unchanged so your in-flight plan is not disrupted. Your new goal applies starting ${effectiveDateLabel}.`
+          : isMealplan
+            ? `Today's meals stay as-is. The next meal plan starting ${effectiveDateLabel} will use these settings.`
+            : `Your current week stays unchanged. The next training week starting ${effectiveDateLabel} will use these settings; use Change Focus or Swap for immediate day-level tweaks.`;
+        const summaryText = isGoal
+          ? `Goal updated to ${(pendingSave.profile.goalDetails?.pace ?? '').toString() || pendingSave.profile.goal.replace(/_/g, ' ')}`
+          : isMealplan
+            ? `Meal plan settings updated (${pendingSave.profile.mealsPerDay ?? 3} meals/day · variety ${pendingSave.profile.mealVariety ?? 5})`
+            : `Workout settings updated (${pendingSave.profile.daysPerWeek ?? 0} days/week · ${pendingSave.profile.workoutDurationMinutes ?? 0} min)`;
         return (
           <Modal visible transparent animationType="fade" onRequestClose={() => setPendingSave(null)}>
             <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
               <View style={{ backgroundColor: tc.surface, borderRadius: 20, padding: 24, width: '100%', maxWidth: 340, borderWidth: 1, borderColor: tc.border }}>
                 <Text style={{ fontSize: 18, fontWeight: '800', color: tc.textPrimary, textAlign: 'center', marginBottom: 8 }}>
-                  {isGoal ? 'Save Goal Change?' : 'Save Workout Settings?'}
+                  {titleText}
                 </Text>
-                <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', marginBottom: 20, lineHeight: 18 }}>
-                  {isGoal
-                    ? 'Your current week stays unchanged so your active plan is not disrupted. Your new goal applies to the next generated week.'
-                    : 'Your current week stays unchanged. The next generated week will use these settings; use Change Focus or Swap for immediate day-level tweaks.'}
+                <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', marginBottom: 14, lineHeight: 18 }}>
+                  {bodyText}
                 </Text>
+                <View style={{ backgroundColor: tc.primary + '14', borderRadius: 10, padding: 10, marginBottom: 18, borderWidth: 1, borderColor: tc.primary + '33' }}>
+                  <Text style={{ fontSize: 11, fontWeight: '800', color: tc.primary, letterSpacing: 0.5, marginBottom: 2 }}>
+                    APPLIES {effectiveDateLabel.toUpperCase()}
+                  </Text>
+                  <Text style={{ fontSize: 11, color: tc.textSecondary, lineHeight: 15 }}>
+                    Tracked in Progress → Change History so you can review when each change took effect.
+                  </Text>
+                </View>
                 <TouchableOpacity
                   style={{ backgroundColor: tc.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
                   onPress={async () => {
@@ -1888,6 +1924,21 @@ export default function Index() {
                     setPendingSave(null);
                     try {
                       await _doSaveProfile(saved.profile, saved.mode as any);
+                      // Record this change so the user can see it in
+                      // Progress → Change History alongside coach
+                      // changes. Fire-and-forget — failure here mustn't
+                      // block the actual save.
+                      try {
+                        await savePlanChange({
+                          id: `user-${Date.now()}`,
+                          changedAt: new Date().toISOString(),
+                          changedBy: 'user',
+                          scope: saved.mode as 'goal' | 'workout' | 'mealplan',
+                          summary: summaryText,
+                          question: '',
+                          effectiveDate,
+                        });
+                      } catch { /* non-critical */ }
                     } catch (err: any) {
                       console.error('[_doSaveProfile] error:', err);
                       Alert.alert('Save failed', err?.message ?? 'Something went wrong. Please try again.');
@@ -1896,7 +1947,7 @@ export default function Index() {
                     }
                   }}>
                   <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>
-                    {isGoal ? 'Save Goal' : 'Save Settings'}
+                    {isGoal ? 'Save Goal' : isMealplan ? 'Save Meal Plan' : 'Save Settings'}
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity

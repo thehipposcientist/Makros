@@ -4104,7 +4104,7 @@ export interface FeedItem {
     duration_seconds?: number;
     date?: string;
     exercise_count?: number;
-    exercises?: Array<{ name: string; sets: Array<{ reps: number; weight: number | null }> }>;
+    exercises?: Array<{ name: string; sets: Array<{ reps: number }> }>;
     streak?: number;
     caption?: string;
     photo_base64?: string;
@@ -4142,7 +4142,7 @@ export interface WorkoutPostSummary {
   exercises: Array<{
     name: string;
     equipment?: string | null;
-    sets: Array<{ reps: number; weight_lbs: number }>;
+    sets: Array<{ reps: number; weight_lbs?: number }>;
   }>;
   total_sets: number;
   total_reps: number;

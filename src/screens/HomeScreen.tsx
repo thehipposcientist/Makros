@@ -25,8 +25,6 @@ import PressableScale from '../components/PressableScale';
 import ShimmerLogo from '../components/ShimmerLogo';
 import LogActivityModal from '../components/LogActivityModal';
 import FriendsModal from '../components/FriendsModal';
-// ShareWorkoutModal hidden — will re-enable when social feed is active
-// import ShareWorkoutModal from '../components/ShareWorkoutModal';
 import LiveActivityTracker from '../components/LiveActivityTracker';
 import WorkoutTemplateBuilderModal from '../components/WorkoutTemplateBuilderModal';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
@@ -6178,7 +6176,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <TouchableOpacity
                   style={{ alignSelf: 'flex-start', marginTop: 8, paddingVertical: 6, paddingHorizontal: 14, borderRadius: 8, backgroundColor: themeColors.warning }}
                   onPress={() => { setEmailError(''); setNewEmail(''); setShowEmailModal(true); }}>
-                  <Text style={{ fontSize: 12, fontWeight: '700', color: '#fff' }}>Update Email</Text>
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: getContrastingTextColor(themeColors.warning) }}>Update Email</Text>
                 </TouchableOpacity>
               </View>
             )}
@@ -9231,7 +9229,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       const fieldLines = summarizeApplyFields(m.applyResult?.changed_fields);
                       return (
                       <View key={fullIndex} style={[styles.trainerBubble, m.role === 'user' ? [styles.trainerBubbleUser, { backgroundColor: themeColors.primary, borderColor: themeColors.primary }] : [styles.trainerBubbleAssistant, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]]}>
-                        <Text style={[styles.trainerBubbleText, { color: m.role === 'user' ? '#FFFFFF' : themeColors.textPrimary }]}>{m.content}</Text>
+                        <Text style={[styles.trainerBubbleText, { color: m.role === 'user' ? getContrastingTextColor(themeColors.primary) : themeColors.textPrimary }]}>{m.content}</Text>
                         {m.role === 'assistant' && m.applyResult && (
                           <View style={[styles.coachActionResultCard, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -9305,7 +9303,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                 borderRadius: 8,
                                 backgroundColor: themeColors.primary,
                               }}>
-                              <Text style={{ fontSize: 11, fontWeight: '800', color: themeColors.background }}>
+                              <Text style={{ fontSize: 11, fontWeight: '800', color: getContrastingTextColor(themeColors.primary) }}>
                                 Apply
                               </Text>
                             </TouchableOpacity>
@@ -9368,7 +9366,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       onPress={applyPendingUpdate}
                       style={{ flex: 1, backgroundColor: themeColors.primary, borderRadius: radius.md, paddingVertical: 10, alignItems: 'center' }}
                       activeOpacity={0.8}>
-                      <Text style={{ fontSize: 13, fontWeight: '800', color: '#FFFFFF' }}>Apply</Text>
+                      <Text style={{ fontSize: 13, fontWeight: '800', color: getContrastingTextColor(themeColors.primary) }}>Apply</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       onPress={dismissPendingUpdate}
@@ -9425,7 +9423,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         }, 1500);
                       }}
                       style={{ flex: 1, backgroundColor: themeColors.primary, borderRadius: 8, paddingVertical: 10, alignItems: 'center' }}>
-                      <Text style={{ fontSize: 13, fontWeight: '800', color: '#fff' }}>Add & Update Plan</Text>
+                      <Text style={{ fontSize: 13, fontWeight: '800', color: getContrastingTextColor(themeColors.primary) }}>Add & Update Plan</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       onPress={() => {
@@ -9919,8 +9917,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           />
         </View>
       </Modal>
-
-      {/* ShareWorkoutModal removed — will re-enable with social feed */}
 
       {/* Gear tracker */}
       <Modal
@@ -10556,7 +10552,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       style={{ backgroundColor: themeColors.primary, borderRadius: radius.md, paddingHorizontal: 13, justifyContent: 'center' }}
                       onPress={handleSuppAiSearch}
                       disabled={suppAiLoading}>
-                      <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>
+                      <Text style={{ color: getContrastingTextColor(themeColors.primary), fontWeight: '700', fontSize: 15 }}>
                         {suppAiLoading ? '…' : '→'}
                       </Text>
                     </TouchableOpacity>
@@ -10620,7 +10616,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           setSuppAiQuery('');
                           Alert.alert('Added', `${suppAiResult.name} added to My Supplements.`);
                         }}>
-                        <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>+ Add to My Supplements</Text>
+                        <Text style={{ color: getContrastingTextColor(themeColors.primary), fontWeight: '700', fontSize: 13 }}>+ Add to My Supplements</Text>
                       </TouchableOpacity>
                       <TouchableOpacity
                         style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: radius.md, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: themeColors.border }}
@@ -10824,9 +10820,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               onPress={handleSaveEmail}
               disabled={emailSaving}>
               {emailSaving ? (
-                <ActivityIndicator color="#fff" size="small" />
+                <ActivityIndicator color={getContrastingTextColor(themeColors.primary)} size="small" />
               ) : (
-                <Text style={{ fontSize: 14, fontWeight: '700', color: '#fff' }}>Save</Text>
+                <Text style={{ fontSize: 14, fontWeight: '700', color: getContrastingTextColor(themeColors.primary) }}>Save</Text>
               )}
             </TouchableOpacity>
           </View>
@@ -11390,7 +11386,7 @@ function BottomTabButton({
             </Animated.View>
             {badge != null && badge > 0 && (
               <View style={{ position: 'absolute', top: -4, right: -8, backgroundColor: tint, borderRadius: 999, minWidth: 15, height: 15, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 }}>
-                <Text style={{ fontSize: 9, fontWeight: '800', color: '#000' }}>{badge}</Text>
+                <Text style={{ fontSize: 9, fontWeight: '800', color: getContrastingTextColor(tint) }}>{badge}</Text>
               </View>
             )}
           </View>

@@ -790,6 +790,7 @@ function AnimatedChartBar({
 export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, themeName, noHeader = false, nutritionPlan }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
   const styles = useMemo(() => createStyles(tc), [themeName]);
+  const primaryButtonTextColor = getContrastingTextColor(tc.primary);
   const meta = useMetaData();
   const isProTier = tierOf(userProfile) === 'pro';
   const [tab, setTab] = useState<'health' | 'body' | 'prs' | 'charts'>('health');
@@ -2257,7 +2258,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                             }}>
                               <Text style={{
                                 fontSize: 13, fontWeight: isToday ? '800' : cell.status === 'done' ? '700' : '400',
-                                color: cell.status === 'done' ? '#fff'
+                                color: cell.status === 'done' ? getContrastingTextColor(tc.primary)
                                   : cell.status === 'skipped' ? '#F59E0B'
                                   : cell.status === 'future' ? tc.textMuted + '55'
                                   : tc.textSecondary,
@@ -2831,16 +2832,30 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <View style={[styles.emptyBox, { marginBottom: 24 }]}>
               <Ionicons name="clipboard-outline" size={40} color={tc.textMuted} />
               <Text style={styles.emptyTitle}>No plan changes yet</Text>
-              <Text style={styles.emptyBody}>When your trainer or nutritionist updates your plan via chat, the changes will be logged here.</Text>
+              <Text style={styles.emptyBody}>Edits you make to your goal, workout, or meal plan settings — and updates from your trainer / nutritionist — will be logged here.</Text>
             </View>
           ) : planChanges.slice(0, 20).map((c, i) => {
             const d = new Date(c.changedAt);
             const label = `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+            // Title varies by author. User-driven entries get a scope
+            // tag (Goal / Workout / Meal Plan) so the user can scan
+            // their own settings tweaks at a glance.
+            const sourceLabel = c.changedBy === 'trainer'
+              ? 'Trainer Update'
+              : c.changedBy === 'nutritionist'
+                ? 'Nutritionist Update'
+                : c.scope === 'goal'
+                  ? 'You · Goal Change'
+                  : c.scope === 'workout'
+                    ? 'You · Workout Settings'
+                    : c.scope === 'mealplan'
+                      ? 'You · Meal Plan Settings'
+                      : 'You · Settings';
             return (
               <View key={c.id ?? i} style={[styles.sessionCard, { gap: 6, marginBottom: 8 }]}>
                 <View style={styles.sessionHeader}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.sessionFocus}>{c.changedBy === 'trainer' ? 'Trainer Update' : 'Nutritionist Update'}</Text>
+                    <Text style={styles.sessionFocus}>{sourceLabel}</Text>
                     <Text style={styles.sessionDate}>{label}</Text>
                   </View>
                   {c.id && (
@@ -2864,8 +2879,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     </TouchableOpacity>
                   )}
                 </View>
-                <Text style={{ fontSize: 12, color: tc.textMuted, fontStyle: 'italic', marginBottom: 2 }}>You asked: "{c.question.length > 80 ? c.question.slice(0, 80) + '…' : c.question}"</Text>
+                {/* Coach-driven changes carry the chat that triggered
+                    them; user-driven changes don't (they came from a
+                    settings save). */}
+                {c.changedBy !== 'user' && c.question && (
+                  <Text style={{ fontSize: 12, color: tc.textMuted, fontStyle: 'italic', marginBottom: 2 }}>
+                    You asked: "{c.question.length > 80 ? c.question.slice(0, 80) + '…' : c.question}"
+                  </Text>
+                )}
                 <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>{c.summary}</Text>
+                {c.effectiveDate && (
+                  <Text style={{ fontSize: 11, color: tc.primary, fontWeight: '700', marginTop: 2 }}>
+                    Took effect {(() => {
+                      const ed = new Date(`${c.effectiveDate}T12:00:00`);
+                      return `${MONTH_NAMES[ed.getMonth()]} ${ed.getDate()}, ${ed.getFullYear()}`;
+                    })()}
+                  </Text>
+                )}
               </View>
             );
           })}
@@ -4142,16 +4172,22 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </Text>
             <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
               <TouchableOpacity
-                style={[styles.bodyScanBtn, { flex: 1 }]}
+                style={[styles.bodyScanBtn, { flex: 1 }, bodyScanLoading && { opacity: 0.55 }]}
                 onPress={() => handleBodyScan('camera')}
                 disabled={bodyScanLoading}>
-                <Text style={styles.bodyScanBtnText}><Ionicons name="camera-outline" size={16} /> Camera</Text>
+                <View style={styles.bodyScanBtnContent}>
+                  <Ionicons name="camera-outline" size={16} color={primaryButtonTextColor} />
+                  <Text style={[styles.bodyScanBtnText, { color: primaryButtonTextColor }]}>Camera</Text>
+                </View>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.bodyScanBtn, { flex: 1, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }]}
+                style={[styles.bodyScanBtn, { flex: 1, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }, bodyScanLoading && { opacity: 0.55 }]}
                 onPress={() => handleBodyScan('library')}
                 disabled={bodyScanLoading}>
-                <Text style={[styles.bodyScanBtnText, { color: tc.textPrimary }]}><Ionicons name="images-outline" size={16} /> Library</Text>
+                <View style={styles.bodyScanBtnContent}>
+                  <Ionicons name="images-outline" size={16} color={tc.textPrimary} />
+                  <Text style={[styles.bodyScanBtnText, { color: tc.textPrimary }]}>Library</Text>
+                </View>
               </TouchableOpacity>
             </View>
             <Text style={{ fontSize: 10, color: tc.textMuted, textAlign: 'center', marginTop: 6, lineHeight: 14 }}>
@@ -4822,7 +4858,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     padding: 10, fontSize: 15, color: colors.textPrimary, backgroundColor: colors.surfaceRaised,
   },
   weightConfirmBtn: { backgroundColor: colors.primary, borderRadius: radius.md, paddingHorizontal: 14, paddingVertical: 10 },
-  weightConfirmText: { fontSize: 13, fontWeight: '700', color: '#fff' },
+  weightConfirmText: { fontSize: 13, fontWeight: '700', color: getContrastingTextColor(colors.primary) },
   weightCancelBtn: { paddingHorizontal: 8, paddingVertical: 10 },
   weightCancelText: { fontSize: 13, color: colors.textSecondary },
   weightRow: { flexDirection: 'row', gap: 8, marginBottom: 8 },
@@ -5130,10 +5166,16 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     paddingVertical: 12,
     alignItems: 'center',
   },
+  bodyScanBtnContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
   bodyScanBtnText: {
     fontSize: 14,
     fontWeight: '700',
-    color: '#fff',
+    color: getContrastingTextColor(colors.primary),
   },
   bodyScanResultCard: {
     backgroundColor: colors.surface,

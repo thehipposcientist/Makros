@@ -607,9 +607,19 @@ export interface GoalHistoryEntry {
 export interface PlanChangeEntry {
   id: string;
   changedAt: string;          // ISO timestamp
-  changedBy: 'trainer' | 'nutritionist';
+  /** Who/what authored the change. `user` is for direct edits via the
+   *  Goal/Workout/Mealplan settings (added 2026-04 so users can review
+   *  their own settings tweaks alongside coach-driven changes). */
+  changedBy: 'trainer' | 'nutritionist' | 'user';
+  /** Optional sub-category for `user` changes — useful for grouping in
+   *  the change-history view. */
+  scope?: 'goal' | 'workout' | 'mealplan';
   summary: string;            // human-readable description of what changed
-  question: string;           // the chat message that triggered the change
+  question: string;           // for coach-driven changes — the chat message that triggered it
+  /** The local date (YYYY-MM-DD) when the change is scheduled to take
+   *  effect on the user's plan. For mid-week edits this is the next
+   *  Monday; for immediate changes it's the date the change was saved. */
+  effectiveDate?: string;
 }
 
 export interface MealRoutineFood {

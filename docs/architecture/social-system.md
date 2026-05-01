@@ -1,23 +1,25 @@
 # Social System — Architecture
 
-Last synced from CLAUDE.md: 2026-04-27
+Last updated: 2026-05-01
 
-Friend list + once-a-week digest only. **No public feed, no posts, no reactions, no comments.**
+Friend list + once-a-week digest + a bounded friends-only activity feed. There is still no public discovery feed and no comments.
 
 ## Tables
 
 - `user_social_profiles` — `display_name` + `share_activity_enabled`. Lazy-created on first `/social/me` read. Auth-level `User.username` is the friend-search handle.
 - `friendships` — canonical pair (`user_a_id < user_b_id`), `status` ∈ {pending/accepted/blocked}, `requested_by`, `blocked_by`. Unique index on `(user_a_id, user_b_id)`.
 - `weekly_digest_cache` — per-user-per-week JSON. TTL = 1 hour + eager invalidation on accept/remove/block.
+- `activity_feed` — friends-only workout activity rows. Feed payloads are sanitized to workout structure only.
+- `feed_likes` — one like per user/feed item.
 
 ## Privacy Model
 
 | Visible to friends | Never visible |
 |---|---|
-| Sessions completed (count only) | Calories, macros, weight |
-| Streak length | Body fat, measurements |
-| Goal label | Specific lifts/weights, PRs |
-| Active-in-last-48h dot | Meal logs, recovery flags |
+| Sessions completed, workout focus/duration/exercises/sets/reps | Calories, macros, body weight |
+| Streak length | Body fat, measurements, body photos |
+| Goal label | Specific lift weights, meal logs, recovery flags |
+| Active-in-last-48h dot | Private notes, reports, account data |
 
 `share_activity_enabled` defaults **off**. Friends without it on show `sessions=0 / streak=0 / share_enabled=false`.
 
@@ -42,20 +44,25 @@ Digest `summary`: `friend_count`, `friends_trained_this_week`, `total_friend_ses
 | `POST /social/friends/{id}/{accept,reject,remove,block}` | State transitions. `reject`/`remove` delete row. `block` keeps row hidden. |
 | `GET /social/search?q=...` | Username prefix search, ≥2 chars, max 10 results, excludes caller. |
 | `GET /social/digest` | Cached weekly payload. Eagerly invalidated on friend-state change. |
+| `GET /social/feed` | Bounded feed for self + friends with sharing enabled. |
+| `GET /social/feed/{user_id}` | Friend detail feed when the friend has sharing enabled. |
+| `POST /social/posts` | Optional workout share with caption/photo + sanitized workout summary. |
+| `DELETE /social/posts/{id}` | Delete own post. |
+| `POST /social/feed/{id}/like` | Toggle a like on a visible feed item. |
 
-## Client (`src/components/FriendsModal.tsx`)
+## Client (`src/components/FriendsModal.tsx`, `src/components/SocialFeedView.tsx`)
 
-Full-screen modal in `HomeScreen`. Three sections:
-1. **THIS WEEK** — digest summary + YOU row.
-2. **REQUESTS / FRIENDS / SENT** — pending incoming, accepted, pending outgoing. Long-press → remove confirm.
-3. **ADD FRIENDS** — username prefix search with 250ms debounce.
+Full-screen modal in `HomeScreen`. Two tabs:
+1. **Activity** — latest workout shares from self + friends with sharing enabled.
+2. **Friends** — THIS WEEK digest, requests/friends/sent rows, and ADD FRIENDS username search with 250ms debounce.
 
 Profile tab: "Friends · N" row with pending-request badge. Count refreshes on Profile-tab activation + FriendsModal close.
 
 ## Key Design Decisions
 
-- No live feed — keeps App Store review simple.
+- Activity is bounded and friends-only — it is a recent activity surface, not an infinite public feed.
 - Reuse `User.username` (globally unique) as friend handle — no separate social handle.
 - Canonical pair `(user_a_id < user_b_id)` — exactly one row per pair.
 - Eager cache invalidation — newly-accepted friend appears in digest within seconds.
-- Digest reads `WorkoutCompletion.workout_date` only — calorie/macro/weight data NEVER crosses social boundary.
+- Digest reads `WorkoutCompletion.workout_date` only.
+- Feed write/read paths sanitize payloads so calorie/macro/body-weight/body-composition data and lift weights never cross social surfaces.

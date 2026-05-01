@@ -2,7 +2,7 @@
 // frontend compares the active user's accepted version against this and
 // shows the LegalDisclosureModal on next launch when they differ.
 export const LEGAL_VERSION = '2026-04-29.2';
-export const SUPPORT_EMAIL = 'support@thallo.app';
+export const SUPPORT_EMAIL = 'thallosupport@gmail.com';
 
 export const LEGAL_SECTIONS = [
   {

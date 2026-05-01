@@ -1638,10 +1638,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 setGoalMatchLoading(false);
               }}>
               {goalMatchLoading
-                ? <ActivityIndicator size="small" color="#fff" />
+                ? <ActivityIndicator size="small" color={getContrastingTextColor(tc.primary)} />
                 : <>
-                    <Ionicons name="sparkles" size={14} color="#fff" />
-                    <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Find my goal</Text>
+                    <Ionicons name="sparkles" size={14} color={getContrastingTextColor(tc.primary)} />
+                    <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '700', fontSize: 14 }}>Find my goal</Text>
                   </>
               }
             </TouchableOpacity>
@@ -1811,7 +1811,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                         setPace('moderate');
                         setGoalPreviewId(null);
                       }}>
-                      <Text style={{ fontSize: 14, fontWeight: '700', color: '#fff' }}>Select this goal</Text>
+                      <Text style={{ fontSize: 14, fontWeight: '700', color: getContrastingTextColor(tc.primary) }}>Select this goal</Text>
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -2012,7 +2012,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                     setInjuryEntries(prev => [...prev, newInjury]);
                     setShowAddInjury(false);
                   }}>
-                  <Text style={[styles.modalConfirmText, { color: '#fff' }]}>Add</Text>
+                  <Text style={[styles.modalConfirmText, { color: getContrastingTextColor(tc.primary) }]}>Add</Text>
                 </TouchableOpacity>
               </View>
             </TouchableOpacity>
@@ -2328,7 +2328,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                           style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: tc.primary, paddingVertical: 10, paddingHorizontal: 14, borderRadius: radius.md, alignSelf: 'flex-start', marginTop: 4 }}
                           onPress={() => setVideoExerciseName(selectedExercise.name)}
                           activeOpacity={0.8}>
-                          <Text style={{ fontSize: 14, color: '#fff', fontWeight: '700' }}>▶  Watch Form Video</Text>
+                          <Text style={{ fontSize: 14, color: getContrastingTextColor(tc.primary), fontWeight: '700' }}>▶  Watch Form Video</Text>
                         </TouchableOpacity>
                       </View>
 
@@ -2407,8 +2407,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                       onPress={handleAiExerciseSearch}
                       disabled={aiExerciseLoading}>
                       {aiExerciseLoading
-                        ? <ActivityIndicator size="small" color="#fff" />
-                        : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>AI Search</Text>}
+                        ? <ActivityIndicator size="small" color={getContrastingTextColor(tc.primary)} />
+                        : <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '700', fontSize: 13 }}>AI Search</Text>}
                     </TouchableOpacity>
                   )}
                 </View>
@@ -3160,8 +3160,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 setSuppSearchLoading(false);
               }}>
               {suppSearchLoading
-                ? <ActivityIndicator size="small" color="#fff" />
-                : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Add</Text>
+                ? <ActivityIndicator size="small" color={getContrastingTextColor(tc.primary)} />
+                : <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '700', fontSize: 13 }}>Add</Text>
               }
             </TouchableOpacity>
           </View>
@@ -3617,7 +3617,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 <TextInput value={routineFoodInput} onChangeText={setRoutineFoodInput} placeholder="Food name" placeholderTextColor={tc.textMuted} style={{ flex: 2, borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingHorizontal: 10, paddingVertical: 9, fontSize: 14, color: tc.textPrimary, backgroundColor: tc.surfaceRaised }} />
                 <TextInput value={routineFoodQtyInput} onChangeText={setRoutineFoodQtyInput} placeholder="Qty" placeholderTextColor={tc.textMuted} style={{ flex: 1, borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingHorizontal: 10, paddingVertical: 9, fontSize: 14, color: tc.textPrimary, backgroundColor: tc.surfaceRaised }} />
                 <TouchableOpacity onPress={handleRoutineAddFood} style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingHorizontal: 14, justifyContent: 'center' }}>
-                  <Text style={{ fontSize: 20, color: '#fff', fontWeight: '700', lineHeight: 24 }}>+</Text>
+                  <Text style={{ fontSize: 20, color: getContrastingTextColor(tc.primary), fontWeight: '700', lineHeight: 24 }}>+</Text>
                 </TouchableOpacity>
               </View>
               {routineFoods.length > 0 && (
@@ -3636,7 +3636,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 6 }}>Notes (optional)</Text>
               <TextInput value={routineNotes} onChangeText={setRoutineNotes} placeholder="e.g. I have this every morning before the gym" placeholderTextColor={tc.textMuted} multiline style={{ borderWidth: 1, borderColor: tc.border, borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: tc.textPrimary, backgroundColor: tc.surfaceRaised, minHeight: 60, textAlignVertical: 'top', marginBottom: 20 }} />
               <TouchableOpacity onPress={handleRoutineSave} style={{ backgroundColor: tc.primary, borderRadius: radius.lg, paddingVertical: 14, alignItems: 'center', marginBottom: 8 }} activeOpacity={0.85}>
-                <Text style={{ fontSize: 15, fontWeight: '800', color: '#fff' }}>{editingRoutine ? 'Save Changes' : 'Save Routine'}</Text>
+                <Text style={{ fontSize: 15, fontWeight: '800', color: getContrastingTextColor(tc.primary) }}>{editingRoutine ? 'Save Changes' : 'Save Routine'}</Text>
               </TouchableOpacity>
               {editingRoutine && (
                 <TouchableOpacity onPress={() => { setRoutineModalVisible(false); handleRoutineDelete(editingRoutine.id); }} style={{ paddingVertical: 12, alignItems: 'center' }} activeOpacity={0.7}>

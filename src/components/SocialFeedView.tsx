@@ -16,11 +16,9 @@
 // from soft-deleted users render as "unknown" (backend filter).
 //
 // De-duplication: one card per (user_id, workout_date). A single
-// workout can produce multiple DB rows — an auto `workout_completed`
-// event plus a manual `workout_post` share plus one `pr_achieved` per
-// new record. The feed groups them: workout_post beats
-// workout_completed for the headline card; PR items attach as inline
-// badges instead of separate blank cards.
+// workout can produce both an auto `workout_completed` row and a manual
+// `workout_post` share. The feed groups them so workout_post beats
+// workout_completed for the headline card.
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
@@ -199,7 +197,7 @@ export default function SocialFeedView({
         date: item.payload.date ?? '',
         exercises: (item.payload.exercises ?? []).map((ex: any) => ({
           name: ex.name,
-          sets: (ex.sets ?? []).map((s: any) => ({ reps: s.reps, weight_lbs: s.weight ?? 0 })),
+          sets: (ex.sets ?? []).map((s: any) => ({ reps: s.reps })),
         })),
         total_sets: (item.payload.exercises ?? [])
           .reduce((t: number, ex: any) => t + (ex.sets?.length ?? 0), 0),

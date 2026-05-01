@@ -80,4 +80,4 @@ Last updated: 2026-05-01
 - Activity log includes: Yard Work, Chopping Wood, Moving/Lifting, Gardening, House Cleaning, Construction, Shoveling, Playing w/ Kids, Dancing.
 - Sports: Pickleball, Surfing, Skiing, Spin Class.
 - Smart weekly check-in modal leads with "TRAINER'S READ · THIS WEEK" block + inline Apply pills.
-- Friends modal: THIS WEEK digest + REQUESTS/FRIENDS/SENT sections + ADD FRIENDS search.
+- Friends modal: Activity feed tab + Friends tab with THIS WEEK digest, REQUESTS/FRIENDS/SENT sections, and ADD FRIENDS search.

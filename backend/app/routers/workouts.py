@@ -1588,7 +1588,7 @@ def mark_workout_complete(
                 {
                     "name": ex.name,
                     "sets": [
-                        {"reps": s.actual_reps, "weight": s.actual_weight_lbs}
+                        {"reps": s.actual_reps}
                         for s in ex.sets
                     ],
                 }

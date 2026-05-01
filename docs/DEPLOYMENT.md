@@ -144,7 +144,7 @@ Use plain text for each. **Do not leave any value blank** — App Runner rejects
 | `SMTP_USE_TLS` | `1` |
 | `EMAIL_VERIFICATION_URL_TEMPLATE` | optional deep-link/web template containing `{email}` and `{token}` |
 | `PASSWORD_RESET_URL_TEMPLATE` | optional deep-link/web template containing `{email}` and `{token}` |
-| `SOCIAL_FEED_ENABLED` | omit or set `0` for external beta |
+| `SOCIAL_FEED_ENABLED` | omit or set `1`; set `0` only to disable friends activity feed |
 
 **Do NOT set `DEV_PASSWORD_RESET`.** Omitting it disables the dev-mode password reset endpoint in prod.
 

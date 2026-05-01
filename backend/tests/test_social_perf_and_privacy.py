@@ -7,6 +7,7 @@ Covers:
 """
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import event
@@ -18,6 +19,7 @@ from app.models import (
 )
 from app.enums import GoalType
 from app.services.social.digest import compute_digest
+from app.routers.social import _sanitize_feed_payload_for_read
 
 
 def _ok(label: str) -> None:
@@ -205,11 +207,67 @@ def test_digest_respects_share_toggle():
     _ok("share toggle hides stats for opted-out friends")
 
 
+def test_feed_sanitizer_removes_sensitive_workout_fields():
+    """Activity feed payloads must never expose lift/body/nutrition data."""
+    print("\n[test] feed: sanitizer removes sensitive workout fields")
+    clean = _sanitize_feed_payload_for_read("workout_completed", {
+        "focus": "Push",
+        "duration_seconds": 2700,
+        "date": "2026-05-01",
+        "calories": 500,
+        "body_weight_lbs": 185,
+        "exercises": [{
+            "name": "Bench Press",
+            "sets": [{
+                "reps": 5,
+                "weight": 225,
+                "weight_lbs": 225,
+                "calories": 80,
+            }],
+        }],
+    })
+    dumped = json.dumps(clean).lower()
+    assert clean["exercises"][0]["sets"] == [{"reps": 5}]
+    assert "weight" not in dumped
+    assert "calorie" not in dumped
+    _ok("auto workout feed payload keeps only structure and reps")
+
+
+def test_feed_sanitizer_removes_sensitive_post_fields():
+    """Manual workout posts get the same privacy boundary as auto rows."""
+    print("\n[test] feed: sanitizer removes sensitive post fields")
+    clean = _sanitize_feed_payload_for_read("workout_post", {
+        "caption": "Solid session",
+        "body_weight_lbs": 185,
+        "workout_summary": {
+            "focus": "Lower",
+            "duration_seconds": 3600,
+            "date": "2026-05-01",
+            "calories": 700,
+            "exercises": [{
+                "name": "Back Squat",
+                "equipment": "barbell",
+                "sets": [{"reps": 3, "weight_lbs": 315}],
+            }],
+            "total_sets": 1,
+            "total_reps": 3,
+        },
+    })
+    dumped = json.dumps(clean).lower()
+    assert clean["caption"] == "Solid session"
+    assert clean["workout_summary"]["exercises"][0]["sets"] == [{"reps": 3}]
+    assert "weight" not in dumped
+    assert "calorie" not in dumped
+    _ok("manual post payload keeps caption/photo plus sanitized workout structure")
+
+
 cases = [
     test_digest_drops_soft_deleted_friends,
     test_digest_query_count_is_constant,
     test_digest_with_zero_friends_doesnt_crash,
     test_digest_respects_share_toggle,
+    test_feed_sanitizer_removes_sensitive_workout_fields,
+    test_feed_sanitizer_removes_sensitive_post_fields,
 ]
 
 

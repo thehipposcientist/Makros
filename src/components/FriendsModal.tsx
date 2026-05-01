@@ -14,7 +14,7 @@ import {
 } from 'react-native';
 import FadeInView from './FadeInView';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius, spacing } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius, spacing } from '../constants/theme';
 import type { AppThemeName } from '../types';
 import { dynamicTextProps } from '../utils/dynamicType';
 import {
@@ -37,7 +37,7 @@ import {
 } from '../services/api';
 import SocialFeedView from './SocialFeedView';
 
-const SOCIAL_ACTIVITY_FEED_ENABLED = false;
+const SOCIAL_ACTIVITY_FEED_ENABLED = true;
 
 interface Props {
   visible: boolean;
@@ -587,7 +587,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                       </Text>
                     </View>
                     <TouchableOpacity style={styles.inviteButton} onPress={onShareInvite} activeOpacity={0.78}>
-                      <Ionicons name="share-outline" size={15} color="#000" />
+                      <Ionicons name="share-outline" size={15} color={getContrastingTextColor(colors.primary)} />
                       <Text style={styles.btnPrimaryText}>Share</Text>
                     </TouchableOpacity>
                   </View>
@@ -820,7 +820,7 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       paddingVertical: 8,
       borderRadius: radius.full,
     },
-    btnPrimaryText: { fontSize: 12, fontWeight: '800', color: '#000' },
+    btnPrimaryText: { fontSize: 12, fontWeight: '800', color: getContrastingTextColor(colors.primary) },
     btnSecondary: {
       backgroundColor: 'transparent',
       borderColor: colors.border,

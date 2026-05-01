@@ -28,7 +28,7 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
     },
   });
 })();
-const SOCIAL_WORKOUT_POSTS_ENABLED = false;
+const SOCIAL_WORKOUT_POSTS_ENABLED = true;
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
@@ -5209,7 +5209,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       onPress={() => startExerciseTimer(timerModalKey)}
                       accessibilityRole="button"
                       accessibilityLabel={mElapsed > 0 ? 'Resume timer' : 'Start timer'}>
-                      <Text style={styles.timerModalBigBtnText}>{mElapsed > 0 ? 'Resume' : 'Start'}</Text>
+                      <Text style={[styles.timerModalBigBtnText, { color: getContrastingTextColor(themeColors.primary) }]}>
+                        {mElapsed > 0 ? 'Resume' : 'Start'}
+                      </Text>
                     </TouchableOpacity>
                   )}
                 </View>
@@ -5768,7 +5770,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               ) : (
                 coachChat.map((m, idx) => (
                   <View key={idx} style={[styles.coachBubble, m.role === 'user' ? styles.coachBubbleUser : styles.coachBubbleAssistant]}>
-                    <Text style={styles.coachBubbleText}>{m.content}</Text>
+                    <Text style={[styles.coachBubbleText, m.role === 'user' && { color: getContrastingTextColor(themeColors.primary) }]}>
+                      {m.content}
+                    </Text>
                   </View>
                 ))
               )}

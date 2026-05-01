@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import type { AppThemeName } from '../types';
 import { createSocialPost, type WorkoutPostSummary } from '../services/api';
 
@@ -57,10 +57,18 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
     if (!workoutSummary) return;
     setPosting(true);
     try {
+      const socialSummary: WorkoutPostSummary = {
+        ...workoutSummary,
+        exercises: workoutSummary.exercises.map(ex => ({
+          name: ex.name,
+          equipment: ex.equipment ?? null,
+          sets: ex.sets.map(set => ({ reps: set.reps })),
+        })),
+      };
       await createSocialPost(authToken, {
         caption: caption.trim() || undefined,
         photo_base64: photoBase64 || undefined,
-        workout_summary: workoutSummary,
+        workout_summary: socialSummary,
       });
       setCaption('');
       setPhotoBase64(null);
@@ -110,7 +118,7 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
                 activeOpacity={0.85}
               >
                 {posting ? (
-                  <ActivityIndicator size="small" color="#000" />
+                  <ActivityIndicator size="small" color={getContrastingTextColor(c.primary)} />
                 ) : (
                   <Text style={s.postBtnText}>Post</Text>
                 )}
@@ -212,7 +220,7 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
                   <View style={s.exerciseList}>
                     {exs.map((ex, i) => {
                       const bestSet = ex.sets.reduce(
-                        (best, set) => (set.weight_lbs > best.weight_lbs ? set : best),
+                        (best, set) => ((set.weight_lbs ?? 0) > (best.weight_lbs ?? 0) ? set : best),
                         ex.sets[0] ?? { reps: 0, weight_lbs: 0 },
                       );
                       return (
@@ -225,7 +233,7 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
                           </View>
                           <Text style={s.exerciseSets}>
                             {ex.sets.length}x{bestSet.reps}
-                            {bestSet.weight_lbs > 0 ? ` @ ${bestSet.weight_lbs} lbs` : ''}
+                            {(bestSet.weight_lbs ?? 0) > 0 ? ` @ ${bestSet.weight_lbs} lbs` : ''}
                           </Text>
                         </View>
                       );
@@ -260,7 +268,7 @@ const mk = (c: ReturnType<typeof getTheme>['colors']) =>
       paddingHorizontal: 20, paddingVertical: 8,
       borderRadius: radius.full, minWidth: 64, alignItems: 'center',
     },
-    postBtnText: { fontSize: 14, fontWeight: '800', color: '#000' },
+    postBtnText: { fontSize: 14, fontWeight: '800', color: getContrastingTextColor(c.primary) },
     captionInput: {
       fontSize: 15, color: c.textPrimary,
       backgroundColor: c.surface,
