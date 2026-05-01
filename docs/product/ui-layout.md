@@ -8,8 +8,9 @@ Last updated: 2026-05-01
 - **Plan** — fixed 7-day **PlanWeek** schedule (Mon-Sun, anchored on the
   most recent Monday). Renders a compact weekly selector in chronological
   order, then one full selected-day card. Past days show as completed /
-  skipped in the selector, today is selected by default, and forward days remain
-  queued. The 7 days are stable for the full week — no mid-week regeneration.
+  skipped in the selector, today is selected by default and keeps a persistent
+  top dot when another day is selected, and forward days remain queued. The 7
+  days are stable for the full week — no mid-week regeneration.
   Each selected day card has per-exercise Swap chip → `PlanSwapExerciseModal`.
   Today's selected day also renders extra-workout cards for live custom
   tracking, manual logging, and detected Apple Health imports.

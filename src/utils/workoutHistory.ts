@@ -644,11 +644,10 @@ export async function getExerciseBests(exerciseName: string): Promise<ExerciseBe
 }
 
 /** Returns the best set (heaviest weight, tie-break by reps) per exercise across all history. */
-export async function getPersonalRecords(): Promise<PR[]> {
-  const history = await loadWorkoutHistory();
+export function derivePersonalRecords(history: WorkoutSession[]): PR[] {
   const prMap = new Map<string, PR>();
 
-  for (const session of history) {
+  for (const session of history.filter(s => s.completed && !s.skipped)) {
     for (const ex of session.exercises) {
       for (const set of ex.sets) {
         const key = ex.name.toLowerCase();
@@ -673,6 +672,11 @@ export async function getPersonalRecords(): Promise<PR[]> {
   return Array.from(prMap.values()).sort((a, b) =>
     a.exerciseName.localeCompare(b.exerciseName)
   );
+}
+
+/** Returns the best set (heaviest weight, tie-break by reps) per exercise across all history. */
+export async function getPersonalRecords(): Promise<PR[]> {
+  return derivePersonalRecords(await loadWorkoutHistory());
 }
 
 // ── Apple Health data persistence ────────────────────────────────────────────

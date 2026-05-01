@@ -7,7 +7,7 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 }
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import { DailyNutritionPlan, MealSuggestion, AppThemeName } from '../types';
-import { elevations, getTheme, radius, typography } from '../constants/theme';
+import { elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { ensureItems, formatItemAmount } from '../utils/mealItems';
 import { computeDayInsights } from '../utils/nutritionLayers';
 import { classifyFood, computeNutritionScore, computePlanGutHealth } from '../utils/nutritionScore';
@@ -1063,8 +1063,8 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
       }));
 
   const swipeActions: SwipeAction[] = [];
-  if (onShowRecipe) swipeActions.push({ icon: 'restaurant-outline', color: '#fff', bgColor: colors.primary, onPress: () => onShowRecipe(mealType, meal), label: 'Recipe' });
-  if (onShuffle) swipeActions.push({ icon: 'shuffle', color: '#fff', bgColor: mealAccent.strong, onPress: onShuffle, label: 'Shuffle' });
+  if (onShowRecipe) swipeActions.push({ icon: 'restaurant-outline', color: getContrastingTextColor(colors.primary), bgColor: colors.primary, onPress: () => onShowRecipe(mealType, meal), label: 'Recipe' });
+  if (onShuffle) swipeActions.push({ icon: 'shuffle', color: getContrastingTextColor(mealAccent.strong), bgColor: mealAccent.strong, onPress: onShuffle, label: 'Shuffle' });
   if (onMoveUp) swipeActions.push({ icon: 'arrow-up', color: '#fff', bgColor: '#6B7280', onPress: onMoveUp });
   if (onMoveDown) swipeActions.push({ icon: 'arrow-down', color: '#fff', bgColor: '#6B7280', onPress: onMoveDown });
   if (onRemove) swipeActions.push({ icon: 'trash-outline', color: '#fff', bgColor: colors.error ?? '#EF4444', onPress: () => onRemove(mealType), label: 'Remove' });

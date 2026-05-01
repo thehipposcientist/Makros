@@ -20,7 +20,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import {
   getWeeklyReview, applyRecommendationAction,
@@ -344,7 +344,7 @@ export default function WeeklyCoachingCard({
                           paddingHorizontal: 12, paddingVertical: 6,
                           borderRadius: 8, backgroundColor: pc,
                         }}>
-                        <Text style={{ fontSize: 11, fontWeight: '800', color: '#fff' }}>
+                        <Text style={{ fontSize: 11, fontWeight: '800', color: getContrastingTextColor(pc) }}>
                           {rec.action.type === 'noop' ? 'Got it' : 'Apply'}
                         </Text>
                       </TouchableOpacity>

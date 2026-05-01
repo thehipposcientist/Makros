@@ -11,7 +11,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { cleanAiText } from '../utils/aiText';
 import type { AppThemeName } from '../types';
 import {
@@ -489,7 +489,7 @@ export default function CoachCheckinModal({
                                       borderRadius: 6,
                                       backgroundColor: rec.priority === 'warn' ? colors.error : rec.priority === 'suggest' ? colors.warning : colors.primary,
                                     }}>
-                                    <Text style={{ fontSize: 10, fontWeight: '800', color: '#fff' }}>
+                                    <Text style={{ fontSize: 10, fontWeight: '800', color: getContrastingTextColor(rec.priority === 'warn' ? colors.error : rec.priority === 'suggest' ? colors.warning : colors.primary) }}>
                                       Apply
                                     </Text>
                                   </TouchableOpacity>
@@ -736,7 +736,7 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) => StyleShe
     fontSize: 15,
     fontWeight: '700',
   },
-  scaleDotTextActive: { color: '#fff' },
+  scaleDotTextActive: { color: getContrastingTextColor(colors.primary) },
   scaleHint: {
     color: colors.textMuted,
     fontSize: 12,
@@ -818,7 +818,7 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) => StyleShe
     marginTop: 10,
   },
   submitBtnText: {
-    color: '#fff',
+    color: getContrastingTextColor(colors.primary),
     fontSize: 16,
     fontWeight: '700',
   },
@@ -926,7 +926,7 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) => StyleShe
     marginTop: 10,
   },
   doneBtnText: {
-    color: '#fff',
+    color: getContrastingTextColor(colors.primary),
     fontSize: 16,
     fontWeight: '700',
   },

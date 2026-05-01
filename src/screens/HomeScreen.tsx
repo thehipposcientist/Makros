@@ -2275,39 +2275,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         // healthDataSummary the phone Progress tab reads, so watch
         // and phone always show the same number.
         try {
-          const { pushSleepToWatch } = await import('../utils/watchSync');
+          const { pushSleepToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
           const { getHealthDataSummary } = await import('../services/healthDataSummary');
           // Use the fresh-fetcher (cache + auto-refresh if stale) so the
           // watch gets the same sleep score the phone's Progress card
           // sees, not whatever was last cached. Otherwise watch stays on
           // a stale value while phone refreshes silently in the background.
           const cached = await getHealthDataSummary({ age: userProfile?.physicalStats?.age ?? null });
-          const ss = (cached?.raw as any)?.sleepScore ?? null;
-          const hours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
-          // Prefer the full sleep score when available; fall back to
-          // hours-band when sleepScore is null (no Apple Health data).
-          let score: number | null = ss?.score ?? null;
-          let label: string | null = ss?.rating ?? null;
-          let summary: string | null = null;
-          if (score != null && hours != null) {
-            summary = `${hours.toFixed(1)}h slept · ${label}`;
-          } else if (hours != null) {
-            if (hours >= 8) { score = 90; label = 'Excellent'; summary = `${hours.toFixed(1)}h — fully recovered.`; }
-            else if (hours >= 7) { score = 75; label = 'Good'; summary = `${hours.toFixed(1)}h — solid night.`; }
-            else if (hours >= 6) { score = 55; label = 'Fair'; summary = `${hours.toFixed(1)}h — a touch short.`; }
-            else if (hours > 0) { score = 30; label = 'Poor'; summary = `${hours.toFixed(1)}h — dial intensity back today.`; }
-          }
-          await pushSleepToWatch({
-            score,
-            hoursLastNight: hours,
-            asleepMin: cached?.sleepMinutes ?? null,
-            remMin: ss?.stages?.rem != null ? Math.round(ss.stages.rem * 60) : null,
-            deepMin: ss?.stages?.deep != null ? Math.round(ss.stages.deep * 60) : null,
-            restingHr: cached?.restingHeartRate ?? null,
-            hrvMs: cached?.hrv ?? null,
-            label,
-            summary,
-          });
+          await pushSleepToWatch(buildWatchSleepPayloadFromSummary(cached));
         } catch { /* non-fatal */ }
         // Readiness payload is owned by `TrainingReadinessCard`'s
         // `pushReadinessToWatch` call. Routing all readiness writes
@@ -2472,6 +2447,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const {
           onWatchReachabilityChange, pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
           pushSleepToWatch, pushSupplementsToWatch, pushWeightToWatch,
+          buildWatchSleepPayloadFromSummary,
         } = watchSync;
         const unsub = onWatchReachabilityChange((info) => {
           if (!info.reachable) return;
@@ -2545,22 +2521,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             try {
               const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
               const cached = await getCachedHealthDataSummary();
-              const hours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
-              let score: number | null = null;
-              let label: string | null = null;
-              let summary: string | null = null;
-              if (hours != null) {
-                if (hours >= 8) { score = 90; label = 'Excellent'; summary = `${hours.toFixed(1)}h — fully recovered.`; }
-                else if (hours >= 7) { score = 75; label = 'Good'; summary = `${hours.toFixed(1)}h — solid night.`; }
-                else if (hours >= 6) { score = 55; label = 'OK'; summary = `${hours.toFixed(1)}h — a touch short.`; }
-                else if (hours > 0) { score = 30; label = 'Low'; summary = `${hours.toFixed(1)}h — dial intensity back today.`; }
-              }
-              await pushSleepToWatch({
-                score, hoursLastNight: hours,
-                restingHr: cached?.restingHeartRate ?? null,
-                hrvMs: cached?.hrv ?? null,
-                label, summary,
-              });
+              await pushSleepToWatch(buildWatchSleepPayloadFromSummary(cached));
             } catch { /* non-fatal */ }
           })();
           // Readiness push: always go through the server's
@@ -2794,6 +2755,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const {
                   pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
                   pushSleepToWatch, pushSupplementsToWatch, pushWeightToWatch,
+                  buildWatchSleepPayloadFromSummary,
                 } = watchSync;
                 const s = rePushStateRef.current;
                 const todayISO = todayKey();
@@ -2853,13 +2815,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   try {
                     const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
                     const cached = await getCachedHealthDataSummary().catch(() => null);
-                    const hours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : 0;
-                    let score: number | null = null, label: string | null = null, summary: string | null = null;
-                    if (hours >= 8) { score = 90; label = 'Great'; summary = `${hours.toFixed(1)}h — well rested.`; }
-                    else if (hours >= 7) { score = 75; label = 'Good'; summary = `${hours.toFixed(1)}h — solid night.`; }
-                    else if (hours >= 6) { score = 55; label = 'OK'; summary = `${hours.toFixed(1)}h — a touch short.`; }
-                    else if (hours > 0) { score = 30; label = 'Low'; summary = `${hours.toFixed(1)}h — dial intensity back today.`; }
-                    await pushSleepToWatch({ score, hoursLastNight: hours, restingHr: cached?.restingHeartRate ?? null, hrvMs: cached?.hrv ?? null, label, summary });
+                    await pushSleepToWatch(buildWatchSleepPayloadFromSummary(cached));
                   } catch { /* non-fatal */ }
                 })();
                 (async () => {
@@ -9298,7 +9254,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   setTrainerLoading(false);
                   setWorkoutChat(prev => [...prev, { role: 'assistant', content: 'Request cancelled.' }]);
                 } : handleAskTrainer}>
-                {trainerLoading ? <Text style={styles.trainerSendText}>Cancel</Text> : <Text style={styles.trainerSendText}>Send</Text>}
+                <Text style={[styles.trainerSendText, { color: getContrastingTextColor(trainerLoading ? themeColors.error : themeColors.primary) }]}>
+                  {trainerLoading ? 'Cancel' : 'Send'}
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -10485,6 +10443,7 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
     if (state === 'rest') return tc.textMuted;
     return accent;
   };
+  const currentDayKey = todayKey();
 
   return (
     <View style={styles.weekStripWrap}>
@@ -10499,7 +10458,7 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
       <View style={styles.weekStripDays}>
         {items.map(item => {
           const active = item.key === selectedKey;
-          const isToday = item.key === todayKey();
+          const isToday = item.key === currentDayKey;
           const color = stateColor(item.state);
           const showDot = item.state !== 'rest';
           const markerIcon = item.state === 'done' || item.state === 'logged'
@@ -10514,7 +10473,7 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
               activeOpacity={0.82}
               accessibilityRole="button"
               accessibilityState={{ selected: active }}
-              accessibilityLabel={`${DAY_NAMES[item.date.getDay()]} ${item.date.getDate()}, ${item.title}`}
+              accessibilityLabel={`${isToday ? 'Today, ' : ''}${DAY_NAMES[item.date.getDay()]} ${item.date.getDate()}, ${item.title}`}
               style={[
                 styles.weekDayChip,
                 {
@@ -10522,6 +10481,12 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
                   borderColor: active ? accent : isToday ? accent + '66' : tc.border,
                 },
               ]}>
+              {isToday ? (
+                <View
+                  pointerEvents="none"
+                  style={[styles.weekDayTodayMarker, { backgroundColor: accent }]}
+                />
+              ) : null}
               <Text style={[
                 styles.weekDayName,
                 { color: active ? accent : isToday ? accent : tc.textMuted },
@@ -12103,6 +12068,7 @@ const styles = StyleSheet.create({
   weekStripDays: {
     flexDirection: 'row',
     gap: 6,
+    paddingTop: 6,
   },
   weekDayChip: {
     flex: 1,
@@ -12112,6 +12078,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 6,
+    position: 'relative',
+  },
+  weekDayTodayMarker: {
+    position: 'absolute',
+    top: -5,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
   weekDayName: {
     fontSize: 9,

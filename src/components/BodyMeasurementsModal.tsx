@@ -4,7 +4,7 @@ import {
   TextInput, Alert, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { submitWeeklyCheckin } from '../services/api';
 
@@ -142,7 +142,7 @@ export default function BodyMeasurementsModal({ visible, authToken, currentWeigh
                 style={{ flex: 1, paddingVertical: 14, borderRadius: radius.md, backgroundColor: saving ? tc.primary + '80' : tc.primary, alignItems: 'center' }}
                 onPress={handleSave}
                 disabled={saving}>
-                <Text style={{ fontSize: 15, fontWeight: '700', color: '#fff' }}>{saving ? 'Saving…' : 'Save'}</Text>
+                <Text style={{ fontSize: 15, fontWeight: '700', color: getContrastingTextColor(tc.primary) }}>{saving ? 'Saving…' : 'Save'}</Text>
               </TouchableOpacity>
             </View>
           </View>

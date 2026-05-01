@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import * as api from '../services/api';
 
@@ -227,7 +227,7 @@ export default function AdaptiveMacroCard({ authToken, themeName, weightEntries,
                   alignItems: 'center',
                 }}
               >
-                <Text style={{ color: '#fff', fontWeight: '800', fontSize: 13 }}>
+                <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '800', fontSize: 13 }}>
                   Accept {data.suggested_target} kcal
                 </Text>
               </TouchableOpacity>

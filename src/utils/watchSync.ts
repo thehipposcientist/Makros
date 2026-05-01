@@ -281,6 +281,71 @@ export function buildWatchPalette(themeName: AppThemeName | undefined): WatchPal
   };
 }
 
+export type WatchSleepInput = {
+  score?: number | null;
+  hoursLastNight?: number | null;
+  asleepMin?: number | null;
+  remMin?: number | null;
+  deepMin?: number | null;
+  restingHr?: number | null;
+  hrvMs?: number | null;
+  label?: string | null;
+  summary?: string | null;
+};
+
+type SleepSummaryLike = {
+  sleepMinutes?: number | null;
+  restingHeartRate?: number | null;
+  hrv?: number | null;
+  raw?: any | null;
+  lastNightSleepHours?: number | null;
+  hrvAvg?: number | null;
+  sleepScore?: any | null;
+};
+
+function sleepFallback(hours: number | null): Pick<WatchSleepInput, 'score' | 'label' | 'summary'> {
+  if (hours == null || hours <= 0) return { score: null, label: null, summary: null };
+  if (hours >= 8) return { score: 90, label: 'Excellent', summary: `${hours.toFixed(1)}h - fully recovered.` };
+  if (hours >= 7) return { score: 75, label: 'Good', summary: `${hours.toFixed(1)}h - solid night.` };
+  if (hours >= 6) return { score: 55, label: 'Fair', summary: `${hours.toFixed(1)}h - a touch short.` };
+  return { score: 30, label: 'Poor', summary: `${hours.toFixed(1)}h - dial intensity back today.` };
+}
+
+/** Convert the canonical HealthDataSummary / HealthSummary shape into
+ *  the compact watch sleep payload. Every watch-open path should use
+ *  this so a pull_state cannot overwrite the phone's real sleepScore
+ *  with an hours-only approximation. */
+export function buildWatchSleepPayloadFromSummary(summary: SleepSummaryLike | null | undefined): WatchSleepInput {
+  const raw = summary?.raw ?? summary ?? null;
+  const sleepMinutes = finiteNumber(summary?.sleepMinutes);
+  const hours = sleepMinutes != null
+    ? sleepMinutes / 60
+    : finiteNumber(raw?.lastNightSleepHours);
+  const scoreData = raw?.sleepScore ?? null;
+  const score = finiteNumber(scoreData?.score);
+  const label = nullableString(scoreData?.rating);
+  const fallback = sleepFallback(hours);
+  const stages = scoreData?.stages ?? {};
+  const remHours = finiteNumber(stages.rem);
+  const deepHours = finiteNumber(stages.deep);
+  const asleepMin = sleepMinutes
+    ?? (hours != null ? Math.round(hours * 60) : null);
+
+  return {
+    score: score ?? fallback.score ?? null,
+    hoursLastNight: hours,
+    asleepMin,
+    remMin: remHours != null ? Math.round(remHours * 60) : null,
+    deepMin: deepHours != null ? Math.round(deepHours * 60) : null,
+    restingHr: finiteNumber(summary?.restingHeartRate) ?? finiteNumber(raw?.restingHeartRate),
+    hrvMs: finiteNumber(summary?.hrv) ?? finiteNumber(raw?.hrvAvg),
+    label: label ?? fallback.label ?? null,
+    summary: score != null && hours != null
+      ? `${hours.toFixed(1)}h slept - ${label ?? 'Sleep score'}`
+      : fallback.summary ?? null,
+  };
+}
+
 // The `isPaired` gate used to silently drop every push if the WC
 // session reported unpaired — which happens transiently during
 // activation, after a reboot, etc. We now only gate on platform
@@ -439,17 +504,7 @@ export async function pushMealsToWatch(
  *  Sleep tab on the watch — score + hours + RHR + HRV + a short
  *  coach-style summary line. Built from the phone's sleepScore
  *  service so the watch + phone stay consistent. */
-export async function pushSleepToWatch(opts: {
-  score?: number | null;
-  hoursLastNight?: number | null;
-  asleepMin?: number | null;
-  remMin?: number | null;
-  deepMin?: number | null;
-  restingHr?: number | null;
-  hrvMs?: number | null;
-  label?: string | null;
-  summary?: string | null;
-}): Promise<boolean> {
+export async function pushSleepToWatch(opts: WatchSleepInput): Promise<boolean> {
   if (!canPush()) { await recordWatchSync('sleep', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
   const payload: WatchSleepPayload = {

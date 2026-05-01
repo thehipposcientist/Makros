@@ -27,7 +27,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import type { AppThemeName } from '../types';
 
 export type TutorialTier = 'free' | 'pro';
@@ -421,7 +421,7 @@ function createStyles(tc: any) {
       backgroundColor: tc.primary,
     },
     primaryBtnText: {
-      color: '#fff', fontSize: 15, fontWeight: '800',
+      color: getContrastingTextColor(tc.primary), fontSize: 15, fontWeight: '800',
       letterSpacing: 0.3,
     },
     secondaryBtn: {

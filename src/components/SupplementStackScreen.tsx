@@ -17,7 +17,7 @@ import {
   Modal, TextInput, StyleSheet,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme } from '../constants/theme';
+import { getContrastingTextColor, getTheme } from '../constants/theme';
 import { AppThemeName } from '../types';
 import * as api from '../services/api';
 
@@ -280,11 +280,11 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
                 opacity: takingAll || skippingAll ? 0.6 : 1,
               }}>
               {takingAll ? (
-                <ActivityIndicator size="small" color="#fff" />
+                <ActivityIndicator size="small" color={getContrastingTextColor(tc.primary)} />
               ) : (
-                <Ionicons name="checkmark-done" size={18} color="#fff" />
+                <Ionicons name="checkmark-done" size={18} color={getContrastingTextColor(tc.primary)} />
               )}
-              <Text style={{ fontSize: 14, fontWeight: '800', color: '#fff' }}>
+              <Text style={{ fontSize: 14, fontWeight: '800', color: getContrastingTextColor(tc.primary) }}>
                 {takingAll ? 'Logging…' : `Take all (${pendingCount})`}
               </Text>
             </TouchableOpacity>
@@ -398,7 +398,7 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
                               backgroundColor: tc.primary,
                             }}
                           >
-                            <Text style={{ fontSize: 11, fontWeight: '700', color: '#fff' }}>Mark taken</Text>
+                            <Text style={{ fontSize: 11, fontWeight: '700', color: getContrastingTextColor(tc.primary) }}>Mark taken</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
                             onPress={() => handleMarkTaken(item, true)}
@@ -456,7 +456,7 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
             onPress={() => setShowAdd(true)}
             style={{ backgroundColor: tc.primary, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10 }}
           >
-            <Text style={{ color: '#fff', fontWeight: '800', fontSize: 13 }}>+ Add supplement</Text>
+            <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '800', fontSize: 13 }}>+ Add supplement</Text>
           </TouchableOpacity>
         </View>
       );
@@ -1143,7 +1143,7 @@ function AddSupplementModal({
                 alignItems: 'center',
               }}
             >
-              <Text style={{ color: '#fff', fontWeight: '800', fontSize: 14 }}>Add to stack</Text>
+              <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '800', fontSize: 14 }}>Add to stack</Text>
             </TouchableOpacity>
           </ScrollView>
         </View>
@@ -1312,7 +1312,7 @@ function MultiScanReviewSheet({
                 backgroundColor: review.length === 0 ? tc.border : tc.primary,
               }}
             >
-              <Text style={{ color: '#fff', fontWeight: '800', fontSize: 13 }}>
+              <Text style={{ color: getContrastingTextColor(review.length === 0 ? tc.border : tc.primary), fontWeight: '800', fontSize: 13 }}>
                 Add {review.length} to stack
               </Text>
             </TouchableOpacity>

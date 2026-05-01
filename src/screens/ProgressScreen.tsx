@@ -29,7 +29,7 @@ import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
-import { loadWorkoutHistory, getPersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
+import { loadWorkoutHistory, derivePersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
 import { APPLE_HEALTH_PERMISSION_COPY, readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory, summarizeWorkoutZone2 } from '../services/appleHealth';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import BodyMeasurementsModal from '../components/BodyMeasurementsModal';
@@ -46,7 +46,7 @@ import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
-import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint } from '../services/api';
+import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord } from '../services/api';
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
@@ -431,6 +431,65 @@ function buildProgressAnalytics(
   return rows.slice(0, 4);
 }
 
+function workoutCompletionKey(dateISO?: string | null, focus?: string | null): string | null {
+  const date = typeof dateISO === 'string' ? dateISO.slice(0, 10) : '';
+  const focusKey = typeof focus === 'string' ? focus.trim().toLowerCase() : '';
+  return date && focusKey ? `${date}|${focusKey}` : null;
+}
+
+function reconcileWorkoutProgressData(
+  history: WorkoutSession[],
+  summaries: StoredWorkoutSummary[],
+  completions: WorkoutCompletionRecord[] | null,
+): { history: WorkoutSession[]; summaries: StoredWorkoutSummary[] } {
+  if (!completions) return { history, summaries };
+  const completionKeys = new Set(
+    completions
+      .map(c => workoutCompletionKey(c.workout_date, c.focus_label))
+      .filter((key): key is string => !!key),
+  );
+  if (completionKeys.size === 0) return { history: [], summaries: [] };
+
+  const scopedHistory = history.filter(session => {
+    const key = workoutCompletionKey(session.date, session.focus);
+    return !!key && completionKeys.has(key);
+  });
+  const existingKeys = new Set(
+    scopedHistory
+      .map(session => workoutCompletionKey(session.date, session.focus))
+      .filter((key): key is string => !!key),
+  );
+  for (const completion of completions) {
+    const key = workoutCompletionKey(completion.workout_date, completion.focus_label);
+    if (!key || existingKeys.has(key)) continue;
+    scopedHistory.push({
+      id: `server-${completion.id}`,
+      date: completion.completed_at ?? `${completion.workout_date}T12:00:00.000Z`,
+      focus: completion.focus_label,
+      durationSeconds: completion.duration_seconds,
+      exercises: [],
+      completed: true,
+      ...(completion.activity_category ? {
+        manualActivity: {
+          category: completion.activity_category as any,
+          subtype: completion.activity_subtype ?? '',
+          intensity: completion.activity_intensity as any,
+          distanceMiles: completion.distance_miles ?? undefined,
+          caloriesBurned: completion.calories_burned ?? undefined,
+        },
+      } : {}),
+    });
+    existingKeys.add(key);
+  }
+  scopedHistory.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+
+  const scopedSummaries = summaries.filter(summary => {
+    const key = workoutCompletionKey(summary.date, summary.focus);
+    return !!key && completionKeys.has(key);
+  });
+  return { history: scopedHistory, summaries: scopedSummaries };
+}
+
 function buildTrainingSignals(
   history: WorkoutSession[],
   summaries: StoredWorkoutSummary[],
@@ -756,11 +815,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   }, [tab, authToken]);
 
   useEffect(() => {
-    Promise.all([getPersonalRecords(), loadWorkoutHistory(), loadWorkoutSummaries(), loadGoalHistory(), loadPlanChanges()]).then(([p, h, s, g, c]) => {
+    Promise.all([
+      loadWorkoutHistory(),
+      loadWorkoutSummaries(),
+      loadGoalHistory(),
+      loadPlanChanges(),
+      authToken ? listWorkoutCompletions(authToken, 100).catch(() => null) : Promise.resolve(null),
+    ]).then(([h, s, g, c, completions]) => {
+      const scoped = reconcileWorkoutProgressData(h, s, completions);
+      const p = derivePersonalRecords(scoped.history);
       setPrs(p);
-      setHistory(h);
-      setSummaries(s);
-      console.log(`[Progress] history=${h.length} completed=${h.filter((x: any) => x.completed).length} summaries=${s.length} sample_date=${h[0]?.date ?? 'none'}`);
+      setHistory(scoped.history);
+      setSummaries(scoped.summaries);
+      if (completions) {
+        AsyncStorage.setItem('workoutHistory', JSON.stringify(scoped.history.slice(0, 100))).catch(() => {});
+        AsyncStorage.setItem('workoutSummaries', JSON.stringify(scoped.summaries.slice(0, 100))).catch(() => {});
+      }
+      console.log(`[Progress] history=${scoped.history.length} completed=${scoped.history.filter((x: any) => x.completed).length} summaries=${scoped.summaries.length} sample_date=${scoped.history[0]?.date ?? 'none'} completions=${completions?.length ?? 'cache'}`);
       setGoalHistory(g);
       setPlanChanges(c);
       setLoading(false);
@@ -961,24 +1032,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           // pulled from HealthKit — phone shows a new score, watch stays
           // stuck on the older one.
           try {
-            const ss: any = (fresh as any).sleepScore ?? null;
-            if (ss) {
-              const hours = (fresh as any).sleepMinutes != null
-                ? (fresh as any).sleepMinutes / 60
-                : null;
-              const { pushSleepToWatch } = await import('../utils/watchSync');
-              await pushSleepToWatch({
-                score: ss.score ?? null,
-                hoursLastNight: hours,
-                asleepMin: (fresh as any).sleepMinutes ?? null,
-                remMin: ss.stages?.rem != null ? Math.round(ss.stages.rem * 60) : null,
-                deepMin: ss.stages?.deep != null ? Math.round(ss.stages.deep * 60) : null,
-                restingHr: (fresh as any).restingHeartRate ?? null,
-                hrvMs: (fresh as any).hrv ?? null,
-                label: ss.rating ?? null,
-                summary: hours != null && ss.rating ? `${hours.toFixed(1)}h slept · ${ss.rating}` : null,
-              });
-            }
+            const { pushSleepToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
+            await pushSleepToWatch(buildWatchSleepPayloadFromSummary(fresh as any));
           } catch { /* watch may be unavailable */ }
           const rows = await Promise.all(
             (fresh.workoutDetails ?? []).map((w) => summarizeWorkoutZone2(w, age).catch(() => null)),

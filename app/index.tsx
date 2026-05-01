@@ -181,6 +181,12 @@ const SYNCED_STATE_KEYS = [
   'healthSummary', 'healthScoreResult',
 ];
 
+function workoutCompletionKey(dateISO?: string | null, focus?: string | null): string | null {
+  const date = typeof dateISO === 'string' ? dateISO.slice(0, 10) : '';
+  const focusKey = typeof focus === 'string' ? focus.trim().toLowerCase() : '';
+  return date && focusKey ? `${date}|${focusKey}` : null;
+}
+
 /** Push the local AsyncStorage state blob to the backend. Best-effort —
  *  swallows errors so a failed sync never blocks sign-out / app backgrounding. */
 async function pushUserStateToBackend(token: string): Promise<void> {
@@ -231,6 +237,29 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
     // or non-server ids) we preserve.
     const realLocal = localArr.filter(s => typeof s?.id === 'string' && !s.id.startsWith('server-'));
     const completions = await listWorkoutCompletions(token, 100);
+    const completionKeys = new Set(
+      completions
+        .map(c => workoutCompletionKey(c.workout_date, c.focus_label))
+        .filter((k): k is string => !!k),
+    );
+    if (completionKeys.size === 0) {
+      await AsyncStorage.multiRemove(['workoutHistory', 'workoutSummaries']);
+      console.log('[user-state] backend has 0 completions; cleared local workout history/summaries');
+      return;
+    }
+    try {
+      const rawSummaries = await AsyncStorage.getItem('workoutSummaries');
+      const summaries = rawSummaries ? JSON.parse(rawSummaries) : [];
+      if (Array.isArray(summaries)) {
+        const scoped = summaries.filter((s: any) => {
+          const key = workoutCompletionKey(s?.date, s?.focus);
+          return !!key && completionKeys.has(key);
+        });
+        if (scoped.length !== summaries.length) {
+          await AsyncStorage.setItem('workoutSummaries', JSON.stringify(scoped));
+        }
+      }
+    } catch {}
     if (completions.length > 0) {
       // Only treat non-strength categories as "manual activity" for display —
       // a real lifting workout (e.g. Legs) may have activity_category="strength"
@@ -255,10 +284,13 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
           } : {}),
         };
       });
-      // Merge: skeletons from backend + any real local-logged sessions the
-      // server doesn't know about. Dedupe same-date-same-focus (prefer real
-      // local over skeleton since it has exercise detail).
-      const merged = [...realLocal];
+      // Merge: backend completions + matching real local sessions with
+      // exercise detail. Backend completion rows are authoritative for
+      // which days count as active.
+      const merged = realLocal.filter((s) => {
+        const key = workoutCompletionKey(s?.date, s?.focus);
+        return !!key && completionKeys.has(key);
+      });
       for (const sk of skeleton) {
         const skDate = sk.date.slice(0, 10);
         const dupe = merged.some(m => m.date?.slice(0, 10) === skDate && m.focus === sk.focus);
@@ -1506,6 +1538,11 @@ export default function Index() {
           await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
           setUserProfile(stamped);
           syncOnboarding(authToken, stamped).catch(() => null);
+          if (changes.themePreference) {
+            import('../src/utils/watchSync')
+              .then(({ pushThemeToWatch }) => pushThemeToWatch(stamped.themePreference))
+              .catch(() => null);
+          }
           // If the chat already included an updated plan, just refresh without regen
           if (skipRegen) {
             console.log('[onProfileUpdate] profile saved, skipping regen (plan already applied from chat)');
@@ -1656,8 +1693,13 @@ export default function Index() {
             const updated = { ...userProfile, ...changes };
             setUserProfile(updated);
             AsyncStorage.setItem('userProfile', JSON.stringify(updated)).catch(() => {});
-            if (authToken && !skipRegen) {
+            if (authToken) {
               syncOnboarding(authToken, updated).catch(() => null);
+            }
+            if (changes.themePreference) {
+              import('../src/utils/watchSync')
+                .then(({ pushThemeToWatch }) => pushThemeToWatch(updated.themePreference))
+                .catch(() => null);
             }
           }}
         />
