@@ -17,7 +17,7 @@ import {
   MealItem, FoodUnit, FOOD_UNIT_LABELS, FOOD_UNIT_GROUPS,
 } from '../types';
 import { FoodItem, FoodCategoryGroup, lookupFood } from '../hooks/useMetaData';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { scanFoodsPhoto, searchFoodNutrition, getMealInstructions } from '../services/api';
 import { ensureItems, syncLegacyFieldsFromItems, splitFoodString, convertQuantity, parseAmountString, guessUnitForFood, validUnitsForFood } from '../utils/mealItems';
@@ -1626,7 +1626,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               disabled={(speechReview?.items.length ?? 0) === 0}
               style={{ flex: 2, paddingVertical: 12, borderRadius: 10, alignItems: 'center', backgroundColor: (speechReview?.items.length ?? 0) === 0 ? colors.border : colors.primary }}
             >
-              <Text style={{ color: '#fff', fontWeight: '800', fontSize: 13 }}>
+              <Text style={{ color: getContrastingTextColor(colors.primary), fontWeight: '800', fontSize: 13 }}>
                 Add {(speechReview?.items.length ?? 0)} to meal
               </Text>
             </TouchableOpacity>
@@ -1760,7 +1760,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     borderColor: colors.primary,
   },
   unitChipText: { fontSize: 12, color: colors.textPrimary },
-  unitChipTextActive: { color: '#fff', fontWeight: '700' },
+  unitChipTextActive: { color: getContrastingTextColor(colors.primary), fontWeight: '700' },
   currentFoodMacros: { fontSize: 12, color: colors.textMuted },
   savedMealRow: {
     flexDirection: 'row', alignItems: 'center',
@@ -1804,7 +1804,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     paddingVertical: 10, paddingHorizontal: 14,
     alignItems: 'center', justifyContent: 'center',
   },
-  aiSearchInlineBtnText: { fontSize: 13, fontWeight: '700', color: '#FFFFFF' },
+  aiSearchInlineBtnText: { fontSize: 13, fontWeight: '700', color: getContrastingTextColor(colors.primary) },
   aiResultRow: {
     flexDirection: 'row', alignItems: 'center',
     backgroundColor: colors.surface, borderRadius: radius.md,

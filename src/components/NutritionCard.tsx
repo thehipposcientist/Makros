@@ -80,6 +80,9 @@ interface NutritionCardProps {
     dose_unit: string;
     taken_count: number;
   }> | null;
+  /** Removes the outer card shell so parent day cards can reveal the
+   *  macro panel + individual meal cards as a clean expanding stack. */
+  embedded?: boolean;
 }
 
 export default function NutritionCard({
@@ -107,6 +110,7 @@ export default function NutritionCard({
   dailyProbioticCfuBillions,
   proteinBreakdown,
   todaySupplements,
+  embedded = false,
 }: NutritionCardProps) {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [showProteinModal, setShowProteinModal] = useState(false);
@@ -226,12 +230,12 @@ export default function NutritionCard({
   }, [proteinBreakdown, allVisible]);
 
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, embedded && styles.cardEmbedded]}>
       {/* Header removed — the macro grid below acts as the hero. The
           "+ Add Meal" affordance moved to the bottom of the meal list
           so the card opens with the user's macros front-and-center,
           matching the WorkoutCard hierarchy (hero → stats → list). */}
-      <View style={styles.body}>
+      <View style={[styles.body, embedded && styles.bodyEmbedded]}>
         {title ? <Text style={styles.titleSubtle}>{title}</Text> : null}
         {/* Macro tracker grid */}
         <View style={styles.macrosGrid}>
@@ -830,7 +834,7 @@ export default function NutritionCard({
         {/* Meal rows — single unified list. Order is whatever the user
             arranged with the up/down arrows. Routines are tagged with a
             📌 emoji but are otherwise rendered identically to other meals. */}
-        <View style={styles.meals}>
+        <View style={[styles.meals, embedded && styles.mealsEmbedded]}>
           {visibleMeals.length > 0 && !swipeHintDismissed && (
             <TouchableOpacity
               onPress={() => setSwipeHintDismissed(true)}
@@ -1319,9 +1323,26 @@ const createStyles = (
     borderColor: colors.border,
     ...elevations.card,
   },
+  cardEmbedded: {
+    backgroundColor: 'transparent',
+    borderWidth: 0,
+    borderColor: 'transparent',
+    borderRadius: 0,
+    marginBottom: 0,
+    overflow: 'visible',
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 0,
+  },
 
   // ── Body ─────────────────────────────────────────────────────────────────────
   body: { padding: 14 },
+  bodyEmbedded: {
+    paddingHorizontal: 0,
+    paddingTop: 0,
+    paddingBottom: 0,
+  },
 
   // Optional small subtitle when the parent passes a `title` prop
   // (used by the day-card flow to label "Today" / "Tomorrow"). Replaces
@@ -1391,14 +1412,16 @@ const createStyles = (
 
   // ── Meals ────────────────────────────────────────────────────────────────────
   meals: { gap: 10, marginBottom: 14 },
+  mealsEmbedded: { marginBottom: 0, gap: 9 },
 
   mealItem: {
     backgroundColor: colors.surfaceRaised,
     borderRadius: 16,
     padding: 14,
     borderWidth: 1,
-    borderColor: section.strong + '2A',
+    borderColor: colors.border,
     gap: 6,
+    ...elevations.subtle,
   },
   // Completed state: no opacity fade — full strength with strikethrough
   // title + muted subtitle so it reads "done", not "dead".

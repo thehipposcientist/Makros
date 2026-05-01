@@ -941,6 +941,24 @@ export function isLightThemeName(themeName?: AppThemeName | string): boolean {
   return (LIGHT_THEME_NAMES as readonly string[]).includes(resolveThemeName(themeName));
 }
 
+// Pick black or white text for readability on the given background color.
+// Used by primary CTAs (Start Workout, big save buttons, etc.) where the
+// background is theme-driven and a hardcoded '#FFFFFF' text breaks on the
+// monochrome themes (onyx has white primary → invisible white-on-white).
+export function getContrastingTextColor(hex: string): string {
+  if (!hex) return '#FFFFFF';
+  const h = hex.replace('#', '');
+  if (h.length !== 6 && h.length !== 3) return '#FFFFFF';
+  const expand = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
+  const r = parseInt(expand.substring(0, 2), 16);
+  const g = parseInt(expand.substring(2, 4), 16);
+  const b = parseInt(expand.substring(4, 6), 16);
+  // Perceived luminance; > 0.6 means the bg is light enough that black reads
+  // better than white.
+  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return lum > 0.6 ? '#000000' : '#FFFFFF';
+}
+
 export const colors = APP_THEMES.slate.colors;
 
 export function getTheme(themeName?: AppThemeName | string): AppTheme {

@@ -28,7 +28,7 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
 })();
 import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood, Gender, StrengthEquipmentSettings } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
-import { APP_THEMES, THEME_PICKER_ORDER, colors, getTheme, radius, resolveThemeName } from '../constants/theme';
+import { APP_THEMES, THEME_PICKER_ORDER, colors, getContrastingTextColor, getTheme, radius, resolveThemeName } from '../constants/theme';
 import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult, getCalorieRanges, CalorieRanges } from '../services/api';
 import {
   LAUNCH_GOALS, GOAL_CATEGORIES, ENDURANCE_EVENT_GOALS, goalCategory,
@@ -4083,7 +4083,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   scannedFoodCheckSelected: { color: colors.primary },
 
   saveBtn:     { backgroundColor: colors.primary, borderRadius: radius.lg, paddingVertical: 16, alignItems: 'center', shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.25, shadowRadius: 8, elevation: 4 },
-  saveBtnText: { fontSize: 16, fontWeight: '800', color: '#FFFFFF', letterSpacing: 0.2 },
+  saveBtnText: { fontSize: 16, fontWeight: '800', color: getContrastingTextColor(colors.primary), letterSpacing: 0.2 },
 
   // Toggle switch
   toggleTrack: { width: 44, height: 26, borderRadius: 13, backgroundColor: colors.border, padding: 2, justifyContent: 'center' },

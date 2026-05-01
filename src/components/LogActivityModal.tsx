@@ -4,7 +4,7 @@ import {
   StyleSheet, Alert, UIManager, Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme } from '../constants/theme';
+import { getContrastingTextColor, getTheme } from '../constants/theme';
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import {
   AppThemeName, WorkoutSession,
@@ -639,16 +639,19 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                   onPress={handleSave}
                   disabled={saving || !effectiveSubtype}>
                   <View style={[s.saveBtn, { backgroundColor: (!effectiveSubtype) ? tc.textMuted : tc.primary }]}>
-                    {saving ? (
-                      <Text style={s.saveBtnText}>Saving...</Text>
-                    ) : (
-                      <>
-                        <Ionicons name="checkmark-circle" size={20} color="#fff" />
-                        <Text style={s.saveBtnText}>
-                          Log {effectiveLabel || '...'} · {durationMin} min · {formatDate(dateOffset)}
-                        </Text>
-                      </>
-                    )}
+                    {(() => {
+                      const onColor = getContrastingTextColor(!effectiveSubtype ? tc.textMuted : tc.primary);
+                      return saving ? (
+                        <Text style={[s.saveBtnText, { color: onColor }]}>Saving...</Text>
+                      ) : (
+                        <>
+                          <Ionicons name="checkmark-circle" size={20} color={onColor} />
+                          <Text style={[s.saveBtnText, { color: onColor }]}>
+                            Log {effectiveLabel || '...'} · {durationMin} min · {formatDate(dateOffset)}
+                          </Text>
+                        </>
+                      );
+                    })()}
                   </View>
                 </PressableScale>
               </>

@@ -83,7 +83,7 @@ import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
 // CoachCheckinModal removed — coach chat handles check-ins now
-import { APP_THEMES, THEME_PICKER_ORDER, colors, elevations, getTheme, isLightThemeName, radius, resolveThemeName, typography } from '../constants/theme';
+import { APP_THEMES, THEME_PICKER_ORDER, colors, elevations, getContrastingTextColor, getTheme, isLightThemeName, radius, resolveThemeName, typography } from '../constants/theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // Inline-rendered tab content. Goals and Progress used to be modal
 // overlays via parent callbacks; they now mount inside the tab body
@@ -6526,6 +6526,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   onPress={() => {
                     import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
                     const collapsing = isWorkoutCardExpanded;
+                    configureExpandAnimation(360);
                     setExpandedDay(collapsing ? -2 : i);
                     // Collapse the Switch Day picker when the parent
                     // card collapses — otherwise re-expanding the card
@@ -6540,7 +6541,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   splitOptions={sortedOptions}
                   optionWarnings={optionWarnings}
                   showSwitchOptions={switchDayIdx === i}
-                  onToggleSwitch={() => { import('../utils/feedback').then(f => f.hapticLight()).catch(() => {}); setSwitchDayIdx(switchDayIdx === i ? -1 : i); }}
+                  onToggleSwitch={() => {
+                    import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+                    configureExpandAnimation(280);
+                    setSwitchDayIdx(switchDayIdx === i ? -1 : i);
+                  }}
                   hasPlateauedExercises={plateauedExercises.size > 0 && (item.workout?.exercises ?? []).some((ex: any) => plateauedExercises.has(ex.name.toLowerCase()))}
                   isRegenerating={(() => {
                     const idx = workoutPlan ? workoutPlan.days.indexOf(item.workout as any) : -1;
@@ -7371,6 +7376,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     style={[styles.mealAccordionHeader, { backgroundColor: 'transparent' }]}
                     onPress={() => {
                       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+                      configureExpandAnimation(360);
                       setExpandedMealDays(prev => {
                         const next = new Set(prev);
                         if (next.has(d.key)) next.delete(d.key); else next.add(d.key);
@@ -7495,7 +7501,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         </Text>
                       </TouchableOpacity>
                     )}
-                    <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
+                    <ExpandingChevron expanded={isExpanded} color={themeColors.textMuted} size={16} />
                   </TouchableOpacity>
 
                   {(isToday || isPast) && authToken && (
@@ -7510,41 +7516,44 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     />
                   )}
 
-                  <AnimatedCollapsible visible={isExpanded}>
-                    <NutritionCard
-                      themeName={userProfile.themePreference}
-                      nutritionPlan={plan}
-                      checkedMeals={checkedMealsByDate[d.key] ?? {}}
-                      onToggleMeal={(mealType) => handleToggleMeal(d.key, mealType)}
-                      onEditMeal={(mealType, meal) => setEditingMeal({ dateKey: d.key, type: mealType, meal })}
-                      onAddSnack={() => handleAddSnack(d.key)}
-                      onRemoveMeal={(mealType) => handleRemoveMeal(d.key, mealType)}
-                      onRestoreMeal={(mealType) => handleRestoreMeal(d.key, mealType)}
-                      onHardDeleteMeal={(mealType) => {
-                        Alert.alert(
-                          'Delete meal?',
-                          'This removes the meal entirely. You won\'t be able to restore it.',
-                          [
-                            { text: 'Cancel', style: 'cancel' },
-                            { text: 'Delete', style: 'destructive', onPress: () => handleHardDeleteMeal(d.key, mealType) },
-                          ],
-                        );
-                      }}
-                      onToggleRoutine={(mealType) => handleToggleRoutine(d.key, mealType)}
-                      onShowRecipe={(mealType, meal) => setRecipeTarget({ dateKey: d.key, type: mealType, meal })}
-                      onMoveMeal={(mealType, direction) => handleMoveMeal(d.key, mealType, direction)}
-                      onShuffleMeal={(mealType, meal) => handleShuffleMeal(d.key, mealType, meal)}
-                      shufflingMealKey={shufflingInfo?.date === d.key ? shufflingInfo.mealKey : null}
-                      onRenameMeal={(mealType, newName) => handleRenameMeal(d.key, mealType, newName)}
-                      goal={userProfile.goal}
-                      savedMealNames={savedMealNames}
-                      onAddFromSaved={() => setAddFromSavedFor(d.key)}
-                      onToggleSave={handleToggleSaveMeal}
-                      dailyCollagenG={d.key === todayKey() ? todayCollagenG : null}
-                      dailyProbioticCfuBillions={d.key === todayKey() ? todayProbioticCfu : null}
-                      proteinBreakdown={d.key === todayKey() ? proteinBreakdown : null}
-                      todaySupplements={d.key === todayKey() ? todaySupplementMicros : null}
-                    />
+                  <AnimatedCollapsible visible={isExpanded} duration={360} slideDistance={14}>
+                    <View style={styles.mealExpansionRail}>
+                      <NutritionCard
+                        embedded
+                        themeName={userProfile.themePreference}
+                        nutritionPlan={plan}
+                        checkedMeals={checkedMealsByDate[d.key] ?? {}}
+                        onToggleMeal={(mealType) => handleToggleMeal(d.key, mealType)}
+                        onEditMeal={(mealType, meal) => setEditingMeal({ dateKey: d.key, type: mealType, meal })}
+                        onAddSnack={() => handleAddSnack(d.key)}
+                        onRemoveMeal={(mealType) => handleRemoveMeal(d.key, mealType)}
+                        onRestoreMeal={(mealType) => handleRestoreMeal(d.key, mealType)}
+                        onHardDeleteMeal={(mealType) => {
+                          Alert.alert(
+                            'Delete meal?',
+                            'This removes the meal entirely. You won\'t be able to restore it.',
+                            [
+                              { text: 'Cancel', style: 'cancel' },
+                              { text: 'Delete', style: 'destructive', onPress: () => handleHardDeleteMeal(d.key, mealType) },
+                            ],
+                          );
+                        }}
+                        onToggleRoutine={(mealType) => handleToggleRoutine(d.key, mealType)}
+                        onShowRecipe={(mealType, meal) => setRecipeTarget({ dateKey: d.key, type: mealType, meal })}
+                        onMoveMeal={(mealType, direction) => handleMoveMeal(d.key, mealType, direction)}
+                        onShuffleMeal={(mealType, meal) => handleShuffleMeal(d.key, mealType, meal)}
+                        shufflingMealKey={shufflingInfo?.date === d.key ? shufflingInfo.mealKey : null}
+                        onRenameMeal={(mealType, newName) => handleRenameMeal(d.key, mealType, newName)}
+                        goal={userProfile.goal}
+                        savedMealNames={savedMealNames}
+                        onAddFromSaved={() => setAddFromSavedFor(d.key)}
+                        onToggleSave={handleToggleSaveMeal}
+                        dailyCollagenG={d.key === todayKey() ? todayCollagenG : null}
+                        dailyProbioticCfuBillions={d.key === todayKey() ? todayProbioticCfu : null}
+                        proteinBreakdown={d.key === todayKey() ? proteinBreakdown : null}
+                        todaySupplements={d.key === todayKey() ? todaySupplementMicros : null}
+                      />
+                    </View>
                   </AnimatedCollapsible>
                 </View>
                 </FadeInView>
@@ -8770,8 +8779,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             onPress={handleAiExerciseSearch}
                             disabled={aiExerciseLoading}>
                             {aiExerciseLoading
-                              ? <ActivityIndicator size="small" color="#fff" />
-                              : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>AI Search</Text>}
+                              ? <ActivityIndicator size="small" color={getContrastingTextColor(workoutPalette.strong)} />
+                              : <Text style={{ color: getContrastingTextColor(workoutPalette.strong), fontWeight: '700', fontSize: 13 }}>AI Search</Text>}
                           </TouchableOpacity>
                         )}
                       </View>
@@ -8814,7 +8823,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                   style={{ marginTop: 10, alignSelf: 'flex-start', backgroundColor: alreadySaved ? themeColors.border : workoutPalette.strong, paddingVertical: 8, paddingHorizontal: 14, borderRadius: 8 }}
                                   onPress={() => handleSaveAiExerciseToLibrary(ex)}
                                   disabled={alreadySaved}>
-                                  <Text style={{ color: alreadySaved ? themeColors.textMuted : '#fff', fontWeight: '700', fontSize: 13 }}>
+                                  <Text style={{ color: alreadySaved ? themeColors.textMuted : getContrastingTextColor(workoutPalette.strong), fontWeight: '700', fontSize: 13 }}>
                                     {alreadySaved ? '✓ In Library' : '+ Save to Library'}
                                   </Text>
                                 </TouchableOpacity>
@@ -9360,7 +9369,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <TouchableOpacity
                   style={[styles.skipReasonConfirm, { backgroundColor: skipType === 'drop' ? themeColors.warning : workoutPalette.strong }]}
                   onPress={confirmSkip}>
-                  <Text style={styles.skipReasonConfirmText}>
+                  <Text style={[styles.skipReasonConfirmText, { color: getContrastingTextColor(skipType === 'drop' ? themeColors.warning : workoutPalette.strong) }]}>
                     {skipType === 'push' ? 'Reschedule' : 'Skip'}
                   </Text>
                 </TouchableOpacity>
@@ -10515,6 +10524,34 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
   );
 }
 
+function ExpandingChevron({ expanded, color, size = 16 }: {
+  expanded: boolean;
+  color: string;
+  size?: number;
+}) {
+  const rotation = useRef(new Animated.Value(expanded ? 1 : 0)).current;
+
+  useEffect(() => {
+    Animated.timing(rotation, {
+      toValue: expanded ? 1 : 0,
+      duration: 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [expanded, rotation]);
+
+  const rotate = rotation.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '180deg'],
+  });
+
+  return (
+    <Animated.View style={{ transform: [{ rotate }] }}>
+      <Ionicons name="chevron-down" size={size} color={color} />
+    </Animated.View>
+  );
+}
+
 function HydrationTodayPanel({
   ounces,
   target,
@@ -11457,7 +11494,9 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
             <Text style={[styles.completeBadgeText, { color: tc.success }]}>✓ Done</Text>
           </View>
         ) : (
-          <Text style={[styles.chevron, { color: tc.textMuted }]}>{expanded ? '▲' : '▼'}</Text>
+          <View style={styles.chevron}>
+            <ExpandingChevron expanded={expanded} color={tc.textMuted} size={16} />
+          </View>
         )}
       </View>
       {isToday && readinessBadge && (() => {
@@ -11497,8 +11536,8 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
               accessibilityRole="button"
               accessibilityLabel="Start workout">
               <View style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
-                <Ionicons name="play-circle" size={22} color="#fff" />
-                <Text style={styles.startWorkoutBtnText}>Start Workout</Text>
+                <Ionicons name="play-circle" size={22} color={getContrastingTextColor(workoutPalette.strong)} />
+                <Text style={[styles.startWorkoutBtnText, { color: getContrastingTextColor(workoutPalette.strong) }]}>Start Workout</Text>
               </View>
             </PressableScale>
           </PulseView>
@@ -11516,7 +11555,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           </Pressable>
         </View>
       )}
-      <AnimatedCollapsible visible={expanded}>
+      <AnimatedCollapsible visible={expanded} duration={360} slideDistance={14}>
         <View style={styles.expandedContent}>
           {isCompleted ? (
             <View style={{ gap: 10 }}>
@@ -11765,6 +11804,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                 </View>
               )}
               <WorkoutCard
+                embedded
                 workout={item.workout!}
                 themeName={themeName}
                 sessionMinutes={sessionMinutes}
@@ -12312,7 +12352,7 @@ const styles = StyleSheet.create({
 
   focusLabel:    { fontSize: 16, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
   exerciseCount: { fontSize: 13, color: colors.textMuted },
-  chevron:       { fontSize: 10, color: colors.textMuted, marginLeft: 8 },
+  chevron:       { width: 22, height: 22, marginLeft: 8, alignItems: 'center', justifyContent: 'center' },
 
   completeBadge:     { backgroundColor: colors.success + '22', borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.success },
   completeBadgeText: { fontSize: 12, color: colors.success, fontWeight: '700' },
@@ -12428,6 +12468,11 @@ const styles = StyleSheet.create({
   mealAccordionTitle: { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
   mealAccordionMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 2, fontWeight: '500' },
   mealAccordionChevron: { fontSize: 11, color: colors.textMuted, marginLeft: 8 },
+  mealExpansionRail: {
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    marginTop: -2,
+  },
   mealHydrationPanel: {
     marginHorizontal: 14,
     marginTop: 0,

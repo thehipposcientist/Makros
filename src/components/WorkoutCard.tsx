@@ -38,9 +38,12 @@ interface WorkoutCardProps {
    *  given exercise name. Typically routes to the Library sub-tab with
    *  the exercise pre-selected. */
   onViewExercise?: (exerciseName: string) => void;
+  /** Removes the enclosing card shell when this is revealed inside a
+   *  selected day card; exercise rows then read as individual cards. */
+  embedded?: boolean;
 }
 
-export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpenExerciseVideo, onSwapExercise, onViewExercise }: WorkoutCardProps) {
+export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpenExerciseVideo, onSwapExercise, onViewExercise, embedded = false }: WorkoutCardProps) {
   const theme  = getTheme(themeName);
   const c      = theme.colors;
   const s      = theme.sections.workout;
@@ -155,11 +158,11 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
   }, [workout.exercises, sessionMinutes]);
 
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, embedded && styles.cardEmbedded]}>
       {/* Header removed — the parent DayCard already shows day + focus.
           Stats strip is now a plain inline row, no colored background,
           matching the macros grid on the meal accordion. */}
-      <View style={styles.statsStrip}>
+      <View style={[styles.statsStrip, embedded && styles.statsStripEmbedded]}>
         <StatItem icon="time-outline" value={`~${estimatedMinutes} min`} color={s.strong} />
         <View style={[styles.statsDivider, { backgroundColor: c.border }]} />
         <StatItem icon="layers-outline" value={`${totalSets} sets`} color={s.strong} />
@@ -171,7 +174,7 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
       </Text>
 
       {/* ── Exercise list ───────────────────────────────────────────────── */}
-      <View style={styles.body}>
+      <View style={[styles.body, embedded && styles.bodyEmbedded]}>
         {(() => {
           // Group consecutive core-role exercises (2+) into circuit blocks.
           // Single core exercises render as normal rows.
@@ -307,7 +310,11 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
   circuitStep?: number;
 }) {
   return (
-    <View style={[styles.exRow, !isLast && !circuitMode && { borderBottomWidth: 1, borderBottomColor: c.border + '66' }]}>
+    <View style={[
+      styles.exRow,
+      circuitMode ? styles.exRowCircuit : styles.exRowCard,
+      !isLast && !circuitMode && styles.exRowStackGap,
+    ]}>
       {/* Thumbnail — YouTube video frame when available, numbered tile
           otherwise. Tapping the thumbnail launches the form-video modal
           (separate hit target from the whole row so an accidental tap
@@ -535,6 +542,18 @@ const createStyles = (
     borderColor: c.border,
     ...elevations.card,
   },
+  cardEmbedded: {
+    backgroundColor: 'transparent',
+    borderWidth: 0,
+    borderColor: 'transparent',
+    borderRadius: 0,
+    marginBottom: 0,
+    overflow: 'visible',
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 0,
+  },
 
   // Stats strip — plain inline row, no colored background. Mirrors the
   // macros grid on the meal accordion: just numbers + dividers, sitting
@@ -553,6 +572,10 @@ const createStyles = (
     borderWidth: 1,
     borderColor: s.strong + '24',
   },
+  statsStripEmbedded: {
+    marginHorizontal: 0,
+    marginTop: 2,
+  },
   statsDivider: { width: 1, height: 14 },
 
   warmupHint: {
@@ -564,6 +587,7 @@ const createStyles = (
 
   // Body
   body: { paddingHorizontal: 16, paddingTop: 2, paddingBottom: 10 },
+  bodyEmbedded: { paddingHorizontal: 0, paddingBottom: 0 },
 
   // Exercise row
   exRow: {
@@ -571,6 +595,20 @@ const createStyles = (
     alignItems: 'flex-start',
     gap: 12,
     paddingVertical: 12,
+  },
+  exRowCard: {
+    backgroundColor: c.surfaceRaised,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: c.border,
+    paddingHorizontal: 12,
+    ...elevations.subtle,
+  },
+  exRowCircuit: {
+    paddingHorizontal: 12,
+  },
+  exRowStackGap: {
+    marginBottom: 8,
   },
   exNum: {
     width: 28,

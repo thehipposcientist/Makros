@@ -43,7 +43,7 @@ import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQ
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
 import FormVideoModal from '../components/FormVideoModal';
@@ -4479,7 +4479,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 maybeRefreshRecommendationForExercise(i, updatedSets);
                               }}
                               style={{ flex: 1, minWidth: 44, paddingVertical: 8, borderRadius: 8, alignItems: 'center', backgroundColor: workoutPalette.strong }}>
-                              <Text style={{ color: '#fff', fontSize: 13, fontWeight: '800' }}>{label}</Text>
+                              <Text style={{ color: getContrastingTextColor(workoutPalette.strong), fontSize: 13, fontWeight: '800' }}>{label}</Text>
                             </TouchableOpacity>
                           );
                         })}
@@ -4570,7 +4570,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                     <TouchableOpacity
                                       style={{ backgroundColor: themeColors.primary, paddingHorizontal: 28, paddingVertical: 12, borderRadius: 12 }}
                                       onPress={() => { startExerciseTimer(timerKey); setTimerModalKey(timerKey); }}>
-                                      <Text style={{ color: '#fff', fontSize: 16, fontWeight: '800' }}>Start</Text>
+                                      <Text style={{ color: getContrastingTextColor(themeColors.primary), fontSize: 16, fontWeight: '800' }}>Start</Text>
                                     </TouchableOpacity>
                                   ) : timerRunning ? (
                                     <>
@@ -4592,7 +4592,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                           handleLogSetInline(i, currentSlot, true, durStr || undefined);
                                           resetExerciseTimer(timerKey);
                                         }}>
-                                        <Text style={{ color: '#fff', fontSize: 15, fontWeight: '700' }}>
+                                        <Text style={{ color: getContrastingTextColor(themeColors.primary), fontSize: 15, fontWeight: '700' }}>
                                           {isMultiInterval ? 'Log Round' : 'Done'}
                                         </Text>
                                       </TouchableOpacity>
@@ -4602,7 +4602,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                       <TouchableOpacity
                                         style={{ backgroundColor: themeColors.primary, paddingHorizontal: 20, paddingVertical: 12, borderRadius: 12 }}
                                         onPress={() => startExerciseTimer(timerKey)}>
-                                        <Text style={{ color: '#fff', fontSize: 15, fontWeight: '700' }}>Resume</Text>
+                                        <Text style={{ color: getContrastingTextColor(themeColors.primary), fontSize: 15, fontWeight: '700' }}>Resume</Text>
                                       </TouchableOpacity>
                                       <TouchableOpacity
                                         style={{ borderWidth: 1, borderColor: themeColors.border, paddingHorizontal: 20, paddingVertical: 12, borderRadius: 12 }}
@@ -5173,7 +5173,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     onPress={writeDurationAndClose}
                     accessibilityRole="button"
                     accessibilityLabel={mElapsed > 0 ? 'Done with timer' : 'Close timer'}>
-                    <Text style={[styles.timerModalSecondaryBtnText, { color: '#fff', fontWeight: '800' }]}>
+                    <Text style={[styles.timerModalSecondaryBtnText, { color: getContrastingTextColor(themeColors.primary), fontWeight: '800' }]}>
                       {mElapsed > 0 ? 'Done' : 'Close'}
                     </Text>
                   </TouchableOpacity>
@@ -5893,7 +5893,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               <TouchableOpacity
                                 style={{ flex: 1, backgroundColor: workoutPalette.strong, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
                                 onPress={() => handleAddAiExercise(ex)}>
-                                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Add</Text>
+                                <Text style={{ color: getContrastingTextColor(workoutPalette.strong), fontWeight: '700', fontSize: 13 }}>Add</Text>
                               </TouchableOpacity>
                               <TouchableOpacity
                                 style={{ flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}

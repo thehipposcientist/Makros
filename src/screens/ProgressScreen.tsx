@@ -47,7 +47,7 @@ import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint } from '../services/api';
-import { colors, elevations, getTheme, radius, typography } from '../constants/theme';
+import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
 
@@ -2604,8 +2604,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       disabled={healthConnecting}
                     >
                       {healthConnecting
-                        ? <ActivityIndicator color="#fff" />
-                        : <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Connect Apple Health</Text>}
+                        ? <ActivityIndicator color={getContrastingTextColor(tc.primary)} />
+                        : <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '700', fontSize: 14 }}>Connect Apple Health</Text>}
                     </TouchableOpacity>
                   </View>
                 </View>
@@ -3428,8 +3428,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   setWeightInputError('');
                   setWeightInputVisible(true);
                 }}>
-                <Ionicons name="add" size={16} color="#fff" />
-                <Text style={{ fontSize: 13, fontWeight: '600', color: '#fff' }}>Log</Text>
+                <Ionicons name="add" size={16} color={getContrastingTextColor(tc.primary)} />
+                <Text style={{ fontSize: 13, fontWeight: '600', color: getContrastingTextColor(tc.primary) }}>Log</Text>
               </TouchableOpacity>
             </View>
             {weightEntries.length === 0 ? (
@@ -3650,8 +3650,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <TouchableOpacity
                 style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: tc.primary, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6 }}
                 onPress={() => setMeasurementsModalVisible(true)}>
-                <Ionicons name="add" size={16} color="#fff" />
-                <Text style={{ fontSize: 13, fontWeight: '600', color: '#fff' }}>Log</Text>
+                <Ionicons name="add" size={16} color={getContrastingTextColor(tc.primary)} />
+                <Text style={{ fontSize: 13, fontWeight: '600', color: getContrastingTextColor(tc.primary) }}>Log</Text>
               </TouchableOpacity>
             </View>
             <View style={{ marginTop: 10, padding: 12, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }}>
@@ -3750,7 +3750,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 marginTop: 10, alignSelf: 'center', paddingHorizontal: 18, paddingVertical: 10,
                 borderRadius: 999, backgroundColor: tc.primary,
               }}>
-              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Share Result</Text>
+              <Text style={{ color: getContrastingTextColor(tc.primary), fontWeight: '700', fontSize: 13 }}>Share Result</Text>
             </TouchableOpacity>
             </>
           )}
@@ -4144,7 +4144,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     );
                   }
                 }}>
-                <Text style={{ fontSize: 15, fontWeight: '700', color: '#fff' }}>Save</Text>
+                <Text style={{ fontSize: 15, fontWeight: '700', color: getContrastingTextColor(tc.primary) }}>Save</Text>
               </TouchableOpacity>
             </View>
           </View>
