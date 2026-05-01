@@ -5679,6 +5679,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               </TouchableOpacity>
             </View>
             <Text style={styles.coachHint}>This chat is for form, pain flags, and in-session adjustments.</Text>
+            {/* AI disclaimer — surfaces the same caveat that lives in
+                LEGAL_SECTIONS so users see it next to the input where
+                they're about to act on a recommendation. Sharp pain or
+                injury → stop the workout and seek a clinician, not the
+                chat. */}
+            <Text style={[styles.coachHint, { fontStyle: 'italic', fontSize: 11, marginTop: -4 }]}>
+              AI replies can be wrong — verify before acting. Stop and seek medical advice for sharp pain or injury.
+            </Text>
 
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.coachPromptRow}>
               {COACH_PROMPT_OPTIONS.map((option) => (

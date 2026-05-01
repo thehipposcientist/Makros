@@ -183,9 +183,40 @@ export async function deleteWorkoutTemplate(templateId: string): Promise<void> {
   }
 }
 
+/**
+ * Insert or update a saved template. When the row is genuinely new
+ * (not an existing-id update) we enforce the free-tier cap as
+ * defense-in-depth — UI-level gates exist at every call site, but
+ * having the storage helper itself respect the cap means a bug or new
+ * code path can't silently bypass it.
+ *
+ * Reads `userProfile` from AsyncStorage to determine the user's tier;
+ * Pro users get unlimited templates so the check short-circuits.
+ * Throws when the cap is hit so callers can surface a typed error
+ * instead of silently no-op'ing.
+ */
 export async function upsertWorkoutTemplate(template: SavedWorkoutTemplate): Promise<SavedWorkoutTemplate[]> {
   const templates = await loadWorkoutTemplates();
   const idx = templates.findIndex(t => t.id === template.id);
+  if (idx < 0) {
+    // New row — gate against the per-tier limit.
+    try {
+      const [{ canCreateWorkoutTemplate, FREE_WORKOUT_TEMPLATE_LIMIT }] = await Promise.all([
+        import('./subscription'),
+      ]);
+      const raw = await AsyncStorage.getItem('userProfile');
+      const profile = raw ? JSON.parse(raw) : null;
+      if (!canCreateWorkoutTemplate(profile, templates.length)) {
+        throw new Error(
+          `Free accounts can save up to ${FREE_WORKOUT_TEMPLATE_LIMIT} workout templates. Upgrade to Pro for unlimited.`,
+        );
+      }
+    } catch (e: any) {
+      // Re-throw the cap error so the caller can show a typed alert.
+      // Only a missing subscription module is silenced (dev / offline).
+      if (typeof e?.message === 'string' && e.message.includes('templates')) throw e;
+    }
+  }
   const next = idx >= 0
     ? templates.map(t => t.id === template.id ? template : t)
     : [template, ...templates];

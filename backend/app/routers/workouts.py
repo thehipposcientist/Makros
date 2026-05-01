@@ -1391,18 +1391,19 @@ def mark_workout_complete(
             ).first()
             if existing_session:
                 # Drop old exercises + sets so we can re-insert cleanly.
-                old_exs = db.exec(
-                    select(WorkoutExercise)
+                # Was N+1: one SELECT per session for exercises, then one
+                # SELECT per exercise for its sets, then per-row deletes.
+                # On a 6-exercise session that's ~14 round trips just to
+                # clear old rows. Now: one IN-set fetch for exercise ids,
+                # one bulk DELETE for sets, one bulk DELETE for exercises.
+                from sqlmodel import col, delete as sql_delete
+                old_ex_ids = list(db.exec(
+                    select(WorkoutExercise.id)
                     .where(WorkoutExercise.session_id == existing_session.id)
-                ).all()
-                for ox in old_exs:
-                    old_sets = db.exec(
-                        select(ExerciseSet)
-                        .where(ExerciseSet.workout_exercise_id == ox.id)
-                    ).all()
-                    for os in old_sets:
-                        db.delete(os)
-                    db.delete(ox)
+                ).all())
+                if old_ex_ids:
+                    db.exec(sql_delete(ExerciseSet).where(col(ExerciseSet.workout_exercise_id).in_(old_ex_ids)))
+                    db.exec(sql_delete(WorkoutExercise).where(col(WorkoutExercise.id).in_(old_ex_ids)))
                 existing_session.completed_at = datetime.now(timezone.utc)
                 session_row = existing_session
                 db.add(session_row)
@@ -1774,19 +1775,19 @@ def delete_workout_completion(
     if focus_label:
         sq = sq.where(WorkoutSession.focus == focus_label)
     sessions = db.exec(sq).all()
-    for s in sessions:
-        # Cascade: drop child exercise rows + set rows.
-        exercises = db.exec(
-            select(WorkoutExercise).where(WorkoutExercise.session_id == s.id)
-        ).all()
-        for e in exercises:
-            sets_ = db.exec(
-                select(ExerciseSet).where(ExerciseSet.workout_exercise_id == e.id)
-            ).all()
-            for st in sets_:
-                db.delete(st)
-            db.delete(e)
-        db.delete(s)
+    if sessions:
+        # Cascade: drop child exercise rows + set rows. Was a 3-level
+        # nested per-row delete; now three bulk DELETEs total (sets,
+        # exercises, sessions) regardless of how many rows match.
+        from sqlmodel import col, delete as sql_delete
+        session_ids = [s.id for s in sessions]
+        ex_ids = list(db.exec(
+            select(WorkoutExercise.id).where(col(WorkoutExercise.session_id).in_(session_ids))
+        ).all())
+        if ex_ids:
+            db.exec(sql_delete(ExerciseSet).where(col(ExerciseSet.workout_exercise_id).in_(ex_ids)))
+            db.exec(sql_delete(WorkoutExercise).where(col(WorkoutExercise.id).in_(ex_ids)))
+        db.exec(sql_delete(WorkoutSession).where(col(WorkoutSession.id).in_(session_ids)))
 
     db.commit()
 
@@ -1858,16 +1859,17 @@ def sync_in_progress_workout(
             .where(WorkoutSession.focus == body.focus_label)
         ).first()
         if existing_session:
-            old_exs = db.exec(
-                select(WorkoutExercise).where(WorkoutExercise.session_id == existing_session.id)
-            ).all()
-            for ox in old_exs:
-                old_sets = db.exec(
-                    select(ExerciseSet).where(ExerciseSet.workout_exercise_id == ox.id)
-                ).all()
-                for os in old_sets:
-                    db.delete(os)
-                db.delete(ox)
+            # Bulk delete child rows — same N+1 elimination as the
+            # /complete path (ExerciseSet + WorkoutExercise via IN-set
+            # DELETEs). Hot path: this fires after every set in the
+            # active workout, so per-set latency matters.
+            from sqlmodel import col, delete as sql_delete
+            old_ex_ids = list(db.exec(
+                select(WorkoutExercise.id).where(WorkoutExercise.session_id == existing_session.id)
+            ).all())
+            if old_ex_ids:
+                db.exec(sql_delete(ExerciseSet).where(col(ExerciseSet.workout_exercise_id).in_(old_ex_ids)))
+                db.exec(sql_delete(WorkoutExercise).where(col(WorkoutExercise.id).in_(old_ex_ids)))
             session_row = existing_session
         else:
             session_row = WorkoutSession(

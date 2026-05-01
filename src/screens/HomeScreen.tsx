@@ -5404,11 +5404,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Prefer the persisted PlanWeek (dated, stable for 7 days). Fall back
   // to the legacy rolling-from-today schedule only for users who don't
   // have a PlanWeek row yet (network failure on first run, mid-migration).
-  const scheduleRaw = planWeek?.days?.length
-    ? getScheduleFromPlanWeek(planWeek)
-    : workoutPlan?.days?.length
-      ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates, droppedSkipDates, completedDates, userProfile.trainingDays)
-      : [];
+  // Memoized — the schedule shape only changes when the underlying plan,
+  // skipped/dropped/completed sets, or preserved overlay changes. Without
+  // this we recompute (and create new array refs) on every parent render,
+  // which cascades into DayCard re-renders even when nothing changed.
+  // Pairs with the React.memo wrapper on DayCard so item-prop identity
+  // is stable across re-renders.
+  const scheduleRaw = useMemo(() => (
+    planWeek?.days?.length
+      ? getScheduleFromPlanWeek(planWeek)
+      : workoutPlan?.days?.length
+        ? get7DaySchedule(workoutPlan, userProfile.daysPerWeek, skippedDates, droppedSkipDates, completedDates, userProfile.trainingDays)
+        : []
+  ), [planWeek, workoutPlan, userProfile.daysPerWeek, userProfile.trainingDays, skippedDates, droppedSkipDates, completedDates]);
   // Overlay preserved completed workouts: any date the user has already
   // finished keeps its original WorkoutDay snapshot, so a plan regen can't
   // swap a done day's exercises out from under them.
@@ -5422,14 +5430,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Now: if a date has a preserved completed workout, it ALWAYS shows as
   // a (non-rest) completed training day regardless of what the new schedule
   // thinks the day should be.
-  const schedule = scheduleRaw.map(item => {
-    const k = dateKey(item.date);
-    const preserved = preservedWorkouts[k];
-    if (preserved) {
-      return { ...item, workout: preserved, isRest: false };
-    }
-    return item;
-  });
+  const schedule = useMemo(() => (
+    scheduleRaw.map(item => {
+      const k = dateKey(item.date);
+      const preserved = preservedWorkouts[k];
+      if (preserved) {
+        return { ...item, workout: preserved, isRest: false };
+      }
+      return item;
+    })
+  ), [scheduleRaw, preservedWorkouts]);
   // Free tier — strip all generated exercises and replace each scheduled day
   // with an "Empty" shell the user can start + populate manually. Past
   // preserved/completed workouts are left untouched so the user's history
@@ -7295,10 +7305,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const isPastSkipped = isPast && checkedCount === 0;
               const removedSet = new Set(plan.removedMealIds ?? []);
               const meals = (plan.meals ?? []).filter((_, i) => !removedSet.has(`meal_${i}`));
-              const totalCalories = meals.reduce((sum, m) => sum + (m.calories ?? 0), 0);
-              const totalProtein  = meals.reduce((sum, m) => sum + (m.protein ?? 0), 0);
-              const totalCarbs    = meals.reduce((sum, m) => sum + (m.carbs ?? 0), 0);
-              const totalFat      = meals.reduce((sum, m) => sum + (m.fat ?? 0), 0);
+              // Single-pass macro totals — was 4 separate `.reduce` calls
+              // per day. With 7 day cards × ~5 meals each, that's 28
+              // unnecessary iterations per parent render. The for-of
+              // loop walks the array once and accumulates all four
+              // values together.
+              let totalCalories = 0, totalProtein = 0, totalCarbs = 0, totalFat = 0;
+              for (const m of meals) {
+                totalCalories += m.calories ?? 0;
+                totalProtein  += m.protein ?? 0;
+                totalCarbs    += m.carbs ?? 0;
+                totalFat      += m.fat ?? 0;
+              }
               const t = plan.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
               // Today highlight uses the hardcoded MEALS_ACCENT (green)
               // so it's guaranteed distinct from the workout side's
@@ -8893,6 +8911,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </TouchableOpacity>
             </View>
             </FadeInView>
+
+            {/* AI disclaimer — verbatim language from LEGAL_SECTIONS so
+                what users accepted at signup is what they see at the
+                surface where AI is actually doing the work. Especially
+                important for nutrition / training advice where wrong
+                output can compound. */}
+            <Text style={{
+              fontSize: 11, color: themeColors.textMuted, fontStyle: 'italic',
+              paddingHorizontal: 16, paddingBottom: 6, lineHeight: 15,
+            }}>
+              AI replies can be wrong — review before acting on them. Not medical advice; consult a clinician for injury, illness, or significant changes.
+            </Text>
 
             {/* Single unified chat */}
 
@@ -11105,7 +11135,7 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, sessionMinutes, onSwapExercise, onViewExercise, onOpenExerciseVideo, readinessBadge, onReadinessTap }: {
+function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, sessionMinutes, onSwapExercise, onViewExercise, onOpenExerciseVideo, readinessBadge, onReadinessTap }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -11749,6 +11779,34 @@ function DayCard({ item, themeName, isToday, isCompleted, isSkipped, skipReason,
     </TouchableOpacity>
   );
 }
+
+// Memo wrap: HomeScreen has 121+ useState calls and re-renders constantly.
+// Without this, every state change in the parent re-rendered every DayCard
+// even when its inputs hadn't changed. Custom comparator ignores callback
+// identity (those are recreated each render but behave identically) and
+// compares value props by reference — `item` is now stable thanks to the
+// useMemo'd `schedule` derivation. `splitOptions`/`optionWarnings` are
+// expected to be stable enough; if they start re-creating per-render,
+// memoize them at the call site.
+const DayCard = React.memo(DayCardImpl, (prev, next) => {
+  return (
+    prev.item === next.item
+    && prev.themeName === next.themeName
+    && prev.isToday === next.isToday
+    && prev.isCompleted === next.isCompleted
+    && prev.isSkipped === next.isSkipped
+    && prev.skipReason === next.skipReason
+    && prev.completedSummary === next.completedSummary
+    && prev.expanded === next.expanded
+    && prev.splitOptions === next.splitOptions
+    && prev.optionWarnings === next.optionWarnings
+    && prev.showSwitchOptions === next.showSwitchOptions
+    && prev.hasPlateauedExercises === next.hasPlateauedExercises
+    && prev.isRegenerating === next.isRegenerating
+    && prev.sessionMinutes === next.sessionMinutes
+    && prev.readinessBadge === next.readinessBadge
+  );
+});
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 

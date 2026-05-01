@@ -394,6 +394,19 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const pickAndScan = async (source: 'camera' | 'library') => {
     if (!authToken) return;
     if (scanLock.current) return;
+    // Pro gate — food photo scan runs through OpenAI vision. We don't
+    // have a `profile` prop on this modal, so read the cached one from
+    // AsyncStorage to feed `requirePro`. Cheap (KB-scale) + matches the
+    // pattern used in `ActiveWorkoutScreen` for the template-cap check.
+    try {
+      const [{ requirePro }, { default: AsyncStorage }] = await Promise.all([
+        import('../utils/subscription'),
+        import('@react-native-async-storage/async-storage'),
+      ]);
+      const raw = await AsyncStorage.getItem('userProfile');
+      const profile = raw ? JSON.parse(raw) : null;
+      if (!requirePro(profile, 'ai_food_scan')) return;
+    } catch { /* if subscription module fails, fall through (dev / offline) */ }
     scanLock.current = true;
     if (source === 'camera') {
       const perm = await ImagePicker.requestCameraPermissionsAsync();
@@ -736,6 +749,22 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
 
   const handleAiSearch = async (opts?: { forceAi?: boolean; append?: boolean }) => {
     if (!authToken || !search.trim()) return;
+    // Pro gate — only the AI-forced search route hits OpenAI. Plain
+    // searches against the seed/USDA library stay free; the `forceAi`
+    // call below is the one that incurs cost + needs gating. The
+    // bound button at line ~1492 is `forceAi: true` which is what
+    // this guard catches.
+    if (opts?.forceAi) {
+      try {
+        const [{ requirePro }, { default: AsyncStorage }] = await Promise.all([
+          import('../utils/subscription'),
+          import('@react-native-async-storage/async-storage'),
+        ]);
+        const raw = await AsyncStorage.getItem('userProfile');
+        const profile = raw ? JSON.parse(raw) : null;
+        if (!requirePro(profile, 'ai_food_enrichment')) return;
+      } catch { /* dev / offline — fall through */ }
+    }
     setAiSearchLoading(true);
     try {
       const res = await searchFoodNutrition(authToken, search.trim(), { forceAi: opts?.forceAi });

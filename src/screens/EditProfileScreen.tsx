@@ -559,6 +559,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const handleAiExerciseSearch = async () => {
     const q = exerciseSearch.trim();
     if (!q || !authToken) return;
+    // Pro gate — AI exercise search hits OpenAI to find lifts outside
+    // the seed library. Free users see the upgrade alert.
+    const { requirePro } = await import('../utils/subscription');
+    if (!requirePro(profile, 'ai_food_enrichment')) return;
     setAiExerciseLoading(true);
     try {
       const res = await searchExerciseAI(authToken, {
@@ -763,6 +767,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
    *  foods + macros get auto-populated. If the user already typed some
    *  foods, the scan results are merged in (no duplicate names). */
   const handleRoutinePickPhoto = async () => {
+    // Pro gate — food photo scan runs through OpenAI vision. Surface
+    // the upgrade prompt before the picker so free users don't take a
+    // photo that won't get processed.
+    const { requirePro } = await import('../utils/subscription');
+    if (!requirePro(profile, 'ai_food_scan')) return;
     let pickedUri: string | null = null;
     let pickedBase64: string | null = null;
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
@@ -1072,6 +1081,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       Alert.alert('Sign in required', 'You need to be signed in to analyze food photos.');
       return;
     }
+    // Pro gate — `analyzeFoodPhoto` runs through OpenAI vision.
+    const { requirePro } = await import('../utils/subscription');
+    if (!requirePro(profile, 'ai_food_scan')) return;
 
     const permission = source === 'camera'
       ? await ImagePicker.requestCameraPermissionsAsync()
@@ -1134,6 +1146,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
   const handleScanFoods = async () => {
     if (!authToken || pendingImages.length === 0) return;
+    // Pro gate — multi-image food scan runs through OpenAI vision.
+    const { requirePro } = await import('../utils/subscription');
+    if (!requirePro(profile, 'ai_food_scan')) return;
     setScanFoodsLoading(true);
     try {
       const response = await scanFoodsPhoto(authToken, {

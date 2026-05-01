@@ -210,28 +210,111 @@ def list_friends(
         )
     ).all()
 
+    # Was N+1: `_hydrate_friend` did 3-4 queries per accepted friend (user,
+    # profile, goal, completion-dates), and the pending branch did its own
+    # 2 per row. With 20 friends + 5 pending that's ~80 queries on every
+    # call. Now: collect all the other_ids, do 4 IN-set queries up front,
+    # and hydrate from the in-memory maps.
+    from sqlmodel import col
+    accepted_rows = [r for r in rows if r.status == "accepted"]
+    pending_rows = [r for r in rows if r.status == "pending"]
+    accepted_other_ids = [
+        (r.user_b_id if r.user_a_id == current_user.id else r.user_a_id)
+        for r in accepted_rows
+    ]
+    pending_other_ids = [
+        (r.user_b_id if r.user_a_id == current_user.id else r.user_a_id)
+        for r in pending_rows
+    ]
+    all_other_ids = list({*accepted_other_ids, *pending_other_ids})
+
+    users_by_id: dict[int, User] = {}
+    profs_by_user: dict[int, UserSocialProfile] = {}
+    goals_by_user: dict[int, UserGoal] = {}
+    if all_other_ids:
+        for u in db.exec(
+            select(User).where(col(User.id).in_(all_other_ids), User.is_active == True)  # noqa: E712
+        ).all():
+            users_by_id[u.id] = u
+        for p in db.exec(
+            select(UserSocialProfile).where(col(UserSocialProfile.user_id).in_(all_other_ids))
+        ).all():
+            profs_by_user[p.user_id] = p
+        for g in db.exec(
+            select(UserGoal).where(
+                col(UserGoal.user_id).in_(all_other_ids),
+                UserGoal.is_active == True,  # noqa: E712
+            )
+        ).all():
+            goals_by_user.setdefault(g.user_id, g)
+
+    # Streak data: one batched completion-date pull for every accepted
+    # friend whose share-activity flag is on. `_hydrate_friend` did this
+    # one user at a time inside the loop.
+    from app.services.social.digest import _streak_days, _last_active
+    from datetime import timedelta as _td
+    today_d = datetime.now(timezone.utc).date()
+    window_start = today_d - _td(days=13)
+    cutoff_48h = today_d - _td(days=2)
+    sharing_ids = [
+        oid for oid in accepted_other_ids
+        if (profs_by_user.get(oid) and profs_by_user[oid].share_activity_enabled)
+    ]
+    dates_by_user: dict[int, set] = {}
+    if sharing_ids:
+        from app.models import WorkoutCompletion
+        for uid, d in db.exec(
+            select(WorkoutCompletion.user_id, WorkoutCompletion.workout_date).where(
+                col(WorkoutCompletion.user_id).in_(sharing_ids),
+                WorkoutCompletion.workout_date >= window_start,
+                WorkoutCompletion.workout_date <= today_d,
+            )
+        ).all():
+            dates_by_user.setdefault(uid, set()).add(d)
+
     friends: list[FriendRead] = []
-    pending: list[PendingRequestRead] = []
-    for r in rows:
+    for r in accepted_rows:
         other_id = r.user_b_id if r.user_a_id == current_user.id else r.user_a_id
-        if r.status == "accepted":
-            friends.append(_hydrate_friend(db, current_user.id, other_id, r.id))
-        elif r.status == "pending":
-            other = db.exec(
-                select(User).where(User.id == other_id, User.is_active == True)  # noqa: E712
-            ).first()
-            if not other:
-                continue
-            prof = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == other_id)).first()
-            pending.append(PendingRequestRead(
-                friendship_id=r.id,
-                user_id=other_id,
-                username=other.username,
-                display_name=(prof.display_name if prof and prof.display_name else other.username),
-                requested_at=r.requested_at,
-                direction=("outgoing" if r.requested_by == current_user.id else "incoming"),
-            ))
-        # blocked rows are intentionally hidden from the list
+        user_row = users_by_id.get(other_id)
+        if not user_row:
+            # Soft-deleted account — drop silently.
+            continue
+        prof = profs_by_user.get(other_id)
+        goal_row = goals_by_user.get(other_id)
+        share = bool(prof and prof.share_activity_enabled)
+        if share:
+            f_dates = dates_by_user.get(other_id, set())
+            streak = _streak_days(f_dates, today_d)
+            la = _last_active(f_dates, today_d)
+            active_48h = bool(la and la >= cutoff_48h)
+        else:
+            streak, active_48h = 0, False
+        friends.append(FriendRead(
+            friendship_id=r.id,
+            user_id=other_id,
+            username=user_row.username,
+            display_name=(prof.display_name if prof and prof.display_name else user_row.username),
+            goal=(goal_row.goal_type.value if goal_row else None),
+            last_active_within_48h=active_48h,
+            streak=streak,
+        ))
+
+    pending: list[PendingRequestRead] = []
+    for r in pending_rows:
+        other_id = r.user_b_id if r.user_a_id == current_user.id else r.user_a_id
+        other = users_by_id.get(other_id)
+        if not other:
+            continue
+        prof = profs_by_user.get(other_id)
+        pending.append(PendingRequestRead(
+            friendship_id=r.id,
+            user_id=other_id,
+            username=other.username,
+            display_name=(prof.display_name if prof and prof.display_name else other.username),
+            requested_at=r.requested_at,
+            direction=("outgoing" if r.requested_by == current_user.id else "incoming"),
+        ))
+    # blocked rows are intentionally hidden from the list
 
     return FriendsListRead(friends=friends, pending=pending)
 

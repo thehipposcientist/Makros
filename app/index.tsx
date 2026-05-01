@@ -350,6 +350,11 @@ export default function Index() {
   const [showAccount, setShowAccount]     = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
   const [showSupplements, setShowSupplements] = useState(false);
+  // Re-acceptance gate: when the server-side legal versions a user has
+  // accepted differ from the current LEGAL_VERSION constant, this flips
+  // true and a blocking LegalDisclosureModal renders. Cleared after the
+  // user taps "I Agree" and POST /auth/accept-legal succeeds.
+  const [legalReAcceptNeeded, setLegalReAcceptNeeded] = useState(false);
   // Post-onboarding tutorial — owned at the app root so the
   // AccountInfoModal "Show tutorial again" button can flip it on
   // directly. Earlier this lived on HomeScreen and replay required
@@ -581,6 +586,15 @@ export default function Index() {
         if ((meData as any)?.username) {
           await AsyncStorage.setItem('user_username', (meData as any).username);
         }
+        // Legal re-acceptance gate. `getMe` returns the per-section
+        // accepted versions; compare to the current LEGAL_VERSION and
+        // raise the modal if any section's accepted version is stale.
+        // Runs once at session restore — the post-fresh-login path
+        // (handleAuthenticated below) does the same check.
+        try {
+          const { needsLegalReAcceptance } = await import('../src/constants/legal');
+          if (needsLegalReAcceptance(meData as any)) setLegalReAcceptNeeded(true);
+        } catch { /* legal module optional in dev */ }
         await loadProfile(persistedToken);
         // Cold-start hydration: if local history / synced state are empty
         // (e.g. user wiped app data), restore from backend. pullUserState
@@ -872,6 +886,13 @@ export default function Index() {
       const me = await getMe(token);
       incomingUserId = (me as any)?.id ?? (me as any)?.user_id ?? null;
       incomingUsername = (me as any)?.username ?? null;
+      // Legal re-acceptance check on fresh login (mirror of the session-
+      // restore branch above). If the legal copy was bumped while the
+      // user was signed out, surface the modal as soon as they're in.
+      try {
+        const { needsLegalReAcceptance } = await import('../src/constants/legal');
+        if (needsLegalReAcceptance(me as any)) setLegalReAcceptNeeded(true);
+      } catch { /* legal module optional in dev */ }
     } catch {
       incomingUserId = null;
     }
@@ -1526,6 +1547,41 @@ export default function Index() {
             });
         }}
       />
+      {/* Legal re-acceptance gate — blocking, no-dismiss modal that
+          surfaces when the user's accepted legal versions don't match
+          the current LEGAL_VERSION. Outranks Account / Settings /
+          Tutorial visually because acceptance is a precondition for
+          continued use. The hardware back button and OS dismiss are
+          gated inside LegalDisclosureModal when `onAccept` is set. */}
+      {legalReAcceptNeeded && authToken && (
+        <LegalDisclosureModal
+          visible
+          isReAcceptance
+          themeColors={getTheme(userProfile?.themePreference).colors}
+          onClose={() => undefined}
+          onAccept={async () => {
+            try {
+              const [{ acceptLegal }, { LEGAL_VERSION }, { getMe: refetchMe }] = await Promise.all([
+                import('../src/services/api'),
+                import('../src/constants/legal'),
+                import('../src/services/api'),
+              ]);
+              await acceptLegal(authToken, LEGAL_VERSION);
+              setLegalReAcceptNeeded(false);
+              // Best-effort refresh — keeps the in-memory `me` shape
+              // (legal_accepted, *_version) consistent with the server
+              // so a subsequent session-restore doesn't re-prompt.
+              await refetchMe(authToken).catch(() => null);
+            } catch (err: any) {
+              Alert.alert(
+                'Could not save acceptance',
+                err?.message ?? 'Please try again. Continued use of Thallo requires acceptance.',
+              );
+            }
+          }}
+        />
+      )}
+
       {showAccount && authToken && (
         <AccountInfoModal
           token={authToken}
@@ -1994,23 +2050,41 @@ function AccountInfoModal({
   const handleDeleteAccount = () => {
     Alert.alert(
       'Delete account?',
-      'This disables your login and anonymizes your account identifiers. Export your data first if you want a copy.',
+      // Two-step confirmation. The first alert spells out exactly what
+      // happens (retention window, irreversibility, data loss) — users
+      // shouldn't tap-through a "are you sure" without seeing the cost.
+      "This disables your login immediately and anonymizes your account.\n\nWithin 30 days, all personal data — workouts, meals, weight, photos, supplements, social ties — is permanently removed and cannot be recovered.\n\nExport your data first if you want a copy.",
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Delete account',
+          text: 'Continue',
           style: 'destructive',
-          onPress: async () => {
-            setAccountBusy('delete');
-            try {
-              await deleteAccount(token);
-              onClose();
-              onSignOut();
-            } catch (e: any) {
-              Alert.alert('Delete failed', e?.message ?? 'Could not delete account.');
-            } finally {
-              setAccountBusy(null);
-            }
+          onPress: () => {
+            // Second confirmation — final guard so a thumb-misfire on
+            // the first alert can't actually delete the account.
+            Alert.alert(
+              'Are you sure?',
+              'This is permanent after 30 days. There is no undo.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Delete my account',
+                  style: 'destructive',
+                  onPress: async () => {
+                    setAccountBusy('delete');
+                    try {
+                      await deleteAccount(token);
+                      onClose();
+                      onSignOut();
+                    } catch (e: any) {
+                      Alert.alert('Delete failed', e?.message ?? 'Could not delete account.');
+                    } finally {
+                      setAccountBusy(null);
+                    }
+                  },
+                },
+              ],
+            );
           },
         },
       ],

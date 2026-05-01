@@ -905,6 +905,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   };
 
   const handleBodyScan = async (source: 'camera' | 'library') => {
+    // Pro gate — body-fat estimation runs through OpenAI vision and is
+    // a paid feature. Surface the upgrade prompt before opening the
+    // camera/library so free users don't even take a throwaway photo.
+    const { requirePro } = await import('../utils/subscription');
+    if (!requirePro(userProfile, 'ai_form_analysis')) return;
     try {
       const opts = {
         mediaTypes: 'images' as any,
