@@ -4,24 +4,20 @@
 // through `isPro()` so flipping the dev toggle instantly changes UI + API
 // behavior across the app.
 //
-// FREE — basic tracking, enough to experience the app:
-//   - Manual workout logging + set tracking
-//   - Manual meal logging (no AI)
+// FREE — manual tracking and starter tools:
+//   - Manual workouts + custom activity logging
+//   - Manual meals, hydration, and meal routines
 //   - Weight + body measurements
-//   - Basic workout history (sets, reps, duration)
+//   - Basic history / progress views
+//   - Up to 3 saved workout templates
 //
-// PRO — full coaching, deeper insights, best results:
-//   - Personalized workout plan generation + day regeneration
-//   - AI meal plans + food photo scanning
-//   - AI coach chat (trainer + nutritionist)
-//   - Smart starting-weight recommendations
-//   - In-workout AI set review
-//   - Gut & longevity nutrition insights
-//   - Nutrition scoring + weekly digest
-//   - Recovery + fatigue tracking with adaptive recommendations
-//   - Apple Health integration (HR, sleep, readiness)
-//   - Workout calorie + HR zone tracking
-//   - Charts, trends, and progress analytics
+// PRO — guided planning, AI help, and deeper insights:
+//   - Visible generated workout PlanWeeks + day rebuilds
+//   - AI meal plans, meal swaps, and food lookup
+//   - Food/body/form photo analysis
+//   - Coach chat for training + nutrition
+//   - Nutrition scoring, gut insights, weekly digest
+//   - Readiness, fatigue, sleep, and recovery cards
 
 import type { UserProfile } from '../types';
 import {
@@ -66,7 +62,7 @@ export function requirePro(
   const { Alert } = require('react-native');
   Alert.alert(
     'Upgrade to Pro',
-    `${FEATURE_LABEL[feature]} is a Thallo Pro feature. Upgrade for personalized plans, deeper insights, and AI coaching.`,
+    `${FEATURE_LABEL[feature]} is a Thallo Pro feature. Upgrade for guided plans, AI help, readiness, and deeper insights.`,
     [
       { text: 'Not now', style: 'cancel' },
       { text: 'Upgrade', onPress: () => opts?.onUpgrade?.() },

@@ -27,23 +27,23 @@ export type ProFeature =
   | 'progress_charts';
 
 export const FEATURE_LABEL: Record<ProFeature, string> = {
-  ai_plan_generation:       'Personalized training plans',
-  ai_day_regenerate:        'Rebuild your week',
+  ai_plan_generation:       'Generated workout PlanWeeks',
+  ai_day_regenerate:        'Change Focus and day rebuilds',
   ai_meal_plan:             'AI meal plans',
-  ai_coach:                 'AI coach chat',
+  ai_coach:                 'Coach chat',
   ai_food_scan:             'Food photo scanning',
   ai_form_analysis:         'Form analysis',
-  ai_weight_recommendation: 'Smart starting weights',
-  ai_plan_review:           'AI plan review',
+  ai_weight_recommendation: 'AI starting-weight fallback',
+  ai_plan_review:           'Plan review',
   ai_food_enrichment:       'AI food lookup',
-  ai_in_workout_review:     'In-workout AI feedback',
-  nutrition_insights:        'Gut & longevity insights',
+  ai_in_workout_review:     'In-workout set feedback',
+  nutrition_insights:        'Gut and longevity insights',
   nutrition_scoring:         'Nutrition scoring',
   weekly_digest:             'Weekly progress digest',
-  recovery_tracking:         'Recovery + fatigue tracking',
-  apple_health:              'Apple Health sync',
-  workout_analytics:         'Workout calorie + HR tracking',
-  progress_charts:           'Charts + trends',
+  recovery_tracking:         'Readiness and fatigue tracking',
+  apple_health:              'Health-powered readiness',
+  workout_analytics:         'Workout analytics',
+  progress_charts:           'Advanced charts and trends',
 };
 
 export function tierOf(profile: UserProfile | null | undefined): Tier {

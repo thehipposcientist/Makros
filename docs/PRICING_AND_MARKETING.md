@@ -78,40 +78,45 @@ Avoid these claims:
 
 ## Recommended Free And Pro Split
 
-The free tier should prove the product, not replace it. The paid tier should own ongoing adaptation, Watch convenience, AI assistance, and advanced insight.
+The free tier should prove the product, not replace it. The paid tier should own guided planning, AI assistance, ongoing adaptation, and advanced insight. Today this split is still a client/dev-tier simulation; before public billing, StoreKit or RevenueCat plus server-side entitlement checks must enforce the same gates.
+
+### Current Implemented Split
+
+This is the accurate in-app split as of May 1, 2026.
 
 ### Free
 
-Recommended free access:
+Current free access:
 
 - Account creation and onboarding.
-- One starter 7-day PlanWeek.
-- Manual workout logging.
-- Manual meal logging.
-- Basic nutrition targets and meal history.
-- Weight logging.
-- Basic progress view.
-- Limited grocery-list preview.
-- Basic local reminders.
-- Read-only access to completed history.
+- Manual workouts and custom activity logging.
+- Manual meals, hydration, and meal routines.
+- Weight and body measurement tracking.
+- Basic history and progress views.
+- Exercise library, equipment, injury, and preference settings.
+- Up to 3 saved workout templates.
 
-Free should not include indefinite auto-renewed programming. A starter week is enough to show the core loop while preserving the reason to subscribe.
+Free should not promise full generated programming or AI help. In the current client, free users see manual tracking scaffolds while Pro surfaces are prompted at use.
 
 ### Pro
 
-Recommended Pro access:
+Current Pro access:
 
-- Ongoing weekly PlanWeek auto-renewal.
-- Change Focus, deterministic swaps, and plan personalization controls.
-- Full Apple Watch companion workflow for guided workouts and quick logging.
-- AI meal generation and meal swaps.
-- Food scanning and classification beyond a free monthly cap.
-- Full grocery list.
-- Readiness, sleep, recovery, and HealthKit-powered insights.
-- Coach chat and apply-action recommendations.
-- Supplement reminders and Watch supplement flows.
-- Advanced progress trends.
-- Future weekly reports and smarter reminders.
+- Visible generated workout PlanWeeks.
+- Change Focus, deterministic swaps, and day rebuilds.
+- AI meal plans, meal swaps, and grocery help.
+- Food photo scanning and AI food lookup.
+- Coach chat for training and nutrition.
+- Body and form photo analysis.
+- Nutrition scoring, gut insights, and weekly digest surfaces.
+- Readiness, fatigue, sleep, and recovery cards.
+
+### Launch Target
+
+For a paid public launch, keep the same shape but make the backend authoritative:
+
+- Free gets onboarding, manual tracking, basic history, basic progress, and a limited starter experience.
+- Pro gets ongoing PlanWeek auto-renewal, AI meals/scans/coach, readiness and recovery insight, advanced analytics, and the full Watch-guided workflow if Watch convenience is positioned as a paid benefit.
 
 Pro should sell "the loop keeps going": next week, better context, faster logging, and less friction.
 

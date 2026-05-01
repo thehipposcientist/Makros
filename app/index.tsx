@@ -5,7 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as KeepAwake from 'expo-keep-awake';
-import { tierOf } from '../src/utils/subscription';
+import { FREE_WORKOUT_TEMPLATE_LIMIT, tierOf } from '../src/utils/subscription';
 
 /** Keep the device awake while plan generation is in flight. iOS suspends
  *  JS execution ~30s after the app backgrounds or the screen locks, which
@@ -2358,14 +2358,15 @@ function AccountInfoModal({
                       </View>
                       <View>
                         <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary }}>Free</Text>
-                        <Text style={{ fontSize: 11, color: tc.textMuted }}>Basic tracking to try the app</Text>
+                        <Text style={{ fontSize: 11, color: tc.textMuted }}>Manual tracking and starter tools</Text>
                       </View>
                     </View>
                     {[
-                      'Log workouts manually',
-                      'Log meals manually',
-                      'Track weight + body measurements',
-                      'Basic workout history',
+                      'Manual workouts and custom activity logging',
+                      'Manual meals, hydration, and meal routines',
+                      'Weight and body measurement tracking',
+                      'Basic history and progress views',
+                      `Up to ${FREE_WORKOUT_TEMPLATE_LIMIT} saved workout templates`,
                     ].map((label) => (
                       <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 }}>
                         <Text style={{ fontSize: 14, color: tc.textMuted }}>{'·'}</Text>
@@ -2384,27 +2385,22 @@ function AccountInfoModal({
                       </View>
                       <View>
                         <Text style={{ fontSize: 14, fontWeight: '800', color: tc.primary }}>Pro</Text>
-                        <Text style={{ fontSize: 11, color: tc.textMuted }}>Full coaching, deeper insights, best results</Text>
+                        <Text style={{ fontSize: 11, color: tc.textMuted }}>Guided planning, AI help, and insights</Text>
                       </View>
                     </View>
                     <Text style={{ fontSize: 12, color: tc.textSecondary, marginBottom: 10, marginLeft: 36, lineHeight: 17 }}>
                       Everything in Free, plus:
                     </Text>
                     {[
-                      ['barbell-outline',     'Personalized training plans'],
-                      ['swap-horizontal-outline', 'Rebuild your week when you switch a day'],
-                      ['restaurant-outline',  'AI-generated meal plans'],
-                      ['chatbubble-outline',  'AI coach for training + nutrition questions'],
-                      ['camera-outline',      'Snap a photo to log any meal'],
-                      ['fitness-outline',     'Smart starting-weight recommendations'],
-                      ['flash-outline',       'In-workout AI set feedback'],
-                      ['leaf-outline',        'Daily nutrition insights (fiber, protein sources)'],
-                      ['star-outline',        'Nutrition scoring + daily grades'],
-                      ['bar-chart-outline',   'Weekly progress digest with trends'],
-                      ['pulse-outline',       'Recovery + fatigue tracking'],
-                      ['heart-outline',       'Apple Health sync (HR, sleep, readiness)'],
-                      ['flame-outline',       'Workout calorie + HR zone tracking'],
-                      ['trending-up-outline', 'Charts, trends, and progress analytics'],
+                      ['calendar-outline',    'Visible generated workout PlanWeeks'],
+                      ['swap-horizontal-outline', 'Change Focus, swaps, and day rebuilds'],
+                      ['restaurant-outline',  'AI meal plans, meal swaps, and grocery help'],
+                      ['camera-outline',      'Food photo scanning and AI food lookup'],
+                      ['chatbubble-outline',  'Coach chat for training and nutrition'],
+                      ['body-outline',        'Body and form photo analysis'],
+                      ['leaf-outline',        'Nutrition scoring and gut insights'],
+                      ['pulse-outline',       'Readiness, fatigue, sleep, and recovery cards'],
+                      ['bar-chart-outline',   'Weekly digest and advanced trend surfaces'],
                     ].map(([icon, label]) => (
                       <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 }}>
                         <Ionicons name={icon as any} size={15} color={tc.primary} />
@@ -2428,9 +2424,10 @@ function AccountInfoModal({
           </Modal>
           )}
 
-          {/* DEV: Subscription tier toggle. Flips between free (manual tracking
-              only) and pro (full AI features). Writes back to the profile
-              immediately so gates take effect without navigating away. */}
+          {/* DEV: Subscription tier toggle. Flips between the current free
+              tracking surface and pro-only guided plan / AI surfaces. Writes
+              back to the profile immediately so gates take effect without
+              navigating away. */}
           <View style={{
             padding: 14, borderRadius: 12,
             backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border,
@@ -2483,8 +2480,8 @@ function AccountInfoModal({
             </View>
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
               {tierOf(profile) === 'free'
-                ? 'Free: basic workout + meal logging. Upgrade for guided plans, coaching, insights, and analytics.'
-                : 'Pro: personalized training plans, coaching, nutrition insights, recovery tracking, and full analytics.'}
+                ? `Free: manual workout + meal logging, basic progress, and ${FREE_WORKOUT_TEMPLATE_LIMIT} saved workout templates.`
+                : 'Pro: generated PlanWeeks, AI meal help, coach chat, scan features, readiness, and weekly insights.'}
             </Text>
           </View>
 

@@ -28,7 +28,7 @@ from sqlmodel import select
 from app.models import Meal, MealItem, Food, FoodNutrition, FoodMetadata, DailyNutritionMetrics
 from app.services.nutrition.ai_classify import get_or_create_metadata
 from app.services.nutrition.food_classifier import CLASSIFIER_VERSION, PLANT_CATEGORY
-from app.services.nutrition.meal_history import dedupe_generated_plan_meals
+from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
 
 METRICS_VERSION = 3   # bumped at unified-score rewrite (v3 adds tag servings + recovery_flags)
 
@@ -310,7 +310,7 @@ def _gather_raw_signals(
     items_by_meal: dict[int, list] = {}
     for item in items:
         items_by_meal.setdefault(item.meal_id, []).append(item)
-    meals = dedupe_generated_plan_meals(meals, items_by_meal)
+    meals = dedupe_meals_for_aggregation(meals, items_by_meal)
     kept_meal_ids = {m.id for m in meals}
     items = [item for item in items if item.meal_id in kept_meal_ids]
 

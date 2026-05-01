@@ -86,7 +86,7 @@ Deferred by owner decision:
 
 - Backend `User` already has `first_name` and `last_name`. Signup flow now uses them.
 - Workout planner is fully deterministic per `CLAUDE.md`. AI plan review is permanently disabled (`PLAN_REVIEW_ENABLED=0` is a no-op).
-- The `subscription.ts` helper returns Pro when the tier is missing: `profile?.subscriptionTier ?? 'pro'`. **Still unsafe for production.**
+- The subscription helper now defaults missing tiers to Free, but Pro is still a client/dev-tier simulation until StoreKit or RevenueCat and server-side entitlements are wired.
 - `HomeScreen.tsx` is ~12k lines with 121 `useState` calls. `ActiveWorkoutScreen.tsx` is ~6k lines with 17 active `setInterval` instances.
 - Watch and Live Activity code exists. Recent diagnostic improvements should make next-build sync issues visible without Console.app.
 - `docs/DEPLOYMENT.md` already notes that a public App Store release needs a privacy policy URL.

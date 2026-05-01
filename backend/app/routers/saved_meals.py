@@ -210,6 +210,76 @@ def log_saved_meal(
         except ValueError:
             pass
 
+    # Idempotency for retries / repeated taps. A user can intentionally
+    # log the same saved meal more than once, so only collapse exact item
+    # matches that land in the same date/type slot within a short window.
+    try:
+        from app.services.nutrition.meal_history import _normalized_item_signature
+
+        def _signature_from_saved_items(items: list[dict]) -> str:
+            return _normalized_item_signature([
+                {
+                    "name": it.get("food_name") or it.get("name") or "",
+                    "quantity": it.get("quantity") or 0,
+                    "unit": it.get("unit") or "",
+                    "calories": it.get("calories") or 0,
+                    "protein": it.get("protein_g") or it.get("protein") or 0,
+                    "carbs": it.get("carbs_g") or it.get("carbs") or 0,
+                    "fat": it.get("fat_g") or it.get("fat") or 0,
+                }
+                for it in (items or [])
+            ])
+
+        def _ts(raw: datetime | None) -> float | None:
+            if raw is None:
+                return None
+            if raw.tzinfo is None:
+                raw = raw.replace(tzinfo=timezone.utc)
+            return float(raw.timestamp())
+
+        incoming_signature = _signature_from_saved_items(saved.items or [])
+        target_ts = _ts(consumed_at)
+        existing_meals = db.exec(
+            select(Meal)
+            .where(Meal.user_id == current_user.id)
+            .where(Meal.meal_date == target_date)
+            .where(Meal.meal_type == mt)
+            .where(Meal.source == MealSource.LOGGED)
+            .where(Meal.name == saved.name)
+            .order_by(Meal.created_at.desc())
+            .limit(20)
+        ).all()
+        if existing_meals and incoming_signature:
+            existing_items = db.exec(
+                select(MealItem).where(MealItem.meal_id.in_([m.id for m in existing_meals]))
+            ).all()
+            items_by_meal: dict[int, list[MealItem]] = {}
+            for item in existing_items:
+                items_by_meal.setdefault(item.meal_id, []).append(item)
+            for existing in existing_meals:
+                existing_signature = _normalized_item_signature([
+                    {
+                        "name": item.food_name,
+                        "quantity": item.quantity,
+                        "unit": item.unit,
+                        "calories": item.calories,
+                        "protein": item.protein_g,
+                        "carbs": item.carbs_g,
+                        "fat": item.fat_g,
+                    }
+                    for item in items_by_meal.get(existing.id, [])
+                ])
+                existing_ts = _ts(existing.consumed_at or existing.created_at)
+                if (
+                    existing_signature == incoming_signature
+                    and target_ts is not None
+                    and existing_ts is not None
+                    and abs(target_ts - existing_ts) <= 120
+                ):
+                    return {"meal_id": existing.id, "saved_meal_id": saved.id, "times_logged": saved.times_logged}
+    except Exception:
+        pass
+
     meal = Meal(
         user_id=current_user.id, meal_date=target_date,
         meal_type=mt, name=saved.name,

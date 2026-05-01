@@ -2582,9 +2582,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             <Ionicons name="chevron-forward" size={16} color={tc.textMuted} />
           </TouchableOpacity>
 
-          {/* DEV: Subscription tier toggle. Flips between free (manual tracking
-              only) and pro (full AI features). Remove / hide behind a debug
-              flag once the billing flow ships. */}
+          {/* DEV: Subscription tier toggle. Flips between the current free
+              tracking surface and pro-only guided plan / AI surfaces.
+              Remove / hide behind a debug flag once billing ships. */}
           <View style={{
             backgroundColor: tc.surfaceRaised, padding: 14, borderRadius: radius.lg,
             borderWidth: 1, borderColor: tc.border, marginBottom: 14,
@@ -2616,8 +2616,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
             <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
               {subscriptionTier === 'free'
-                ? 'Free: manual tracking only. No AI plan generation, coach, food scan, or smart weight recs.'
-                : 'Pro: full feature set including AI plans, coaching, and scanning.'}
+                ? 'Free: manual workouts, meals, hydration, body tracking, basic progress, and limited templates.'
+                : 'Pro: generated PlanWeeks, AI meal help, coach chat, scan features, readiness, and weekly insights.'}
             </Text>
           </View>
 

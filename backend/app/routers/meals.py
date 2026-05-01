@@ -894,7 +894,7 @@ def daily_summary(
     db: Session = Depends(get_session),
 ):
     """Total macros consumed across all meals for a given day."""
-    from app.services.nutrition.meal_history import dedupe_generated_plan_meals
+    from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
 
     meals = db.exec(
         select(Meal).where(Meal.user_id == current_user.id, Meal.meal_date == summary_date)
@@ -906,7 +906,7 @@ def daily_summary(
     items_by_meal: dict[int, list] = defaultdict(list)
     for item in all_items:
         items_by_meal[item.meal_id].append(item)
-    meals = dedupe_generated_plan_meals(meals, items_by_meal)
+    meals = dedupe_meals_for_aggregation(meals, items_by_meal)
 
     totals = {"calories": 0.0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 0.0}
     meal_data = []
@@ -972,7 +972,7 @@ def adjusted_daily_target(
     from datetime import date as date_cls, timedelta
     from app.models import UserProfile, UserGoal, UserCoachingState
     from app.services.nutrition.calorie_calculator import compute_targets, CalorieInputs
-    from app.services.nutrition.meal_history import dedupe_generated_plan_meals
+    from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
     from app.services.nutrition.weekly_calorie_budget import (
         compute_adjusted_daily_target, compute_adjusted_macros,
     )
@@ -998,7 +998,7 @@ def adjusted_daily_target(
         items_by_meal: dict[int, list] = defaultdict(list)
         for item in items:
             items_by_meal[item.meal_id].append(item)
-        week_meals = dedupe_generated_plan_meals(week_meals, items_by_meal)
+        week_meals = dedupe_meals_for_aggregation(week_meals, items_by_meal)
         kept_meal_ids = {m.id for m in week_meals}
         calories_this_week = sum(float(item.calories or 0) for item in items if item.meal_id in kept_meal_ids)
     else:

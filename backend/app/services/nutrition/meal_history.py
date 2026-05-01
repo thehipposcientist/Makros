@@ -144,6 +144,84 @@ def dedupe_generated_plan_meals(meals: list, items_by_meal: dict[int, list] | No
     ]
 
 
+def _meal_timestamp(meal: object) -> float | None:
+    raw = getattr(meal, "consumed_at", None) or getattr(meal, "created_at", None)
+    if raw is None or not hasattr(raw, "timestamp"):
+        return None
+    try:
+        if raw.tzinfo is None:
+            raw = raw.replace(tzinfo=timezone.utc)
+        return float(raw.timestamp())
+    except Exception:
+        return None
+
+
+def _meal_items_signature(items: list) -> str:
+    return _normalized_item_signature([
+        {
+            "name": getattr(item, "food_name", ""),
+            "quantity": getattr(item, "quantity", 0),
+            "unit": getattr(item, "unit", ""),
+            "calories": getattr(item, "calories", 0),
+            "protein": getattr(item, "protein_g", 0),
+            "carbs": getattr(item, "carbs_g", 0),
+            "fat": getattr(item, "fat_g", 0),
+        }
+        for item in items
+    ])
+
+
+def dedupe_meals_for_aggregation(
+    meals: list,
+    items_by_meal: dict[int, list] | None = None,
+    *,
+    logged_retry_window_seconds: int = 120,
+) -> list:
+    """Collapse generated duplicates plus obvious logged-meal retries.
+
+    Manual/saved meals can be intentionally repeated, so logged rows are
+    only collapsed when the same date/type/name/items land within a short
+    retry window.
+    """
+    deduped = dedupe_generated_plan_meals(meals, items_by_meal)
+    if not items_by_meal or logged_retry_window_seconds <= 0:
+        return deduped
+
+    passthrough_ids: set[int] = set()
+    logged_groups: dict[tuple, list] = defaultdict(list)
+    for meal in deduped:
+        meal_id = int(getattr(meal, "id", 0) or 0)
+        if _meal_source_name(meal) != "logged":
+            passthrough_ids.add(meal_id)
+            continue
+        name_key = _normalize_meal_text(getattr(meal, "name", ""))
+        meal_date = getattr(meal, "meal_date", None)
+        type_key = _meal_type_name(meal)
+        signature = _meal_items_signature(items_by_meal.get(meal_id, []))
+        if not name_key or meal_date is None or not signature:
+            passthrough_ids.add(meal_id)
+            continue
+        logged_groups[(meal_date, type_key, name_key, signature)].append(meal)
+
+    kept_logged_ids: set[int] = set()
+    for rows in logged_groups.values():
+        kept_times: list[float] = []
+        for meal in sorted(rows, key=_meal_recency_key, reverse=True):
+            meal_id = int(getattr(meal, "id", 0) or 0)
+            ts = _meal_timestamp(meal)
+            if ts is not None and any(abs(ts - kept) <= logged_retry_window_seconds for kept in kept_times):
+                continue
+            kept_logged_ids.add(meal_id)
+            if ts is not None:
+                kept_times.append(ts)
+
+    kept_ids = passthrough_ids | kept_logged_ids
+    return [
+        meal for meal in deduped
+        if int(getattr(meal, "id", 0) or 0) in kept_ids
+    ]
+
+
 def _delete_meal_with_items(db: Session, meal: object) -> None:
     from app.models import MealItem
 
@@ -612,7 +690,6 @@ def get_meal_history(
         .where(Meal.user_id == user_id)
         .where(col(Meal.meal_date) >= cutoff)
         .order_by(col(Meal.meal_date).desc(), col(Meal.created_at).desc())
-        .limit(limit)
     ).all()
 
     # Batch-load all items to avoid N+1
@@ -621,7 +698,7 @@ def get_meal_history(
     items_by_meal: dict[int, list] = defaultdict(list)
     for item in all_items:
         items_by_meal[item.meal_id].append(item)
-    meals = dedupe_generated_plan_meals(meals, items_by_meal)
+    meals = dedupe_meals_for_aggregation(meals, items_by_meal)[:limit]
 
     result = []
     for m in meals:
@@ -705,7 +782,7 @@ def get_rolling_averages(user_id: int, window: int = 7, *, db: Session, end_date
     items_by_meal: dict[int, list] = defaultdict(list)
     for item in all_items:
         items_by_meal[item.meal_id].append(item)
-    meals = dedupe_generated_plan_meals(meals, items_by_meal)
+    meals = dedupe_meals_for_aggregation(meals, items_by_meal)
 
     for m in meals:
         items = items_by_meal.get(m.id, [])
@@ -745,6 +822,18 @@ def get_rolling_averages(user_id: int, window: int = 7, *, db: Session, end_date
         "avg_fat_g_when_logged": round(total_fat / logged_denom, 1),
         "tracking_rate_pct": round(days_with_data / window_denom * 100, 1),
         "total_meals_logged": total_meals,
+        "daily": [
+            {
+                "date": str(day),
+                "calories": round(data["calories"], 1),
+                "protein_g": round(data["protein_g"], 1),
+                "carbs_g": round(data["carbs_g"], 1),
+                "fat_g": round(data["fat_g"], 1),
+                "meal_count": int(data["meal_count"]),
+            }
+            for day, data in sorted(daily.items())
+            if data["meal_count"] > 0
+        ],
     }
 
 
@@ -788,7 +877,7 @@ def get_common_meals(
     items_by_meal: dict[int, list] = defaultdict(list)
     for item in all_items:
         items_by_meal[item.meal_id].append(item)
-    meals = dedupe_generated_plan_meals(meals, items_by_meal)
+    meals = dedupe_meals_for_aggregation(meals, items_by_meal)
 
     # Group by normalized meal name for better deduplication
     name_groups: dict[str, list[int]] = defaultdict(list)
@@ -866,7 +955,7 @@ def get_nutrition_patterns(user_id: int, days: int = 14, *, db: Session) -> dict
     _pattern_items_by_meal: dict[int, list] = defaultdict(list)
     for _item in _pattern_all_items:
         _pattern_items_by_meal[_item.meal_id].append(_item)
-    meals = dedupe_generated_plan_meals(meals, _pattern_items_by_meal)
+    meals = dedupe_meals_for_aggregation(meals, _pattern_items_by_meal)
 
     for m in meals:
         if m.meal_date not in daily:

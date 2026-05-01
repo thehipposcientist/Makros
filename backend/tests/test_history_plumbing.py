@@ -511,6 +511,127 @@ def test_rolling_averages_preserve_distinct_generic_meals() -> None:
     _ok("distinct generic generated meals remain separate")
 
 
+def test_meal_history_limits_after_deduping_generated_rows() -> None:
+    """Duplicate generated rows should not consume the whole history limit
+    before older real meal days can be returned."""
+    print("\n[test] meal history applies limit after generated de-dupe")
+    from datetime import date, timedelta
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.enums import MealSource, MealType
+    from app.models import User, Meal, MealItem  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import get_meal_history
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    today = date.today()
+    older = today - timedelta(days=1)
+    with Session(engine) as s:
+        u = User(email="meal-history-limit@example.com", username="meallimit", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        for calories in (500, 550, 600, 650, 700):
+            meal = Meal(
+                user_id=u.id,
+                meal_date=today,
+                meal_type=MealType.BREAKFAST,
+                name="Balanced meal 1",
+                source=MealSource.GENERATED,
+            )
+            s.add(meal); s.flush()
+            s.add(MealItem(
+                meal_id=meal.id,
+                food_name="Oats",
+                quantity=1,
+                unit="bowl",
+                calories=calories,
+                protein_g=20,
+                carbs_g=80,
+                fat_g=12,
+            ))
+        old_meal = Meal(
+            user_id=u.id,
+            meal_date=older,
+            meal_type=MealType.LUNCH,
+            name="Older lunch",
+            source=MealSource.GENERATED,
+        )
+        s.add(old_meal); s.flush()
+        s.add(MealItem(
+            meal_id=old_meal.id,
+            food_name="Chicken",
+            quantity=1,
+            unit="serving",
+            calories=400,
+            protein_g=40,
+            carbs_g=20,
+            fat_g=10,
+        ))
+        s.commit()
+
+        history = get_meal_history(u.id, days=7, limit=2, db=s)
+        assert len(history) == 2, history
+        assert [row["meal_date"] for row in history] == [str(today), str(older)], history
+        assert history[0]["totals"]["calories"] == 700, history
+    _ok("history limit is applied after duplicate collapse")
+
+
+def test_saved_meal_log_retry_is_idempotent() -> None:
+    """A retry of the same saved-meal log should return the existing row
+    instead of inflating nutrition totals."""
+    print("\n[test] saved meal log retry is idempotent")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, SavedMeal, Meal  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.saved_meals import log_saved_meal
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        u = User(email="saved-retry@example.com", username="savedretry", hashed_password="x")
+        saved = SavedMeal(
+            user_id=1,
+            name="Veggie shake",
+            total_calories=211,
+            total_protein_g=6.5,
+            total_carbs_g=30,
+            total_fat_g=5,
+            items=[{
+                "food_name": "Veggie shake",
+                "quantity": 1,
+                "unit": "serving",
+                "calories": 211,
+                "protein_g": 6.5,
+                "carbs_g": 30,
+                "fat_g": 5,
+            }],
+        )
+        s.add(u); s.commit(); s.refresh(u)
+        saved.user_id = u.id
+        s.add(saved); s.commit(); s.refresh(saved)
+
+        consumed_at = datetime(2026, 4, 24, 14, 16, tzinfo=timezone.utc).isoformat()
+        body = {"meal_date": str(date(2026, 4, 24)), "meal_type": "lunch", "consumed_at": consumed_at}
+        first = log_saved_meal(saved.id, body, current_user=u, db=s)
+        second = log_saved_meal(saved.id, body, current_user=u, db=s)
+
+        rows = s.exec(select(Meal).where(Meal.user_id == u.id)).all()
+        assert first["meal_id"] == second["meal_id"], (first, second)
+        assert len(rows) == 1, rows
+        assert second["times_logged"] == 1, second
+    _ok("saved meal retry returns existing log row")
+
+
 def test_logged_ai_food_micros_are_persisted_for_gut_metrics() -> None:
     """AI/USDA food-search results arrive with per-item micronutrients.
     Logging an unmatched custom item should turn those into a FoodNutrition
@@ -746,6 +867,8 @@ cases = [
     test_log_meal_from_plan_collapses_existing_generated_duplicates,
     test_rolling_averages_ignore_duplicate_generated_plan_rows,
     test_rolling_averages_preserve_distinct_generic_meals,
+    test_meal_history_limits_after_deduping_generated_rows,
+    test_saved_meal_log_retry_is_idempotent,
     test_logged_ai_food_micros_are_persisted_for_gut_metrics,
     test_score_micros_read_unsuffixed_aliases_and_calorie_fallback,
     test_gut_rollup_uses_logged_days_not_empty_metric_placeholders,

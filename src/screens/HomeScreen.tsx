@@ -1392,7 +1392,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // gutHealthToday removed — NutritionCard now computes gut health from plan data
   const [showGroceryList, setShowGroceryList] = useState(false);
   const [feedbackSettings, setFeedbackSettings] = useState<{ hapticsEnabled: boolean; soundsEnabled: boolean; vibrationEnabled: boolean; restNotificationSoundEnabled: boolean; restTimerSound: import('../utils/feedback').RestTimerSound }>({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true, restNotificationSoundEnabled: false, restTimerSound: 'chime' });
-  const [reminderEnabled, setReminderEnabled] = useState(false);
+  // Full reminder state — preserves the user's chosen time across
+  // toggles. The previous reminderEnabled-only state forced a hardcoded
+  // hour:8/minute:0 on every save, silently clobbering whatever schedule
+  // the user had set in the dedicated SettingsScreen.
+  const [workoutReminder, setWorkoutReminder] = useState<{ enabled: boolean; hour: number; minute: number }>({ enabled: false, hour: 8, minute: 0 });
+  const [mealReminder, setMealReminder] = useState<{ enabled: boolean; hour: number; minute: number }>({ enabled: true, hour: 21, minute: 0 });
   const [showEmailBanner, setShowEmailBanner] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [newEmail, setNewEmail] = useState('');
@@ -1946,7 +1951,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   useEffect(() => {
     AsyncStorage.getItem('user_username').then(v => { if (v) setUsername(v); }).catch(() => {});
     import('../utils/workoutReminders').then(({ loadReminderSettings }) =>
-      loadReminderSettings().then(s => setReminderEnabled(s.enabled)).catch(() => {})
+      loadReminderSettings().then(s => setWorkoutReminder(s)).catch(() => {})
+    );
+    import('../utils/mealReminders').then(({ loadMealReminderSettings }) =>
+      loadMealReminderSettings().then(s => setMealReminder(s)).catch(() => {})
     );
     if (userProfile) loadPlans(userProfile);
     loadDayStatus();
@@ -9776,25 +9784,118 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </View>
                 ))}
 
-                {/* Workout Reminders */}
+                {/* Reminders — full schedule UI surfaced here so users
+                    don't have to dig into Account Details > Settings to
+                    change the time. The toggle preserves the user's
+                    chosen hour/minute (no hardcoded reset). */}
                 <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>REMINDERS</Text>
                 <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
                   <View style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
                     <View style={{ flex: 1 }}>
                       <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Workout Reminders</Text>
-                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Daily notification on training days</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Nudge on training days at the time you set</Text>
                     </View>
                     <Switch
-                      value={reminderEnabled}
+                      value={workoutReminder.enabled}
                       onValueChange={async (v) => {
-                        setReminderEnabled(v);
+                        const next = { ...workoutReminder, enabled: v };
+                        setWorkoutReminder(next);
                         const { saveReminderSettings } = await import('../utils/workoutReminders');
-                        await saveReminderSettings({ enabled: v, hour: 8, minute: 0 });
+                        await saveReminderSettings(next);
                       }}
                       trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
-                      thumbColor={reminderEnabled ? themeColors.primary : themeColors.textMuted}
+                      thumbColor={workoutReminder.enabled ? themeColors.primary : themeColors.textMuted}
                     />
                   </View>
+                  {workoutReminder.enabled && (
+                    <View style={[styles.profileMenuItem, { justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: themeColors.border }]}>
+                      <Text style={{ fontSize: 13, color: themeColors.textSecondary }}>Remind me at</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <TouchableOpacity
+                          onPress={async () => {
+                            const m = workoutReminder.minute - 15;
+                            const next = m < 0
+                              ? { ...workoutReminder, hour: (workoutReminder.hour + 23) % 24, minute: m + 60 }
+                              : { ...workoutReminder, minute: m };
+                            setWorkoutReminder(next);
+                            const { saveReminderSettings } = await import('../utils/workoutReminders');
+                            await saveReminderSettings(next);
+                          }}
+                          style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
+                          <Ionicons name="remove" size={14} color={themeColors.textSecondary} />
+                        </TouchableOpacity>
+                        <Text style={{ minWidth: 64, textAlign: 'center', fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>
+                          {`${((workoutReminder.hour + 11) % 12 + 1)}:${String(workoutReminder.minute).padStart(2, '0')} ${workoutReminder.hour < 12 ? 'AM' : 'PM'}`}
+                        </Text>
+                        <TouchableOpacity
+                          onPress={async () => {
+                            const m = workoutReminder.minute + 15;
+                            const next = m >= 60
+                              ? { ...workoutReminder, hour: (workoutReminder.hour + 1) % 24, minute: m - 60 }
+                              : { ...workoutReminder, minute: m };
+                            setWorkoutReminder(next);
+                            const { saveReminderSettings } = await import('../utils/workoutReminders');
+                            await saveReminderSettings(next);
+                          }}
+                          style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
+                          <Ionicons name="add" size={14} color={themeColors.textSecondary} />
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  )}
+                  <View style={[styles.profileMenuItem, { justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: themeColors.border }]}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Meal Log Reminder</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Evening nudge if today's meals aren't logged</Text>
+                    </View>
+                    <Switch
+                      value={mealReminder.enabled}
+                      onValueChange={async (v) => {
+                        const next = { ...mealReminder, enabled: v };
+                        setMealReminder(next);
+                        const { saveMealReminderSettings } = await import('../utils/mealReminders');
+                        await saveMealReminderSettings(next);
+                      }}
+                      trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
+                      thumbColor={mealReminder.enabled ? themeColors.primary : themeColors.textMuted}
+                    />
+                  </View>
+                  {mealReminder.enabled && (
+                    <View style={[styles.profileMenuItem, { justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: themeColors.border }]}>
+                      <Text style={{ fontSize: 13, color: themeColors.textSecondary }}>Remind me at</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <TouchableOpacity
+                          onPress={async () => {
+                            const m = mealReminder.minute - 15;
+                            const next = m < 0
+                              ? { ...mealReminder, hour: (mealReminder.hour + 23) % 24, minute: m + 60 }
+                              : { ...mealReminder, minute: m };
+                            setMealReminder(next);
+                            const { saveMealReminderSettings } = await import('../utils/mealReminders');
+                            await saveMealReminderSettings(next);
+                          }}
+                          style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
+                          <Ionicons name="remove" size={14} color={themeColors.textSecondary} />
+                        </TouchableOpacity>
+                        <Text style={{ minWidth: 64, textAlign: 'center', fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>
+                          {`${((mealReminder.hour + 11) % 12 + 1)}:${String(mealReminder.minute).padStart(2, '0')} ${mealReminder.hour < 12 ? 'AM' : 'PM'}`}
+                        </Text>
+                        <TouchableOpacity
+                          onPress={async () => {
+                            const m = mealReminder.minute + 15;
+                            const next = m >= 60
+                              ? { ...mealReminder, hour: (mealReminder.hour + 1) % 24, minute: m - 60 }
+                              : { ...mealReminder, minute: m };
+                            setMealReminder(next);
+                            const { saveMealReminderSettings } = await import('../utils/mealReminders');
+                            await saveMealReminderSettings(next);
+                          }}
+                          style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
+                          <Ionicons name="add" size={14} color={themeColors.textSecondary} />
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  )}
                 </View>
 
                 {/* Feedback & Device */}

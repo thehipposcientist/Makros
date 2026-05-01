@@ -387,7 +387,7 @@ function buildProgressMilestones(
   prs: PR[],
   summaries: StoredWorkoutSummary[],
   paceHistory: PaceHistoryPoint[],
-  mealAverages: { window_days: number; days_with_data: number; avg_protein_g: number } | null,
+  mealAverages: { window_days: number; days_with_data: number; avg_protein_g: number; avg_protein_g_when_logged?: number } | null,
   oneRepMaxLifts: Array<{ name: string; oneRepMaxLbs: number }>,
 ): ProgressMilestone[] {
   const now = Date.now();
@@ -443,12 +443,13 @@ function buildProgressMilestones(
     });
   }
   if (mealAverages && mealAverages.days_with_data > 0) {
+    const loggedDayProtein = mealAverages.avg_protein_g_when_logged ?? mealAverages.avg_protein_g;
     cards.push({
       key: 'nutrition-data',
       title: 'Nutrition signal',
       value: `${mealAverages.days_with_data}/${mealAverages.window_days}`,
       detail: mealAverages.days_with_data >= 2
-        ? `${Math.round(mealAverages.avg_protein_g)}g protein/day rolling average`
+        ? `${Math.round(loggedDayProtein)}g protein/logged day`
         : 'first meal-logging day captured',
       icon: 'nutrition-outline',
       color: '#14B8A6',
@@ -3341,9 +3342,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const directionLabel = direction === 'improving' ? 'Improving' : direction === 'slipping' ? 'Slipping' : 'Steady';
             const trackingDelta = Number(trends.tracking_delta_pct ?? 0);
             const proteinDelta = trends.protein_hit_delta_pct == null ? null : Number(trends.protein_hit_delta_pct);
-            const calorieAvg = Number(recent.avg_calories ?? 0);
-            const trackedDayCalorieAvg = Number(recent.avg_calories_when_logged ?? recent.avg_calories ?? 0);
-            const calorieDelta = Number(trends.calorie_delta ?? 0);
+            const calendarCalorieAvg = Number(recent.avg_calories ?? 0);
+            const calorieAvg = Number(recent.avg_calories_when_logged ?? recent.avg_calories ?? 0);
+            const calorieDelta = Number(trends.calorie_delta_when_logged ?? trends.calorie_delta ?? 0);
             return (
               <View style={[styles.vitalsCard, { marginTop: 0 }]}>
                 <View style={[styles.vitalsHeader, { marginBottom: 12 }]}>
@@ -3355,7 +3356,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   {[
                     { label: 'Tracked', value: `${recent.tracking_rate_pct ?? 0}%`, delta: `${trackingDelta >= 0 ? '+' : ''}${trackingDelta}%` },
                     { label: 'Protein', value: recent.protein_hit_pct == null ? 'n/a' : `${recent.protein_hit_pct}%`, delta: proteinDelta == null ? null : `${proteinDelta >= 0 ? '+' : ''}${proteinDelta}%` },
-                    { label: 'Cal/day', value: `${Math.round(calorieAvg)}`, delta: `${calorieDelta >= 0 ? '+' : ''}${Math.round(calorieDelta)}` },
+                    { label: 'Logged cal', value: `${Math.round(calorieAvg)}`, delta: `${calorieDelta >= 0 ? '+' : ''}${Math.round(calorieDelta)}` },
                   ].map(item => (
                     <View key={item.label} style={{ flex: 1, backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingVertical: 9, paddingHorizontal: 8 }}>
                       <Text style={{ fontSize: 17, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
@@ -3373,8 +3374,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
                   Logging streak {trends.current_logging_streak_days ?? 0} day{trends.current_logging_streak_days === 1 ? '' : 's'}
                   {trends.current_protein_streak_days != null ? ` · Protein streak ${trends.current_protein_streak_days} day${trends.current_protein_streak_days === 1 ? '' : 's'}` : ''}
-                  {trackedDayCalorieAvg > 0 && Math.abs(trackedDayCalorieAvg - calorieAvg) >= 25
-                    ? ` · Logged-day avg ${Math.round(trackedDayCalorieAvg)} cal`
+                  {calendarCalorieAvg > 0 && Math.abs(calendarCalorieAvg - calorieAvg) >= 25
+                    ? ` · Calendar avg ${Math.round(calendarCalorieAvg)} cal`
                     : ''}
                 </Text>
               </View>
@@ -3420,19 +3421,25 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
               )}
 
-              {/* Nutrition macros — rolling daily average first, with the
-                  tracked-day average called out separately when it differs. */}
-              {mealAverages && mealAverages.days_with_data >= 2 && (
+              {/* Nutrition macros — logged-day average first, with the
+                  calendar-window average called out separately when it differs. */}
+              {mealAverages && mealAverages.days_with_data >= 2 && (() => {
+                const loggedCal = mealAverages.avg_calories_when_logged ?? mealAverages.avg_calories;
+                const loggedProtein = mealAverages.avg_protein_g_when_logged ?? mealAverages.avg_protein_g;
+                const loggedCarbs = mealAverages.avg_carbs_g_when_logged ?? mealAverages.avg_carbs_g;
+                const loggedFat = mealAverages.avg_fat_g_when_logged ?? mealAverages.avg_fat_g;
+                const dailyRows = [...(mealAverages.daily ?? [])].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+                return (
                 <View style={{ marginBottom: 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
                   <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>
-                    MACROS (ROLLING DAILY AVG)
+                    MACROS (LOGGED-DAY AVG)
                   </Text>
                   <View style={{ flexDirection: 'row', gap: 6 }}>
                     {[
-                      { label: 'Calories', value: Math.round(mealAverages.avg_calories), color: tc.primary },
-                      { label: 'Protein', value: `${Math.round(mealAverages.avg_protein_g)}g`, color: '#22C55E' },
-                      { label: 'Carbs', value: `${Math.round(mealAverages.avg_carbs_g)}g`, color: '#F59E0B' },
-                      { label: 'Fat', value: `${Math.round(mealAverages.avg_fat_g)}g`, color: '#A78BFA' },
+                      { label: 'Calories', value: Math.round(loggedCal), color: tc.primary },
+                      { label: 'Protein', value: `${Math.round(loggedProtein)}g`, color: '#22C55E' },
+                      { label: 'Carbs', value: `${Math.round(loggedCarbs)}g`, color: '#F59E0B' },
+                      { label: 'Fat', value: `${Math.round(loggedFat)}g`, color: '#A78BFA' },
                     ].map(s => (
                       <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: 8, paddingVertical: 8 }}>
                         <Text style={{ fontSize: 15, fontWeight: '800', color: s.color }}>{s.value}</Text>
@@ -3442,12 +3449,32 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </View>
                   <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6 }}>
                     {mealAverages.days_with_data} logged day{mealAverages.days_with_data === 1 ? '' : 's'} in last {mealAverages.window_days} · {Math.round(mealAverages.avg_meals_per_day)} meals/day · {mealAverages.total_meals_logged} total
-                    {mealAverages.avg_calories_when_logged != null && Math.abs(mealAverages.avg_calories_when_logged - mealAverages.avg_calories) >= 25
-                      ? ` · logged-day avg ${Math.round(mealAverages.avg_calories_when_logged)} cal`
+                    {Math.abs(loggedCal - mealAverages.avg_calories) >= 25
+                      ? ` · calendar avg ${Math.round(mealAverages.avg_calories)} cal`
                       : ''}
                   </Text>
+                  {dailyRows.length > 0 && (
+                    <View style={{ marginTop: 8, gap: 4 }}>
+                      {dailyRows.map(row => {
+                        const d = new Date(`${row.date}T12:00:00`);
+                        const label = `${d.getMonth() + 1}/${d.getDate()}`;
+                        return (
+                          <View key={row.date} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                            <Text style={{ width: 36, fontSize: 10, fontWeight: '700', color: tc.textMuted }}>{label}</Text>
+                            <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
+                              <View style={{ width: `${Math.min(100, (row.calories / Math.max(loggedCal, 1)) * 100)}%` as any, height: 5, borderRadius: 3, backgroundColor: tc.primary }} />
+                            </View>
+                            <Text style={{ width: 92, fontSize: 10, color: tc.textSecondary, textAlign: 'right' }}>
+                              {Math.round(row.calories)} cal · {Math.round(row.protein_g)}g P
+                            </Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
                 </View>
-              )}
+                );
+              })()}
 
               {/* Gut health metrics — weekly rolling */}
               {gutHealthWindow && gutHealthWindow.days_with_data > 0 && (

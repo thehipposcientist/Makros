@@ -2570,6 +2570,14 @@ export interface MealAverages {
   tracking_rate_pct?: number;
   avg_meals_per_day: number;
   total_meals_logged: number;
+  daily?: Array<{
+    date: string;
+    calories: number;
+    protein_g: number;
+    carbs_g: number;
+    fat_g: number;
+    meal_count: number;
+  }>;
 }
 
 export async function logMealChecked(

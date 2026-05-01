@@ -37,7 +37,7 @@ Per-day aggregation → `DailyNutritionMetrics` row. Stores: fiber totals, fiber
 
 Runs on every meal-write path: `POST /meals`, `DELETE /meals/{id}`, `POST /meals/log-checked`, and added-meal save via `handleMealSave`.
 
-Adaptive rolling averages: `get_rolling_averages` divides by `days_with_data` not `window`, so partial weeks are not penalized.
+Rolling averages: `get_rolling_averages` returns both calendar-window averages (`avg_*`, sum divided by the requested window) and logged-day averages (`avg_*_when_logged`, sum divided by days with data). Progress uses logged-day averages when comparing against meal history, and calendar averages when the signal needs to account for unlogged days.
 
 ## Fueling & Recovery Flags (`recovery_flags.py`)
 

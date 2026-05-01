@@ -251,9 +251,10 @@ export interface UserProfile {
   weightEntries?: Array<{ date: string; weight_lbs: number; source?: string }>;
   allergies?: string[];           // allergen categories the user avoids
   dislikedExercises?: string[];  // exercise names excluded from plan generation
-  /** Subscription tier. `free` = manual tracking only (no AI, no generators).
-   *  `pro` = full feature set. Missing/unknown tiers must be treated as
-   *  `free` by clients so unlocked features only come from explicit state. */
+  /** Subscription tier. `free` = manual tracking and starter tools;
+   *  `pro` = guided PlanWeeks, AI help, and advanced insight surfaces.
+   *  Missing/unknown tiers must be treated as `free` by clients so
+   *  unlocked features only come from explicit state. */
   subscriptionTier?: 'free' | 'pro';
 }
 

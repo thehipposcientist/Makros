@@ -155,7 +155,7 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
   // still renders cleanly. Groups display in a stable order so morning
   // shows before evening, etc.
   const TIMING_ORDER: Record<string, number> = {
-    morning: 0, pre_workout: 1, with_meal: 2, evening: 3,
+    morning: 0, pre_workout: 1, post_workout: 2, with_meal: 3, evening: 4, bedtime: 5,
   };
   const titleCase = (s: string): string =>
     s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -1088,11 +1088,14 @@ function AddSupplementModal({
               })}
             </View>
 
-            <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, marginBottom: 6, letterSpacing: 0.5 }}>
-              TIMING (OPTIONAL)
+            <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, marginBottom: 4, letterSpacing: 0.5 }}>
+              TIMING / GROUP
+            </Text>
+            <Text style={{ fontSize: 11, color: tc.textMuted, marginBottom: 8, lineHeight: 15 }}>
+              Items in the same bucket appear together on Today with a single "Take all" button.
             </Text>
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 16 }}>
-              {(['morning', 'evening', 'with_meal', 'pre_workout'] as const).map(t => {
+              {(['morning', 'pre_workout', 'post_workout', 'with_meal', 'evening', 'bedtime'] as const).map(t => {
                 const active = timing === t;
                 return (
                   <TouchableOpacity
@@ -1117,12 +1120,12 @@ function AddSupplementModal({
                 tab so users can name their own packs ("Stack 1",
                 "Travel pack") and tap-to-take the whole group at once. */}
             <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textMuted, marginBottom: 6, letterSpacing: 0.5 }}>
-              GROUP (OPTIONAL)
+              CUSTOM BATCH NAME (OPTIONAL)
             </Text>
             <TextInput
               value={groupLabel}
               onChangeText={setGroupLabel}
-              placeholder="e.g. Stack 1, Travel pack, Pre-bed"
+              placeholder="e.g. Stack 1, Travel pack, Race day"
               placeholderTextColor={tc.textMuted}
               maxLength={40}
               style={{
@@ -1133,7 +1136,7 @@ function AddSupplementModal({
               }}
             />
             <Text style={{ fontSize: 10, color: tc.textMuted, marginBottom: 16 }}>
-              Lets you tap "Take all" for this whole group on the Today tab. Leave blank to use the timing bucket above.
+              Only needed if you want a custom name (overrides the bucket above). Most users can leave this blank.
             </Text>
 
             <TouchableOpacity
