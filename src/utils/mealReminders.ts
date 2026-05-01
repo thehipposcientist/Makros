@@ -20,17 +20,32 @@ import { Platform } from 'react-native';
 
 const REMINDER_KEY = 'meal_reminder_settings';
 const SCHEDULED_ID_KEY = 'meal_reminder_notification_id';
+// Per-weekday IDs (for scheduleType !== 'every_day' or migrated state).
+// Legacy single-ID rows (`SCHEDULED_ID_KEY`) are still cancelled on
+// re-schedule for forward compat.
+const REMINDER_IDS_KEY = 'meal_reminder_ids';
+
+export type MealReminderScheduleType = 'every_day' | 'weekdays' | 'weekends' | 'custom';
 
 export interface MealReminderSettings {
   enabled: boolean;
   hour: number;    // 0-23; default 21 (9pm)
   minute: number;  // 0-59
+  /** Days the reminder should fire. Defaults to 'every_day' (legacy
+   *  behavior). For 'custom', see `customDays`. */
+  scheduleType?: MealReminderScheduleType;
+  customDays?: number[];  // 0=Sun..6=Sat, only when scheduleType === 'custom'
+  /** When true (default), today's reminder is auto-cancelled the moment
+   *  every plan meal is checked off. */
+  skipIfAllLogged?: boolean;
 }
 
 const DEFAULT_SETTINGS: MealReminderSettings = {
   enabled: true,
   hour: 21,
   minute: 0,
+  scheduleType: 'every_day',
+  skipIfAllLogged: true,
 };
 
 export async function loadMealReminderSettings(): Promise<MealReminderSettings> {
@@ -57,8 +72,37 @@ async function requestPermissions(): Promise<boolean> {
   return status === 'granted';
 }
 
+function resolveMealDays(scheduleType: MealReminderScheduleType | undefined, customDays: number[] | undefined): number[] {
+  switch (scheduleType ?? 'every_day') {
+    case 'weekdays':  return [1, 2, 3, 4, 5];
+    case 'weekends':  return [0, 6];
+    case 'custom': {
+      const days = (customDays ?? []).filter(d => d >= 0 && d <= 6);
+      return days.length ? days : [0, 1, 2, 3, 4, 5, 6];
+    }
+    case 'every_day':
+    default:           return [0, 1, 2, 3, 4, 5, 6];
+  }
+}
+
+async function loadMealReminderIds(): Promise<Record<string, string>> {
+  try {
+    const raw = await AsyncStorage.getItem(REMINDER_IDS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {}
+  return {};
+}
+
+async function saveMealReminderIds(ids: Record<string, string>): Promise<void> {
+  await AsyncStorage.setItem(REMINDER_IDS_KEY, JSON.stringify(ids));
+}
+
 /**
- * Schedule the daily repeating reminder at the given local hour:minute.
+ * Schedule the meal reminder. When scheduleType is 'every_day' (default)
+ * we use a single daily-repeating trigger to keep iOS's notification budget
+ * low. For any other type we fall back to per-weekday WEEKLY triggers so
+ * the reminder honors the user's schedule.
+ *
  * Cancels any previously-scheduled reminder first so we don't stack.
  */
 export async function scheduleMealReminder(settings: MealReminderSettings): Promise<void> {
@@ -74,21 +118,48 @@ export async function scheduleMealReminder(settings: MealReminderSettings): Prom
   }
   await cancelMealReminder();
 
-  const id = await Notifications.scheduleNotificationAsync({
-    content: {
-      title: 'Any meals left to log?',
-      body: 'Tap to check off today\'s meals before bed.',
-      sound: 'default',
-      data: { route: 'meals' },
-    },
-    trigger: Platform.OS === 'ios'
-      ? { hour: settings.hour, minute: settings.minute, repeats: true } as any
-      : { hour: settings.hour, minute: settings.minute, repeats: true, channelId: 'default' } as any,
-  });
-  await AsyncStorage.setItem(SCHEDULED_ID_KEY, id);
+  const scheduleType = settings.scheduleType ?? 'every_day';
+  if (scheduleType === 'every_day') {
+    const id = await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'Any meals left to log?',
+        body: 'Tap to check off today\'s meals before bed.',
+        sound: 'default',
+        data: { route: 'meals' },
+      },
+      trigger: Platform.OS === 'ios'
+        ? { hour: settings.hour, minute: settings.minute, repeats: true } as any
+        : { hour: settings.hour, minute: settings.minute, repeats: true, channelId: 'default' } as any,
+    });
+    await AsyncStorage.setItem(SCHEDULED_ID_KEY, id);
+    return;
+  }
+
+  // Per-weekday WEEKLY triggers — same shape workoutReminders uses.
+  const days = resolveMealDays(scheduleType, settings.customDays);
+  const ids: Record<string, string> = {};
+  for (const dow of days) {
+    const id = await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'Any meals left to log?',
+        body: 'Tap to check off today\'s meals before bed.',
+        sound: 'default',
+        data: { route: 'meals', dow },
+      },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.WEEKLY,
+        weekday: dow + 1,  // expo: 1=Sun..7=Sat
+        hour: settings.hour,
+        minute: settings.minute,
+      },
+    });
+    ids[String(dow)] = id;
+  }
+  await saveMealReminderIds(ids);
 }
 
-/** Cancel the scheduled meal reminder, if any. */
+/** Cancel the scheduled meal reminder, if any. Cancels both the legacy
+ *  single-ID slot and any per-weekday slots from the new scheduleType paths. */
 export async function cancelMealReminder(): Promise<void> {
   try {
     const id = await AsyncStorage.getItem(SCHEDULED_ID_KEY);
@@ -96,6 +167,13 @@ export async function cancelMealReminder(): Promise<void> {
       await Notifications.cancelScheduledNotificationAsync(id).catch(() => {});
       await AsyncStorage.removeItem(SCHEDULED_ID_KEY);
     }
+  } catch {}
+  try {
+    const ids = await loadMealReminderIds();
+    for (const id of Object.values(ids)) {
+      await Notifications.cancelScheduledNotificationAsync(id).catch(() => {});
+    }
+    await saveMealReminderIds({});
   } catch {}
 }
 
@@ -113,6 +191,7 @@ export async function maybeCancelTodayReminder(allTodayChecked: boolean): Promis
   if (!allTodayChecked) return;
   const settings = await loadMealReminderSettings();
   if (!settings.enabled) return;
+  if (settings.skipIfAllLogged === false) return;  // user opted out of auto-skip
   const now = new Date();
   const scheduledToday = new Date();
   scheduledToday.setHours(settings.hour, settings.minute, 0, 0);

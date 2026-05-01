@@ -1392,12 +1392,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // gutHealthToday removed — NutritionCard now computes gut health from plan data
   const [showGroceryList, setShowGroceryList] = useState(false);
   const [feedbackSettings, setFeedbackSettings] = useState<{ hapticsEnabled: boolean; soundsEnabled: boolean; vibrationEnabled: boolean; restNotificationSoundEnabled: boolean; restTimerSound: import('../utils/feedback').RestTimerSound }>({ hapticsEnabled: true, soundsEnabled: true, vibrationEnabled: true, restNotificationSoundEnabled: false, restTimerSound: 'chime' });
-  // Full reminder state — preserves the user's chosen time across
-  // toggles. The previous reminderEnabled-only state forced a hardcoded
-  // hour:8/minute:0 on every save, silently clobbering whatever schedule
-  // the user had set in the dedicated SettingsScreen.
-  const [workoutReminder, setWorkoutReminder] = useState<{ enabled: boolean; hour: number; minute: number }>({ enabled: false, hour: 8, minute: 0 });
-  const [mealReminder, setMealReminder] = useState<{ enabled: boolean; hour: number; minute: number }>({ enabled: true, hour: 21, minute: 0 });
+  // Full reminder state — preserves the user's chosen time AND schedule
+  // across toggles. The previous reminderEnabled-only state forced a
+  // hardcoded hour:8/minute:0 on every save, silently clobbering
+  // whatever schedule the user had set in the dedicated SettingsScreen.
+  const [workoutReminder, setWorkoutReminder] = useState<import('../utils/workoutReminders').ReminderSettings>({
+    enabled: false, hour: 8, minute: 0, scheduleType: 'training_days', skipIfCompleted: true,
+  });
+  const [mealReminder, setMealReminder] = useState<import('../utils/mealReminders').MealReminderSettings>({
+    enabled: true, hour: 21, minute: 0, scheduleType: 'every_day', skipIfAllLogged: true,
+  });
   const [showEmailBanner, setShowEmailBanner] = useState(false);
   const [showEmailModal, setShowEmailModal] = useState(false);
   const [newEmail, setNewEmail] = useState('');
@@ -9784,16 +9788,23 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </View>
                 ))}
 
-                {/* Reminders — full schedule UI surfaced here so users
-                    don't have to dig into Account Details > Settings to
-                    change the time. The toggle preserves the user's
-                    chosen hour/minute (no hardcoded reset). */}
+                {/* Reminders — dedicated section with full schedule UI:
+                    enable toggle, time picker, schedule type (training-days
+                    / daily / weekdays / weekends / custom), and the
+                    auto-skip-when-already-done rule. Lives here (Profile
+                    gear) instead of buried in Account Details. */}
                 <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>REMINDERS</Text>
+                <Text style={{ fontSize: 11, color: themeColors.textMuted, marginBottom: 6, lineHeight: 15 }}>
+                  Workout + meal-logging nudges. Each can fire on its own schedule and auto-skip when you've already finished for the day.
+                </Text>
+
+                {/* ── Workout reminder ─────────────────────────────────── */}
+                <Text style={{ fontSize: 11, fontWeight: '800', color: themeColors.textSecondary, marginTop: 6, marginBottom: 4, letterSpacing: 0.5 }}>WORKOUT</Text>
                 <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
                   <View style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
                     <View style={{ flex: 1 }}>
                       <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Workout Reminders</Text>
-                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Nudge on training days at the time you set</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Local notification at your set time</Text>
                     </View>
                     <Switch
                       value={workoutReminder.enabled}
@@ -9808,45 +9819,133 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     />
                   </View>
                   {workoutReminder.enabled && (
-                    <View style={[styles.profileMenuItem, { justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: themeColors.border }]}>
-                      <Text style={{ fontSize: 13, color: themeColors.textSecondary }}>Remind me at</Text>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <TouchableOpacity
-                          onPress={async () => {
-                            const m = workoutReminder.minute - 15;
-                            const next = m < 0
-                              ? { ...workoutReminder, hour: (workoutReminder.hour + 23) % 24, minute: m + 60 }
-                              : { ...workoutReminder, minute: m };
-                            setWorkoutReminder(next);
-                            const { saveReminderSettings } = await import('../utils/workoutReminders');
-                            await saveReminderSettings(next);
-                          }}
-                          style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
-                          <Ionicons name="remove" size={14} color={themeColors.textSecondary} />
-                        </TouchableOpacity>
-                        <Text style={{ minWidth: 64, textAlign: 'center', fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>
-                          {`${((workoutReminder.hour + 11) % 12 + 1)}:${String(workoutReminder.minute).padStart(2, '0')} ${workoutReminder.hour < 12 ? 'AM' : 'PM'}`}
-                        </Text>
-                        <TouchableOpacity
-                          onPress={async () => {
-                            const m = workoutReminder.minute + 15;
-                            const next = m >= 60
-                              ? { ...workoutReminder, hour: (workoutReminder.hour + 1) % 24, minute: m - 60 }
-                              : { ...workoutReminder, minute: m };
-                            setWorkoutReminder(next);
-                            const { saveReminderSettings } = await import('../utils/workoutReminders');
-                            await saveReminderSettings(next);
-                          }}
-                          style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
-                          <Ionicons name="add" size={14} color={themeColors.textSecondary} />
-                        </TouchableOpacity>
+                    <>
+                      <View style={[styles.profileMenuItem, { justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: themeColors.border }]}>
+                        <Text style={{ fontSize: 13, color: themeColors.textSecondary }}>Remind me at</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <TouchableOpacity
+                            onPress={async () => {
+                              const m = workoutReminder.minute - 15;
+                              const next = m < 0
+                                ? { ...workoutReminder, hour: (workoutReminder.hour + 23) % 24, minute: m + 60 }
+                                : { ...workoutReminder, minute: m };
+                              setWorkoutReminder(next);
+                              const { saveReminderSettings } = await import('../utils/workoutReminders');
+                              await saveReminderSettings(next);
+                            }}
+                            style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
+                            <Ionicons name="remove" size={14} color={themeColors.textSecondary} />
+                          </TouchableOpacity>
+                          <Text style={{ minWidth: 64, textAlign: 'center', fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>
+                            {`${((workoutReminder.hour + 11) % 12 + 1)}:${String(workoutReminder.minute).padStart(2, '0')} ${workoutReminder.hour < 12 ? 'AM' : 'PM'}`}
+                          </Text>
+                          <TouchableOpacity
+                            onPress={async () => {
+                              const m = workoutReminder.minute + 15;
+                              const next = m >= 60
+                                ? { ...workoutReminder, hour: (workoutReminder.hour + 1) % 24, minute: m - 60 }
+                                : { ...workoutReminder, minute: m };
+                              setWorkoutReminder(next);
+                              const { saveReminderSettings } = await import('../utils/workoutReminders');
+                              await saveReminderSettings(next);
+                            }}
+                            style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
+                            <Ionicons name="add" size={14} color={themeColors.textSecondary} />
+                          </TouchableOpacity>
+                        </View>
                       </View>
-                    </View>
+                      <View style={[styles.profileMenuItem, { borderTopWidth: 1, borderTopColor: themeColors.border, flexDirection: 'column', alignItems: 'flex-start', gap: 8 }]}>
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textSecondary }}>Schedule</Text>
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                          {([
+                            { key: 'training_days' as const, label: 'Training days' },
+                            { key: 'every_day' as const, label: 'Every day' },
+                            { key: 'weekdays' as const, label: 'Weekdays' },
+                            { key: 'weekends' as const, label: 'Weekends' },
+                            { key: 'custom' as const, label: 'Custom' },
+                          ]).map(opt => {
+                            const active = (workoutReminder.scheduleType ?? 'training_days') === opt.key;
+                            return (
+                              <TouchableOpacity
+                                key={opt.key}
+                                onPress={async () => {
+                                  const next = { ...workoutReminder, scheduleType: opt.key };
+                                  setWorkoutReminder(next);
+                                  const { saveReminderSettings } = await import('../utils/workoutReminders');
+                                  await saveReminderSettings(next);
+                                }}
+                                style={{
+                                  paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14,
+                                  backgroundColor: active ? themeColors.primary : themeColors.surface,
+                                  borderWidth: 1, borderColor: active ? themeColors.primary : themeColors.border,
+                                }}>
+                                <Text style={{ fontSize: 11, fontWeight: '700', color: active ? getContrastingTextColor(themeColors.primary) : themeColors.textSecondary }}>
+                                  {opt.label}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                        {(workoutReminder.scheduleType ?? 'training_days') === 'custom' && (
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                            {(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']).map((d, idx) => {
+                              const selected = (workoutReminder.customDays ?? []).includes(idx);
+                              return (
+                                <TouchableOpacity
+                                  key={d}
+                                  onPress={async () => {
+                                    const cur = workoutReminder.customDays ?? [];
+                                    const nextDays = selected ? cur.filter(x => x !== idx) : [...cur, idx].sort();
+                                    const next = { ...workoutReminder, customDays: nextDays };
+                                    setWorkoutReminder(next);
+                                    const { saveReminderSettings } = await import('../utils/workoutReminders');
+                                    await saveReminderSettings(next);
+                                  }}
+                                  style={{
+                                    width: 36, height: 32, borderRadius: 8,
+                                    backgroundColor: selected ? themeColors.primary : themeColors.surface,
+                                    borderWidth: 1, borderColor: selected ? themeColors.primary : themeColors.border,
+                                    alignItems: 'center', justifyContent: 'center',
+                                  }}>
+                                  <Text style={{ fontSize: 11, fontWeight: '700', color: selected ? getContrastingTextColor(themeColors.primary) : themeColors.textSecondary }}>
+                                    {d}
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+                        )}
+                      </View>
+                      <View style={[styles.profileMenuItem, { justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: themeColors.border }]}>
+                        <View style={{ flex: 1, paddingRight: 10 }}>
+                          <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Skip if already done</Text>
+                          <Text style={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 15 }}>
+                            Auto-cancel today's reminder once you complete or skip the workout. Off = always fire.
+                          </Text>
+                        </View>
+                        <Switch
+                          value={workoutReminder.skipIfCompleted !== false}
+                          onValueChange={async (v) => {
+                            const next = { ...workoutReminder, skipIfCompleted: v };
+                            setWorkoutReminder(next);
+                            const { saveReminderSettings } = await import('../utils/workoutReminders');
+                            await saveReminderSettings(next);
+                          }}
+                          trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
+                          thumbColor={workoutReminder.skipIfCompleted !== false ? themeColors.primary : themeColors.textMuted}
+                        />
+                      </View>
+                    </>
                   )}
-                  <View style={[styles.profileMenuItem, { justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: themeColors.border }]}>
+                </View>
+
+                {/* ── Meal log reminder ────────────────────────────────── */}
+                <Text style={{ fontSize: 11, fontWeight: '800', color: themeColors.textSecondary, marginTop: 14, marginBottom: 4, letterSpacing: 0.5 }}>MEALS</Text>
+                <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+                  <View style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
                     <View style={{ flex: 1 }}>
                       <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Meal Log Reminder</Text>
-                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Evening nudge if today's meals aren't logged</Text>
+                      <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Evening nudge to check off the day's meals</Text>
                     </View>
                     <Switch
                       value={mealReminder.enabled}
@@ -9861,40 +9960,122 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     />
                   </View>
                   {mealReminder.enabled && (
-                    <View style={[styles.profileMenuItem, { justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: themeColors.border }]}>
-                      <Text style={{ fontSize: 13, color: themeColors.textSecondary }}>Remind me at</Text>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <TouchableOpacity
-                          onPress={async () => {
-                            const m = mealReminder.minute - 15;
-                            const next = m < 0
-                              ? { ...mealReminder, hour: (mealReminder.hour + 23) % 24, minute: m + 60 }
-                              : { ...mealReminder, minute: m };
-                            setMealReminder(next);
-                            const { saveMealReminderSettings } = await import('../utils/mealReminders');
-                            await saveMealReminderSettings(next);
-                          }}
-                          style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
-                          <Ionicons name="remove" size={14} color={themeColors.textSecondary} />
-                        </TouchableOpacity>
-                        <Text style={{ minWidth: 64, textAlign: 'center', fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>
-                          {`${((mealReminder.hour + 11) % 12 + 1)}:${String(mealReminder.minute).padStart(2, '0')} ${mealReminder.hour < 12 ? 'AM' : 'PM'}`}
-                        </Text>
-                        <TouchableOpacity
-                          onPress={async () => {
-                            const m = mealReminder.minute + 15;
-                            const next = m >= 60
-                              ? { ...mealReminder, hour: (mealReminder.hour + 1) % 24, minute: m - 60 }
-                              : { ...mealReminder, minute: m };
-                            setMealReminder(next);
-                            const { saveMealReminderSettings } = await import('../utils/mealReminders');
-                            await saveMealReminderSettings(next);
-                          }}
-                          style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
-                          <Ionicons name="add" size={14} color={themeColors.textSecondary} />
-                        </TouchableOpacity>
+                    <>
+                      <View style={[styles.profileMenuItem, { justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: themeColors.border }]}>
+                        <Text style={{ fontSize: 13, color: themeColors.textSecondary }}>Remind me at</Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                          <TouchableOpacity
+                            onPress={async () => {
+                              const m = mealReminder.minute - 15;
+                              const next = m < 0
+                                ? { ...mealReminder, hour: (mealReminder.hour + 23) % 24, minute: m + 60 }
+                                : { ...mealReminder, minute: m };
+                              setMealReminder(next);
+                              const { saveMealReminderSettings } = await import('../utils/mealReminders');
+                              await saveMealReminderSettings(next);
+                            }}
+                            style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
+                            <Ionicons name="remove" size={14} color={themeColors.textSecondary} />
+                          </TouchableOpacity>
+                          <Text style={{ minWidth: 64, textAlign: 'center', fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>
+                            {`${((mealReminder.hour + 11) % 12 + 1)}:${String(mealReminder.minute).padStart(2, '0')} ${mealReminder.hour < 12 ? 'AM' : 'PM'}`}
+                          </Text>
+                          <TouchableOpacity
+                            onPress={async () => {
+                              const m = mealReminder.minute + 15;
+                              const next = m >= 60
+                                ? { ...mealReminder, hour: (mealReminder.hour + 1) % 24, minute: m - 60 }
+                                : { ...mealReminder, minute: m };
+                              setMealReminder(next);
+                              const { saveMealReminderSettings } = await import('../utils/mealReminders');
+                              await saveMealReminderSettings(next);
+                            }}
+                            style={{ paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: themeColors.border }}>
+                            <Ionicons name="add" size={14} color={themeColors.textSecondary} />
+                          </TouchableOpacity>
+                        </View>
                       </View>
-                    </View>
+                      <View style={[styles.profileMenuItem, { borderTopWidth: 1, borderTopColor: themeColors.border, flexDirection: 'column', alignItems: 'flex-start', gap: 8 }]}>
+                        <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textSecondary }}>Schedule</Text>
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                          {([
+                            { key: 'every_day' as const, label: 'Every day' },
+                            { key: 'weekdays' as const, label: 'Weekdays' },
+                            { key: 'weekends' as const, label: 'Weekends' },
+                            { key: 'custom' as const, label: 'Custom' },
+                          ]).map(opt => {
+                            const active = (mealReminder.scheduleType ?? 'every_day') === opt.key;
+                            return (
+                              <TouchableOpacity
+                                key={opt.key}
+                                onPress={async () => {
+                                  const next = { ...mealReminder, scheduleType: opt.key };
+                                  setMealReminder(next);
+                                  const { saveMealReminderSettings } = await import('../utils/mealReminders');
+                                  await saveMealReminderSettings(next);
+                                }}
+                                style={{
+                                  paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14,
+                                  backgroundColor: active ? themeColors.primary : themeColors.surface,
+                                  borderWidth: 1, borderColor: active ? themeColors.primary : themeColors.border,
+                                }}>
+                                <Text style={{ fontSize: 11, fontWeight: '700', color: active ? getContrastingTextColor(themeColors.primary) : themeColors.textSecondary }}>
+                                  {opt.label}
+                                </Text>
+                              </TouchableOpacity>
+                            );
+                          })}
+                        </View>
+                        {(mealReminder.scheduleType ?? 'every_day') === 'custom' && (
+                          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                            {(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']).map((d, idx) => {
+                              const selected = (mealReminder.customDays ?? []).includes(idx);
+                              return (
+                                <TouchableOpacity
+                                  key={d}
+                                  onPress={async () => {
+                                    const cur = mealReminder.customDays ?? [];
+                                    const nextDays = selected ? cur.filter(x => x !== idx) : [...cur, idx].sort();
+                                    const next = { ...mealReminder, customDays: nextDays };
+                                    setMealReminder(next);
+                                    const { saveMealReminderSettings } = await import('../utils/mealReminders');
+                                    await saveMealReminderSettings(next);
+                                  }}
+                                  style={{
+                                    width: 36, height: 32, borderRadius: 8,
+                                    backgroundColor: selected ? themeColors.primary : themeColors.surface,
+                                    borderWidth: 1, borderColor: selected ? themeColors.primary : themeColors.border,
+                                    alignItems: 'center', justifyContent: 'center',
+                                  }}>
+                                  <Text style={{ fontSize: 11, fontWeight: '700', color: selected ? getContrastingTextColor(themeColors.primary) : themeColors.textSecondary }}>
+                                    {d}
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+                        )}
+                      </View>
+                      <View style={[styles.profileMenuItem, { justifyContent: 'space-between', borderTopWidth: 1, borderTopColor: themeColors.border }]}>
+                        <View style={{ flex: 1, paddingRight: 10 }}>
+                          <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Skip if all meals logged</Text>
+                          <Text style={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 15 }}>
+                            Auto-cancel today's reminder once every plan meal is checked off. Off = always fire.
+                          </Text>
+                        </View>
+                        <Switch
+                          value={mealReminder.skipIfAllLogged !== false}
+                          onValueChange={async (v) => {
+                            const next = { ...mealReminder, skipIfAllLogged: v };
+                            setMealReminder(next);
+                            const { saveMealReminderSettings } = await import('../utils/mealReminders');
+                            await saveMealReminderSettings(next);
+                          }}
+                          trackColor={{ false: themeColors.border, true: themeColors.primary + '55' }}
+                          thumbColor={mealReminder.skipIfAllLogged !== false ? themeColors.primary : themeColors.textMuted}
+                        />
+                      </View>
+                    </>
                   )}
                 </View>
 

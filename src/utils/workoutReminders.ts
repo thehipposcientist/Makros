@@ -7,18 +7,36 @@ const REMINDER_KEY = 'workout_reminder_settings';
 // Shape: { '0': 'id', '1': 'id', ... } where keys are 0-6 (Sun-Sat).
 const REMINDER_IDS_KEY = 'workout_reminder_ids';
 
+export type ReminderScheduleType = 'training_days' | 'every_day' | 'weekdays' | 'weekends' | 'custom';
+
 export interface ReminderSettings {
   enabled: boolean;
   hour: number;    // 0-23
   minute: number;  // 0-59
+  /** Which days the reminder fires on. Defaults to 'training_days' (the
+   *  user's profile.trainingDays). Migrating older settings without this
+   *  field keep the legacy training_days behavior. */
+  scheduleType?: ReminderScheduleType;
+  /** Required when scheduleType === 'custom'. Subset of [0,1,2,3,4,5,6]
+   *  where 0=Sun. */
+  customDays?: number[];
+  /** Auto-cancel today's reminder if the user already completed (or
+   *  skipped) the workout. Defaults true — matches prior behavior. */
+  skipIfCompleted?: boolean;
 }
+
+const DEFAULT_REMINDER: ReminderSettings = {
+  enabled: false, hour: 8, minute: 0,
+  scheduleType: 'training_days',
+  skipIfCompleted: true,
+};
 
 export async function loadReminderSettings(): Promise<ReminderSettings> {
   try {
     const raw = await AsyncStorage.getItem(REMINDER_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) return { ...DEFAULT_REMINDER, ...JSON.parse(raw) };
   } catch {}
-  return { enabled: false, hour: 8, minute: 0 };
+  return { ...DEFAULT_REMINDER };
 }
 
 export async function saveReminderSettings(settings: ReminderSettings): Promise<void> {
@@ -60,6 +78,30 @@ async function readTrainingDays(): Promise<number[]> {
   return [1, 2, 3, 4, 5]; // default Mon-Fri
 }
 
+/** Resolve the scheduleType + custom selection into a concrete weekday
+ *  list (0=Sun .. 6=Sat). Centralized so meal + workout reminders share
+ *  the same rules. */
+export async function resolveScheduleDays(
+  scheduleType: ReminderScheduleType | undefined,
+  customDays: number[] | undefined,
+): Promise<number[]> {
+  switch (scheduleType ?? 'training_days') {
+    case 'every_day':
+      return [0, 1, 2, 3, 4, 5, 6];
+    case 'weekdays':
+      return [1, 2, 3, 4, 5];
+    case 'weekends':
+      return [0, 6];
+    case 'custom': {
+      const days = (customDays ?? []).filter(d => d >= 0 && d <= 6);
+      return days.length ? days : [1, 2, 3, 4, 5];
+    }
+    case 'training_days':
+    default:
+      return readTrainingDays();
+  }
+}
+
 export async function scheduleWorkoutReminder(settings: ReminderSettings): Promise<void> {
   const granted = await requestPermissions();
   if (!granted) return;
@@ -76,7 +118,7 @@ export async function scheduleWorkoutReminder(settings: ReminderSettings): Promi
 
   await cancelWorkoutReminders();
 
-  const trainingDays = await readTrainingDays();
+  const trainingDays = await resolveScheduleDays(settings.scheduleType, settings.customDays);
   const ids: Record<string, string> = {};
 
   // Schedule one weekly notification per training day. Per-weekday IDs are
@@ -125,6 +167,12 @@ export async function cancelWorkoutReminders(): Promise<void> {
  *  reminder time, the rescheduled WEEKLY may still fire today — acceptable
  *  vs. the complexity of skipping a single first-fire occurrence. */
 export async function cancelTodayWorkoutReminder(): Promise<void> {
+  // Respect the user's opt-out FIRST so we don't cancel the slot they
+  // explicitly want to keep firing today.
+  const settings = await loadReminderSettings();
+  if (!settings.enabled) return;
+  if (settings.skipIfCompleted === false) return;
+
   const todayDow = new Date().getDay();
   const ids = await loadReminderIds();
   const oldId = ids[String(todayDow)];
@@ -134,11 +182,8 @@ export async function cancelTodayWorkoutReminder(): Promise<void> {
     await saveReminderIds(ids);
   }
 
-  // Only re-schedule if the user still wants reminders AND today is a
-  // training day. Otherwise leave the slot empty.
-  const settings = await loadReminderSettings();
-  if (!settings.enabled) return;
-  const trainingDays = await readTrainingDays();
+  // Re-arm next week's slot only if today falls under the user's schedule.
+  const trainingDays = await resolveScheduleDays(settings.scheduleType, settings.customDays);
   if (!trainingDays.includes(todayDow)) return;
 
   const granted = await requestPermissions();
