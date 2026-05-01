@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { Text, TouchableOpacity, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme } from '../constants/theme';
+import { getContrastingTextColor, getTheme } from '../constants/theme';
 
 type ThemeColors = ReturnType<typeof getTheme>['colors'];
 
@@ -153,10 +153,10 @@ export default function MealTimeSelector({ value, mealDate, colors, onChange }: 
                 borderWidth: 1,
                 borderColor: active ? colors.primary : colors.border,
               }}>
-              <Text style={{ fontSize: 12, fontWeight: '900', color: active ? '#fff' : colors.textPrimary }}>
+              <Text style={{ fontSize: 12, fontWeight: '900', color: active ? getContrastingTextColor(colors.primary) : colors.textPrimary }}>
                 {p.label}
               </Text>
-              <Text style={{ fontSize: 10, fontWeight: '700', color: active ? '#ffffffcc' : colors.textMuted, marginTop: 1 }}>
+              <Text style={{ fontSize: 10, fontWeight: '700', color: active ? getContrastingTextColor(colors.primary) + 'CC' : colors.textMuted, marginTop: 1 }}>
                 {p.time}
               </Text>
             </TouchableOpacity>
@@ -217,7 +217,7 @@ export default function MealTimeSelector({ value, mealDate, colors, onChange }: 
                 borderWidth: 1,
                 borderColor: active ? colors.primary : colors.border,
               }}>
-              <Text style={{ fontSize: 12, fontWeight: '900', color: active ? '#fff' : colors.textPrimary }}>
+              <Text style={{ fontSize: 12, fontWeight: '900', color: active ? getContrastingTextColor(colors.primary) : colors.textPrimary }}>
                 {label}
               </Text>
             </TouchableOpacity>

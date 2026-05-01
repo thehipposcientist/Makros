@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { View, Text, Modal, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated, Easing, Linking } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -2033,7 +2033,10 @@ function AccountInfoModal({
 }) {
   const tc = getTheme(profile.themePreference).colors;
   const c = tc; // alias for the new Developer-logs block below
-  const am = createAmStyles(tc);
+  // Memoized — without this, every keystroke / state change in this
+  // modal recreates the entire StyleSheet (40+ entries) and triggers
+  // a re-mount of every styled child. Open felt sluggish.
+  const am = useMemo(() => createAmStyles(tc), [tc]);
   const [accountData, setAccountData] = useState<{
     email: string;
     username: string;
@@ -2206,28 +2209,28 @@ function AccountInfoModal({
           <Text style={am.title}>Account</Text>
 
           <ScrollView style={{ flexShrink: 1 }} contentContainerStyle={{ gap: 16 }} showsVerticalScrollIndicator={false} bounces={false}>
-          {loading ? (
-            <ActivityIndicator color={tc.primary} style={{ marginVertical: 24 }} />
-          ) : (
-            <View style={am.infoSection}>
-              {accountData ? (
-                <>
-                  {(accountData.firstName || accountData.lastName) && (
-                    <Row label="Name" value={`${accountData.firstName ?? ''} ${accountData.lastName ?? ''}`.trim()} />
-                  )}
-                  <Row label="Email"    value={accountData.email} />
-                  <Row label="Username" value={accountData.username} />
-                  <Row label="Email Status" value={accountData.emailVerified ? 'Verified' : 'Not verified'} />
-                  <Row label="Legal Version" value={accountData.legalAccepted ? LEGAL_VERSION : 'Needs review'} />
-                </>
-              ) : (
-                <Text style={am.errorText}>Could not load account info</Text>
-              )}
-              <Row label="Goal"   value={profile.goal.replace(/_/g, ' ')} />
-              <Row label="Weight" value={`${profile.physicalStats.weightLbs} lbs`} />
-              <Row label="Age"    value={String(profile.physicalStats.age)} />
-            </View>
-          )}
+          {/* Static profile data renders immediately. Only the rows that
+              depend on the /me network call (email, username, verified,
+              legal version) show a placeholder until getMe resolves —
+              avoids the "blank modal then everything pops in" delay. */}
+          <View style={am.infoSection}>
+            {((profile.firstName || profile.lastName) || (accountData?.firstName || accountData?.lastName)) && (
+              <Row
+                label="Name"
+                value={`${accountData?.firstName ?? profile.firstName ?? ''} ${accountData?.lastName ?? profile.lastName ?? ''}`.trim()}
+              />
+            )}
+            <Row label="Email"        value={accountData?.email ?? (loading ? 'Loading…' : '—')} />
+            <Row label="Username"     value={accountData?.username ?? (loading ? 'Loading…' : '—')} />
+            <Row label="Email Status" value={accountData ? (accountData.emailVerified ? 'Verified' : 'Not verified') : (loading ? 'Loading…' : '—')} />
+            <Row label="Legal Version" value={accountData ? (accountData.legalAccepted ? LEGAL_VERSION : 'Needs review') : (loading ? 'Loading…' : '—')} />
+            <Row label="Goal"   value={profile.goal.replace(/_/g, ' ')} />
+            <Row label="Weight" value={`${profile.physicalStats.weightLbs} lbs`} />
+            <Row label="Age"    value={String(profile.physicalStats.age)} />
+            {!loading && !accountData && (
+              <Text style={am.errorText}>Could not load full account info — tap retry by reopening.</Text>
+            )}
+          </View>
 
           <TouchableOpacity
             style={am.securityRow}
@@ -2247,11 +2250,13 @@ function AccountInfoModal({
             </View>
           </TouchableOpacity>
 
-          <RecoveryQuestionModal
-            visible={showRecoveryModal}
-            authToken={token}
-            onDone={() => { setShowRecoveryModal(false); setHasRecoveryQuestion(true); }}
-          />
+          {showRecoveryModal && (
+            <RecoveryQuestionModal
+              visible={showRecoveryModal}
+              authToken={token}
+              onDone={() => { setShowRecoveryModal(false); setHasRecoveryQuestion(true); }}
+            />
+          )}
 
           {onOpenSettings && (
             <ActionRow
@@ -2303,13 +2308,18 @@ function AccountInfoModal({
             busy={accountBusy === 'delete'}
           />
 
-          <LegalDisclosureModal
-            visible={showLegal}
-            onClose={() => setShowLegal(false)}
-            themeColors={tc as any}
-          />
+          {showLegal && (
+            <LegalDisclosureModal
+              visible={showLegal}
+              onClose={() => setShowLegal(false)}
+              themeColors={tc as any}
+            />
+          )}
 
-          {/* Pro vs Free feature comparison modal */}
+          {/* Pro vs Free feature comparison modal — gated on showTierInfo
+              so the heavy 100-line subtree doesn't mount eagerly while
+              AccountInfoModal is opening. */}
+          {showTierInfo && (
           <Modal visible={showTierInfo} transparent animationType="fade" onRequestClose={() => setShowTierInfo(false)}>
             <TouchableOpacity
               style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', padding: 20 }}
@@ -2416,6 +2426,7 @@ function AccountInfoModal({
               </TouchableOpacity>
             </TouchableOpacity>
           </Modal>
+          )}
 
           {/* DEV: Subscription tier toggle. Flips between free (manual tracking
               only) and pro (full AI features). Writes back to the profile

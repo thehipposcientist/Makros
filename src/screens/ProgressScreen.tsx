@@ -39,7 +39,7 @@ import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
 import AdherenceTrendCard from '../components/AdherenceTrendCard';
 import { RECOVERY_LABELS } from '../utils/healthScore';
-import { computeDietConsistency, DietConsistencyScore, getMealChecks } from '../utils/mealTracker';
+import { getMealChecks } from '../utils/mealTracker';
 import { computePlantDiversity, computeFiberToday, recommendedFiberTarget } from '../utils/gutHealth';
 import { proteinTimingInsights } from '../utils/nutritionInsights';
 import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
@@ -221,6 +221,167 @@ type TrainingSignalItem = {
   color: string;
 };
 
+const PR_MOMENTUM_WINDOW_DAYS = 30;
+const MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE = 4;
+
+function isActiveWorkoutSummary(summary: StoredWorkoutSummary): boolean {
+  const hasSets = (summary.totalSets ?? 0) > 0
+    || (summary.exercises ?? []).some(ex => (ex.sets?.length ?? 0) > 0);
+  return hasSets || (summary.durationSeconds ?? 0) > 30;
+}
+
+function exerciseHistoryStats(history: WorkoutSession[]): Map<string, { firstDate: string; sessionCount: number }> {
+  const byExercise = new Map<string, Set<string>>();
+  for (const session of history.filter(s => s.completed && !s.skipped)) {
+    for (const exercise of session.exercises ?? []) {
+      const key = exercise.name?.trim().toLowerCase();
+      if (!key) continue;
+      const hasLoadedSet = (exercise.sets ?? []).some(set => (set.weightLbs ?? 0) > 0 && (set.reps ?? 0) > 0);
+      if (!hasLoadedSet) continue;
+      const sessionKey = session.id || session.date;
+      if (!sessionKey) continue;
+      const bucket = byExercise.get(key) ?? new Set<string>();
+      bucket.add(`${session.date}::${sessionKey}`);
+      byExercise.set(key, bucket);
+    }
+  }
+
+  const out = new Map<string, { firstDate: string; sessionCount: number }>();
+  for (const [key, sessions] of byExercise) {
+    const dates = Array.from(sessions)
+      .map(v => v.split('::')[0])
+      .filter(Boolean)
+      .sort((a, b) => +new Date(a) - +new Date(b));
+    if (dates.length > 0) {
+      out.set(key, { firstDate: dates[0], sessionCount: dates.length });
+    }
+  }
+  return out;
+}
+
+function establishedRecentPrs(history: WorkoutSession[], prs: PR[], sinceMs: number): PR[] {
+  const stats = exerciseHistoryStats(history);
+  return prs.filter(pr => {
+    if (+new Date(pr.date) < sinceMs) return false;
+    const stat = stats.get(pr.exerciseName.toLowerCase());
+    if (!stat || stat.sessionCount < 2) return false;
+    return +new Date(pr.date) > +new Date(stat.firstDate);
+  });
+}
+
+function OneRepMaxTrendCard({
+  title,
+  subtitle,
+  points,
+  tc,
+  styles,
+}: {
+  title: string;
+  subtitle: string;
+  points: import('../services/api').E1RMHistoryPoint[];
+  tc: ReturnType<typeof getTheme>['colors'];
+  styles: ReturnType<typeof createStyles>;
+}) {
+  if (points.length < 2) return null;
+
+  const values = points.map(p => Number(p.e1rm_lbs)).filter(v => Number.isFinite(v) && v > 0);
+  if (values.length < 2) return null;
+
+  const chartW = 320;
+  const chartH = 140;
+  const padL = 40;
+  const padR = 16;
+  const padT = 16;
+  const padB = 28;
+  const plotW = chartW - padL - padR;
+  const plotH = chartH - padT - padB;
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const span = Math.max(5, rawMax - rawMin);
+  const rangeMin = Math.max(0, Math.floor(rawMin - span * 0.25));
+  const rangeMax = Math.ceil(rawMax + span * 0.25);
+  const rangeDelta = Math.max(1, rangeMax - rangeMin);
+  const chartPoints = points.map((point, i) => {
+    const v = Number(point.e1rm_lbs);
+    const x = padL + (points.length > 1 ? (i / (points.length - 1)) * plotW : plotW / 2);
+    const y = padT + plotH - ((v - rangeMin) / rangeDelta) * plotH;
+    const d = new Date(point.date);
+    return { x, y, v, label: `${d.getMonth() + 1}/${d.getDate()}`, i };
+  });
+  const polyPoints = chartPoints.map(p => `${p.x},${p.y}`).join(' ');
+  const gridLines = 4;
+  const gridVals = Array.from({ length: gridLines }, (_, i) =>
+    Math.round(rangeMin + (rangeDelta * (i / (gridLines - 1))))
+  );
+  const first = values[0];
+  const last = values[values.length - 1];
+  const delta = Math.round(last - first);
+  const deltaColor = delta > 0 ? '#22C55E' : delta < 0 ? '#EF4444' : tc.textMuted;
+
+  return (
+    <View style={styles.graphCard}>
+      <View style={styles.graphHeader}>
+        <Text style={styles.graphTitle}>{title}</Text>
+        <Text style={{ fontSize: 12, fontWeight: '800', color: deltaColor }}>
+          {delta > 0 ? '+' : ''}{delta} lb
+        </Text>
+      </View>
+      <Text style={styles.graphSubtitle}>{subtitle}</Text>
+      <View style={{ alignItems: 'center', marginVertical: 8 }}>
+        <Svg width={chartW} height={chartH}>
+          {gridVals.map((gv, gi) => {
+            const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
+            return (
+              <Line key={gi} x1={padL} y1={gy} x2={chartW - padR} y2={gy}
+                stroke={tc.border} strokeWidth={1} strokeDasharray="4,4" />
+            );
+          })}
+          {gridVals.map((gv, gi) => {
+            const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
+            return (
+              <SvgText key={`lbl${gi}`} x={padL - 6} y={gy + 4}
+                fontSize={10} fill={tc.textMuted} textAnchor="end">
+                {gv}
+              </SvgText>
+            );
+          })}
+          <Polyline points={polyPoints}
+            fill="none" stroke={tc.primary} strokeWidth={2.5}
+            strokeLinejoin="round" strokeLinecap="round" />
+          {chartPoints.map((p) => (
+            <Circle key={p.i} cx={p.x} cy={p.y}
+              r={p.i === chartPoints.length - 1 ? 5 : 3.5}
+              fill={p.i === chartPoints.length - 1 ? tc.accent : tc.primary}
+              stroke={tc.surface} strokeWidth={1.5} />
+          ))}
+          {chartPoints.length <= 12 && chartPoints.map((p) => (
+            <SvgText key={`d${p.i}`} x={p.x} y={chartH - 4}
+              fontSize={9} fill={tc.textMuted} textAnchor="middle">
+              {p.label}
+            </SvgText>
+          ))}
+        </Svg>
+      </View>
+      <View style={styles.chartSummaryRow}>
+        <View style={styles.chartStat}>
+          <Text style={styles.chartStatValue}>{Math.round(last)} lbs</Text>
+          <Text style={styles.chartStatLabel}>Current e1RM</Text>
+        </View>
+        <View style={styles.chartStat}>
+          <Text style={styles.chartStatValue}>{Math.round(Math.max(...values))} lbs</Text>
+          <Text style={styles.chartStatLabel}>Peak e1RM</Text>
+        </View>
+        <View style={styles.chartStat}>
+          <Text style={[styles.chartStatValue, { color: deltaColor }]}>
+            {delta > 0 ? '+' : ''}{delta} lbs
+          </Text>
+          <Text style={styles.chartStatLabel}>vs first estimate</Text>
+        </View>
+      </View>
+    </View>
+  );
+}
+
 function buildProgressMilestones(
   history: WorkoutSession[],
   prs: PR[],
@@ -230,18 +391,19 @@ function buildProgressMilestones(
   oneRepMaxLifts: Array<{ name: string; oneRepMaxLbs: number }>,
 ): ProgressMilestone[] {
   const now = Date.now();
-  const thirtyDaysAgo = now - 30 * 86400000;
+  const thirtyDaysAgo = now - PR_MOMENTUM_WINDOW_DAYS * 86400000;
   const completed = history.filter(s => s.completed && !s.skipped);
   const completedDayKeys = new Set<string>();
   for (const session of completed) {
     completedDayKeys.add(session.date.slice(0, 10));
   }
-  for (const summary of summaries) {
+  const activeSummaries = summaries.filter(isActiveWorkoutSummary);
+  for (const summary of activeSummaries) {
     completedDayKeys.add(summary.date.slice(0, 10));
   }
   const activeDays30 = Array.from(completedDayKeys).filter(k => +new Date(`${k}T00:00:00`) >= thirtyDaysAgo).length;
-  const recentPrs = prs.filter(pr => +new Date(pr.date) >= thirtyDaysAgo);
-  const durationSource = summaries.length > 0 ? summaries : completed;
+  const recentPrs = establishedRecentPrs(history, prs, thirtyDaysAgo);
+  const durationSource = activeSummaries.length > 0 ? activeSummaries : completed;
   const totalMinutes = Math.round(durationSource.reduce((sum, s) => sum + (s.durationSeconds ?? 0), 0) / 60);
   const cardioMiles = paceHistory.reduce((sum, p) => sum + (p.distance ?? 0), 0);
   const topLift = oneRepMaxLifts.reduce(
@@ -265,7 +427,7 @@ function buildProgressMilestones(
       key: 'recent-prs',
       title: 'PR momentum',
       value: `${recentPrs.length}`,
-      detail: 'strength records in the last 30 days',
+      detail: 'records after your baseline in the last 30 days',
       icon: 'trophy-outline',
       color: '#F59E0B',
     });
@@ -285,7 +447,9 @@ function buildProgressMilestones(
       key: 'nutrition-data',
       title: 'Nutrition signal',
       value: `${mealAverages.days_with_data}/${mealAverages.window_days}`,
-      detail: `${Math.round(mealAverages.avg_protein_g)}g protein/day average`,
+      detail: mealAverages.days_with_data >= 2
+        ? `${Math.round(mealAverages.avg_protein_g)}g protein/day rolling average`
+        : 'first meal-logging day captured',
       icon: 'nutrition-outline',
       color: '#14B8A6',
     });
@@ -323,7 +487,7 @@ function buildProgressAnalytics(
   const activeDayKeys = new Set<string>();
   for (const session of completed) activeDayKeys.add(session.date.slice(0, 10));
   for (const summary of summaries) {
-    if ((summary.totalSets ?? 0) > 0) activeDayKeys.add(summary.date.slice(0, 10));
+    if (isActiveWorkoutSummary(summary)) activeDayKeys.add(summary.date.slice(0, 10));
   }
 
   const dayKeys = Array.from(activeDayKeys).sort();
@@ -391,14 +555,14 @@ function buildProgressAnalytics(
   }
 
   const now = Date.now();
-  const thirtyDaysAgo = now - 30 * 86400000;
-  const recentPrs = prs.filter(pr => +new Date(pr.date) >= thirtyDaysAgo);
+  const thirtyDaysAgo = now - PR_MOMENTUM_WINDOW_DAYS * 86400000;
+  const recentPrs = establishedRecentPrs(history, prs, thirtyDaysAgo);
   if (recentPrs.length > 0) {
     rows.push({
       key: 'recent-records',
       label: 'Records',
       value: `${recentPrs.length}`,
-      detail: 'PRs in the last 30 days',
+      detail: 'PRs after your first baseline session',
       icon: 'trophy-outline',
       color: '#6366F1',
     });
@@ -667,10 +831,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [healthEnabled, setHealthEnabled] = useState<boolean>(false);
   const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
-  // Diet score now always exists (mealTracker returns a zeroed
-  // empty-state object instead of null). The card always renders so
-  // fresh users see "log a meal to start tracking" instead of nothing.
-  const [dietScore, setDietScore] = useState<DietConsistencyScore | null>(null);
   const [oneRepMaxLifts, setOneRepMaxLifts] = useState<import('../services/api').OneRepMaxLift[]>([]);
   // 1RM history for the top lift — fetched lazily after `oneRepMaxLifts`
   // resolves so the bars render immediately. Used to draw the trend chart
@@ -690,6 +850,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [muscleBalanceExpanded, setMuscleBalanceExpanded] = useState(false);
   const [nutritionGutExpanded, setNutritionGutExpanded] = useState(false);
   const [mealInsightPatterns, setMealInsightPatterns] = useState<Record<string, any> | null>(null);
+  const [nutritionScoreWeekly, setNutritionScoreWeekly] = useState<import('../services/api').NutritionScoreWeekly | null>(null);
   const [weekSummaryExpanded, setWeekSummaryExpanded] = useState(false);
   const [proteinBreakdown, setProteinBreakdown] = useState<import('../services/api').ProteinBreakdown | null>(null);
   const [proteinBreakdownExpanded, setProteinBreakdownExpanded] = useState(false);
@@ -926,6 +1087,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           .then(r => setMealInsightPatterns(r.patterns ?? null))
           .catch(() => setMealInsightPatterns(null))
       );
+      import('../services/api').then(({ getNutritionScore }) =>
+        getNutritionScore(authToken, 14)
+          .then(r => setNutritionScoreWeekly(r.weekly ?? null))
+          .catch(() => setNutritionScoreWeekly(null))
+      );
       import('../services/api').then(({ getMuscleBalance }) =>
         getMuscleBalance(authToken, 14).then(setMuscleBalance).catch(() => null)
       );
@@ -1051,7 +1217,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         try { setSleepHistoryCount((await loadSleepHistory()).length); } catch {}
       } catch {}
     })();
-    computeDietConsistency(userProfile.mealsPerDay ?? 3).then(setDietScore);
   }, [userProfile.mealsPerDay, userProfile.physicalStats?.age]);
 
   const handleShareBodyScan = async () => {
@@ -1298,6 +1463,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </ScrollView>
               )}
 
+              {topLiftHistory && topLiftHistory.points.length >= 3 && (
+                <View style={{ marginTop: 6 }}>
+                  <Text style={styles.sectionLabel}>Estimated 1RM Trend</Text>
+                  <OneRepMaxTrendCard
+                    title={topLiftHistory.name}
+                    subtitle="Rolling estimated 1-rep max from logged working sets"
+                    points={topLiftHistory.points}
+                    tc={tc}
+                    styles={styles}
+                  />
+                </View>
+              )}
+
               {selectedExercise ? (() => {
                 const trend = selectedExerciseTrend;
                 if (trend.length < 2) {
@@ -1374,30 +1552,30 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                             const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
                             return (
                               <Line key={gi} x1={padL} y1={gy} x2={chartW - padR} y2={gy}
-                                stroke={colors.border} strokeWidth={1} strokeDasharray="4,4" />
+                                stroke={tc.border} strokeWidth={1} strokeDasharray="4,4" />
                             );
                           })}
                           {gridVals.map((gv, gi) => {
                             const gy = padT + plotH - ((gv - rangeMin) / rangeDelta) * plotH;
                             return (
                               <SvgText key={`lbl${gi}`} x={padL - 6} y={gy + 4}
-                                fontSize={10} fill={colors.textMuted} textAnchor="end">
+                                fontSize={10} fill={tc.textMuted} textAnchor="end">
                                 {gv}
                               </SvgText>
                             );
                           })}
                           <Polyline points={polyPoints}
-                            fill="none" stroke={colors.primary} strokeWidth={2.5}
+                            fill="none" stroke={tc.primary} strokeWidth={2.5}
                             strokeLinejoin="round" strokeLinecap="round" />
                           {pts.map((p, i) => (
                             <Circle key={i} cx={p.x} cy={p.y}
                               r={i === pts.length - 1 ? 5 : 3.5}
-                              fill={i === pts.length - 1 ? colors.accent : colors.primary}
-                              stroke={colors.surface} strokeWidth={1.5} />
+                              fill={i === pts.length - 1 ? tc.accent : tc.primary}
+                              stroke={tc.surface} strokeWidth={1.5} />
                           ))}
                           {pts.length <= 12 && pts.map((p, i) => (
                             <SvgText key={`d${i}`} x={p.x} y={chartH - 4}
-                              fontSize={9} fill={colors.textMuted} textAnchor="middle">
+                              fontSize={9} fill={tc.textMuted} textAnchor="middle">
                               {p.label}
                             </SvgText>
                           ))}
@@ -1413,7 +1591,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <Text style={styles.chartStatLabel}>Peak e1RM</Text>
                         </View>
                         <View style={styles.chartStat}>
-                          <Text style={[styles.chartStatValue, { color: e1rmValues[e1rmValues.length - 1] >= e1rmValues[0] ? colors.primary : colors.error }]}>
+                          <Text style={[styles.chartStatValue, { color: e1rmValues[e1rmValues.length - 1] >= e1rmValues[0] ? tc.primary : tc.error }]}>
                             {e1rmValues[e1rmValues.length - 1] >= e1rmValues[0] ? '+' : ''}{e1rmValues[e1rmValues.length - 1] - e1rmValues[0]} lbs
                           </Text>
                           <Text style={styles.chartStatLabel}>vs first estimate</Text>
@@ -1845,62 +2023,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               {/* 1RM trend chart for the top lift — only renders when there
                   are 3+ data points. Pure SVG sparkline, matches the body-
                   fat timeline pattern below for visual consistency. */}
-              {topLiftHistory && topLiftHistory.points.length >= 3 && (() => {
-                const pts = topLiftHistory.points;
-                const values = pts.map(p => p.e1rm_lbs);
-                const minV = Math.min(...values);
-                const maxV = Math.max(...values);
-                const range = Math.max(1, maxV - minV);
-                const chartW = 320, chartH = 80, padL = 8, padR = 8, padT = 10, padB = 10;
-                const plotW = chartW - padL - padR;
-                const plotH = chartH - padT - padB;
-                const xAt = (i: number) => padL + (i / Math.max(1, pts.length - 1)) * plotW;
-                const yAt = (v: number) => padT + plotH - ((v - minV) / range) * plotH;
-                const path = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(p.e1rm_lbs).toFixed(1)}`).join(' ');
-                const first = values[0], last = values[values.length - 1];
-                const delta = last - first;
-                const deltaColor = delta > 0 ? '#22C55E' : delta < 0 ? '#EF4444' : tc.textMuted;
-                return (
-                  <View style={{
-                    marginTop: 14,
-                    backgroundColor: tc.surfaceRaised,
-                    borderRadius: 12,
-                    borderWidth: 1,
-                    borderColor: tc.border,
-                    padding: 14,
-                  }}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-                      <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textPrimary }}>
-                        {topLiftHistory.name} · 1RM trend
-                      </Text>
-                      <Text style={{ fontSize: 12, fontWeight: '800', color: deltaColor }}>
-                        {delta > 0 ? '+' : ''}{Math.round(delta)} lb
-                      </Text>
-                    </View>
-                    <Svg width={chartW} height={chartH}>
-                      <Circle cx={xAt(0)} cy={yAt(first)} r={3} fill={tc.textMuted} />
-                      <Circle cx={xAt(pts.length - 1)} cy={yAt(last)} r={4} fill={tc.primary} />
-                      {/* Path drawn as a series of small line segments for compatibility */}
-                      {pts.slice(1).map((p, i) => {
-                        const prev = pts[i];
-                        return (
-                          <Svg key={i} x={0} y={0}>
-                            <Circle cx={xAt(i + 1)} cy={yAt(p.e1rm_lbs)} r={2} fill={tc.primary} opacity={0.5} />
-                          </Svg>
-                        );
-                      })}
-                    </Svg>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
-                      <Text style={{ fontSize: 10, color: tc.textMuted }}>
-                        {new Date(pts[0].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                      </Text>
-                      <Text style={{ fontSize: 10, color: tc.textMuted }}>
-                        {new Date(pts[pts.length - 1].date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
-                      </Text>
-                    </View>
-                  </View>
-                );
-              })()}
+              {topLiftHistory && topLiftHistory.points.length >= 3 && (
+                <View style={{ marginTop: 14 }}>
+                  <OneRepMaxTrendCard
+                    title={`${topLiftHistory.name} · 1RM trend`}
+                    subtitle="Rolling estimated 1-rep max from logged working sets"
+                    points={topLiftHistory.points}
+                    tc={tc}
+                    styles={styles}
+                  />
+                </View>
+              )}
             </View>
           )}
 
@@ -3121,19 +3254,31 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const allDates = new Set(completedWorkouts.map(s => s.date?.slice(0, 10)).filter(Boolean));
             const daysOfData = allDates.size;
             const DAYS_REQUIRED = 14;
+            const nutritionDays = nutritionScoreWeekly?.days_with_data ?? mealAverages?.days_with_data ?? 0;
+            const nutritionReady = !!nutritionScoreWeekly && nutritionScoreWeekly.days_with_data >= MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE;
+            const missingWorkoutDays = Math.max(0, DAYS_REQUIRED - daysOfData);
+            const missingNutritionDays = Math.max(0, MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE - nutritionDays);
 
-            if (daysOfData < DAYS_REQUIRED) {
+            if (daysOfData < DAYS_REQUIRED || !nutritionReady) {
               return (
                 <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 20, marginBottom: 14, borderWidth: 1, borderColor: tc.border, alignItems: 'center' }}>
                   <Ionicons name="heart-circle-outline" size={32} color={tc.textMuted} />
                   <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary, marginTop: 8 }}>Health Score</Text>
                   <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', marginTop: 4, lineHeight: 18 }}>
-                    {DAYS_REQUIRED - daysOfData} more day{DAYS_REQUIRED - daysOfData !== 1 ? 's' : ''} of logging to unlock your score
+                    {missingWorkoutDays > 0 && missingNutritionDays > 0
+                      ? `${missingWorkoutDays} more training day${missingWorkoutDays === 1 ? '' : 's'} and ${missingNutritionDays} more meal day${missingNutritionDays === 1 ? '' : 's'} to unlock your score`
+                      : missingWorkoutDays > 0
+                        ? `${missingWorkoutDays} more training day${missingWorkoutDays === 1 ? '' : 's'} to unlock your score`
+                        : missingNutritionDays > 0
+                          ? `${missingNutritionDays} more meal day${missingNutritionDays === 1 ? '' : 's'} to unlock your score`
+                          : 'Waiting on the server nutrition score before unlocking this card'}
                   </Text>
                   <View style={{ width: '100%', height: 4, borderRadius: 2, backgroundColor: tc.border, marginTop: 12 }}>
                     <View style={{ width: `${Math.min(100, (daysOfData / DAYS_REQUIRED) * 100)}%` as any, height: 4, borderRadius: 2, backgroundColor: tc.primary }} />
                   </View>
-                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>{daysOfData} / {DAYS_REQUIRED} days</Text>
+                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>
+                    Training {Math.min(daysOfData, DAYS_REQUIRED)} / {DAYS_REQUIRED} days · Nutrition {Math.min(nutritionDays, MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE)} / {MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE} days
+                  </Text>
                 </View>
               );
             }
@@ -3144,23 +3289,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const workoutAdherence = expectedWorkouts > 0 ? Math.min(1, completedWorkouts.length / expectedWorkouts) : 0;
             const activityScore = Math.round(workoutAdherence * 100);
 
-            // Nutrition: use real meal averages when available, fall back to diet consistency
-            let nutScore = dietScore ? dietScore.total : 50;
-            let nutDetail = dietScore ? `${dietScore.mealsChecked}/${dietScore.mealsExpected} meals logged` : '';
-            if (mealAverages && mealAverages.days_with_data >= 2) {
-              const targetCal = nutritionPlan?.targets?.calories || 2200;
-              const targetPro = nutritionPlan?.targets?.protein || 150;
-              // Calorie adherence: 40 points — how close avg calories are to target
-              const calRatio = targetCal > 0 ? mealAverages.avg_calories / targetCal : 0;
-              const calAdherence = Math.round(Math.max(0, (1 - Math.abs(1 - calRatio)) * 40));
-              // Protein adherence: 35 points — avg protein vs target
-              const proRatio = targetPro > 0 ? Math.min(1, mealAverages.avg_protein_g / targetPro) : 0;
-              const proAdherence = Math.round(proRatio * 35);
-              // Logging consistency: 25 points — days_with_data / window_days
-              const logConsistency = Math.round((mealAverages.days_with_data / mealAverages.window_days) * 25);
-              nutScore = Math.min(100, calAdherence + proAdherence + logConsistency);
-              nutDetail = `${Math.round(mealAverages.avg_calories)} / ${targetCal} cal avg`;
-            }
+            const nutScore = nutritionScoreWeekly!.avg_score;
+            const nutDetail = `${nutritionScoreWeekly!.days_with_data}/${nutritionScoreWeekly!.window_days} meal days · server nutrition score`;
             const combined = Math.round(activityScore * 0.5 + nutScore * 0.5);
             const scoreColor = combined >= 70 ? '#22C55E' : combined >= 45 ? '#F59E0B' : '#EF4444';
             const rating = combined >= 80 ? 'Excellent' : combined >= 65 ? 'Good' : combined >= 45 ? 'Fair' : 'Needs work';
@@ -3211,8 +3341,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const directionLabel = direction === 'improving' ? 'Improving' : direction === 'slipping' ? 'Slipping' : 'Steady';
             const trackingDelta = Number(trends.tracking_delta_pct ?? 0);
             const proteinDelta = trends.protein_hit_delta_pct == null ? null : Number(trends.protein_hit_delta_pct);
-            const calorieAvg = Number(recent.avg_calories_when_logged ?? recent.avg_calories ?? 0);
-            const calorieDelta = Number(trends.calorie_delta_when_logged ?? trends.calorie_delta ?? 0);
+            const calorieAvg = Number(recent.avg_calories ?? 0);
+            const trackedDayCalorieAvg = Number(recent.avg_calories_when_logged ?? recent.avg_calories ?? 0);
+            const calorieDelta = Number(trends.calorie_delta ?? 0);
             return (
               <View style={[styles.vitalsCard, { marginTop: 0 }]}>
                 <View style={[styles.vitalsHeader, { marginBottom: 12 }]}>
@@ -3224,7 +3355,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   {[
                     { label: 'Tracked', value: `${recent.tracking_rate_pct ?? 0}%`, delta: `${trackingDelta >= 0 ? '+' : ''}${trackingDelta}%` },
                     { label: 'Protein', value: recent.protein_hit_pct == null ? 'n/a' : `${recent.protein_hit_pct}%`, delta: proteinDelta == null ? null : `${proteinDelta >= 0 ? '+' : ''}${proteinDelta}%` },
-                    { label: 'Calories', value: `${Math.round(calorieAvg)}`, delta: `${calorieDelta >= 0 ? '+' : ''}${Math.round(calorieDelta)}` },
+                    { label: 'Cal/day', value: `${Math.round(calorieAvg)}`, delta: `${calorieDelta >= 0 ? '+' : ''}${Math.round(calorieDelta)}` },
                   ].map(item => (
                     <View key={item.label} style={{ flex: 1, backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingVertical: 9, paddingHorizontal: 8 }}>
                       <Text style={{ fontSize: 17, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
@@ -3242,6 +3373,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
                   Logging streak {trends.current_logging_streak_days ?? 0} day{trends.current_logging_streak_days === 1 ? '' : 's'}
                   {trends.current_protein_streak_days != null ? ` · Protein streak ${trends.current_protein_streak_days} day${trends.current_protein_streak_days === 1 ? '' : 's'}` : ''}
+                  {trackedDayCalorieAvg > 0 && Math.abs(trackedDayCalorieAvg - calorieAvg) >= 25
+                    ? ` · Logged-day avg ${Math.round(trackedDayCalorieAvg)} cal`
+                    : ''}
                 </Text>
               </View>
             );
@@ -3286,18 +3420,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
               )}
 
-              {/* Nutrition macros — avg over actual logged days (adaptive). */}
+              {/* Nutrition macros — rolling daily average first, with the
+                  tracked-day average called out separately when it differs. */}
               {mealAverages && mealAverages.days_with_data >= 2 && (
                 <View style={{ marginBottom: 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
                   <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>
-                    MACROS (LOGGED-DAY AVG)
+                    MACROS (ROLLING DAILY AVG)
                   </Text>
                   <View style={{ flexDirection: 'row', gap: 6 }}>
                     {[
-                      { label: 'Calories', value: Math.round(mealAverages.avg_calories_when_logged ?? mealAverages.avg_calories), color: tc.primary },
-                      { label: 'Protein', value: `${Math.round(mealAverages.avg_protein_g_when_logged ?? mealAverages.avg_protein_g)}g`, color: '#22C55E' },
-                      { label: 'Carbs', value: `${Math.round(mealAverages.avg_carbs_g_when_logged ?? mealAverages.avg_carbs_g)}g`, color: '#F59E0B' },
-                      { label: 'Fat', value: `${Math.round(mealAverages.avg_fat_g_when_logged ?? mealAverages.avg_fat_g)}g`, color: '#A78BFA' },
+                      { label: 'Calories', value: Math.round(mealAverages.avg_calories), color: tc.primary },
+                      { label: 'Protein', value: `${Math.round(mealAverages.avg_protein_g)}g`, color: '#22C55E' },
+                      { label: 'Carbs', value: `${Math.round(mealAverages.avg_carbs_g)}g`, color: '#F59E0B' },
+                      { label: 'Fat', value: `${Math.round(mealAverages.avg_fat_g)}g`, color: '#A78BFA' },
                     ].map(s => (
                       <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: 8, paddingVertical: 8 }}>
                         <Text style={{ fontSize: 15, fontWeight: '800', color: s.color }}>{s.value}</Text>
@@ -3307,6 +3442,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </View>
                   <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6 }}>
                     {mealAverages.days_with_data} logged day{mealAverages.days_with_data === 1 ? '' : 's'} in last {mealAverages.window_days} · {Math.round(mealAverages.avg_meals_per_day)} meals/day · {mealAverages.total_meals_logged} total
+                    {mealAverages.avg_calories_when_logged != null && Math.abs(mealAverages.avg_calories_when_logged - mealAverages.avg_calories) >= 25
+                      ? ` · logged-day avg ${Math.round(mealAverages.avg_calories_when_logged)} cal`
+                      : ''}
                   </Text>
                 </View>
               )}

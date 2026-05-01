@@ -2366,6 +2366,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     nutritionScoreData: null as any,
     workoutPlan: null as any,
     planWeek: null as import('../services/api').PlanWeekResponse | null,
+    profileAge: null as number | null,
   });
   useEffect(() => {
     rePushStateRef.current = {
@@ -2379,6 +2380,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       nutritionScoreData,
       workoutPlan,
       planWeek,
+      profileAge: userProfile?.physicalStats?.age ?? null,
     };
   });
 
@@ -2514,13 +2516,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             ).catch(() => {});
           })();
 
-          // Sleep / readiness / weight pulled from cached health summary so
-          // we don't re-query Apple Health on every reachability flip.
+          // Sleep uses the canonical health summary fetcher: cached when
+          // warm, refreshed only when stale/missing. That keeps watch-open
+          // sync aligned with the Progress card without hammering HK.
           // Supplements pull from the API when authToken is present.
           (async () => {
             try {
-              const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
-              const cached = await getCachedHealthDataSummary();
+              const { getHealthDataSummary } = await import('../services/healthDataSummary');
+              const cached = await getHealthDataSummary({ age: s.profileAge ?? null });
               await pushSleepToWatch(buildWatchSleepPayloadFromSummary(cached));
             } catch { /* non-fatal */ }
           })();
@@ -2813,8 +2816,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 // equivalent to re-opening the watch app.
                 (async () => {
                   try {
-                    const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
-                    const cached = await getCachedHealthDataSummary().catch(() => null);
+                    const { getHealthDataSummary } = await import('../services/healthDataSummary');
+                    const cached = await getHealthDataSummary({ age: s.profileAge ?? null }).catch(() => null);
                     await pushSleepToWatch(buildWatchSleepPayloadFromSummary(cached));
                   } catch { /* non-fatal */ }
                 })();

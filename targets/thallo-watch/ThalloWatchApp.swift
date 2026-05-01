@@ -15,6 +15,8 @@ struct ThalloWatchApp: App {
                 .environmentObject(conn)
                 .environmentObject(theme)
                 .preferredColorScheme(.dark)
+                .onAppear { theme.palette = conn.theme }
+                .onReceive(conn.$theme) { palette in theme.palette = palette }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {

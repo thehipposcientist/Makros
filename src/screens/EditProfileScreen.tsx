@@ -3823,7 +3823,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   tab:          { flex: 1, paddingVertical: 10, alignItems: 'center', borderRadius: radius.lg - 3 },
   tabActive:    { backgroundColor: colors.primary },
   tabText:      { fontSize: 12, fontWeight: '600', color: colors.textMuted },
-  tabTextActive:{ fontSize: 12, fontWeight: '700', color: '#fff' },
+  tabTextActive:{ fontSize: 12, fontWeight: '700', color: getContrastingTextColor(colors.primary) },
   section:         { marginBottom: 24 },
   sectionTopRow:   { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
   sectionLabel:    { fontSize: 11, fontWeight: '700', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.9, marginBottom: 6 },

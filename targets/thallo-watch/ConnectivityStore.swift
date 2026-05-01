@@ -36,13 +36,32 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     private let session: WCSession?
     private static let userIdKey = "thallo.watchUserId"
     private static let lastWorkoutRevisionKey = "thallo.lastWorkoutRevision"
+    private static let storedThemeKey = "thallo.storedTheme"
+    private static let storedSleepKey = "thallo.storedSleep"
     private var queuedCommands: [[String: Any]] = []
 
     private override init() {
         self.session = WCSession.isSupported() ? WCSession.default : nil
         super.init()
+        if let storedTheme = Self.loadStored(WatchPalette.self, key: Self.storedThemeKey) {
+            self.theme = storedTheme
+        }
+        if let storedSleep = Self.loadStored(WatchSleepSnapshot.self, key: Self.storedSleepKey) {
+            self.sleep = storedSleep
+        }
         session?.delegate = self
         session?.activate()
+    }
+
+    private static func loadStored<T: Decodable>(_ type: T.Type, key: String) -> T? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    private static func saveStored<T: Encodable>(_ value: T, key: String) {
+        if let data = try? JSONEncoder().encode(value) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
     }
 
     /// The stored userId for the current watch session.
@@ -99,6 +118,8 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         UserDefaults.standard.removeObject(forKey: "thallo.lastAbsorb")
         UserDefaults.standard.removeObject(forKey: "thallo.lastClearWorkoutMs")
         UserDefaults.standard.removeObject(forKey: Self.lastWorkoutRevisionKey)
+        UserDefaults.standard.removeObject(forKey: Self.storedThemeKey)
+        UserDefaults.standard.removeObject(forKey: Self.storedSleepKey)
     }
 
     // ─── WCSessionDelegate ──────────────────────────────────────────
@@ -130,6 +151,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             // idempotent, closes the "wife's watch not pulling meals"
             // gap directly.
             if session.isReachable {
+                self.absorbContext(session.receivedApplicationContext)
                 self.sendCommand("pull_state")
             }
         }
@@ -139,6 +161,9 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     /// WC activation, on reachability → true, and whenever the watch
     /// app becomes visible again (see `ThalloWatchApp` scene phase).
     func requestPull() {
+        if let session = session {
+            absorbContext(session.receivedApplicationContext)
+        }
         sendCommand("pull_state")
     }
 
@@ -193,6 +218,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
            let data = try? JSONSerialization.data(withJSONObject: t),
            let decoded = try? JSONDecoder().decode(WatchPalette.self, from: data) {
             self.theme = decoded
+            Self.saveStored(decoded, key: Self.storedThemeKey)
         }
         if let s = ctx["supplements"] as? [String: Any] {
             if let data = try? JSONSerialization.data(withJSONObject: s),
@@ -207,6 +233,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                let decoded = try? JSONDecoder().decode(WatchSleepSnapshot.self, from: data) {
                 if sleep == nil || decoded.syncedAtMs >= (sleep?.syncedAtMs ?? 0) {
                     self.sleep = decoded
+                    Self.saveStored(decoded, key: Self.storedSleepKey)
                 }
             }
         }

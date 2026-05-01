@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName, UserProfile } from '../types';
 import {
   loadReminderSettings, saveReminderSettings, type ReminderSettings,
@@ -323,7 +323,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                     ]}>
                     <Text style={[
                       styles.toggleOptText,
-                      { color: active ? '#fff' : tc.textSecondary },
+                      { color: active ? getContrastingTextColor(tc.primary) : tc.textSecondary },
                     ]}>{u}</Text>
                   </TouchableOpacity>
                 );
@@ -351,7 +351,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                     ]}>
                     <Text style={[
                       styles.toggleOptText,
-                      { color: active ? '#fff' : tc.textSecondary },
+                      { color: active ? getContrastingTextColor(tc.primary) : tc.textSecondary },
                     ]}>{u}</Text>
                   </TouchableOpacity>
                 );

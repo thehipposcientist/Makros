@@ -10,7 +10,7 @@ import {
   Modal, ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { getTheme } from '../constants/theme';
+import { getContrastingTextColor, getTheme } from '../constants/theme';
 import { AppThemeName } from '../types';
 import MealTimeSelector, { defaultMealDateTime } from './MealTimeSelector';
 import * as api from '../services/api';
@@ -312,7 +312,7 @@ function LogSavedMealModal({
                   >
                     <Text style={{
                       fontSize: 12, fontWeight: '700',
-                      color: active ? '#fff' : tc.textPrimary,
+                      color: active ? getContrastingTextColor(tc.primary) : tc.textPrimary,
                     }}>{opt.label}</Text>
                   </TouchableOpacity>
                 );

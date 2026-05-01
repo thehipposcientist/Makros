@@ -601,7 +601,7 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
             >
               <Text style={{
                 fontSize: 12, fontWeight: '700',
-                color: active ? '#fff' : tc.textSecondary,
+                color: active ? getContrastingTextColor(tc.primary) : tc.textSecondary,
               }}>{label}</Text>
             </TouchableOpacity>
           );
@@ -1000,7 +1000,7 @@ function AddSupplementModal({
                   >
                     <Text style={{
                       fontSize: 12, fontWeight: '700',
-                      color: active ? '#fff' : tc.textPrimary,
+                      color: active ? getContrastingTextColor(tc.primary) : tc.textPrimary,
                     }}>{ing.name}</Text>
                   </TouchableOpacity>
                 );
@@ -1081,7 +1081,7 @@ function AddSupplementModal({
                   >
                     <Text style={{
                       fontSize: 11, fontWeight: '700',
-                      color: active ? '#fff' : tc.textSecondary,
+                      color: active ? getContrastingTextColor(tc.primary) : tc.textSecondary,
                     }}>{f.replace(/_/g, ' ')}</Text>
                   </TouchableOpacity>
                 );
@@ -1106,7 +1106,7 @@ function AddSupplementModal({
                   >
                     <Text style={{
                       fontSize: 11, fontWeight: '700',
-                      color: active ? '#fff' : tc.textSecondary,
+                      color: active ? getContrastingTextColor(tc.primary) : tc.textSecondary,
                     }}>{t.replace(/_/g, ' ')}</Text>
                   </TouchableOpacity>
                 );

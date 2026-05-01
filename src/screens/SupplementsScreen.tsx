@@ -8,7 +8,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { UserProfile, SupplementItem, AppThemeName } from '../types';
-import { getTheme, radius } from '../constants/theme';
+import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { SUPPLEMENT_LIBRARY, SUPPLEMENT_CATEGORIES, SupplementEntry } from '../constants/supplementLibrary';
 
 interface SupplementsScreenProps {
@@ -175,7 +175,7 @@ export default function SupplementsScreen({ userProfile, themeName, onSave, onBa
                 style={[styles.catChip, active && { backgroundColor: meal.strong, borderColor: meal.strong }]}
                 onPress={() => setActiveCategory(cat.key)}
                 activeOpacity={0.75}>
-                <Text style={[styles.catChipText, { color: active ? '#fff' : c.textSecondary }]}>{cat.label}</Text>
+                <Text style={[styles.catChipText, { color: active ? getContrastingTextColor(meal.strong) : c.textSecondary }]}>{cat.label}</Text>
               </TouchableOpacity>
             );
           })}
