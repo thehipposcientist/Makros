@@ -215,7 +215,12 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
       const pairs: [string, string][] = [];
       for (const [k, v] of Object.entries(state)) {
         if (v == null) continue;
-        pairs.push([k, typeof v === 'string' ? v : JSON.stringify(v)]);
+        if (k === 'userProfile') {
+          const currentRaw = await AsyncStorage.getItem('userProfile').catch(() => null);
+          pairs.push([k, encodePulledStateValueForStorage(k, v, currentRaw)]);
+          continue;
+        }
+        pairs.push([k, encodePulledStateValueForStorage(k, v)]);
       }
       if (pairs.length > 0) await AsyncStorage.multiSet(pairs);
       console.log(`[user-state] pulled ${pairs.length} keys`);
@@ -309,6 +314,7 @@ import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem }
 import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName } from '../src/services/api';
 import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday } from '../src/utils/mealTracker';
 import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
+import { encodePulledStateValueForStorage } from '../src/utils/profileCache';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';

@@ -4704,7 +4704,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       <BodyMeasurementsModal
         visible={measurementsModalVisible}
         authToken={authToken}
-        currentWeight={weightEntries.length > 0 ? weightEntries[weightEntries.length - 1].weightLbs : undefined}
+        currentWeight={userProfile.physicalStats?.weightLbs}
         themeName={userProfile.themePreference}
         onClose={() => setMeasurementsModalVisible(false)}
         onSaved={() => import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {})}

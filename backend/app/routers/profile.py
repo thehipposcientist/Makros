@@ -315,17 +315,17 @@ def get_my_profile(
 
     coaching = _coaching_state(session, current_user.id)
     session.add(coaching)
-    session.commit()
-
-    return {
-        "profile": profile,
-        "goal": goal,
-        "preferences": prefs,
-        "coaching": coaching,
+    payload = {
+        "profile": _dump_model(profile),
+        "goal": _dump_model(goal),
+        "preferences": _dump_model(prefs),
+        "coaching": _dump_model(coaching),
         "first_name": current_user.first_name,
         "last_name": current_user.last_name,
         "subscription_tier": current_user.subscription_tier or "free",
     }
+    session.commit()
+    return payload
 
 
 @router.patch("/name")
@@ -564,6 +564,8 @@ def weekly_checkin(
 ):
     if body.energy < 1 or body.energy > 5 or body.sleep < 1 or body.sleep > 5 or body.adherence < 1 or body.adherence > 5:
         raise HTTPException(status_code=400, detail="energy, sleep, and adherence must be 1-5")
+    if body.weight_lbs <= 0:
+        raise HTTPException(status_code=400, detail="weight_lbs must be positive")
 
     profile = session.exec(select(UserProfile).where(UserProfile.user_id == current_user.id)).first()
     if not profile:
@@ -575,10 +577,13 @@ def weekly_checkin(
         .order_by(WeeklyCheckIn.checkin_date.desc())
     ).first()
 
-    # Save check-in and keep profile weight in sync
-    entry = WeeklyCheckIn(user_id=current_user.id, **body.model_dump())
-    profile.weight_lbs = body.weight_lbs
-    profile.updated_at = datetime.now(timezone.utc)
+    # Save check-in. Measurement-only clients can attach the profile's
+    # current weight for trend context without changing the profile itself.
+    entry_payload = body.model_dump(exclude={"update_profile_weight"})
+    entry = WeeklyCheckIn(user_id=current_user.id, **entry_payload)
+    if body.update_profile_weight:
+        profile.weight_lbs = body.weight_lbs
+        profile.updated_at = datetime.now(timezone.utc)
 
     state = _coaching_state(session, current_user.id)
     cal_delta = 0

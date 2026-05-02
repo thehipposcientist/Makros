@@ -7,6 +7,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { submitWeeklyCheckin } from '../services/api';
+import {
+  buildBodyMeasurementsCheckinPayload,
+  EMPTY_MEASUREMENT_FIELDS,
+} from '../utils/bodyMeasurements';
+import type { MeasurementFields } from '../utils/bodyMeasurements';
 
 interface Props {
   visible: boolean;
@@ -16,21 +21,6 @@ interface Props {
   onClose: () => void;
   onSaved?: () => void;
 }
-
-interface MeasurementFields {
-  waist: string;
-  chest: string;
-  hips: string;
-  bicep: string;
-  thigh: string;
-  calf: string;
-  bodyFat: string;
-}
-
-const EMPTY: MeasurementFields = {
-  waist: '', chest: '', hips: '',
-  bicep: '', thigh: '', calf: '', bodyFat: '',
-};
 
 const FIELDS: Array<{ key: keyof MeasurementFields; label: string; unit: string }> = [
   { key: 'waist',   label: 'Waist',     unit: 'in' },
@@ -44,31 +34,22 @@ const FIELDS: Array<{ key: keyof MeasurementFields; label: string; unit: string 
 
 export default function BodyMeasurementsModal({ visible, authToken, currentWeight, themeName, onClose, onSaved }: Props) {
   const tc = getTheme(themeName).colors;
-  const [fields, setFields] = useState<MeasurementFields>(EMPTY);
+  const [fields, setFields] = useState<MeasurementFields>(EMPTY_MEASUREMENT_FIELDS);
   const [saving, setSaving] = useState(false);
 
   const set = (key: keyof MeasurementFields, val: string) =>
     setFields(f => ({ ...f, [key]: val }));
 
   const handleSave = async () => {
+    const payload = buildBodyMeasurementsCheckinPayload({ currentWeight, fields });
+    if (!payload) {
+      Alert.alert('Weight required', 'Update your Body weight before saving measurements.');
+      return;
+    }
     setSaving(true);
     try {
-      const parse = (v: string) => { const n = parseFloat(v); return isNaN(n) ? undefined : n; };
-      await submitWeeklyCheckin(authToken, {
-        checkin_date: new Date().toISOString().slice(0, 10),
-        weight_lbs: currentWeight ?? 0,
-        waist_in: parse(fields.waist),
-        chest_in: parse(fields.chest),
-        hips_in: parse(fields.hips),
-        bicep_in: parse(fields.bicep),
-        thigh_in: parse(fields.thigh),
-        calf_in: parse(fields.calf),
-        body_fat_pct: parse(fields.bodyFat),
-        energy: 3,
-        sleep: 3,
-        adherence: 3,
-      });
-      setFields(EMPTY);
+      await submitWeeklyCheckin(authToken, payload);
+      setFields(EMPTY_MEASUREMENT_FIELDS);
       onSaved?.();
       onClose();
     } catch {

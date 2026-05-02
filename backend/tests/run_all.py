@@ -173,6 +173,9 @@ _TEST_MODULES = (
     # RecoveryActivity model + router (cold plunge, sauna, breathwork,
     # meditation logging).
     "tests.test_phase4_tracking",
+    # Profile weight source of truth — measurement-only check-ins must
+    # not promote cached/history weights into UserProfile.weight_lbs.
+    "tests.test_profile_weight_sync",
     # Coach chat: photo attachments + multi-turn conversation history
     # (the active-workout coach can now see a snapped photo and answer
     # follow-up questions without re-stating context).

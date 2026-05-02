@@ -1624,6 +1624,7 @@ export async function submitWeeklyCheckin(
   body: {
     checkin_date: string;
     weight_lbs: number;
+    update_profile_weight?: boolean;
     waist_in?: number;
     chest_in?: number;
     hips_in?: number;

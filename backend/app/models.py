@@ -1568,6 +1568,7 @@ class DayStateUpsert(SQLModel):
 class WeeklyCheckInCreate(SQLModel):
     checkin_date: date
     weight_lbs: float
+    update_profile_weight: bool = True
     waist_in: float | None = None
     chest_in: float | None = None
     hips_in: float | None = None
