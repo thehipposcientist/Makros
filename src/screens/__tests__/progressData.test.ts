@@ -284,9 +284,14 @@ describe('Progress data layer', () => {
       expect(rows[0].calories).toBe(1500);
     });
 
-    it('falls back to averages.daily when history is empty / not loaded yet', () => {
+    it('falls back to averages.daily when history is not loaded yet', () => {
       const rows = selectDailyRows(null, averagesDaily);
       expect(rows[0].calories).toBe(999);
+    });
+
+    it('trusts an empty loaded history over stale averages.daily rows', () => {
+      const rows = selectDailyRows([], averagesDaily);
+      expect(rows.length).toBe(0);
     });
 
     it('returns an empty array when both sources are empty', () => {

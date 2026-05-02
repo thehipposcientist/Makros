@@ -203,7 +203,7 @@ export function selectDailyRows(
   averagesDaily: DailyRowShape[] | undefined,
   limit = 5,
 ): DailyRowShape[] {
-  if (history && history.length > 0) {
+  if (history != null) {
     return aggregateDailyFromHistory(history).slice(0, limit);
   }
   const rows = [...(averagesDaily ?? [])];

@@ -708,6 +708,8 @@ export interface SessionExercise {
    *  recs when the exact exercise has no direct history. */
   primaryMuscle?: string | null;
   primary_muscle?: string | null;
+  secondaryMuscles?: string[] | null;
+  secondary_muscles?: string[];
   muscles_targeted?: string[];
   /** Whether this is a compound (multi-joint) movement. Propagated from
    *  the planner's exercise library — used for 1RM estimation eligibility. */

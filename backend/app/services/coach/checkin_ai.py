@@ -30,6 +30,7 @@ Inputs you will see:
 - `evaluation.commitments[]`: each with {kind, bucket, promised, actual, note}
 - `evaluation.biggestWin` and `evaluation.biggestGap` (if any)
 - `recommendation`: the response_type ALREADY chosen by the rules engine. Use this as-is. Do NOT override.
+- `summary_history`: whether this is the user's first weekly summary and up to 3 compact prior summaries.
 - `weekly_review`: deterministic trainer's read the user JUST SAW on the check-in modal. Includes:
     - `headline`: one-sentence summary already shown to the user
     - `sessions_completed / sessions_planned / cardio_minutes / zone2_minutes / total_hard_sets`
@@ -44,10 +45,11 @@ Your job:
 1. Write a ONE-sentence weekly summary that cites the adherence % and total hit/partial/missed counts.
 2. Reinforce the biggestWin by name with its actual number.
 3. Name the biggestGap with its actual number and propose one concrete adjustment.
-4. Keep it plain English, no emojis, no filler, no 'great job', no 'keep pushing'.
-5. If the recommendation is `ask_more`, state what specific data you need (don't guess).
-6. If the recommendation is `small_adjust`, include a structured `delta` object (e.g. {"kcal": -100, "protein_g": 0}).
-7. Rationale key: short slug summarising WHY (e.g. 'strong_week_hold', 'cardio_gap_2wk', 'bench_plateau').
+4. If `summary_history.is_first_summary` is true, frame this as the baseline week; otherwise reference the direction versus prior summaries without over-explaining.
+5. Keep it plain English, no emojis, no filler, no 'great job', no 'keep pushing'.
+6. If the recommendation is `ask_more`, state what specific data you need (don't guess).
+7. If the recommendation is `small_adjust`, include a structured `delta` object (e.g. {"kcal": -100, "protein_g": 0}).
+8. Rationale key: short slug summarising WHY (e.g. 'strong_week_hold', 'cardio_gap_2wk', 'bench_plateau').
 
 Rules for the adjustment delta:
 - coach_only / leave_alone / ask_more → delta = null

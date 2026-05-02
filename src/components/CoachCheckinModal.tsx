@@ -23,6 +23,7 @@ import {
   getWeeklyReview,
   WeeklyReviewResponse,
   applyRecommendationAction,
+  reviewAndApplyPlanWeek,
 } from '../services/api';
 
 /**
@@ -48,6 +49,9 @@ interface Props {
   /** When true, skip the form and show the saved recap from existingCheckin. */
   readOnly?: boolean;
   existingCheckin?: PlanWeekCheckinRecord | null;
+  weekStart?: string | null;
+  weekEnd?: string | null;
+  onPlanUpdated?: () => void;
   /** Shown as a secondary link when the user can skip this week's check-in. */
   onSkip?: () => void;
 }
@@ -97,7 +101,7 @@ const PAIN_OPTIONS: Array<{ value: PainArea; label: string }> = [
 
 export default function CoachCheckinModal({
   visible, authToken, onClose, onCompleted, themeName,
-  planWeekId, readOnly, existingCheckin, onSkip,
+  planWeekId, readOnly, existingCheckin, weekStart, weekEnd, onPlanUpdated, onSkip,
 }: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
@@ -130,13 +134,22 @@ export default function CoachCheckinModal({
     setReviewLoading(true);
     (async () => {
       try {
-        const r = await getWeeklyReview(authToken, { days: 7 });
+        const r = await getWeeklyReview(authToken, { days: 7, endDate: weekEnd ?? undefined });
         if (!cancelled) setReview(r);
       } catch { /* non-fatal — check-in still works without it */ }
       finally { if (!cancelled) setReviewLoading(false); }
     })();
     return () => { cancelled = true; };
-  }, [visible, authToken]);
+  }, [visible, authToken, weekEnd]);
+
+  const reviewDateRange = React.useMemo(() => {
+    const start = review?.week_start ?? weekStart ?? existingCheckin?.week_start_date ?? null;
+    const end = review?.week_end ?? weekEnd ?? existingCheckin?.week_end_date ?? null;
+    if (!start || !end) return '';
+    const fmt = (s: string) =>
+      new Date(s + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return `${fmt(start)} – ${fmt(end)}`;
+  }, [review?.week_start, review?.week_end, weekStart, weekEnd, existingCheckin?.week_start_date, existingCheckin?.week_end_date]);
 
   const reset = () => {
     setEnergy(null);
@@ -297,10 +310,13 @@ export default function CoachCheckinModal({
                     borderWidth: 1, borderColor: colors.primary + '44',
                   }}>
                     <Text style={{ fontSize: 10, fontWeight: '800', letterSpacing: 0.8, color: colors.primary, marginBottom: 6 }}>
-                      WEEKLY REVIEW · {existingCheckin.week_start_date
-                        ? `${new Date(existingCheckin.week_start_date + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${new Date(existingCheckin.week_end_date + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
-                        : ''}
+                      WEEKLY REVIEW{reviewDateRange ? ` · ${reviewDateRange}` : ''}
                     </Text>
+                    {existingCheckin.review_snapshot_json.headline ? (
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textPrimary, lineHeight: 18, marginBottom: 10 }}>
+                        {existingCheckin.review_snapshot_json.headline}
+                      </Text>
+                    ) : null}
                     <View style={{ flexDirection: 'row', gap: 16, marginBottom: existingCheckin.ai_message ? 12 : 0 }}>
                       {existingCheckin.review_snapshot_json.sessions_completed != null && (
                         <View>
@@ -400,7 +416,7 @@ export default function CoachCheckinModal({
                     borderColor: colors.primary + '44',
                   }}>
                     <Text style={{ fontSize: 10, fontWeight: '800', letterSpacing: 0.8, color: colors.primary, marginBottom: 6 }}>
-                      TRAINER'S READ · THIS WEEK
+                      TRAINER'S READ{reviewDateRange ? ` · ${reviewDateRange}` : ''}
                     </Text>
                     <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary, lineHeight: 19 }}>
                       {review.headline}
@@ -469,10 +485,16 @@ export default function CoachCheckinModal({
                                     onPress={async () => {
                                       try {
                                         const applied = await applyRecommendationAction(authToken, rec.action, rec.key);
+                                        if (planWeekId) {
+                                          await reviewAndApplyPlanWeek(authToken, []);
+                                          onPlanUpdated?.();
+                                        }
                                         // Show concise feedback then
                                         // remove the rec from view so
                                         // it's clear it was handled.
-                                        setApplyNotice(applied.summary || 'Applied to your next generated week.');
+                                        setApplyNotice(applied.summary || (planWeekId
+                                          ? 'Applied and refreshed the current generated week.'
+                                          : 'Applied to your next generated week.'));
                                         setReview(prev => prev ? {
                                           ...prev,
                                           recommendations: prev.recommendations.filter(x => x.key !== rec.key),
@@ -502,10 +524,14 @@ export default function CoachCheckinModal({
                     )}
                     {applyNotice && (
                       <View style={[styles.deltaBlock, { marginTop: 12, marginBottom: 0, borderWidth: 1, borderColor: colors.primary + '44' }]}>
-                        <Text style={styles.deltaLabel}>Applied for next plan</Text>
+                        <Text style={styles.deltaLabel}>
+                          {planWeekId ? 'Applied for current week' : 'Applied for next plan'}
+                        </Text>
                         <Text style={styles.deltaLine}>{applyNotice}</Text>
                         <Text style={styles.deltaFootnote}>
-                          Your current 7-day PlanWeek stays fixed; this changes the next generated week.
+                          {planWeekId
+                            ? 'The current generated week is refreshed; locked days stay unchanged.'
+                            : 'Your current 7-day PlanWeek stays fixed; this changes the next generated week.'}
                         </Text>
                       </View>
                     )}
@@ -564,7 +590,9 @@ export default function CoachCheckinModal({
                   )}
                 </TouchableOpacity>
                 <Text style={styles.submitHint}>
-                  The coach will review your trends and let you know if anything needs to change.
+                  {planWeekId
+                    ? 'Coach changes refresh the current generated week; locked days stay unchanged.'
+                    : 'The coach will review your trends and let you know if anything needs to change.'}
                 </Text>
                 {onSkip && (
                   <TouchableOpacity onPress={onSkip} style={{ alignItems: 'center', paddingVertical: 10 }}>
@@ -611,7 +639,9 @@ export default function CoachCheckinModal({
                             </Text>
                           )}
                           <Text style={styles.deltaFootnote}>
-                            Applies to the next generated plan; this week stays fixed.
+                            {planWeekId
+                              ? 'Applied to the current generated week after check-in; locked days stay unchanged.'
+                              : 'Applies to the next generated plan; this week stays fixed.'}
                           </Text>
                         </View>
                       )}

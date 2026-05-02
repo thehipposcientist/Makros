@@ -1,8 +1,9 @@
 // WeeklyCheckinCard — end-of-week coaching entry point.
 //
 // Three states:
-//   pending   → "Weekly check-in ready" + dates + Start / Skip
+//   pending   → "Weekly check-in ready" + dates + Start / Skip; current week already exists
 //   completed → read-only recap with AI message + "View recap"
+//   skipped   → saved deterministic summary + "View summary"
 //   none      → renders nothing
 //
 // Self-contained: fetches its own status on mount. No parent state needed.
@@ -19,12 +20,13 @@ import {
   PlanWeekCheckinRecord,
 } from '../services/api';
 import CoachCheckinModal from './CoachCheckinModal';
+import { maybeNotifyWeeklyCheckinDue } from '../utils/weeklyCheckinNotifications';
 
 interface Props {
   authToken: string;
   themeName?: AppThemeName;
   /** Called after a successful check-in submission or skip so parent can
-   *  trigger loadPlans / auto-renew. */
+   *  reload the current PlanWeek. */
   onCheckinCompleted?: () => void;
 }
 
@@ -61,6 +63,15 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
     fetchStatus();
   }, [fetchStatus]);
 
+  useEffect(() => {
+    if (status?.status !== 'pending' || !status.plan_week_id) return;
+    maybeNotifyWeeklyCheckinDue({
+      planWeekId: status.plan_week_id,
+      weekStart: status.week_start,
+      weekEnd: status.week_end,
+    }).catch(() => {});
+  }, [status?.status, status?.plan_week_id, status?.week_start, status?.week_end]);
+
   if (loading) {
     return (
       <View style={{
@@ -79,12 +90,16 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
   const checkin: PlanWeekCheckinRecord | null = status.checkin ?? null;
   const isPending = status.status === 'pending';
   const isCompleted = status.status === 'completed';
+  const isSkipped = status.status === 'skipped';
+  const hasRecap = isCompleted || (isSkipped && !!checkin?.review_snapshot_json);
+
+  if (isSkipped && !hasRecap) return null;
 
   const handleSkip = async () => {
     if (!status.plan_week_id) return;
     Alert.alert(
       'Skip check-in?',
-      'Your next week will be generated without coaching adjustments.',
+      'Your current generated week will stay as it is. The summary remains available in Progress.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -138,28 +153,28 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
           </View>
           <View style={{ flex: 1 }}>
             <Text style={{ fontSize: 10, fontWeight: '800', letterSpacing: 0.8, color: tc.primary }}>
-              {isPending ? 'WEEKLY CHECK-IN READY' : 'LAST WEEKLY REVIEW'}
+              {isPending ? 'WEEKLY CHECK-IN READY' : isSkipped ? 'LAST WEEK SUMMARY' : 'LAST WEEKLY REVIEW'}
             </Text>
             {dateRange ? (
               <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary, marginTop: 1 }}>
-                {isPending ? `Review ${dateRange} before building your next week.` : dateRange}
+                {isPending ? `Review ${dateRange} and tune the week already generated.` : dateRange}
               </Text>
             ) : null}
           </View>
         </View>
 
         {/* Completed recap preview */}
-        {isCompleted && checkin?.ai_message ? (
+        {hasRecap && (checkin?.ai_message || checkin?.review_snapshot_json?.headline) ? (
           <Text
             style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginBottom: 10 }}
             numberOfLines={3}
           >
-            {checkin.ai_message}
+            {checkin?.ai_message || checkin?.review_snapshot_json?.headline}
           </Text>
         ) : null}
 
         {/* Completed: stats row */}
-        {isCompleted && checkin?.review_snapshot_json ? (
+        {hasRecap && checkin?.review_snapshot_json ? (
           <View style={{ flexDirection: 'row', gap: 16, marginBottom: 10 }}>
             {checkin.review_snapshot_json.sessions_completed != null && (
               <View>
@@ -207,7 +222,7 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
               fontSize: 13, fontWeight: '700',
               color: isPending ? '#fff' : tc.textPrimary,
             }}>
-              {isPending ? 'Start check-in' : 'View recap'}
+              {isPending ? 'Start check-in' : isSkipped ? 'View summary' : 'View recap'}
             </Text>
           </TouchableOpacity>
 
@@ -233,6 +248,9 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
           planWeekId={status.plan_week_id}
           readOnly={recapMode}
           existingCheckin={recapMode ? checkin : null}
+          weekStart={status.week_start}
+          weekEnd={status.week_end}
+          onPlanUpdated={onCheckinCompleted}
           themeName={themeName}
           onClose={() => setModalVisible(false)}
           onCompleted={handleCheckinSubmitted}

@@ -339,6 +339,64 @@ def test_log_meal_from_plan_replaces_edited_meal_items() -> None:
     _ok("edited meal replaces prior items without duplicate meal rows")
 
 
+def test_unlog_meal_from_plan_removes_checked_row_from_rollups() -> None:
+    """Unchecking a meal should remove its persisted backend log so
+    Progress nutrition/gut facts cannot drift from meal history."""
+    print("\n[test] unlog_meal_from_plan removes checked row from rollups")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.models import User  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import (
+        get_meal_history,
+        get_rolling_averages,
+        log_meal_from_plan,
+        unlog_meal_from_plan,
+    )
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date.today()
+    meal_data = {
+        "meal": "Greek Yogurt Bowl",
+        "items": [
+            {"name": "Greek Yogurt", "quantity": 1, "unit": "cup", "calories": 180, "protein": 20, "carbs": 8, "fat": 4},
+        ],
+    }
+    with Session(engine) as s:
+        u = User(email="meal-unlog@example.com", username="mealunlog", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        log_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_0",
+            meal_data=meal_data,
+            consumed_at=datetime.now(timezone.utc),
+            db=s,
+        )
+        before = get_rolling_averages(u.id, window=1, db=s)
+        assert before["total_meals_logged"] == 1, before
+
+        result = unlog_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_0",
+            meal_data=meal_data,
+            db=s,
+        )
+        assert result["deleted"] == 1, result
+        assert get_meal_history(u.id, days=1, db=s) == []
+        after = get_rolling_averages(u.id, window=1, db=s)
+        assert after["total_meals_logged"] == 0, after
+        assert after["avg_calories_when_logged"] == 0, after
+    _ok("unchecked meal no longer appears in history or averages")
+
+
 def test_log_meal_from_plan_collapses_existing_generated_duplicates() -> None:
     """Existing duplicate generated rows for one checked plan meal should
     be collapsed when the meal is logged again."""
@@ -854,6 +912,219 @@ def test_hydration_get_reads_requested_date() -> None:
     _ok("requested date returns its own hydration row")
 
 
+# ── Part 4: workout completion feedback patches ─────────────────────
+
+
+def test_feedback_patch_preserves_exercise_based_fatigue_same_focus() -> None:
+    """Post-workout feedback reuses /workouts/complete without exercises.
+    That should patch the existing completion row without downgrading the
+    per-exercise fatigue map back to a generic focus estimate."""
+    print("\n[test] workout feedback patch preserves exercise-based fatigue")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, WorkoutCompletion  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import (
+        CompletedExercisePayload,
+        CompletedSetPayload,
+        WorkoutCompleteRequest,
+        mark_workout_complete,
+    )
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    workout_date = date(2026, 5, 1)
+    with Session(engine) as s:
+        u = User(email="workout-feedback@example.com", username="workoutfeedback", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=workout_date,
+                focus_label="Legs",
+                duration_seconds=3600,
+                exercises=[
+                    CompletedExercisePayload(
+                        name="Barbell Squat",
+                        equipment="barbell",
+                        order_index=0,
+                        sets=[
+                            CompletedSetPayload(set_number=1, reps=5, weight_lbs=225, rir=2),
+                            CompletedSetPayload(set_number=2, reps=5, weight_lbs=225, rir=2),
+                            CompletedSetPayload(set_number=3, reps=5, weight_lbs=225, rir=1),
+                        ],
+                    )
+                ],
+            ),
+            current_user=u,
+            db=s,
+        )
+        row = s.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == u.id)).first()
+        assert row is not None
+        before = dict(row.resolved_muscle_fatigue or {})
+        assert before.get("quads", 0) > 0, before
+
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=workout_date,
+                focus_label="Legs",
+                duration_seconds=3600,
+                feeling="rough",
+                intensity=4,
+                soreness_areas=["quads"],
+            ),
+            current_user=u,
+            db=s,
+        )
+        rows = s.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == u.id)).all()
+        assert len(rows) == 1, rows
+        s.refresh(rows[0])
+        assert rows[0].resolved_muscle_fatigue == before, rows[0].resolved_muscle_fatigue
+        assert rows[0].feeling == "rough", rows[0].feeling
+        assert rows[0].intensity == 4, rows[0].intensity
+    _ok("feedback updates row without replacing actual muscle fatigue")
+
+
+def test_feedback_patch_targets_focus_corrected_completion() -> None:
+    """If the user starts from a stale focus label but logs different
+    exercises, the backend may correct the completion focus from muscles.
+    The later feedback patch still arrives with the original client focus,
+    so it must find the corrected completion instead of creating a second
+    generic row."""
+    print("\n[test] workout feedback patch targets focus-corrected completion")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, WorkoutCompletion  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import (
+        CompletedExercisePayload,
+        CompletedSetPayload,
+        WorkoutCompleteRequest,
+        mark_workout_complete,
+    )
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    workout_date = date(2026, 5, 1)
+    with Session(engine) as s:
+        u = User(email="workout-focus-patch@example.com", username="workoutfocuspatch", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=workout_date,
+                focus_label="Recovery",
+                duration_seconds=3000,
+                exercises=[
+                    CompletedExercisePayload(
+                        name="Barbell Squat",
+                        equipment="barbell",
+                        order_index=0,
+                        sets=[
+                            CompletedSetPayload(set_number=1, reps=8, weight_lbs=185, rir=2),
+                            CompletedSetPayload(set_number=2, reps=8, weight_lbs=185, rir=2),
+                        ],
+                    )
+                ],
+            ),
+            current_user=u,
+            db=s,
+        )
+        row = s.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == u.id)).first()
+        assert row is not None
+        assert row.focus_label == "Legs", row.focus_label
+        before = dict(row.resolved_muscle_fatigue or {})
+        assert before.get("quads", 0) > 0, before
+
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=workout_date,
+                focus_label="Recovery",
+                duration_seconds=3000,
+                feeling="good",
+                intensity=3,
+            ),
+            current_user=u,
+            db=s,
+        )
+        rows = s.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == u.id)).all()
+        assert len(rows) == 1, [(r.focus_label, r.resolved_muscle_fatigue) for r in rows]
+        s.refresh(rows[0])
+        assert rows[0].focus_label == "Legs", rows[0].focus_label
+        assert rows[0].resolved_muscle_fatigue == before, rows[0].resolved_muscle_fatigue
+        assert rows[0].feeling == "good", rows[0].feeling
+    _ok("feedback patches corrected completion without duplicate generic row")
+
+
+def test_custom_exercise_muscles_feed_completion_fatigue() -> None:
+    """Exercises that are not in the seed library should still affect
+    recovery/generation when the client sends their muscle metadata."""
+    print("\n[test] custom exercise muscle metadata feeds completion fatigue")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, WorkoutCompletion  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import (
+        CompletedExercisePayload,
+        CompletedSetPayload,
+        WorkoutCompleteRequest,
+        mark_workout_complete,
+    )
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        u = User(email="custom-ex-fatigue@example.com", username="customexfatigue", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=date(2026, 5, 1),
+                focus_label="Custom",
+                duration_seconds=2400,
+                exercises=[
+                    CompletedExercisePayload(
+                        name="Garage Cable Row",
+                        equipment="cable",
+                        primary_muscle="back",
+                        secondary_muscles=["biceps"],
+                        is_compound=True,
+                        order_index=0,
+                        sets=[
+                            CompletedSetPayload(set_number=1, reps=10, weight_lbs=90, rir=2),
+                            CompletedSetPayload(set_number=2, reps=10, weight_lbs=90, rir=2),
+                            CompletedSetPayload(set_number=3, reps=9, weight_lbs=90, rir=1),
+                        ],
+                    )
+                ],
+            ),
+            current_user=u,
+            db=s,
+        )
+        row = s.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == u.id)).first()
+        assert row is not None
+        fatigue = row.resolved_muscle_fatigue or {}
+        assert fatigue.get("back", 0) > 0, fatigue
+        assert fatigue.get("biceps", 0) > 0, fatigue
+        assert row.focus_label == "Pull", row.focus_label
+    _ok("custom exercise metadata produces specific muscle fatigue")
+
+
 # ── Runner ──────────────────────────────────────────────────────────
 
 cases = [
@@ -864,6 +1135,7 @@ cases = [
     test_format_for_prompt_includes_meal_history_lines,
     test_log_meal_from_plan_persists_consumed_at,
     test_log_meal_from_plan_replaces_edited_meal_items,
+    test_unlog_meal_from_plan_removes_checked_row_from_rollups,
     test_log_meal_from_plan_collapses_existing_generated_duplicates,
     test_rolling_averages_ignore_duplicate_generated_plan_rows,
     test_rolling_averages_preserve_distinct_generic_meals,
@@ -873,6 +1145,9 @@ cases = [
     test_score_micros_read_unsuffixed_aliases_and_calorie_fallback,
     test_gut_rollup_uses_logged_days_not_empty_metric_placeholders,
     test_hydration_get_reads_requested_date,
+    test_feedback_patch_preserves_exercise_based_fatigue_same_focus,
+    test_feedback_patch_targets_focus_corrected_completion,
+    test_custom_exercise_muscles_feed_completion_fatigue,
 ]
 
 

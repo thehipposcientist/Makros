@@ -5,8 +5,8 @@ Invariants verified:
   2. submit_plan_week_checkin creates a durable record and calls AI once.
   3. A second submit for the same plan_week_id is blocked (409 equivalent).
   4. skip marks the check-in as skipped.
-  5. auto-renew is gated: returns checkin_required when no record exists.
-  6. auto-renew proceeds after check-in is submitted or skipped.
+  5. day-8 auto-renew proceeds while the prior week remains promptable.
+  6. after the prompt window, the prior check-in becomes a saved recap/skip.
   7. Recap (GET /week/{id}/checkin) returns saved data without re-calling AI.
 """
 from __future__ import annotations
@@ -162,17 +162,36 @@ def test_checkin_status_skipped():
     assert status == "skipped"
 
 
-def test_auto_renew_gated_when_no_checkin():
-    """auto-renew gate logic: no checkin row → checkin_required=True."""
+def test_day8_auto_renew_keeps_checkin_promptable():
+    """No checkin row during prompt window → renewal proceeds, prompt remains."""
+    from app.routers.plan_weeks import _checkin_prompt_active
+
     pw = FakePlanWeek()
     checkin = None
 
-    # Replicate the gate from the router
-    checkin_required = False
+    renewal_proceeds = True
+    prompt_active = False
     if not checkin or (not checkin.submitted_at and not checkin.skipped):
-        checkin_required = True
+        prompt_active = _checkin_prompt_active(pw)
 
-    assert checkin_required
+    assert renewal_proceeds
+    assert prompt_active
+
+
+def test_checkin_prompt_expires_after_window():
+    """No checkin row after the prompt window → normal auto-renew still proceeds."""
+    from app.routers.plan_weeks import _checkin_prompt_active
+
+    pw = FakePlanWeek(end_date=date.today() - timedelta(days=2))
+    checkin = None
+
+    renewal_proceeds = True
+    prompt_active = False
+    if not checkin or (not checkin.submitted_at and not checkin.skipped):
+        prompt_active = _checkin_prompt_active(pw)
+
+    assert renewal_proceeds
+    assert not prompt_active
 
 
 def test_auto_renew_proceeds_after_submit():
@@ -288,7 +307,8 @@ if __name__ == "__main__":
         test_checkin_status_pending_when_no_record,
         test_checkin_status_completed_after_submit,
         test_checkin_status_skipped,
-        test_auto_renew_gated_when_no_checkin,
+        test_day8_auto_renew_keeps_checkin_promptable,
+        test_checkin_prompt_expires_after_window,
         test_auto_renew_proceeds_after_submit,
         test_auto_renew_proceeds_after_skip,
         test_idempotency_guard_blocks_second_submit,

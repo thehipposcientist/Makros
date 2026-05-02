@@ -233,6 +233,29 @@ def _delete_meal_with_items(db: Session, meal: object) -> None:
     db.delete(meal)
 
 
+def _resolve_logged_meal_type_and_source(meal_type: str, source: str):
+    from app.enums import MealSource, MealType
+
+    mt_map = {
+        "breakfast": MealType.BREAKFAST,
+        "lunch": MealType.LUNCH,
+        "dinner": MealType.DINNER,
+        "snack": MealType.SNACK,
+        "pre_workout": MealType.PRE_WORKOUT,
+        "post_workout": MealType.POST_WORKOUT,
+    }
+    resolved_type = mt_map.get((meal_type or "").lower())
+    if resolved_type is None:
+        try:
+            idx = int((meal_type or "").split("_")[1])
+            resolved_type = [MealType.BREAKFAST, MealType.LUNCH, MealType.DINNER, MealType.SNACK][min(idx, 3)]
+        except (ValueError, IndexError):
+            resolved_type = MealType.SNACK
+
+    resolved_source = MealSource.GENERATED if source == "plan_check" else MealSource.LOGGED
+    return resolved_type, resolved_source
+
+
 # ─── Log a meal from plan check-off ──────────────────────────────────────────
 
 def log_meal_from_plan(
@@ -251,28 +274,9 @@ def log_meal_from_plan(
       { meal: str, items: [{name, quantity, unit, calories, protein, carbs, fat}], ... }
     """
     from app.models import Meal, MealItem
-    from app.enums import MealType, MealSource
 
     # Resolve meal_type to enum — the client sends "meal_0", "breakfast", etc.
-    mt_map = {
-        "breakfast": MealType.BREAKFAST,
-        "lunch": MealType.LUNCH,
-        "dinner": MealType.DINNER,
-        "snack": MealType.SNACK,
-        "pre_workout": MealType.PRE_WORKOUT,
-        "post_workout": MealType.POST_WORKOUT,
-    }
-    # If meal_type is "meal_N", try to infer from index or fall back to SNACK.
-    resolved_type = mt_map.get(meal_type.lower())
-    if resolved_type is None:
-        # Heuristic: meal_0→breakfast, meal_1→lunch, meal_2→dinner, rest→snack
-        try:
-            idx = int(meal_type.split("_")[1])
-            resolved_type = [MealType.BREAKFAST, MealType.LUNCH, MealType.DINNER, MealType.SNACK][min(idx, 3)]
-        except (ValueError, IndexError):
-            resolved_type = MealType.SNACK
-
-    resolved_source = MealSource.GENERATED if source == "plan_check" else MealSource.LOGGED
+    resolved_type, resolved_source = _resolve_logged_meal_type_and_source(meal_type, source)
     incoming_name = _normalize_meal_text(meal_data.get("meal", "Checked meal"))
     incoming_signature = _normalized_item_signature(meal_data.get("items") or [])
 
@@ -669,6 +673,92 @@ def log_meal_from_plan(
         "meal_date": str(meal.meal_date),
         "consumed_at": meal.consumed_at.isoformat() if meal.consumed_at else None,
     }
+
+
+def unlog_meal_from_plan(
+    user_id: int,
+    meal_date: date,
+    meal_type: str,
+    meal_data: dict,
+    source: str = "plan_check",
+    *,
+    db: Session,
+) -> dict:
+    """Remove the backend meal row created by a meal check-off.
+
+    The phone's meal-history UI is driven by day-state checks. If a user
+    unchecks a planned meal, the matching Meal row must be removed too or
+    nutrition/gut rollups keep counting food the user no longer considers
+    logged.
+    """
+    from app.models import Meal, MealItem
+
+    resolved_type, resolved_source = _resolve_logged_meal_type_and_source(meal_type, source)
+    incoming_name = _normalize_meal_text(meal_data.get("meal", "Checked meal"))
+    incoming_signature = _normalized_item_signature(meal_data.get("items") or [])
+
+    candidates = db.exec(
+        select(Meal)
+        .where(Meal.user_id == user_id)
+        .where(Meal.meal_date == meal_date)
+        .where(Meal.source == resolved_source)
+        .order_by(col(Meal.created_at).desc())
+    ).all()
+    if not candidates:
+        return {"deleted": 0, "meal_date": str(meal_date)}
+
+    items = db.exec(
+        select(MealItem).where(col(MealItem.meal_id).in_([m.id for m in candidates]))
+    ).all()
+    items_by_meal: dict[int, list[MealItem]] = defaultdict(list)
+    for item in items:
+        items_by_meal[item.meal_id].append(item)
+
+    def _signature_for(meal: Meal) -> str:
+        return _normalized_item_signature([
+            {
+                "name": item.food_name,
+                "quantity": item.quantity,
+                "unit": item.unit,
+                "calories": item.calories,
+                "protein": item.protein_g,
+                "carbs": item.carbs_g,
+                "fat": item.fat_g,
+            }
+            for item in items_by_meal.get(meal.id, [])
+        ])
+
+    exact_matches = [
+        m for m in candidates
+        if _signature_for(m) == incoming_signature
+        and (
+            _normalize_meal_text(m.name) == incoming_name
+            or m.meal_type == resolved_type
+        )
+    ] if incoming_signature else []
+
+    if exact_matches:
+        matches = exact_matches
+    else:
+        is_generic = incoming_name in _GENERIC_MEAL_NAMES
+        name_type_matches = [
+            m for m in candidates
+            if not is_generic
+            and _normalize_meal_text(m.name) == incoming_name
+            and m.meal_type == resolved_type
+        ]
+        if name_type_matches:
+            matches = name_type_matches
+        else:
+            same_type = [m for m in candidates if m.meal_type == resolved_type]
+            matches = same_type if len(same_type) == 1 else []
+
+    for meal in matches:
+        _delete_meal_with_items(db, meal)
+    if matches:
+        db.commit()
+
+    return {"deleted": len(matches), "meal_date": str(meal_date)}
 
 
 # ─── Meal history query ──────────────────────────────────────────────────────

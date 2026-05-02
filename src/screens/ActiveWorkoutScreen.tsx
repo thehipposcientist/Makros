@@ -1055,6 +1055,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       targetWeightLbs: (ex as any).targetWeightLbs ?? null,
       slug: (ex as any).slug ?? (ex as any).exerciseSlug ?? null,
       primaryMuscle: (ex as any).primary_muscle ?? (ex as any).primaryMuscle ?? (ex as any)._primary_muscle ?? null,
+      secondaryMuscles: (ex as any).secondary_muscles ?? (ex as any).secondaryMuscles ?? (ex as any)._secondary_muscles ?? [],
+      muscles_targeted: (ex as any).muscles_targeted ?? undefined,
       isCompound: (ex as any).is_compound ?? (ex as any).isCompound ?? null,
       slotRole: (ex as any).slotRole ?? (ex as any).slot_role ?? (ex as any)._role ?? null,
       slotLabel: (ex as any).slotLabel ?? (ex as any).slot_label ?? (ex as any)._slot ?? null,
@@ -1085,6 +1087,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           target_sets: typeof ex.targetSets === 'number' ? ex.targetSets : undefined,
           target_reps: ex.targetReps,
           equipment: ex.equipment,
+          primary_muscle: ex.primaryMuscle ?? ex.primary_muscle ?? null,
+          secondary_muscles: ex.secondaryMuscles ?? ex.secondary_muscles ?? null,
+          is_compound: ex.isCompound ?? null,
           order_index: i,
           sets: ex.sets.map(s => ({
             set_number: s.setNumber,
@@ -1764,6 +1769,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           weightRecommendationSource: (ex.weightRecommendationSource as any) ?? null,
           slug: ex.slug ?? undefined,
           primary_muscle: ex.primaryMuscle ?? undefined,
+          secondary_muscles: ex.secondaryMuscles ?? undefined,
           is_compound: ex.isCompound ?? undefined,
           _role: ex.slotRole ?? undefined,
           _slot_label: ex.slotLabel ?? undefined,
@@ -1969,6 +1975,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       video_id: selected.video_id ?? previous.video_id ?? null,
       slug: selected.slug ?? null,
       primaryMuscle: selected.primary_muscle ?? previous.primaryMuscle ?? null,
+      secondaryMuscles: selected.secondary_muscles ?? previous.secondaryMuscles ?? [],
+      muscles_targeted: [
+        selected.primary_muscle,
+        ...(selected.secondary_muscles ?? []),
+      ].filter(Boolean) as string[],
       isCompound: selected.is_compound ?? previous.isCompound ?? null,
       aiRecommendation: undefined,
       targetWeightLbs: null,
@@ -2430,6 +2441,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       sets: [],
       aiRecommendation: undefined,
       primaryMuscle: item.primary_muscle ?? null,
+      secondaryMuscles: item.secondary_muscles ?? [],
+      muscles_targeted: [
+        item.primary_muscle,
+        ...(item.secondary_muscles ?? []),
+      ].filter(Boolean) as string[],
       isCompound: item.is_compound ?? null,
       // Carry through enrichment metadata so a freshly-added exercise
       // (wger / AI / custom) renders with the same form-video card and
@@ -3356,6 +3372,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             target_sets: typeof ex.targetSets === 'number' ? ex.targetSets : null,
             target_reps: typeof ex.targetReps === 'string' ? ex.targetReps : null,
             equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
+            primary_muscle: ex.primaryMuscle ?? ex.primary_muscle ?? null,
+            secondary_muscles: ex.secondaryMuscles ?? ex.secondary_muscles ?? null,
+            is_compound: ex.isCompound ?? null,
             order_index: idx,
             sets: ex.sets.map((s, si) => {
               const isLast = si === ex.sets.length - 1;

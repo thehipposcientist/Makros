@@ -39,6 +39,12 @@ from app.services.workout.goals import effective_goal_id
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/plans", tags=["plan-weeks"])
 
+# Day 8 generates immediately. The expired week stays promptable for one day
+# so the user can review coach feedback and regenerate the new week's remaining
+# unlocked days; after that it becomes a saved recap.
+CHECKIN_PROMPT_DAYS_AFTER_END = 1
+CHECKIN_RECAP_DAYS_AFTER_END = 7
+
 
 def _active_injury_tokens(profile: object | None, prefs: object | None) -> list[str]:
     tokens: list[str] = []
@@ -103,7 +109,7 @@ class AutoRenewResponse(BaseModel):
 
 
 class CheckinRequiredResponse(BaseModel):
-    """Returned by auto-renew when a check-in must be completed first."""
+    """Legacy response from the old hold-renewal flow. Kept for clients."""
     checkin_required: bool = True
     plan_week_id: int
     week_start: str
@@ -202,6 +208,193 @@ def _plan_week_to_response(pw: PlanWeek, days: list[PlanDay]) -> PlanWeekRespons
         pause_reason=getattr(pw, "pause_reason", None) if paused_until_str else None,
         days=[_plan_day_to_response(d) for d in days],
     )
+
+
+def _checkin_prompt_active(pw: PlanWeek, *, today: date | None = None) -> bool:
+    """True while the expired week should still show the check-in prompt."""
+    today = today or date.today()
+    return today <= pw.end_date + timedelta(days=CHECKIN_PROMPT_DAYS_AFTER_END)
+
+
+def _checkin_prompt_active_for_dates(week_end: date, *, today: date | None = None) -> bool:
+    today = today or date.today()
+    return today <= week_end + timedelta(days=CHECKIN_PROMPT_DAYS_AFTER_END)
+
+
+def _checkin_recap_active_for_dates(week_end: date, *, today: date | None = None) -> bool:
+    today = today or date.today()
+    return today <= week_end + timedelta(days=CHECKIN_RECAP_DAYS_AFTER_END)
+
+
+def _review_snapshot_from_review(review, *, history_context: dict | None = None) -> dict:
+    snapshot = {
+        "headline": review.headline,
+        "goal": review.goal,
+        "week_start": review.week_start.isoformat(),
+        "week_end": review.week_end.isoformat(),
+        "sessions_completed": review.sessions_completed,
+        "sessions_planned": review.sessions_planned,
+        "adherence_pct": review.adherence_pct,
+        "cardio_minutes": review.cardio_minutes,
+        "zone2_minutes": review.zone2_minutes,
+        "total_hard_sets": review.volume.total_hard_sets,
+        "avg_protein_g": review.avg_protein_g,
+        "avg_fiber_g": review.avg_fiber_g,
+        "days_logged": review.days_logged,
+        "weight_trend_direction": review.weight_trend_direction,
+        "recommendations": [
+            {"key": r.key, "title": r.title, "priority": r.priority, "area": r.area, "detail": r.detail}
+            for r in review.recommendations[:5]
+        ],
+    }
+    if history_context:
+        snapshot["summary_history"] = {
+            "is_first_summary": history_context.get("is_first_summary", True),
+            "previous_summary_count": history_context.get("previous_summary_count", 0),
+        }
+    return snapshot
+
+
+def _checkin_history_context(db: Session, user_id: int, current_plan_week_id: int | None) -> dict:
+    """Compact prior summary context for weekly recap generation."""
+    from app.models import PlanWeekCheckin
+
+    rows = list(
+        db.exec(
+            select(PlanWeekCheckin)
+            .where(PlanWeekCheckin.user_id == user_id)
+            .order_by(PlanWeekCheckin.week_end_date.desc())
+        ).all()
+    )
+    previous = []
+    previous_count = 0
+    for row in rows:
+        if current_plan_week_id is not None and row.plan_week_id == current_plan_week_id:
+            continue
+        snap = row.review_snapshot_json if isinstance(row.review_snapshot_json, dict) else {}
+        if not snap and not row.ai_message:
+            continue
+        previous_count += 1
+        if len(previous) >= 3:
+            continue
+        previous.append({
+            "week_start": row.week_start_date.isoformat() if row.week_start_date else snap.get("week_start"),
+            "week_end": row.week_end_date.isoformat() if row.week_end_date else snap.get("week_end"),
+            "submitted": bool(row.submitted_at),
+            "skipped": bool(row.skipped),
+            "headline": snap.get("headline") or row.ai_message,
+            "adherence_pct": snap.get("adherence_pct"),
+            "sessions_completed": snap.get("sessions_completed"),
+            "sessions_planned": snap.get("sessions_planned"),
+            "cardio_minutes": snap.get("cardio_minutes"),
+            "avg_protein_g": snap.get("avg_protein_g"),
+        })
+    return {
+        "is_first_summary": previous_count == 0,
+        "previous_summary_count": previous_count,
+        "previous_summaries": previous,
+    }
+
+
+def _build_plan_week_review_snapshot(db: Session, user_id: int, pw: PlanWeek) -> dict:
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+
+    history_context = _checkin_history_context(db, user_id, pw.id)
+    try:
+        review = compute_weekly_review(
+            db,
+            user_id,
+            end_date=pw.end_date,
+            days=7,
+            goal_override=pw.goal,
+        )
+        return _review_snapshot_from_review(review, history_context=history_context)
+    except Exception as e:
+        logger.warning(f"[week-checkin] review snapshot failed for plan_week_id={pw.id}: {e}")
+        return {
+            "headline": f"Week of {pw.start_date.isoformat()} to {pw.end_date.isoformat()} is ready to review.",
+            "goal": pw.goal,
+            "week_start": pw.start_date.isoformat(),
+            "week_end": pw.end_date.isoformat(),
+            "summary_history": {
+                "is_first_summary": history_context.get("is_first_summary", True),
+                "previous_summary_count": history_context.get("previous_summary_count", 0),
+            },
+        }
+
+
+def _ensure_plan_week_checkin_pending(
+    db: Session,
+    user_id: int,
+    pw: PlanWeek,
+):
+    """Create the durable previous-week recap row before auto-renewing."""
+    from app.models import PlanWeekCheckin
+
+    checkin = db.exec(
+        select(PlanWeekCheckin).where(
+            PlanWeekCheckin.user_id == user_id,
+            PlanWeekCheckin.plan_week_id == pw.id,
+        )
+    ).first()
+    if not checkin:
+        checkin = PlanWeekCheckin(
+            user_id=user_id,
+            plan_week_id=pw.id,
+            week_start_date=pw.start_date,
+            week_end_date=pw.end_date,
+            plan_goal=pw.goal,
+        )
+        db.add(checkin)
+    if not checkin.review_snapshot_json:
+        checkin.review_snapshot_json = _build_plan_week_review_snapshot(db, user_id, pw)
+    checkin.plan_goal = checkin.plan_goal or pw.goal
+    db.commit()
+    return checkin
+
+
+def _mark_plan_week_checkin_skipped(
+    db: Session,
+    user_id: int,
+    pw: PlanWeek,
+    *,
+    note: str | None = None,
+):
+    """Upsert a skipped PlanWeekCheckin so renewal can proceed normally."""
+    from app.models import PlanWeekCheckin
+
+    checkin = db.exec(
+        select(PlanWeekCheckin).where(
+            PlanWeekCheckin.user_id == user_id,
+            PlanWeekCheckin.plan_week_id == pw.id,
+        )
+    ).first()
+    if not checkin:
+        checkin = PlanWeekCheckin(
+            user_id=user_id,
+            plan_week_id=pw.id,
+            week_start_date=pw.start_date,
+            week_end_date=pw.end_date,
+            plan_goal=pw.goal,
+        )
+        db.add(checkin)
+    if not checkin.review_snapshot_json:
+        checkin.review_snapshot_json = _build_plan_week_review_snapshot(db, user_id, pw)
+    checkin.skipped = True
+    checkin.submitted_at = None
+    if note and not checkin.note:
+        checkin.note = note
+    db.commit()
+    return checkin
+
+
+def _auto_skip_and_refresh_week_days(db: Session, user_id: int, pw: PlanWeek | None) -> list[PlanDay]:
+    if not pw:
+        return []
+    days = get_week_days(db, pw.id)
+    if not _is_plan_paused(pw) and _auto_skip_unlogged_past_days(db, user_id, days):
+        days = get_week_days(db, pw.id)
+    return days
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -525,16 +718,15 @@ def auto_renew(
     readiness_score: int | None = None,
     cycle_phase: str | None = None,
     day_of_cycle: int | None = None,
-) -> AutoRenewResponse | CheckinRequiredResponse:
+) -> AutoRenewResponse:
     """Auto-generate a new week when the active plan has expired.
 
-    If the expired week has no completed or skipped check-in, returns
-    CheckinRequiredResponse instead of renewing. The client should surface
-    the weekly check-in prompt before calling auto-renew again.
+    Day 8 generation is immediate. A durable check-in row is created for the
+    expired week, but coach adjustments only affect the new week if the user
+    submits/applies them during the one-day review window.
     """
-    from app.models import PlanWeekCheckin
-
     pw = get_active_week(db, current_user.id)
+    apply_coach_adjustments = False
     # Suspended pause window: auto-renew refuses to fire so the user's
     # streak isn't quietly closed out by a no-op week boundary.
     if pw and _is_plan_paused(pw):
@@ -558,22 +750,20 @@ def auto_renew(
             explanation="Your current week is still active.",
         )
 
-    # Gate renewal: if the expired week has no check-in (or a pending one),
-    # prompt the user to complete or skip before generating the next week.
+    # Snapshot the expired week before creating the next active PlanWeek.
+    # The snapshot powers the day-8 prompt and the Progress recap. Renewal
+    # still proceeds immediately so the user always has a current week.
     if pw:
-        checkin = db.exec(
-            select(PlanWeekCheckin).where(
-                PlanWeekCheckin.user_id == current_user.id,
-                PlanWeekCheckin.plan_week_id == pw.id,
-            )
-        ).first()
+        checkin = _ensure_plan_week_checkin_pending(db, current_user.id, pw)
         if not checkin or (not checkin.submitted_at and not checkin.skipped):
-            return CheckinRequiredResponse(
-                checkin_required=True,
-                plan_week_id=pw.id,
-                week_start=pw.start_date.isoformat(),
-                week_end=pw.end_date.isoformat(),
-            )
+            if not _checkin_prompt_active(pw):
+                checkin = _mark_plan_week_checkin_skipped(
+                    db,
+                    current_user.id,
+                    pw,
+                    note="Auto-skipped after the weekly check-in prompt window.",
+                )
+        apply_coach_adjustments = bool(checkin and checkin.submitted_at and not checkin.skipped)
 
     result = auto_renew_week(
         db, current_user.id,
@@ -584,13 +774,14 @@ def auto_renew(
         readiness_score=readiness_score,
         cycle_phase=cycle_phase,
         day_of_cycle=day_of_cycle,
+        apply_coach_adjustments=apply_coach_adjustments,
     )
 
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
 
     new_pw = get_active_week(db, current_user.id)
-    days = get_week_days(db, new_pw.id) if new_pw else []
+    days = _auto_skip_and_refresh_week_days(db, current_user.id, new_pw)
 
     return AutoRenewResponse(
         plan_week=_plan_week_to_response(new_pw, days) if new_pw else None,
@@ -610,23 +801,45 @@ def get_checkin_status(
     """Return whether a coaching check-in is pending, completed, or not due.
 
     status:
-      "pending"   — expired week exists, no check-in submitted or skipped
+      "pending"   — prior expired week is inside its one-day prompt window
       "completed" — check-in was submitted for this week
       "skipped"   — user explicitly skipped
-      "none"      — no expired week / week still active
+      "none"      — no prompt or recent recap to show
     """
     from app.models import PlanWeekCheckin
 
+    today = date.today()
     pw = get_active_week(db, current_user.id)
-    if not pw or not week_needs_renewal(pw):
+    checkin = None
+
+    if pw and week_needs_renewal(pw):
+        checkin = _ensure_plan_week_checkin_pending(db, current_user.id, pw)
+    if not checkin:
+        checkin = db.exec(
+            select(PlanWeekCheckin)
+            .where(
+                PlanWeekCheckin.user_id == current_user.id,
+                PlanWeekCheckin.week_end_date < today,
+            )
+            .order_by(PlanWeekCheckin.week_end_date.desc())
+        ).first()
+
+    if not checkin:
         return {"status": "none", "checkin": None, "week_start": None, "week_end": None, "plan_week_id": None}
 
-    checkin = db.exec(
-        select(PlanWeekCheckin).where(
-            PlanWeekCheckin.user_id == current_user.id,
-            PlanWeekCheckin.plan_week_id == pw.id,
-        )
-    ).first()
+    if not checkin.submitted_at and not checkin.skipped and not _checkin_prompt_active_for_dates(checkin.week_end_date, today=today):
+        checkin.skipped = True
+        checkin.submitted_at = None
+        if not checkin.note:
+            checkin.note = "Auto-skipped after the weekly check-in prompt window."
+        db.add(checkin)
+        db.commit()
+        db.refresh(checkin)
+
+    if (
+        checkin.submitted_at or checkin.skipped
+    ) and not _checkin_recap_active_for_dates(checkin.week_end_date, today=today):
+        return {"status": "none", "checkin": None, "week_start": None, "week_end": None, "plan_week_id": None}
 
     status = "pending"
     if checkin and checkin.skipped:
@@ -637,9 +850,9 @@ def get_checkin_status(
     return {
         "status": status,
         "checkin": _checkin_to_dict(checkin) if checkin else None,
-        "week_start": pw.start_date.isoformat(),
-        "week_end": pw.end_date.isoformat(),
-        "plan_week_id": pw.id,
+        "week_start": checkin.week_start_date.isoformat() if checkin.week_start_date else None,
+        "week_end": checkin.week_end_date.isoformat() if checkin.week_end_date else None,
+        "plan_week_id": checkin.plan_week_id,
     }
 
 
@@ -703,26 +916,22 @@ def submit_plan_week_checkin(
     if not pw:
         raise HTTPException(status_code=404, detail="Plan week not found")
 
-    # Deterministic review
+    # Deterministic review for the exact PlanWeek being checked in. When the
+    # user submits on day 8, the active week may already be the next one.
     try:
-        review = compute_weekly_review(db, current_user.id)
+        review = compute_weekly_review(
+            db,
+            current_user.id,
+            end_date=pw.end_date,
+            days=7,
+            goal_override=pw.goal,
+        )
     except Exception as e:
         logger.warning(f"[week-checkin] compute_weekly_review failed: {e}")
         raise HTTPException(status_code=500, detail="Could not compute weekly review")
 
-    review_snapshot = {
-        "headline": review.headline,
-        "goal": review.goal,
-        "sessions_completed": review.sessions_completed,
-        "sessions_planned": review.sessions_planned,
-        "adherence_pct": review.adherence_pct,
-        "cardio_minutes": review.cardio_minutes,
-        "zone2_minutes": review.zone2_minutes,
-        "total_hard_sets": review.volume.total_hard_sets,
-        "avg_protein_g": review.avg_protein_g,
-        "days_logged": review.days_logged,
-        "weight_trend_direction": review.weight_trend_direction,
-    }
+    history_context = _checkin_history_context(db, current_user.id, plan_week_id)
+    review_snapshot = _review_snapshot_from_review(review, history_context=history_context)
 
     # Build AI payload
     feedback_dict = {}
@@ -859,11 +1068,8 @@ def submit_plan_week_checkin(
         **review_snapshot,
         "muscles_low": review.volume.muscles_low() if hasattr(review.volume, "muscles_low") else [],
         "muscles_high": review.volume.muscles_high() if hasattr(review.volume, "muscles_high") else [],
-        "recommendations": [
-            {"key": r.key, "title": r.title, "priority": r.priority, "area": r.area, "detail": r.detail}
-            for r in review.recommendations[:5]
-        ],
     }
+    payload["summary_history"] = history_context
 
     # Deterministic evaluation of prior commitments
     try:
@@ -975,9 +1181,24 @@ def submit_plan_week_checkin(
 
     db.commit()
 
+    regenerated_current_week = False
+    if structured_applied or ai_delta:
+        active_after = get_active_week(db, current_user.id)
+        if active_after and active_after.id != pw.id and not week_needs_renewal(active_after):
+            try:
+                review_and_apply(
+                    ReviewAndApplyRequest(actions=[]),
+                    current_user=current_user,
+                    db=db,
+                )
+                regenerated_current_week = True
+            except Exception as e:
+                logger.warning(f"[week-checkin] regenerate after check-in failed: {e}")
+
     return {
         **_checkin_to_dict(checkin_row),
         "review_summary": review_snapshot,
+        "regenerated_current_week": regenerated_current_week,
     }
 
 
@@ -987,9 +1208,12 @@ def skip_plan_week_checkin(
     current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> AutoRenewResponse | dict:
-    """Skip the check-in for a plan week and immediately auto-renew the next week."""
-    from app.models import PlanWeekCheckin
+    """Skip the check-in for a plan week.
 
+    If day-8 auto-renew already created the next active week, that week stays
+    exactly as generated. If this is an older client still sitting on the
+    expired week, skipping falls through to normal renewal.
+    """
     pw = db.exec(
         select(PlanWeek).where(
             PlanWeek.id == plan_week_id,
@@ -999,33 +1223,39 @@ def skip_plan_week_checkin(
     if not pw:
         raise HTTPException(status_code=404, detail="Plan week not found")
 
-    # Upsert the check-in row as skipped
-    checkin_row = db.exec(
-        select(PlanWeekCheckin).where(
-            PlanWeekCheckin.user_id == current_user.id,
-            PlanWeekCheckin.plan_week_id == plan_week_id,
-        )
-    ).first()
-    if not checkin_row:
-        checkin_row = PlanWeekCheckin(
-            user_id=current_user.id,
-            plan_week_id=plan_week_id,
-            week_start_date=pw.start_date,
-            week_end_date=pw.end_date,
-            plan_goal=pw.goal,
-        )
-        db.add(checkin_row)
-    checkin_row.skipped = True
-    checkin_row.submitted_at = None
-    db.commit()
+    _mark_plan_week_checkin_skipped(db, current_user.id, pw)
 
-    # Now auto-renew — check-in is marked so gate won't block
-    result = auto_renew_week(db, current_user.id)
+    active_pw = get_active_week(db, current_user.id)
+    if active_pw and active_pw.id != pw.id and not week_needs_renewal(active_pw):
+        days = _auto_skip_and_refresh_week_days(db, current_user.id, active_pw)
+        return AutoRenewResponse(
+            plan_week=_plan_week_to_response(active_pw, days),
+            review_headline="Weekly check-in skipped.",
+            review_summary={},
+            auto_applied=[],
+            needs_review=[],
+            explanation="Check-in skipped; your current week stays as generated.",
+        )
+
+    if active_pw and active_pw.id == pw.id and not week_needs_renewal(active_pw):
+        days = _auto_skip_and_refresh_week_days(db, current_user.id, active_pw)
+        return AutoRenewResponse(
+            plan_week=_plan_week_to_response(active_pw, days),
+            review_headline="Weekly check-in skipped.",
+            review_summary={},
+            auto_applied=[],
+            needs_review=[],
+            explanation="Check-in skipped; your current week stays as generated.",
+        )
+
+    # Older client / edge case: no new week exists yet, so skipping now allows
+    # a normal generation without coach adjustments.
+    result = auto_renew_week(db, current_user.id, apply_coach_adjustments=False)
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
 
     new_pw = get_active_week(db, current_user.id)
-    days = get_week_days(db, new_pw.id) if new_pw else []
+    days = _auto_skip_and_refresh_week_days(db, current_user.id, new_pw)
     return AutoRenewResponse(
         plan_week=_plan_week_to_response(new_pw, days) if new_pw else None,
         review_headline=result.get("review_headline", ""),

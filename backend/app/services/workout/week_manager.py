@@ -494,6 +494,7 @@ def auto_renew_week(
     readiness_score: int | None = None,
     cycle_phase: str | None = None,
     day_of_cycle: int | None = None,
+    apply_coach_adjustments: bool = True,
 ) -> dict:
     """Auto-generate a new week when the user's plan has expired.
 
@@ -545,7 +546,7 @@ def auto_renew_week(
     # Step 2a: Readiness-based auto-deload — if readiness is Fatigued or
     # Overtrained (< 40), immediately reduce volume for the new week so
     # the planner reads a lower adjustment before generating the plan.
-    if readiness_score is not None and readiness_score < 40:
+    if apply_coach_adjustments and readiness_score is not None and readiness_score < 40:
         from app.models import UserCoachingState
         coaching = db.exec(
             select(UserCoachingState).where(UserCoachingState.user_id == user_id)
@@ -559,7 +560,11 @@ def auto_renew_week(
 
     # Step 2b: Auto-apply safe recommendations
     rec_dicts = [r.to_dict() for r in review.recommendations]
-    auto_applied, needs_review = compute_auto_apply_defaults(rec_dicts)
+    auto_applied, needs_review = (
+        compute_auto_apply_defaults(rec_dicts)
+        if apply_coach_adjustments
+        else ([], [])
+    )
 
     applied_summaries = []
     for rec in auto_applied:
@@ -725,6 +730,8 @@ def auto_renew_week(
         )
     if review.headline:
         explanation_parts.append(f"Last week: {review.headline}")
+    if not apply_coach_adjustments:
+        explanation_parts.append("Generated the next week without coach check-in adjustments.")
     if applied_summaries:
         for s in applied_summaries:
             explanation_parts.append(f"Applied: {s['title']} — {s['detail']}")
@@ -737,6 +744,8 @@ def auto_renew_week(
         "plan_week_id": pw.id,
         "review_headline": review.headline,
         "review_summary": {
+            "week_start": review.week_start.isoformat(),
+            "week_end": review.week_end.isoformat(),
             "sessions_completed": review.sessions_completed,
             "sessions_planned": review.sessions_planned,
             "adherence_pct": round(review.adherence_pct, 1),

@@ -110,7 +110,7 @@ _last_refresh_at: dict[tuple[int, date], float] = {}
 _REFRESH_DEBOUNCE_SECONDS = 3.0
 
 
-def _refresh_daily_metrics(db: Session, user_id: int, meal_date: date) -> None:
+def _refresh_daily_metrics(db: Session, user_id: int, meal_date: date, *, force: bool = False) -> None:
     """Recompute DailyNutritionMetrics for the given user + date. Called
     after any write that changes what meals exist on that day so the
     Nutrition Score reflects reality on the next /meals/score fetch.
@@ -118,7 +118,7 @@ def _refresh_daily_metrics(db: Session, user_id: int, meal_date: date) -> None:
     key = (user_id, meal_date)
     now = _time.time()
     last = _last_refresh_at.get(key, 0.0)
-    if now - last < _REFRESH_DEBOUNCE_SECONDS:
+    if not force and now - last < _REFRESH_DEBOUNCE_SECONDS:
         return
     _last_refresh_at[key] = now
     try:
@@ -309,6 +309,33 @@ def log_checked_meal(
         db=db,
     )
     _refresh_daily_metrics(db, current_user.id, meal_date)
+    return result
+
+
+@router.post("/unlog-checked")
+def unlog_checked_meal(
+    body: LogCheckedBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Remove a meal history row when the user unchecks a planned meal."""
+    from app.services.nutrition.meal_history import unlog_meal_from_plan
+
+    try:
+        meal_date = date.fromisoformat(body.meal_date)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid meal_date format. Use YYYY-MM-DD.")
+
+    result = unlog_meal_from_plan(
+        user_id=current_user.id,
+        meal_date=meal_date,
+        meal_type=body.meal_type,
+        meal_data=body.meal,
+        source=body.source or "plan_check",
+        db=db,
+    )
+    if result.get("deleted", 0) > 0:
+        _refresh_daily_metrics(db, current_user.id, meal_date, force=True)
     return result
 
 
@@ -943,7 +970,7 @@ def delete_meal(
         db.delete(item)
     db.delete(meal)
     db.commit()
-    _refresh_daily_metrics(db, current_user.id, affected_date)
+    _refresh_daily_metrics(db, current_user.id, affected_date, force=True)
 
 
 # ─── Weekly calorie smoothing ─────────────────────────────────────────────────

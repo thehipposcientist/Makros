@@ -34,6 +34,7 @@ import { APPLE_HEALTH_PERMISSION_COPY, readHealthSummary, isHealthKitAvailable, 
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import BodyMeasurementsModal from '../components/BodyMeasurementsModal';
 import Zone2TargetCard from '../components/Zone2TargetCard';
+import WeeklyCheckinCard from '../components/WeeklyCheckinCard';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
 import RecoveryCard from '../components/RecoveryCard';
@@ -64,6 +65,7 @@ interface ProgressScreenProps {
   // nav already provides navigation, so the inner header is redundant.
   noHeader?: boolean;
   nutritionPlan?: import('../types').DailyNutritionPlan | null;
+  nutritionLogRefreshKey?: number;
 }
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -787,7 +789,7 @@ function AnimatedChartBar({
   return <Animated.View style={[style, { height }]} />;
 }
 
-export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, themeName, noHeader = false, nutritionPlan }: ProgressScreenProps) {
+export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0 }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
   const styles = useMemo(() => createStyles(tc), [themeName]);
   const primaryButtonTextColor = getContrastingTextColor(tc.primary);
@@ -875,6 +877,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [gutHealthWindow, setGutHealthWindow] = useState<import('../services/api').GutHealthWindow | null>(null);
   const [paceHistory, setPaceHistory] = useState<PaceHistoryPoint[]>([]);
   const paceLoadedRef = useRef(false);
+  const nutritionRefreshSeenRef = useRef(nutritionLogRefreshKey);
   const [appleHealthZone2Minutes, setAppleHealthZone2Minutes] = useState<number | null>(null);
   const [zone2DetectedWorkouts, setZone2DetectedWorkouts] = useState<Array<{ name: string; durationMin: number; counted: boolean; reason?: string }>>([]);
 
@@ -1258,6 +1261,43 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       setZone2DetectedWorkouts([]);
     }
   }, [authToken, isProTier, nutritionPlan, userProfile.goal, userProfile.mealsPerDay, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
+
+  useEffect(() => {
+    if (nutritionRefreshSeenRef.current === nutritionLogRefreshKey) return;
+    nutritionRefreshSeenRef.current = nutritionLogRefreshKey;
+    if (!authToken) return;
+
+    let cancelled = false;
+    (async () => {
+      const api = await import('../services/api');
+      const [averages, historyResp] = await Promise.all([
+        api.getMealAverages(authToken, 14).catch(() => undefined),
+        api.getMealHistory(authToken, 14).catch(() => undefined),
+      ]);
+      if (cancelled) return;
+      if (averages) setMealAverages(averages);
+      if (historyResp) setMealHistory(historyResp.meals ?? []);
+
+      if (!isProTier) {
+        setMealInsightPatterns(null);
+        setNutritionScoreWeekly(null);
+        setGutHealthWindow(null);
+        return;
+      }
+
+      const [insights, score, gut] = await Promise.all([
+        api.getMealInsights(authToken).catch(() => undefined),
+        api.getNutritionScore(authToken, 14).catch(() => undefined),
+        api.getGutHealth(authToken, 14).catch(() => undefined),
+      ]);
+      if (cancelled) return;
+      if (insights) setMealInsightPatterns(insights.patterns ?? null);
+      if (score) setNutritionScoreWeekly(score.weekly ?? null);
+      if (gut) setGutHealthWindow(gut.window);
+    })().catch(() => {});
+
+    return () => { cancelled = true; };
+  }, [authToken, isProTier, nutritionLogRefreshKey]);
 
   const handleShareBodyScan = async () => {
     try {
@@ -2913,6 +2953,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </Text>
               </View>
             </View>
+          )}
+          {isProTier && authToken && (
+            <WeeklyCheckinCard
+              authToken={authToken}
+              themeName={userProfile.themePreference}
+            />
           )}
           {isProTier && authToken && (() => {
             return (

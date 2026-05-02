@@ -57,6 +57,9 @@ class CompletedExercisePayload(BaseModel):
     target_sets: int | None = None
     target_reps: str | None = None
     equipment: str | None = None
+    primary_muscle: str | None = None
+    secondary_muscles: list[str] | None = None
+    is_compound: bool | None = None
     order_index: int = 0
     sets: list[CompletedSetPayload] = []
 
@@ -92,6 +95,40 @@ class WorkoutCompleteRequest(BaseModel):
     # Per-session gear attribution. None = legacy keyword auto-match,
     # [] = explicit "no gear used today", [ids] = only credit these.
     gear_ids: list[int] | None = None
+
+
+def _has_exercise_detail(body: WorkoutCompleteRequest) -> bool:
+    return bool(body.exercises and len(body.exercises) > 0)
+
+
+def _has_activity_detail(body: WorkoutCompleteRequest) -> bool:
+    return any((
+        body.activity_category,
+        body.activity_subtype,
+        body.activity_intensity,
+        body.activity_source,
+        body.cardio_style,
+        body.distance_miles is not None,
+        body.calories_burned is not None,
+        body.hr_summary is not None,
+    ))
+
+
+def _has_feedback_detail(body: WorkoutCompleteRequest) -> bool:
+    return any((
+        body.feeling is not None,
+        body.intensity is not None,
+        body.soreness_areas is not None,
+        body.feedback_notes is not None,
+    ))
+
+
+def _is_feedback_only_patch(body: WorkoutCompleteRequest) -> bool:
+    return (
+        _has_feedback_detail(body)
+        and not _has_exercise_detail(body)
+        and not _has_activity_detail(body)
+    )
 
 # ─── Response models ──────────────────────────────────────────────────────────
 
@@ -1284,6 +1321,7 @@ def mark_workout_complete(
          analytics) real per-set history instead of just a duration.
     """
     plan_lock_focus_label = body.focus_label
+    feedback_only_patch = _is_feedback_only_patch(body)
 
     # Defensive guard: reject completions that have NO sets logged AND
     # no duration AND aren't a manual activity (cardio / sport / etc).
@@ -1310,9 +1348,18 @@ def mark_workout_complete(
         .where(WorkoutCompletion.workout_date == body.workout_date)
         .where(WorkoutCompletion.focus_label == body.focus_label)
     ).first()
+    if existing is None and feedback_only_patch:
+        existing = db.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == current_user.id)
+            .where(WorkoutCompletion.workout_date == body.workout_date)
+            .order_by(WorkoutCompletion.completed_at.desc(), WorkoutCompletion.id.desc())
+        ).first()
+
+    completion_row_for_request: WorkoutCompletion | None = None
     if existing:
         existing.duration_seconds   = body.duration_seconds
-        existing.stimulus           = body.stimulus
+        existing.stimulus           = body.stimulus if body.stimulus is not None else existing.stimulus
         existing.activity_category  = body.activity_category or existing.activity_category
         existing.activity_subtype   = body.activity_subtype or existing.activity_subtype
         existing.activity_intensity = body.activity_intensity or existing.activity_intensity
@@ -1327,8 +1374,9 @@ def mark_workout_complete(
         existing.feedback_notes     = body.feedback_notes if body.feedback_notes is not None else existing.feedback_notes
         existing.completed_at       = datetime.now(timezone.utc)
         db.add(existing)
+        completion_row_for_request = existing
     else:
-        db.add(WorkoutCompletion(
+        completion_row_for_request = WorkoutCompletion(
             user_id=current_user.id,
             workout_date=body.workout_date,
             focus_label=body.focus_label,
@@ -1346,11 +1394,19 @@ def mark_workout_complete(
             intensity=body.intensity,
             soreness_areas=body.soreness_areas,
             feedback_notes=body.feedback_notes,
-        ))
+        )
+        db.add(completion_row_for_request)
 
     # Commit the lightweight completion row immediately so that a rollback
     # in the structured-persistence block below cannot undo it.
     db.commit()
+    completion_row_id = getattr(completion_row_for_request, "id", None)
+    if completion_row_for_request is not None and completion_row_id is None:
+        try:
+            db.refresh(completion_row_for_request)
+            completion_row_id = completion_row_for_request.id
+        except Exception:
+            completion_row_id = None
 
     # Also persist structured per-exercise data if the client sent it.
     # Best-effort: failures here must NOT block the lightweight
@@ -1474,12 +1530,18 @@ def mark_workout_complete(
     # Uses per-exercise data when available, falls back to focus-label estimate.
     try:
         from app.services.workout.activity_impact import resolve_exercise_fatigue, resolve_focus_fatigue
-        completion_row = db.exec(
-            select(WorkoutCompletion)
-            .where(WorkoutCompletion.user_id == current_user.id)
-            .where(WorkoutCompletion.workout_date == body.workout_date)
-            .where(WorkoutCompletion.focus_label == body.focus_label)
-        ).first()
+        completion_row = (
+            db.get(WorkoutCompletion, completion_row_id)
+            if completion_row_id is not None
+            else None
+        )
+        if completion_row is None:
+            completion_row = db.exec(
+                select(WorkoutCompletion)
+                .where(WorkoutCompletion.user_id == current_user.id)
+                .where(WorkoutCompletion.workout_date == body.workout_date)
+                .where(WorkoutCompletion.focus_label == body.focus_label)
+            ).first()
         if completion_row:
             # Lookup user's age so fatigue scales correctly with biology.
             # Missing age defaults to baseline (no scaling) inside the resolver.
@@ -1493,12 +1555,24 @@ def mark_workout_complete(
             except Exception:
                 user_age = None
 
-            if body.exercises:
+            should_keep_existing_fatigue = (
+                feedback_only_patch
+                and isinstance(completion_row.resolved_muscle_fatigue, dict)
+                and bool(completion_row.resolved_muscle_fatigue)
+            )
+            if should_keep_existing_fatigue:
+                resolved = dict(completion_row.resolved_muscle_fatigue)
+            elif body.exercises:
                 from app.seed_exercises_data import SEED_EXERCISES
                 seed_map = {e["name"].lower(): e for e in SEED_EXERCISES}
                 ex_list = []
                 for ep in body.exercises:
                     seed = seed_map.get(ep.name.lower(), {})
+                    secondary_muscles = (
+                        ep.secondary_muscles
+                        if ep.secondary_muscles is not None
+                        else seed.get("secondary_muscles", [])
+                    )
                     # Pass structured per-set data (reps, weight, RIR, HR) so
                     # resolve_exercise_fatigue can compute volume-load and
                     # stimulus-specific fatigue (heavy vs hypertrophy vs volume
@@ -1510,9 +1584,9 @@ def mark_workout_complete(
                     ]
                     ex_list.append({
                         "name": ep.name,
-                        "primary_muscle": seed.get("primary_muscle", ""),
-                        "secondary_muscles": seed.get("secondary_muscles", []),
-                        "is_compound": seed.get("is_compound", False),
+                        "primary_muscle": ep.primary_muscle or seed.get("primary_muscle", ""),
+                        "secondary_muscles": secondary_muscles or [],
+                        "is_compound": ep.is_compound if ep.is_compound is not None else seed.get("is_compound", False),
                         "sets_logged": len(ep.sets),
                         "sets": set_dicts,
                     })
@@ -1617,12 +1691,18 @@ def mark_workout_complete(
         pass
 
     # Verify the row exists
-    verify = db.exec(
-        select(WorkoutCompletion)
-        .where(WorkoutCompletion.user_id == current_user.id)
-        .where(WorkoutCompletion.workout_date == body.workout_date)
-        .where(WorkoutCompletion.focus_label == body.focus_label)
-    ).first()
+    verify = (
+        db.get(WorkoutCompletion, completion_row_id)
+        if completion_row_id is not None
+        else None
+    )
+    if verify is None:
+        verify = db.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == current_user.id)
+            .where(WorkoutCompletion.workout_date == body.workout_date)
+            .where(WorkoutCompletion.focus_label == body.focus_label)
+        ).first()
     logger.info(f"[workouts/complete] VERIFY: row={'FOUND' if verify else 'MISSING'} resolved_fatigue={bool(verify.resolved_muscle_fatigue) if verify else 'N/A'}")
 
     # ── PR detection ──
@@ -1964,6 +2044,7 @@ def get_streak(
 @router.get("/weekly-review")
 def get_weekly_review(
     days: int = 7,
+    end_date: date | None = None,
     weight_slope_lbs_per_week: float | None = None,
     avg_sleep_hours: float | None = None,
     avg_resting_hr: float | None = None,
@@ -1985,6 +2066,7 @@ def get_weekly_review(
     from app.services.workout.plan_review_v2 import compute_weekly_review
     review = compute_weekly_review(
         db, current_user.id,
+        end_date=end_date,
         days=max(3, min(28, days)),
         weight_trend_lbs_per_week=weight_slope_lbs_per_week,
         avg_sleep_hours=avg_sleep_hours,

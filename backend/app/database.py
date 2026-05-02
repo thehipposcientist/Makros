@@ -1352,7 +1352,7 @@ def _ensure_skip_reason_columns() -> None:
 
 def _ensure_plan_week_checkins_table() -> None:
     """Create plan_week_checkins — one coaching check-in record per PlanWeek.
-    Blocks auto-renew until submitted or skipped."""
+    Stores the expired-week prompt/recap while day-8 auto-renew proceeds."""
     if engine.dialect.name != "postgresql":
         return
     try:

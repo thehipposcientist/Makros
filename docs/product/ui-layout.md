@@ -65,7 +65,10 @@ Last updated: 2026-05-01
   adjacent days, weekday name otherwise.
 - Auto-renew: when the active PlanWeek's `end_date < today`, `loadPlans`
   calls `POST /plans/week/auto-renew` and renders the freshly generated
-  next 7 days.
+  next 7 days. The prior week's coach check-in remains available for one
+  day; applying changes refreshes the current week's remaining unlocked
+  days. If ignored, the generated week stays as-is and the recap remains
+  visible from Progress.
 
 ## Key UI Features
 
@@ -79,5 +82,5 @@ Last updated: 2026-05-01
 - History export: PDF via expo-print.
 - Activity log includes: Yard Work, Chopping Wood, Moving/Lifting, Gardening, House Cleaning, Construction, Shoveling, Playing w/ Kids, Dancing.
 - Sports: Pickleball, Surfing, Skiing, Spin Class.
-- Smart weekly check-in modal leads with "TRAINER'S READ · THIS WEEK" block + inline Apply pills.
+- Smart weekly check-in modal leads with a date-stamped "TRAINER'S READ" block + inline Apply pills.
 - Friends modal: Activity feed tab + Friends tab with THIS WEEK digest, REQUESTS/FRIENDS/SENT sections, and ADD FRIENDS search.

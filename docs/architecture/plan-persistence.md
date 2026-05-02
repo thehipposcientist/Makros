@@ -28,8 +28,12 @@ indexes into them via a cycling array.
   deterministic workout planner + nutrition assembler, then persists into
   `plan_weeks` + `plan_days`.
 - `POST /plans/week/auto-renew` — when the active week's `end_date` has
-  passed, generates the next 7 days. Idempotent: a no-op while the
-  current week is still active.
+  passed, generates the next 7 days immediately. It also snapshots the
+  expired week into `plan_week_checkins` so the user has one day to review
+  the coach summary, apply changes, and regenerate the current week's
+  remaining unlocked days. If the user ignores it, the generated week stays
+  as-is and the recap remains readable.
+  Idempotent: a no-op while the current week is still active.
 - `POST /plans/week/review-and-apply` — applies user-selected
   recommendations from the weekly check-in and regenerates remaining days.
 - `PATCH /plans/days/{day_date}/workout` and `…/nutrition` — partial
@@ -42,7 +46,9 @@ indexes into them via a cycling array.
 1. On mount + on `userProfile` change, call `getActivePlanWeek(token)`.
 2. If `null` → call `startNewPlanWeek(token, false)` to generate one.
 3. If `needs_new_week === true` → call `autoRenewPlanWeek(token)` and use
-   the returned `plan_week`.
+   the returned `plan_week`. `WeeklyCheckinCard` reads
+   `/plans/week/checkin-status` separately to show the prior week's review
+   window or saved recap.
 4. Store the result in `planWeek` state. Project its `days[]` into a
    legacy `WorkoutPlan` shape (`{ name, totalDays, days }`) so the
    existing `WorkoutCard` / `DayCard` rendering keeps working.

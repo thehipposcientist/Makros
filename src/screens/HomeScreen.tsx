@@ -38,7 +38,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
 import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration } from '../services/api';
 import type { ApplyActionResult } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
@@ -74,6 +74,7 @@ import FormVideoModal from '../components/FormVideoModal';
 import SupplementStackScreen from '../components/SupplementStackScreen';
 import RecoveryCard from '../components/RecoveryCard';
 import WeeklyDigestCard from '../components/WeeklyDigestCard';
+import WeeklyCheckinCard from '../components/WeeklyCheckinCard';
 import TrainingReadinessCard from '../components/TrainingReadinessCard';
 import BirthdateBackfillCard from '../components/BirthdateBackfillCard';
 import CyclePhaseCard from '../components/CyclePhaseCard';
@@ -81,7 +82,6 @@ import GroceryListModal from '../components/GroceryListModal';
 import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
-// CoachCheckinModal removed — coach chat handles check-ins now
 import { APP_THEMES, THEME_PICKER_ORDER, colors, elevations, getContrastingTextColor, getTheme, isLightThemeName, radius, resolveThemeName, typography } from '../constants/theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // Inline-rendered tab content. Goals and Progress used to be modal
@@ -1751,6 +1751,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   // Meal tracking
   const [checkedMealsByDate, setCheckedMealsByDate] = useState<Record<string, MealChecks>>({});
+  const [mealLogRefreshKey, setMealLogRefreshKey] = useState(0);
   const [editingMeal, setEditingMeal] = useState<{ dateKey: string; type: string; meal: MealSuggestion } | null>(null);
   const [hydration, setHydration] = useState<HydrationSummary | null>(null);
   const [hydrationByDate, setHydrationByDate] = useState<Record<string, HydrationSummary>>({});
@@ -1799,7 +1800,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // from the "Save as Template" button on the active-workout summary.
   const [templateBuilderOpen, setTemplateBuilderOpen] = useState(false);
   const [templateBuilderTarget, setTemplateBuilderTarget] = useState<SavedWorkoutTemplate | null>(null);
-  // showWeeklyCheckin removed — weekly check-in is now handled by WeeklyCheckinCard in ProgressScreen
+  // Weekly check-in is handled by the backend-backed WeeklyCheckinCard.
   const [showFriends, setShowFriends] = useState(false);
   const [showGoalEditor, setShowGoalEditor] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -1817,7 +1818,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     chosen: Record<string, boolean>;
   } | null>(null);
   const unloggedPromptCheckedRef = useRef(false);
-  // Legacy check-in state removed — weekly check-in is now handled by WeeklyCheckinCard in ProgressScreen
+  // Legacy local check-in state removed; PlanWeekCheckin is server-backed.
 
   // Recompute nutrition score client-side whenever the plan changes
   useEffect(() => {
@@ -1990,7 +1991,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // workout thumbnails have the name→video_id index populated even
     // for users who never visit the Library sub-tab.
     ensureExerciseLibraryRef.current?.().catch(() => {});
-    // Weekly check-in prompt is now handled by WeeklyCheckinCard in ProgressScreen (backend-backed).
+    // Weekly check-in prompt is handled by WeeklyCheckinCard on the Plan tab.
     // NOTE: `meta.allFoods.length` was previously in this dep array but caused
     // `loadPlans` to re-fire whenever the parent re-rendered (e.g. when a menu
     // opened), which made in-progress plan generation look like it was
@@ -3097,7 +3098,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   meal: mealObj,
                   source: 'watch_speech',
                   consumed_at: consumedAtForMealDate(mealObj, todayISO),
-                }).catch(() => null);
+                })
+                  .then(() => setMealLogRefreshKey(k => k + 1))
+                  .catch(() => null);
                 // Re-push updated meals to the watch.
                 const s = rePushStateRef.current;
                 const todayPlan = s.nutritionPlansByDate[todayISO]
@@ -3368,16 +3371,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             console.log('[loadPlans] startNewPlanWeek failed (will fall back to legacy cache):', e);
           }
         } else if (pw.needs_new_week) {
-          // The active week's end_date has passed — try to auto-renew.
-          // If a check-in is due the backend returns {checkin_required:true}
-          // instead of a new plan week. The check-in card in ProgressScreen
-          // handles the prompt; we just keep the stale week in that case.
-          console.log(`[loadPlans] PlanWeek expired (ended ${pw.end_date}) — checking for pending check-in`);
+          // The active week's end_date has passed — auto-renew immediately.
+          // WeeklyCheckinCard separately surfaces the expired week's one-day
+          // coach review window and saved recap.
+          console.log(`[loadPlans] PlanWeek expired (ended ${pw.end_date}) — auto-renewing`);
           try {
             const renewed = await autoRenewPlanWeek(authToken, cycleContext);
             if ('checkin_required' in renewed && renewed.checkin_required) {
-              console.log(`[loadPlans] check-in required for plan_week_id=${renewed.plan_week_id} — deferring renewal`);
-              // Keep stale pw; ProgressScreen's WeeklyCheckinCard will prompt
+              console.log(`[loadPlans] legacy check-in-required response for plan_week_id=${renewed.plan_week_id} — using stale week`);
             } else if ((renewed as any)?.plan_week) {
               const nextPw = (renewed as any).plan_week;
               pw = nextPw;
@@ -4667,11 +4668,32 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           meal: meal as Record<string, any>,
           source: 'plan_check',
           consumed_at: consumedAtForMealDate(meal, date),
-        }).catch(err => console.log('[logMealChecked] background save failed:', err.message));
+        })
+          .then(() => setMealLogRefreshKey(k => k + 1))
+          .catch(err => console.log('[logMealChecked] background save failed:', err.message));
       }
     } else {
       const localId = (meal as any)._localId;
       await clearPreservedMeal(date, mealType, localId);
+      if (authToken && meal) {
+        const payload = {
+          meal_date: date,
+          meal_type: mealType,
+          meal: meal as Record<string, any>,
+        };
+        unlogMealChecked(authToken, { ...payload, source: 'plan_check' })
+          .then(result => {
+            if ((result?.deleted ?? 0) > 0) {
+              setMealLogRefreshKey(k => k + 1);
+              return null;
+            }
+            return unlogMealChecked(authToken, { ...payload, source: 'manual_add' })
+              .then(fallback => {
+                if ((fallback?.deleted ?? 0) > 0) setMealLogRefreshKey(k => k + 1);
+              });
+          })
+          .catch(err => console.log('[unlogMealChecked] background delete failed:', err.message));
+      }
     }
   }, [checkedMealsByDate, persistDayState, nutritionPlansByDate, authToken]);
 
@@ -4757,7 +4779,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         meal: updated as Record<string, any>,
         source: isNewMeal ? 'manual_add' : 'plan_check',
         consumed_at: consumedAtForMealDate(updated, date),
-      }).catch(err => console.log('[handleMealSave] meal-log background save failed:', err?.message));
+      })
+        .then(() => setMealLogRefreshKey(k => k + 1))
+        .catch(err => console.log('[handleMealSave] meal-log background save failed:', err?.message));
     }
 
     // Persist detached meals locally so they survive plan reload —
@@ -6106,6 +6130,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <StreakConsistencyWidget authToken={authToken} themeName={userProfile.themePreference} displayName={userProfile.firstName || username || undefined} />
             )}
 
+            {/* End-of-week coach review. The next PlanWeek is already generated;
+                this card handles the one-day review/regenerate window and recap. */}
+            {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (
+              <WeeklyCheckinCard
+                key={`weekly-checkin-${planWeek?.id ?? 'none'}-${planWeek?.end_date ?? 'none'}`}
+                authToken={authToken}
+                themeName={userProfile.themePreference}
+                onCheckinCompleted={() => {
+                  loadDayStatus();
+                  if (userProfile) loadPlans(userProfile);
+                }}
+              />
+            )}
+
             {/* Combined "Today's training readiness" — fuses Recovery (per-muscle
                 for today's focus) + Preparedness (sleep/HRV/nutrition/RHR).
                 Re-runs when today's focus changes (Switch Day picker).
@@ -7142,6 +7180,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           // when called empty.
                           loadDayStatus();
                           if (userProfile) loadPlans(userProfile);
+                          setMealLogRefreshKey(k => k + 1);
                         }}
                         onEditTemplate={(sm) => {
                           setEditingSavedMeal({
@@ -7783,6 +7822,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               loadDayStatus();
                               if (userProfile) loadPlans(userProfile);
                               reloadSavedMeals();
+                              setMealLogRefreshKey(k => k + 1);
                             }}
                             onEditTemplate={(sm) => {
                               setEditingSavedMeal({
@@ -7803,6 +7843,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             loadDayStatus();
                             if (userProfile) loadPlans(userProfile);
                             reloadSavedMeals();
+                            setMealLogRefreshKey(k => k + 1);
                           }}
                           onEditTemplate={(sm) => {
                             setEditingSavedMeal({
@@ -8137,6 +8178,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             themeName={userProfile.themePreference}
             noHeader
             nutritionPlan={nutritionPlansByDate[todayKey()] ?? null}
+            nutritionLogRefreshKey={mealLogRefreshKey}
             onBack={() => setActiveTab('workout')}
             onUpdateWeight={(weightLbs) => {
               onProfileUpdate?.({ physicalStats: { ...userProfile.physicalStats, weightLbs } } as any, true);
@@ -9914,7 +9956,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             meal: meal as Record<string, any>,
                             source: 'plan_check',
                             consumed_at: consumedAtForMealDate(meal, snapshot.date),
-                          }).catch(err => console.log('[logMealChecked] background save failed:', err.message));
+                          })
+                            .then(() => setMealLogRefreshKey(k => k + 1))
+                            .catch(err => console.log('[logMealChecked] background save failed:', err.message));
                         }
                       }
 

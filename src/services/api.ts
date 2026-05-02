@@ -1279,6 +1279,9 @@ export type LoggedExercisePayload = {
   target_sets?: number | null;
   target_reps?: string | null;
   equipment?: string | null;
+  primary_muscle?: string | null;
+  secondary_muscles?: string[] | null;
+  is_compound?: boolean | null;
   order_index?: number;
   sets: LoggedSetPayload[];
 };
@@ -2601,6 +2604,17 @@ export async function logMealChecked(
   return result;
 }
 
+export async function unlogMealChecked(
+  token: string,
+  payload: { meal_date: string; meal_type: string; meal: Record<string, any>; source?: string },
+): Promise<{ deleted: number; meal_date: string }> {
+  return request('/meals/unlog-checked', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 10000, true);
+}
+
 export async function getMealHistory(token: string, days = 30): Promise<{ meals: MealHistoryEntry[] }> {
   return request(`/meals/history?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -3389,6 +3403,7 @@ export async function getWeeklyReview(
   token: string,
   opts: {
     days?: number;
+    endDate?: string | null;
     weightSlopeLbsPerWeek?: number | null;
     avgSleepHours?: number | null;
     avgRestingHr?: number | null;
@@ -3398,6 +3413,7 @@ export async function getWeeklyReview(
 ): Promise<WeeklyReviewResponse> {
   const params = new URLSearchParams();
   if (opts.days) params.set('days', String(opts.days));
+  if (opts.endDate) params.set('end_date', opts.endDate);
   if (opts.weightSlopeLbsPerWeek != null) params.set('weight_slope_lbs_per_week', String(opts.weightSlopeLbsPerWeek));
   if (opts.avgSleepHours != null) params.set('avg_sleep_hours', String(opts.avgSleepHours));
   if (opts.avgRestingHr != null) params.set('avg_resting_hr', String(opts.avgRestingHr));
@@ -3659,7 +3675,7 @@ export interface AutoRenewPlanWeekResponse {
   explanation: string;
 }
 
-/** Returned by auto-renew when a check-in must be completed first. */
+/** Legacy shape from the old hold-renewal flow. Kept for defensive clients. */
 export interface CheckinRequiredResponse {
   checkin_required: true;
   plan_week_id: number;
@@ -3714,8 +3730,8 @@ export interface PlanWeekCheckinSubmit {
 }
 
 /** Auto-generate the next 7-day week when the active PlanWeek has
- *  expired (end_date < today). Returns CheckinRequiredResponse when
- *  a check-in must be completed or skipped first. */
+ *  expired (end_date < today). The previous week's check-in/recap remains
+ *  available separately through getCheckinStatus. */
 export async function autoRenewPlanWeek(
   token: string,
   cycle?: CyclePlanContext | null,
@@ -3727,6 +3743,17 @@ export async function autoRenewPlanWeek(
   return request<AutoRenewPlanWeekResponse | CheckinRequiredResponse>(`/plans/week/auto-renew${qs ? '?' + qs : ''}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function reviewAndApplyPlanWeek(
+  token: string,
+  actions: Array<Record<string, any>> = [],
+): Promise<PlanWeekResponse> {
+  return request<PlanWeekResponse>('/plans/week/review-and-apply', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ actions }),
   });
 }
 

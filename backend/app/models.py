@@ -296,7 +296,8 @@ class WeeklyCheckIn(SQLModel, table=True):
 
 class PlanWeekCheckin(SQLModel, table=True):
     """One-time coaching check-in per PlanWeek.
-    Blocks auto-renew until submitted or skipped.
+    Day-8 auto-renew proceeds immediately; this stores the expired week's
+    prompt/recap and any submitted coach adjustments.
     Stores the deterministic review snapshot + AI decision + self-report ratings."""
     __tablename__ = "plan_week_checkins"
     __table_args__ = (UniqueConstraint("user_id", "plan_week_id", name="uq_plan_week_checkin"),)
