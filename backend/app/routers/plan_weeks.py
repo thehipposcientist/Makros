@@ -46,28 +46,6 @@ CHECKIN_PROMPT_DAYS_AFTER_END = 1
 CHECKIN_RECAP_DAYS_AFTER_END = 7
 
 
-def _active_injury_tokens(profile: object | None, prefs: object | None) -> list[str]:
-    tokens: list[str] = []
-    seen: set[str] = set()
-    for source in (getattr(profile, "injuries", None), getattr(prefs, "injuries", None)):
-        if isinstance(source, str):
-            values = [source]
-        elif isinstance(source, list):
-            values = source
-        else:
-            values = []
-        for raw in values:
-            token = str(raw or "").strip()
-            if not token:
-                continue
-            key = token.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            tokens.append(token)
-    return tokens
-
-
 # ─── Request / Response schemas ───────────────────────────────────────────────
 
 
@@ -564,15 +542,8 @@ def start_new_week(
     """
     from app.services.workout.weekly_recipe import PLANNER_VERSION
     from app.models import UserProfile, UserPreferences, NutritionPlan, WorkoutPlan
-    from app.services.workout.planner import PlannerInputs, generate_workout_plan
-    from app.services.workout.history import (
-        most_recent_completed_focus,
-        build_history_familiarity,
-        recent_exercise_slugs_by_muscle,
-    )
-    from app.services.workout.activity_impact import compute_rolling_fatigue
-    from app.services.workout.history import get_recent_completions_for_fatigue
-    from app.routers.ai.plans import _resolve_owned_equipment_slugs
+    from app.services.workout.planner import generate_workout_plan
+    from app.services.workout.planner_context import build_planweek_planner_context
     from app.seed_exercises_data import SEED_EXERCISES
     import json
 
@@ -597,63 +568,25 @@ def start_new_week(
     goal_pace = active_goal.pace.value if active_goal and active_goal.pace else None
     days_per_week = int(getattr(prefs, "days_per_week", None) or getattr(profile, "days_per_week", 4) or 4)
     session_minutes = int(getattr(prefs, "workout_duration_minutes", None) or getattr(profile, "workout_duration_minutes", 45) or 45)
-    experience = str(getattr(profile, "experience_level", "intermediate") or "intermediate")
-    equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     preferred_split = getattr(prefs, "preferred_split", None) or getattr(profile, "preferred_split", None)
-    injuries = _active_injury_tokens(profile, prefs)
-    disliked = list(getattr(prefs, "disliked_exercises", []) or [])
 
-    owned_slugs = _resolve_owned_equipment_slugs(equipment)
-
-    recent_focus_buckets: tuple = ()
-    recent_focus_families: tuple = ()
-    try:
-        buckets, families = most_recent_completed_focus(current_user.id, db, hours=240, limit=10)
-        recent_focus_buckets = tuple(buckets)
-        recent_focus_families = tuple(families)
-    except Exception:
-        pass
-
-    muscle_fatigue = None
-    try:
-        completions = get_recent_completions_for_fatigue(current_user.id, db)
-        if completions:
-            snapshot = compute_rolling_fatigue(completions)
-            muscle_fatigue = snapshot.muscle_fatigue.to_dict() if snapshot else None
-    except Exception:
-        pass
-
-    try:
-        history_familiarity = build_history_familiarity(current_user.id, db)
-    except Exception:
-        history_familiarity = {}
-    try:
-        recent_muscle_exercises = recent_exercise_slugs_by_muscle(current_user.id, db)
-    except Exception:
-        recent_muscle_exercises = {}
-
-    inputs = PlannerInputs(
+    planner_ctx = build_planweek_planner_context(
+        db,
+        current_user.id,
+        profile,
+        prefs,
         goal=goal,
         days_per_week=days_per_week,
         session_minutes=session_minutes,
-        experience=experience.lower(),
-        equipment_slugs=tuple(sorted(owned_slugs)),
         preferred_split=preferred_split,
-        injuries=tuple(injuries),
-        disliked_exercises=tuple(disliked),
-        rng_seed=current_user.id,
-        recent_focus_buckets=recent_focus_buckets,
-        recent_focus_families=recent_focus_families,
-        muscle_fatigue=muscle_fatigue,
         cycle_phase=body.cycle_phase,
         day_of_cycle=body.day_of_cycle,
-        load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
 
     plan = generate_workout_plan(
-        inputs, SEED_EXERCISES,
-        history_familiarity=history_familiarity,
-        recent_muscle_exercises=recent_muscle_exercises,
+        planner_ctx.inputs, SEED_EXERCISES,
+        history_familiarity=planner_ctx.history_familiarity,
+        recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
     )
     workout_days = plan.get("workout_plan", {}).get("days", [])
     if not workout_days:
@@ -703,7 +636,7 @@ def start_new_week(
     )
 
     days = get_week_days(db, pw.id)
-    logger.info(f"[plan-week] started new week for user={current_user.id} start={week_start} (today={today}, weekday={weekday})")
+    logger.info(f"[plan-week] started new week for user={current_user.id} start={week_start} (today={today}, weekday={today.weekday()})")
     return _plan_week_to_response(pw, days)
 
 
@@ -1316,15 +1249,8 @@ def review_and_apply(
             except Exception as e:
                 logger.warning(f"[review-and-apply] action failed: {action_dict} — {e}")
 
-    from app.services.workout.planner import PlannerInputs, generate_workout_plan
-    from app.services.workout.history import (
-        most_recent_completed_focus,
-        build_history_familiarity,
-        recent_exercise_slugs_by_muscle,
-    )
-    from app.services.workout.activity_impact import compute_rolling_fatigue
-    from app.services.workout.history import get_recent_completions_for_fatigue
-    from app.routers.ai.plans import _resolve_owned_equipment_slugs
+    from app.services.workout.planner import generate_workout_plan
+    from app.services.workout.planner_context import build_planweek_planner_context
     from app.seed_exercises_data import SEED_EXERCISES
     from app.models import UserProfile, UserPreferences, UserGoal
 
@@ -1345,58 +1271,21 @@ def review_and_apply(
     ).first()
     current_goal = effective_goal_id(active_goal, fallback=pw.goal)
 
-    equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
-    owned_slugs = _resolve_owned_equipment_slugs(equipment)
-    injuries = _active_injury_tokens(profile, prefs)
-    disliked = list(getattr(prefs, "disliked_exercises", []) or [])
-
-    muscle_fatigue = None
-    try:
-        completions = get_recent_completions_for_fatigue(current_user.id, db)
-        if completions:
-            snapshot = compute_rolling_fatigue(completions)
-            muscle_fatigue = snapshot.muscle_fatigue.to_dict() if snapshot else None
-    except Exception:
-        pass
-
-    recent_focus_buckets: tuple = ()
-    recent_focus_families: tuple = ()
-    try:
-        buckets, families = most_recent_completed_focus(current_user.id, db, hours=240, limit=10)
-        recent_focus_buckets = tuple(buckets)
-        recent_focus_families = tuple(families)
-    except Exception:
-        pass
-
-    try:
-        history_familiarity = build_history_familiarity(current_user.id, db)
-    except Exception:
-        history_familiarity = {}
-    try:
-        recent_muscle_exercises = recent_exercise_slugs_by_muscle(current_user.id, db)
-    except Exception:
-        recent_muscle_exercises = {}
-
-    inputs = PlannerInputs(
+    planner_ctx = build_planweek_planner_context(
+        db,
+        current_user.id,
+        profile,
+        prefs,
         goal=current_goal,
         days_per_week=pw.days_per_week,
         session_minutes=int(getattr(prefs, "workout_duration_minutes", 45) or 45),
-        experience=str(getattr(profile, "experience_level", "intermediate") or "intermediate").lower(),
-        equipment_slugs=tuple(sorted(owned_slugs)),
         preferred_split=pw.preferred_split,
-        injuries=tuple(injuries),
-        disliked_exercises=tuple(disliked),
-        rng_seed=current_user.id,
-        recent_focus_buckets=recent_focus_buckets,
-        recent_focus_families=recent_focus_families,
-        muscle_fatigue=muscle_fatigue,
-        load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
 
     plan = generate_workout_plan(
-        inputs, SEED_EXERCISES,
-        history_familiarity=history_familiarity,
-        recent_muscle_exercises=recent_muscle_exercises,
+        planner_ctx.inputs, SEED_EXERCISES,
+        history_familiarity=planner_ctx.history_familiarity,
+        recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
     )
     fresh_days = plan.get("workout_plan", {}).get("days", [])
     training_pattern = default_training_pattern(pw.days_per_week)
@@ -1578,15 +1467,8 @@ def adapt_remaining(
 
     Keeps the same split recipe, regenerates exercises using current fatigue.
     """
-    from app.services.workout.planner import PlannerInputs, generate_workout_plan
-    from app.services.workout.history import (
-        most_recent_completed_focus,
-        build_history_familiarity,
-        recent_exercise_slugs_by_muscle,
-    )
-    from app.services.workout.activity_impact import compute_rolling_fatigue
-    from app.services.workout.history import get_recent_completions_for_fatigue
-    from app.routers.ai.plans import _resolve_owned_equipment_slugs
+    from app.services.workout.planner import generate_workout_plan
+    from app.services.workout.planner_context import build_planweek_planner_context
     from app.seed_exercises_data import SEED_EXERCISES
     from app.models import UserProfile, UserPreferences, UserGoal
 
@@ -1611,58 +1493,21 @@ def adapt_remaining(
     ).first()
     current_goal = effective_goal_id(active_goal, fallback=pw.goal)
 
-    equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
-    owned_slugs = _resolve_owned_equipment_slugs(equipment)
-    injuries = _active_injury_tokens(profile, prefs)
-    disliked = list(getattr(prefs, "disliked_exercises", []) or [])
-
-    muscle_fatigue = None
-    try:
-        completions = get_recent_completions_for_fatigue(current_user.id, db)
-        if completions:
-            snapshot = compute_rolling_fatigue(completions)
-            muscle_fatigue = snapshot.muscle_fatigue.to_dict() if snapshot else None
-    except Exception:
-        pass
-
-    recent_focus_buckets: tuple = ()
-    recent_focus_families: tuple = ()
-    try:
-        buckets, families = most_recent_completed_focus(current_user.id, db, hours=240, limit=10)
-        recent_focus_buckets = tuple(buckets)
-        recent_focus_families = tuple(families)
-    except Exception:
-        pass
-
-    try:
-        history_familiarity = build_history_familiarity(current_user.id, db)
-    except Exception:
-        history_familiarity = {}
-    try:
-        recent_muscle_exercises = recent_exercise_slugs_by_muscle(current_user.id, db)
-    except Exception:
-        recent_muscle_exercises = {}
-
-    inputs = PlannerInputs(
+    planner_ctx = build_planweek_planner_context(
+        db,
+        current_user.id,
+        profile,
+        prefs,
         goal=current_goal,
         days_per_week=pw.days_per_week,
         session_minutes=int(getattr(prefs, "workout_duration_minutes", 45) or 45),
-        experience=str(getattr(profile, "experience_level", "intermediate") or "intermediate").lower(),
-        equipment_slugs=tuple(sorted(owned_slugs)),
         preferred_split=pw.preferred_split,
-        injuries=tuple(injuries),
-        disliked_exercises=tuple(disliked),
-        rng_seed=current_user.id,
-        recent_focus_buckets=recent_focus_buckets,
-        recent_focus_families=recent_focus_families,
-        muscle_fatigue=muscle_fatigue,
-        load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
 
     plan = generate_workout_plan(
-        inputs, SEED_EXERCISES,
-        history_familiarity=history_familiarity,
-        recent_muscle_exercises=recent_muscle_exercises,
+        planner_ctx.inputs, SEED_EXERCISES,
+        history_familiarity=planner_ctx.history_familiarity,
+        recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
     )
     fresh_days = plan.get("workout_plan", {}).get("days", [])
 
@@ -1681,15 +1526,8 @@ def regenerate_remaining(
 
     Used when user changes days_per_week or preferred_split mid-week.
     """
-    from app.services.workout.planner import PlannerInputs, generate_workout_plan
-    from app.services.workout.history import (
-        most_recent_completed_focus,
-        build_history_familiarity,
-        recent_exercise_slugs_by_muscle,
-    )
-    from app.services.workout.activity_impact import compute_rolling_fatigue
-    from app.services.workout.history import get_recent_completions_for_fatigue
-    from app.routers.ai.plans import _resolve_owned_equipment_slugs
+    from app.services.workout.planner import generate_workout_plan
+    from app.services.workout.planner_context import build_planweek_planner_context
     from app.seed_exercises_data import SEED_EXERCISES
     from app.models import UserProfile, UserPreferences, UserGoal
 
@@ -1716,67 +1554,22 @@ def regenerate_remaining(
 
     new_dpw = body.new_days_per_week or pw.days_per_week
     new_split = body.new_preferred_split or pw.preferred_split
-    equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
-    owned_slugs = _resolve_owned_equipment_slugs(equipment)
-    injuries = _active_injury_tokens(profile, prefs)
-    disliked = list(getattr(prefs, "disliked_exercises", []) or [])
 
-    muscle_fatigue = None
-    try:
-        completions = get_recent_completions_for_fatigue(current_user.id, db)
-        if completions:
-            snapshot = compute_rolling_fatigue(completions)
-            muscle_fatigue = snapshot.muscle_fatigue.to_dict() if snapshot else None
-    except Exception:
-        pass
-
-    recent_focus_buckets: tuple = ()
-    recent_focus_families: tuple = ()
-    try:
-        buckets, families = most_recent_completed_focus(current_user.id, db, hours=240, limit=10)
-        recent_focus_buckets = tuple(buckets)
-        recent_focus_families = tuple(families)
-    except Exception:
-        pass
-
-    try:
-        history_familiarity = build_history_familiarity(current_user.id, db)
-    except Exception:
-        history_familiarity = {}
-    try:
-        recent_muscle_exercises = recent_exercise_slugs_by_muscle(current_user.id, db)
-    except Exception:
-        recent_muscle_exercises = {}
-
-    from app.models import UserGoal
-    active_goal = db.exec(
-        select(UserGoal).where(
-            UserGoal.user_id == current_user.id,
-            UserGoal.is_active == True,
-        )
-    ).first()
-    current_goal = effective_goal_id(active_goal, fallback=pw.goal)
-
-    inputs = PlannerInputs(
+    planner_ctx = build_planweek_planner_context(
+        db,
+        current_user.id,
+        profile,
+        prefs,
         goal=current_goal,
         days_per_week=new_dpw,
         session_minutes=int(getattr(prefs, "workout_duration_minutes", 45) or 45),
-        experience=str(getattr(profile, "experience_level", "intermediate") or "intermediate").lower(),
-        equipment_slugs=tuple(sorted(owned_slugs)),
         preferred_split=new_split,
-        injuries=tuple(injuries),
-        disliked_exercises=tuple(disliked),
-        rng_seed=current_user.id,
-        recent_focus_buckets=recent_focus_buckets,
-        recent_focus_families=recent_focus_families,
-        muscle_fatigue=muscle_fatigue,
-        load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
 
     plan = generate_workout_plan(
-        inputs, SEED_EXERCISES,
-        history_familiarity=history_familiarity,
-        recent_muscle_exercises=recent_muscle_exercises,
+        planner_ctx.inputs, SEED_EXERCISES,
+        history_familiarity=planner_ctx.history_familiarity,
+        recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
     )
     fresh_days = plan.get("workout_plan", {}).get("days", [])
     training_pattern = default_training_pattern(new_dpw)

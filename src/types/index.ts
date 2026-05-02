@@ -346,6 +346,10 @@ export interface WorkoutDay {
    *  planner from the archetype's training_type. Drives the stimulus
    *  badge on the workout card. */
   stimulus?: string;
+  _source_context?: string;
+  _template_id?: string | null;
+  planDayId?: number | null;
+  plan_day_id?: number | null;
   exercises: Exercise[];
 }
 

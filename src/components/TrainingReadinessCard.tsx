@@ -345,7 +345,9 @@ export default function TrainingReadinessCard({
         setPrep(displayResult);
       }
 
-      try { onScoreComputed?.(displayScore, displayLabel); } catch {}
+      if (displayLabel !== '—') {
+        try { onScoreComputed?.(displayScore, displayLabel); } catch {}
+      }
       try { onDataComputed?.(displayResult); } catch {}
 
       // Push the SERVER response (or our local fallback) verbatim to

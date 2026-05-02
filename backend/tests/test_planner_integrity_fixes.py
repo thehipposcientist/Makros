@@ -273,6 +273,76 @@ def test_validate_plan_adjacency_swap_fires_when_safe() -> None:
     _ok(f"fams={fams} — safe swap performed")
 
 
+def test_validate_plan_strict_preflight_raises_structured_errors() -> None:
+    """Strict validation is for launch/preflight checks: production can keep
+    returning a repaired plan, but hard errors must be machine-readable."""
+    print("\n[test] validate_plan strict preflight raises structured errors")
+    from app.services.workout.planner import PlannerInputs, PlannerValidationError, validate_plan
+    from app.services.workout.archetypes import DayArchetype
+
+    plan = {
+        "workout_plan": {
+            "days": [
+                {"day": "d1", "archetype": DayArchetype.LIFT_UPPER_HEAVY.value, "exercises": []},
+            ],
+        },
+    }
+    inputs = PlannerInputs(goal="muscle_gain", days_per_week=1, experience="intermediate")
+    try:
+        validate_plan(plan, inputs, strict=True)
+    except PlannerValidationError as exc:
+        codes = {e.get("code") for e in exc.errors}
+        assert "empty_day" in codes, f"missing empty_day in {codes}"
+    else:
+        raise AssertionError("strict validate_plan should raise on empty day")
+    _ok("strict preflight raised PlannerValidationError with empty_day")
+
+
+def test_planner_substitutes_recovery_when_day_has_no_eligible_exercises() -> None:
+    """Impossible exercise constraints should not ship a hollow workout card.
+    The planner substitutes active recovery and records the impossible state."""
+    print("\n[test] impossible constraints substitute recovery day with alert")
+    from app.services.workout.planner import PlannerInputs, generate_workout_plan
+
+    inputs = PlannerInputs(
+        goal="muscle_gain",
+        days_per_week=1,
+        session_minutes=45,
+        experience="intermediate",
+        equipment_slugs=(),
+        rng_seed=99,
+    )
+    out = generate_workout_plan(inputs, [])
+    wp = out["workout_plan"]
+    day = wp["days"][0]
+    codes = {w.get("code") for w in wp.get("planner_warnings") or []}
+    assert day.get("focus") == "Recovery", f"expected recovery fallback, got {day}"
+    assert day.get("exercises"), "recovery fallback should contain exercises"
+    assert "no_eligible_exercises_for_day" in codes, f"missing fallback warning: {codes}"
+    assert wp.get("planner_validation", {}).get("ok") is False
+    _ok("empty generated day became Recovery with no_eligible_exercises_for_day warning")
+
+
+def test_launch_preflight_common_profiles_are_strict_ready() -> None:
+    """Small launch matrix: representative deterministic profiles should pass
+    strict validation before external testing."""
+    print("\n[test] launch preflight matrix strict-ready")
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.planner import PlannerInputs, generate_workout_plan
+
+    gym = ("barbell", "dumbbells", "flat_bench", "incline_bench", "squat_rack", "cable_machine", "pull_up_bar")
+    cases = [
+        PlannerInputs(goal="body_recomp", days_per_week=4, session_minutes=60, experience="intermediate", equipment_slugs=gym, rng_seed=11),
+        PlannerInputs(goal="fat_loss", days_per_week=5, session_minutes=45, experience="beginner", equipment_slugs=("dumbbells", "flat_bench"), rng_seed=12),
+        PlannerInputs(goal="strength", days_per_week=3, session_minutes=75, experience="advanced", equipment_slugs=gym, preferred_split="full_body", rng_seed=13),
+    ]
+    for inputs in cases:
+        out = generate_workout_plan(inputs, SEED_EXERCISES, strict_validation=True)
+        validation = out.get("workout_plan", {}).get("planner_validation", {})
+        assert validation.get("ok") is True, f"{inputs} failed validation: {validation}"
+    _ok(f"{len(cases)} representative profiles strict-ready")
+
+
 # ── Fix 6 (also address): build_strength + UL must never emit Full Body
 
 
@@ -1274,6 +1344,9 @@ cases = [
     test_validate_plan_does_not_drop_wrong_family_compounds,
     test_validate_plan_adjacency_swap_rejects_unsafe_swap,
     test_validate_plan_adjacency_swap_fires_when_safe,
+    test_validate_plan_strict_preflight_raises_structured_errors,
+    test_planner_substitutes_recovery_when_day_has_no_eligible_exercises,
+    test_launch_preflight_common_profiles_are_strict_ready,
     test_build_strength_ul_6_days_has_no_full_body,
     test_build_strength_ul_5_days_has_no_full_body,
     test_build_strength_auto_6_days_is_split_balanced,

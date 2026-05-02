@@ -27,6 +27,11 @@ from app.services.nutrition.meal_assembler import assemble_nutrition_response
 from app.services.workout.planner import (
     PlannerInputs, generate_workout_plan as planner_generate_workout_plan,
 )
+from app.services.workout.equipment import (
+    expand_owned_equipment_aliases,
+    resolve_equipment_entry,
+    resolve_owned_equipment_slugs,
+)
 from app.services.workout.history import (
     build_history_familiarity, db_history_lookup, propagate_session_targets,
     recent_exercise_slugs_by_muscle,
@@ -36,54 +41,12 @@ from app.workout_progression import UserTrainingProfile, WorkoutProgressionEngin
 from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
 
 
-_EQUIPMENT_NAME_ALIASES = {
-    "resistance bands": "resistance_bands",
-    "resistance band": "resistance_bands",
-    "bands": "resistance_bands",
-    "tube bands": "resistance_bands",
-    "mini band": "mini_band",
-    "mini bands": "mini_band",
-    "loop band": "mini_band",
-    "loop bands": "mini_band",
-    "swiss ball": "swiss_ball",
-    "stability ball": "swiss_ball",
-    "exercise ball": "swiss_ball",
-    "plyo box": "plyo_box",
-    "box": "plyo_box",
-    "step": "step_platform",
-    "aerobic step": "step_platform",
-    "slider": "slider_discs",
-    "sliders": "slider_discs",
-    "sliding discs": "slider_discs",
-    "pullup bar": "pull_up_bar",
-    "pull-up bar": "pull_up_bar",
-    "rower": "rowing_machine",
-    "ski erg": "skierg",
-    "ski_erg": "skierg",
-    "versa climber": "versaclimber",
-}
-
-
 def _resolve_equipment_entry(raw: str, name_to_slug: dict[str, str], valid_slugs: set[str]) -> str | None:
-    lowered = (raw or "").lower().strip()
-    slugish = lowered.replace("-", "_").replace(" ", "_")
-    if raw in valid_slugs:
-        return raw
-    if slugish in valid_slugs:
-        return slugish
-    return name_to_slug.get(lowered) or _EQUIPMENT_NAME_ALIASES.get(lowered) or _EQUIPMENT_NAME_ALIASES.get(slugish)
+    return resolve_equipment_entry(raw, name_to_slug, valid_slugs)
 
 
 def _expand_owned_equipment_aliases(owned: set[str]) -> set[str]:
-    if "adjustable_dumbbells" in owned:
-        owned.add("dumbbells")
-    if "adjustable_bench" in owned:
-        owned.update({"flat_bench", "incline_bench", "decline_bench"})
-    if "incline_bench" in owned or "decline_bench" in owned:
-        owned.add("adjustable_bench")
-    if "power_rack" in owned:
-        owned.add("squat_rack")
-    return owned
+    return expand_owned_equipment_aliases(owned)
 
 
 def _validate_plans_legacy(plans: dict, req: PlanRequest) -> None:
@@ -330,22 +293,7 @@ def _resolve_owned_equipment_slugs(equipment: list[str] | None) -> set[str]:
     planner understands. Mirrors the logic inside
     `build_user_exercise_library` so both the AI-prompt path and the
     deterministic-planner path resolve equipment identically."""
-    name_to_slug = {e["name"].lower(): e["slug"] for e in SEED_EQUIPMENT}
-    valid_slugs = {e["slug"] for e in SEED_EQUIPMENT}
-    owned: set[str] = set()
-    for raw in (equipment or []):
-        if not raw:
-            continue
-        slug = _resolve_equipment_entry(str(raw), name_to_slug, valid_slugs)
-        if slug:
-            owned.add(slug)
-    _expand_owned_equipment_aliases(owned)
-    # Legacy bucket pass-through so `equipment: ["bodyweight"]` still
-    # unlocks bodyweight exercises even though it isn't an Equipment slug.
-    for bucket in ("bodyweight", "home", "dumbbells", "gym", "other"):
-        if bucket in (equipment or []):
-            owned.add(bucket)
-    return owned
+    return resolve_owned_equipment_slugs(equipment)
 
 
 class _PlanReviewDisabled(Exception):
@@ -2267,6 +2215,44 @@ def _validate_plans(result: dict, req: PlanRequest) -> None:
             raise ValueError(f"nutrition_plans[{idx}] has no meal entries")
 
 
+def _append_nutrition_validation_warning(np_: dict, warning: dict) -> None:
+    validation = np_.setdefault("nutrition_validation", {})
+    validation.setdefault("warnings", [])
+    validation["warnings"].append(warning)
+    if warning.get("severity") == "error":
+        validation["ok"] = False
+    else:
+        validation["ok"] = bool(validation.get("ok", True))
+
+
+def _filter_allergens_before_normalization(
+    plans_list: list[dict],
+    allergens: list[str] | None,
+    *,
+    log_prefix: str,
+) -> int:
+    if not allergens:
+        return 0
+    try:
+        from app.services.nutrition.allergen_filter import filter_allergens
+        removed = filter_allergens(plans_list, allergens=allergens)
+        if removed:
+            warning = {
+                "severity": "warning",
+                "code": "allergen_items_removed",
+                "message": f"Removed {removed} item(s) matching the user's allergen settings before macro normalization.",
+                "removed_count": removed,
+            }
+            for np_ in plans_list:
+                if isinstance(np_, dict):
+                    _append_nutrition_validation_warning(np_, warning)
+            print(f"[{log_prefix}] allergen pre-filter removed {removed} item(s)")
+        return removed
+    except Exception as exc:
+        print(f"[{log_prefix}] allergen pre-filter failed (non-fatal): {exc}")
+        return 0
+
+
 async def run_full_plan_generation(
     req: PlanRequest,
     *,
@@ -2471,6 +2457,12 @@ async def run_full_plan_generation(
         except Exception as exc:
             print(f"[nutrition-review] skipped due to error: {exc}")
 
+    _filter_allergens_before_normalization(
+        plans_list,
+        getattr(req, "allergies", None) or [],
+        log_prefix="plan-gen",
+    )
+
     norm_target = _adjusted_target_for_normalization(req, nutrition_target_macros)
     t_kcal, t_prot, t_carbs, t_fat = norm_target
     for idx, np_ in enumerate(plans_list):
@@ -2535,11 +2527,6 @@ async def run_full_plan_generation(
     _persist_active_workout_plan(
         db, user_id, result["workout_plan"], req=req, reason="regen",
     )
-    _persist_active_nutrition_plan(
-        db, user_id, plans_list, req=req,
-        trainer_note=result.get("nutritionistNote") or None, reason="regen",
-    )
-
     custom_foods = _build_custom_foods(result, req.foodsAvailable, enriched)
     if custom_foods:
         result["custom_foods"] = custom_foods
@@ -2622,7 +2609,7 @@ async def run_full_plan_generation(
                             meal["micronutrients"] = {k: round(v, 2) for k, v in resummed.items()}
                             if "fiber" in resummed:
                                 meal["fiber"] = round(resummed["fiber"], 1)
-                print(f"[plan-gen] enriched {len(backfill)} items, re-summed meal micros")
+                print(f"[plan-gen] enriched {len(all_backfill)} items, re-summed meal micros")
     except Exception as exc:
         print(f"[plan-gen] post-assembly micro enrichment failed (non-fatal): {exc}")
 
@@ -2652,14 +2639,10 @@ async def run_full_plan_generation(
     except Exception:
         pass
 
-    # ── Allergen safety net — remove items matching user allergens ───────
-    try:
-        from app.services.nutrition.allergen_filter import filter_allergens
-        user_allergens = getattr(req, "allergies", None) or []
-        if user_allergens:
-            filter_allergens(plans_list, allergens=user_allergens)
-    except Exception as exc:
-        print(f"[plan-gen] allergen filter failed (non-fatal): {exc}")
+    _persist_active_nutrition_plan(
+        db, user_id, plans_list, req=req,
+        trainer_note=result.get("nutritionistNote") or None, reason="regen",
+    )
 
     print(f"[plan-gen] done — workout days={len(result['workout_plan'].get('days', []))}, nutrition templates={len(plans_list)}")
     return result
@@ -2990,6 +2973,12 @@ async def run_nutrition_only_generation(
     if not plans_list:
         legacy = [nutrition_data.get("nutrition_plan_a"), nutrition_data.get("nutrition_plan_b"), nutrition_data.get("nutrition_plan_c")]
         plans_list = [p for p in legacy if isinstance(p, dict)]
+    _filter_allergens_before_normalization(
+        plans_list,
+        getattr(plan_req, "allergies", None) or [],
+        log_prefix="plan-gen nutrition",
+    )
+
     # See `run_full_plan_generation` for the full explanation of why we use
     # the adjusted target (full minus routine macros) here instead of the
     # full daily target.
@@ -3039,14 +3028,6 @@ async def run_nutrition_only_generation(
     custom_foods = _build_custom_foods(result, plan_req.foodsAvailable, enriched)
     if custom_foods:
         result["custom_foods"] = custom_foods
-
-    # Persist as the new active nutrition plan — mirrors what the full
-    # plan + workout-only paths do. Safe no-op when db/user_id aren't
-    # threaded through (legacy callers).
-    _persist_active_nutrition_plan(
-        db, user_id, plans_list, req=plan_req,
-        trainer_note=result.get("nutritionistNote") or None, reason="regen",
-    )
 
     # Post-assembly micro enrichment (same as full plan gen path)
     try:
@@ -3110,18 +3091,16 @@ async def run_nutrition_only_generation(
                             meal["micronutrients"] = {k: round(v, 2) for k, v in resummed.items()}
                             if "fiber" in resummed:
                                 meal["fiber"] = round(resummed["fiber"], 1)
-                print(f"[plan-gen nutrition] enriched {len(backfill)} items")
+                print(f"[plan-gen nutrition] enriched {len(all_backfill)} items")
     except Exception as exc:
         print(f"[plan-gen nutrition] post-assembly enrichment failed: {exc}")
 
-    # ── Allergen safety net ───────────────────────────────────────────
-    try:
-        from app.services.nutrition.allergen_filter import filter_allergens
-        user_allergens = getattr(plan_req, "allergies", None) or []
-        if user_allergens:
-            filter_allergens(plans_list, allergens=user_allergens)
-    except Exception as exc:
-        print(f"[plan-gen nutrition] allergen filter failed (non-fatal): {exc}")
+    # Persist as the new active nutrition plan after safety filtering,
+    # normalization, and micro enrichment so DB mirrors the response.
+    _persist_active_nutrition_plan(
+        db, user_id, plans_list, req=plan_req,
+        trainer_note=result.get("nutritionistNote") or None, reason="regen",
+    )
 
     return result
 

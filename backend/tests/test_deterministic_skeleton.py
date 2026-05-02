@@ -32,6 +32,7 @@ from app.services.nutrition.deterministic_skeleton import (
 )
 from app.services.nutrition.meal_assembler import (
     FoodMacros,
+    assemble_nutrition_response,
     assemble_template,
     validate_and_repair_skeletons,
 )
@@ -381,6 +382,53 @@ def test_filter_pantry_applies_both_gates() -> None:
     _ok("vegan + tree_nuts filter leaves tofu + brown rice")
 
 
+def test_incompatible_pantry_does_not_fall_back_to_blocked_foods() -> None:
+    """If diet/allergy filtering removes every food, the deterministic
+    skeleton must not silently repopulate meals from the raw blocked pantry."""
+    print("\n[test] incompatible pantry does not fall back to blocked foods")
+    pantry = ["whole milk", "cheddar", "eggs"]
+    req = _make_plan_request(
+        goal="maintain",
+        mealsPerDay=3,
+        mealVariety=1,
+        dietaryPreference="vegan",
+        allergies=["dairy"],
+    )
+    templates, _, _ = generate_deterministic_skeleton(req, 1, pantry)
+    blocked = {p.lower() for p in pantry}
+    for meal in templates[0].meals:
+        assert not any(ref.lower() in blocked for ref in meal.food_refs), (
+            f"blocked pantry food leaked into meal '{meal.name}': {meal.food_refs}"
+        )
+    _ok("blocked raw pantry was not reused after filtering emptied it")
+
+
+def test_assembler_surfaces_no_compatible_foods_validation() -> None:
+    """The full assembler should return an explicit validation sidecar when
+    no selected foods survive diet/allergy filtering."""
+    print("\n[test] assembler surfaces no-compatible-foods validation")
+    pantry = ["whole milk", "cheddar", "eggs"]
+    req = _make_plan_request(
+        goal="maintain",
+        mealsPerDay=3,
+        mealVariety=2,
+        dietaryPreference="vegan",
+        allergies=["dairy"],
+    )
+    out = assemble_nutrition_response(
+        None, req, (2100, 150, 250, 70), 2, pantry, {},
+    )
+    plans = out.get("nutrition_plans") or []
+    assert plans, "expected nutrition templates to be returned"
+    validation = plans[0].get("nutrition_validation") or {}
+    codes = {w.get("code") for w in validation.get("warnings") or []}
+    assert validation.get("ok") is False, f"validation should be false: {validation}"
+    assert "no_compatible_foods" in codes, f"missing warning codes: {codes}"
+    for meal in plans[0].get("meals") or []:
+        assert meal.get("items") == [], f"blocked items should not be assembled: {meal}"
+    _ok("nutrition_validation reports no_compatible_foods and emits no blocked items")
+
+
 # ─── 7. mealsPerDay in {5, 7} ───────────────────────────────────────────────
 
 
@@ -452,6 +500,8 @@ cases = [
     test_vegan_preference_filters_animal_foods,
     test_diet_disallows_helper,
     test_filter_pantry_applies_both_gates,
+    test_incompatible_pantry_does_not_fall_back_to_blocked_foods,
+    test_assembler_surfaces_no_compatible_foods_validation,
     test_meals_per_day_5,
     test_meals_per_day_7,
     test_determinism_identical_inputs_produce_identical_output,

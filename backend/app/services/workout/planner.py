@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import os
 import random
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,16 @@ from typing import Iterable
 # signatures) so removed Layer 4 block can stay removed.
 from .slots import Slot, density_adjust_slots  # noqa: F401
 from .cardio import classify_cardio
+
+
+class PlannerValidationError(ValueError):
+    """Raised only by strict/preflight validation when a plan has hard errors."""
+
+    def __init__(self, errors: list[dict]):
+        self.errors = errors
+        codes = ", ".join(str(e.get("code") or "planner_error") for e in errors)
+        super().__init__(f"Planner validation failed: {codes}")
+
 
 # ─── Layer 1 — Inputs ────────────────────────────────────────────────────────
 
@@ -1264,6 +1275,7 @@ def generate_workout_plan(
     *,
     perf_profiles: dict | None = None,
     recent_muscle_exercises: dict[str, set[str]] | None = None,
+    strict_validation: bool | None = None,
 ) -> dict:
     """Build a complete plan dict in the same shape `_call_workout_ai` returns:
 
@@ -1350,6 +1362,7 @@ def generate_workout_plan(
     _recipe_families = [
         (archetype_to_focus_family(a) or "?") for a in recipe
     ]
+    _recipe_archetypes = [getattr(a, "value", str(a)) for a in recipe]
     logger.info(
         f"[workout_planner] DIAG stage=after_recipe mode={profile.planner_mode} "
         f"days={inputs.days_per_week} "
@@ -1444,6 +1457,9 @@ def generate_workout_plan(
     goal_bucket = profile.bucket
 
     days_out: list[dict] = []
+    planner_warnings: list[dict] = []
+    no_candidate_slot_count = 0
+    fallback_day_count = 0
     # Track which focus families have already had a day in this plan.
     # When the same family comes up a second time (e.g., Legs day 2 in
     # PPL×2), seed used_exercise_slugs with what was on the LAST real
@@ -1509,6 +1525,18 @@ def generate_workout_plan(
                 day_focus_family=_day_focus_family,
             )
             if ex is None:
+                no_candidate_slot_count += 1
+                planner_warnings.append({
+                    "severity": "warning",
+                    "code": "no_eligible_exercise_for_slot",
+                    "message": f"No eligible exercise found for {slot.label}.",
+                    "day_index": day_idx,
+                    "day_focus": focus,
+                    "slot": slot.label,
+                    "movement_pattern": slot.movement_pattern,
+                    "role": slot.role,
+                    "archetype": archetype.value,
+                })
                 logger.debug(f"[workout_planner] slot '{slot.label}' had no eligible exercise")
                 continue
             prescription = prescribe_for_slot(archetype, slot, ex, inputs)
@@ -1539,6 +1567,45 @@ def generate_workout_plan(
         # in used_exercise_slugs via the loop above (line 1273).
         if _temp_history_slugs:
             used_exercise_slugs -= _temp_history_slugs
+
+        if not exercises_out:
+            fallback_day_count += 1
+            planner_warnings.append({
+                "severity": "error",
+                "code": "no_eligible_exercises_for_day",
+                "message": (
+                    "The planner could not build this training day from the "
+                    "current equipment, injury, and dislike constraints, so it "
+                    "substituted an active recovery day."
+                ),
+                "day_index": day_idx,
+                "day_focus": focus,
+                "archetype": archetype.value,
+                "constraints": {
+                    "equipment_count": len(inputs.equipment_slugs),
+                    "injury_count": len(inputs.injuries),
+                    "disliked_count": len(inputs.disliked_exercises),
+                },
+            })
+            recovery_day = generate_recovery_day(inputs.session_minutes)
+            recovery_exs = recovery_day.get("exercises", []) or []
+            for _rex in recovery_exs:
+                if isinstance(_rex, dict):
+                    _normalize_rest_key(_rex)
+            days_out.append({
+                "day": day_name,
+                "focus": "Recovery",
+                "archetype": DayArchetype.RECOVERY_EASY.value,
+                "category": "recovery",
+                "stimulus": "recovery",
+                "exercises": recovery_exs,
+                "planner_substitution": {
+                    "from_focus": focus,
+                    "from_archetype": archetype.value,
+                    "reason": "no_eligible_exercises_for_day",
+                },
+            })
+            continue
 
         days_out.append({
             "day": day_name,
@@ -1744,7 +1811,29 @@ def generate_workout_plan(
         "volume_audit": volume_audit,
         "planner_mode": profile.planner_mode,
         "goal_bucket": profile.bucket,
+        "planner_explain": {
+            "goal": inputs.goal,
+            "days_per_week": inputs.days_per_week,
+            "session_minutes": inputs.session_minutes,
+            "experience": inputs.experience,
+            "selected_split": lifting_split,
+            "user_chose_split": _user_chose_split,
+            "recipe_archetypes": _recipe_archetypes,
+            "recipe_families": _recipe_families,
+            "constraints": {
+                "equipment_count": len(inputs.equipment_slugs),
+                "injury_count": len(inputs.injuries),
+                "disliked_count": len(inputs.disliked_exercises),
+                "preferred_exercise_count": len(inputs.preferred_exercises),
+                "recent_focus_count": len(inputs.recent_focus_buckets),
+                "has_muscle_fatigue": bool(inputs.muscle_fatigue),
+            },
+            "no_candidate_slot_count": no_candidate_slot_count,
+            "fallback_day_count": fallback_day_count,
+        },
     }
+    if planner_warnings:
+        workout_plan_block["planner_warnings"] = planner_warnings
     if inputs.cycle_phase:
         workout_plan_block["cycle_adjustment"] = {
             "phase": inputs.cycle_phase,
@@ -1757,7 +1846,7 @@ def generate_workout_plan(
         "trainerNote": "",
         "workout_plan": workout_plan_block,
     }
-    plan = validate_plan(plan, inputs, recipe)
+    plan = validate_plan(plan, inputs, recipe, strict=strict_validation)
     _out_focuses = [
         (d.get("focus") or "?") for d in plan.get("workout_plan", {}).get("days", [])
     ]
@@ -1771,6 +1860,8 @@ def validate_plan(
     plan: dict,
     inputs: PlannerInputs,
     recipe: list | None = None,
+    *,
+    strict: bool | None = None,
 ) -> dict:
     """Post-generation validation pass.
 
@@ -1784,18 +1875,42 @@ def validate_plan(
 
     Violations are logged loudly. Lightweight repairs are attempted
     where possible (drop duplicates, swap adjacent same-family days).
-    The plan is returned (possibly mutated) regardless — we never fail
-    the generation entirely.
+    The plan is returned (possibly mutated) by default. Strict/preflight
+    callers can opt into PlannerValidationError for hard errors.
     """
     from .archetypes import DayArchetype, archetype_to_focus_family
-    days = plan.get("workout_plan", {}).get("days", [])
+    wp = plan.get("workout_plan", {})
+    days = wp.get("days", [])
     if not days:
         return plan
+    planner_warnings: list[dict] = list(wp.get("planner_warnings") or [])
+
+    def _record(
+        severity: str,
+        code: str,
+        message: str,
+        **details,
+    ) -> None:
+        entry = {
+            "severity": severity,
+            "code": code,
+            "message": message,
+        }
+        entry.update({k: v for k, v in details.items() if v is not None})
+        planner_warnings.append(entry)
 
     # ── Check 1: empty days ─────────────────────────────────────────
     for i, day in enumerate(days):
         exs = day.get("exercises", [])
         if not exs:
+            _record(
+                "error",
+                "empty_day",
+                f"Day {i} has no exercises.",
+                day_index=i,
+                day=day.get("day"),
+                archetype=day.get("archetype"),
+            )
             logger.debug(
                 f"[validate_plan] WARNING: Day {i} ({day.get('day')}) "
                 f"has no exercises — archetype={day.get('archetype')}"
@@ -1809,6 +1924,15 @@ def validate_plan(
         for ex in exs:
             slug = ex.get("_slug")
             if slug and slug in seen_slugs:
+                _record(
+                    "warning",
+                    "duplicate_exercise_removed",
+                    f"Removed duplicate exercise {ex.get('name')}.",
+                    day_index=i,
+                    day=day.get("day"),
+                    exercise=ex.get("name"),
+                    slug=slug,
+                )
                 logger.debug(
                     f"[validate_plan] REPAIR: dropping duplicate exercise "
                     f"'{ex.get('name')}' (slug={slug}) on Day {i}"
@@ -1895,6 +2019,14 @@ def validate_plan(
                 fam_j = _fam_of(days[j])
                 if fam_j and fam_j != fam_a and _swap_is_safe(i, j):
                     days[i], days[j] = days[j], days[i]
+                    _record(
+                        "warning",
+                        "adjacent_family_repaired",
+                        f"Swapped Day {i} with Day {j} to avoid adjacent {fam_a} days.",
+                        day_index=i,
+                        swap_day_index=j,
+                        focus_family=fam_a,
+                    )
                     logger.debug(
                         f"[validate_plan] REPAIR: swapped Day {i} ↔ Day {j} "
                         f"to break adjacent {fam_a!r} streak"
@@ -1902,6 +2034,14 @@ def validate_plan(
                     swapped = True
                     break
             if not swapped:
+                _record(
+                    "warning",
+                    "adjacent_family_unresolved",
+                    f"Adjacent {fam_a} days remain because no safe swap was available.",
+                    day_index=i,
+                    previous_day_index=i - 1,
+                    focus_family=fam_a,
+                )
                 logger.debug(
                     f"[validate_plan] WARNING: adjacent same-family days "
                     f"{i - 1}↔{i} (both {fam_a!r}) — no safe swap available"
@@ -1937,6 +2077,17 @@ def validate_plan(
             if pm == "full_body" and str(arch_str).startswith("hybrid_"):
                 continue
             if role in ("primary", "secondary") and pm and pm not in allowed:
+                _record(
+                    "error",
+                    "wrong_family_compound",
+                    f"Wrong-family compound kept on Day {i}: {ex.get('name')}.",
+                    day_index=i,
+                    day=day.get("day"),
+                    focus_family=fam,
+                    exercise=ex.get("name"),
+                    primary_muscle=pm,
+                    allowed=sorted(allowed),
+                )
                 logger.warning(
                     f"[validate_plan] WARNING: keeping wrong-family "
                     f"compound '{ex.get('name')}' (primary_muscle={pm}) "
@@ -1963,6 +2114,13 @@ def validate_plan(
             expected = {"push", "pull", "legs"}
             missing = expected - recipe_families
             if missing:
+                _record(
+                    "error",
+                    "preferred_ppl_missing_family",
+                    f"User chose PPL but recipe is missing {sorted(missing)}.",
+                    missing=sorted(missing),
+                    present=sorted(recipe_families),
+                )
                 logger.debug(
                     f"[validate_plan] WARNING: user chose PPL but recipe "
                     f"is missing families: {sorted(missing)} "
@@ -1988,11 +2146,25 @@ def validate_plan(
         else:
             resistance_streak = 0
     if max_heavy_streak >= 3:
+        _record(
+            "warning",
+            "heavy_day_streak",
+            f"{max_heavy_streak} consecutive heavy days detected.",
+            max_streak=max_heavy_streak,
+            stimuli=stimuli,
+        )
         logger.debug(
             f"[validate_plan] WARNING: {max_heavy_streak} consecutive heavy days "
             f"detected — stimuli={stimuli}. Consider rebalancing."
         )
     if max_resistance_streak >= 4:
+        _record(
+            "warning",
+            "resistance_day_streak",
+            f"{max_resistance_streak} consecutive resistance days without recovery.",
+            max_streak=max_resistance_streak,
+            stimuli=stimuli,
+        )
         logger.debug(
             f"[validate_plan] WARNING: {max_resistance_streak} consecutive resistance "
             f"days without recovery — stimuli={stimuli}"
@@ -2007,7 +2179,27 @@ def validate_plan(
         if audit["ok"]:
             logger.debug(f"[validate_plan] region OK: {region} — lower={audit['lower_days']} upper={audit['upper_days']}")
         else:
+            _record(
+                "warning",
+                "region_priority_underfilled",
+                audit.get("message") or f"Region priority {region} was underfilled.",
+                region=region,
+                audit=audit,
+            )
             logger.debug(f"[validate_plan] REGION WARNING: {audit['message']}")
+
+    if planner_warnings:
+        wp["planner_warnings"] = planner_warnings
+    errors = [w for w in planner_warnings if w.get("severity") == "error"]
+    wp["planner_validation"] = {
+        "ok": not errors,
+        "error_count": len(errors),
+        "warning_count": sum(1 for w in planner_warnings if w.get("severity") == "warning"),
+        "strict_ready": not errors,
+    }
+    strict_env = os.environ.get("PLANNER_STRICT_VALIDATION", "").strip().lower() in {"1", "true", "yes", "on"}
+    if (strict if strict is not None else strict_env) and errors:
+        raise PlannerValidationError(errors)
 
     return plan
 

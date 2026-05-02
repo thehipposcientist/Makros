@@ -86,11 +86,11 @@ def backfill_all_food_rows(
                 continue
             if (i + 1) % chunk_size == 0:
                 logger.info("gut_backfill_all_foods_progress", extra={
-                    "processed": processed, "created": created, "ai_called": ai_called,
+                    "processed": processed, "created_count": created, "ai_called": ai_called,
                 })
 
     logger.info("gut_backfill_all_foods_done", extra={
-        "processed": processed, "created": created, "ai_called": ai_called,
+        "processed": processed, "created_count": created, "ai_called": ai_called,
     })
     return {"processed": processed, "created": created, "ai_called": ai_called}
 
@@ -151,11 +151,11 @@ def backfill_food_metadata(
             if (i + 1) % chunk_size == 0:
                 logger.info(
                     "gut_backfill_metadata_progress",
-                    extra={"processed": processed, "created": created, "ai_called": ai_called},
+                    extra={"processed": processed, "created_count": created, "ai_called": ai_called},
                 )
 
     logger.info("gut_backfill_metadata_done", extra={
-        "processed": processed, "created": created, "ai_called": ai_called,
+        "processed": processed, "created_count": created, "ai_called": ai_called,
     })
     return {"processed": processed, "created": created, "ai_called": ai_called}
 

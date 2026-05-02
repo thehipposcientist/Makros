@@ -20,9 +20,13 @@ export function sessionExercisesToLoggedPayload(
       const sets = Array.isArray(ex.sets) ? ex.sets : [];
       return {
         name: String(ex.name),
+        slug: ex.slug ?? ex.exerciseSlug ?? ex._slug ?? null,
         target_sets: numberOrUndefined(ex.targetSets) ?? sets.length,
         target_reps: typeof ex.targetReps === 'string' ? ex.targetReps : null,
         equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
+        primary_muscle: ex.primaryMuscle ?? ex.primary_muscle ?? ex._primary_muscle ?? null,
+        secondary_muscles: ex.secondaryMuscles ?? ex.secondary_muscles ?? ex._secondary_muscles ?? null,
+        is_compound: ex.isCompound ?? ex.is_compound ?? null,
         order_index: idx,
         sets: sets.map((set: any, si: number) => ({
           set_number: numberOrUndefined(set.setNumber ?? set.set_number) ?? si + 1,

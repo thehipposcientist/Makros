@@ -995,6 +995,9 @@ class WorkoutCompletion(SQLModel, table=True):
     # completion so the planner can space heavy days from heavy days
     # and avoid back-to-back high-intensity stimulus.
     stimulus: str | None = Field(default=None)
+    source_context: str | None = Field(default=None, index=True)
+    template_id: str | None = Field(default=None)
+    plan_day_id: int | None = Field(default=None, index=True)
     activity_category: str | None = Field(default=None)
     activity_subtype: str | None = Field(default=None)
     activity_intensity: str | None = Field(default=None)
@@ -1047,6 +1050,10 @@ class WorkoutExercise(SQLModel, table=True):
     name: str
     order_index: int
     equipment: EquipmentType = Field(sa_column=Column(SAEnum(EquipmentType), nullable=False))
+    exercise_slug_snapshot: str | None = Field(default=None, index=True)
+    primary_muscle_snapshot: str | None = Field(default=None)
+    secondary_muscles_snapshot: list | None = Field(default=None, sa_column=Column(JSON))
+    is_compound_snapshot: bool | None = Field(default=None)
     notes: str | None = Field(default=None)
     target_reps_text: str | None = Field(default=None)  # e.g. "8–12" or "AMRAP"
     rest_seconds: int | None = Field(default=None)

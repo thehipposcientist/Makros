@@ -514,14 +514,8 @@ def auto_renew_week(
     from app.services.workout.plan_review_v2 import compute_weekly_review
     from app.services.coach.apply_action import apply_action
     from app.models import UserProfile, UserPreferences, NutritionPlan
-    from app.services.workout.planner import PlannerInputs, generate_workout_plan
-    from app.services.workout.history import (
-        most_recent_completed_focus,
-        build_history_familiarity,
-        recent_exercise_slugs_by_muscle,
-    )
-    from app.services.workout.activity_impact import compute_rolling_fatigue
-    from app.services.workout.history import get_recent_completions_for_fatigue
+    from app.services.workout.planner import generate_workout_plan
+    from app.services.workout.planner_context import build_planweek_planner_context
     from app.services.workout.weekly_recipe import PLANNER_VERSION
     from app.seed_exercises_data import SEED_EXERCISES
     import json
@@ -600,77 +594,26 @@ def auto_renew_week(
     goal_pace = active_goal.pace.value if active_goal and active_goal.pace else None
     days_per_week = int(getattr(prefs, "days_per_week", None) or getattr(profile, "days_per_week", 4) or 4)
     session_minutes = int(getattr(prefs, "workout_duration_minutes", None) or getattr(profile, "workout_duration_minutes", 45) or 45)
-    experience = str(getattr(profile, "experience_level", "intermediate") or "intermediate")
-    equipment = list(getattr(prefs, "equipment", None) or getattr(profile, "equipment", []) or [])
     preferred_split = getattr(prefs, "preferred_split", None) or getattr(profile, "preferred_split", None)
-    injuries = []
-    seen_injuries = set()
-    for source in (getattr(profile, "injuries", None), getattr(prefs, "injuries", None)):
-        if isinstance(source, str):
-            values = [source]
-        elif isinstance(source, list):
-            values = source
-        else:
-            values = []
-        for raw in values:
-            token = str(raw or "").strip()
-            if token and token.lower() not in seen_injuries:
-                seen_injuries.add(token.lower())
-                injuries.append(token)
-    disliked = list(getattr(prefs, "disliked_exercises", []) or [])
 
-    from app.routers.ai.plans import _resolve_owned_equipment_slugs
-    owned_slugs = _resolve_owned_equipment_slugs(equipment)
-
-    recent_focus_buckets: tuple = ()
-    recent_focus_families: tuple = ()
-    try:
-        buckets, families = most_recent_completed_focus(user_id, db, hours=240, limit=10)
-        recent_focus_buckets = tuple(buckets)
-        recent_focus_families = tuple(families)
-    except Exception:
-        pass
-
-    muscle_fatigue = None
-    try:
-        completions = get_recent_completions_for_fatigue(user_id, db)
-        if completions:
-            snapshot = compute_rolling_fatigue(completions)
-            muscle_fatigue = snapshot.muscle_fatigue.to_dict() if snapshot else None
-    except Exception:
-        pass
-
-    try:
-        history_familiarity = build_history_familiarity(user_id, db)
-    except Exception:
-        history_familiarity = {}
-    try:
-        recent_muscle_exercises = recent_exercise_slugs_by_muscle(user_id, db)
-    except Exception:
-        recent_muscle_exercises = {}
-
-    inputs = PlannerInputs(
+    planner_ctx = build_planweek_planner_context(
+        db,
+        user_id,
+        profile,
+        prefs,
         goal=goal,
         days_per_week=days_per_week,
         session_minutes=session_minutes,
-        experience=experience.lower(),
-        equipment_slugs=tuple(sorted(owned_slugs)),
         preferred_split=preferred_split,
-        injuries=tuple(injuries),
-        disliked_exercises=tuple(disliked),
-        rng_seed=user_id,
-        recent_focus_buckets=recent_focus_buckets,
-        recent_focus_families=recent_focus_families,
-        muscle_fatigue=muscle_fatigue,
+        avg_resting_hr=avg_resting_hr,
         cycle_phase=cycle_phase,
         day_of_cycle=day_of_cycle,
-        load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
 
     plan = generate_workout_plan(
-        inputs, SEED_EXERCISES,
-        history_familiarity=history_familiarity,
-        recent_muscle_exercises=recent_muscle_exercises,
+        planner_ctx.inputs, SEED_EXERCISES,
+        history_familiarity=planner_ctx.history_familiarity,
+        recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
     )
     workout_days = plan.get("workout_plan", {}).get("days", [])
     if not workout_days:

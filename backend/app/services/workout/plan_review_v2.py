@@ -4,7 +4,7 @@ Replaces the legacy AI plan_review (permanently disabled). Emits
 structured, actionable recommendations from existing signals:
 
   - Weekly volume by muscle group  (weekly_volume.compute_weekly_volume)
-  - Session adherence              (completed vs planned)
+  - Session adherence              (PlanDay-matched completions vs PlanWeek)
   - Weight-trend vs goal            (adaptive_macros recommendations)
   - Cardio minutes by style         (Zone 2 vs intervals)
   - Readiness / recovery flags      (recovery_flags, fatigue)
@@ -28,7 +28,7 @@ from typing import Any, Literal
 from sqlmodel import select
 
 from app.models import (
-    DailyNutritionMetrics, UserGoal, UserRollup, WorkoutCompletion, WorkoutPlan,
+    DailyNutritionMetrics, PlanDay, PlanWeek, UserGoal, UserRollup, WorkoutCompletion, WorkoutPlan,
 )
 from app.services.workout.weekly_volume import (
     WeeklyVolumeSnapshot, compute_weekly_volume,
@@ -224,6 +224,81 @@ def _sum_cardio_minutes(completions: list[WorkoutCompletion]) -> tuple[float, fl
     return total, zone2
 
 
+def _planned_focus(plan_day: PlanDay) -> str:
+    if not isinstance(plan_day.workout_json, dict):
+        return ""
+    return str(plan_day.workout_json.get("focus") or "").strip()
+
+
+def _focuses_match(planned: str, completed: str) -> bool:
+    if not planned or not completed:
+        return False
+
+    def _clean(value: str) -> str:
+        return " ".join(value.lower().replace("_", " ").split())
+
+    if _clean(planned) == _clean(completed):
+        return True
+    try:
+        from app.services.workout.focus_normalize import normalize_focus_to_family
+        planned_family = normalize_focus_to_family(planned)
+        completed_family = normalize_focus_to_family(completed)
+        return bool(planned_family and completed_family and planned_family == completed_family)
+    except Exception:
+        return False
+
+
+def _plan_week_session_counts(
+    db: Any,
+    user_id: int,
+    *,
+    start: date,
+    end_date: date,
+    completions: list[WorkoutCompletion],
+) -> tuple[int, int, bool]:
+    """Return planned sessions + plan-matched completions from PlanWeek."""
+    plan_week = db.exec(
+        select(PlanWeek)
+        .where(PlanWeek.user_id == user_id)
+        .where(PlanWeek.start_date <= end_date)
+        .where(PlanWeek.end_date >= start)
+        .order_by(PlanWeek.start_date.desc(), PlanWeek.id.desc())
+    ).first()
+    if plan_week is None or plan_week.id is None:
+        return 0, 0, False
+
+    plan_days = db.exec(
+        select(PlanDay)
+        .where(PlanDay.plan_week_id == plan_week.id)
+        .where(PlanDay.day_date >= start)
+        .where(PlanDay.day_date <= end_date)
+        .order_by(PlanDay.day_date)
+    ).all()
+    planned_days = [
+        day for day in plan_days
+        if not day.is_rest
+        and _planned_focus(day)
+        and _planned_focus(day).lower() != "rest"
+    ]
+    completed_count = 0
+    for day in planned_days:
+        if day.status == "completed":
+            completed_count += 1
+            continue
+        planned = _planned_focus(day)
+        matched = any(
+            c.workout_date == day.day_date
+            and (
+                getattr(c, "plan_day_id", None) == day.id
+                or _focuses_match(planned, c.focus_label or "")
+            )
+            for c in completions
+        )
+        if matched:
+            completed_count += 1
+    return len(planned_days), completed_count, True
+
+
 def compute_weekly_review(
     db: Any,
     user_id: int,
@@ -272,23 +347,31 @@ def compute_weekly_review(
         .where(WorkoutCompletion.workout_date <= end_date)
     ).all()
 
-    # Planned sessions.
-    plan = db.exec(
-        select(WorkoutPlan)
-        .where(WorkoutPlan.user_id == user_id, WorkoutPlan.is_active == True)
-    ).first()
-    planned = 0
-    # NOTE: WorkoutPlan column is `plan_json` (singular). The plural
-    # `plans_json` lives on NutritionPlan only — easy to mix up.
-    if plan and plan.plan_json:
-        try:
-            days_list = plan.plan_json.get("days") or []
-            planned = len([d for d in days_list if d.get("focus") and (d.get("focus") or "").lower() != "rest"])
-        except Exception:
-            planned = 0
+    planned, completed_for_adherence, used_plan_week = _plan_week_session_counts(
+        db,
+        user_id,
+        start=start,
+        end_date=end_date,
+        completions=completions,
+    )
+    if not used_plan_week:
+        # Fallback for very old accounts/tests that only have legacy WorkoutPlan.
+        plan = db.exec(
+            select(WorkoutPlan)
+            .where(WorkoutPlan.user_id == user_id, WorkoutPlan.is_active == True)
+        ).first()
+        # NOTE: WorkoutPlan column is `plan_json` (singular). The plural
+        # `plans_json` lives on NutritionPlan only — easy to mix up.
+        if plan and plan.plan_json:
+            try:
+                days_list = plan.plan_json.get("days") or []
+                planned = len([d for d in days_list if d.get("focus") and (d.get("focus") or "").lower() != "rest"])
+            except Exception:
+                planned = 0
+        completed_for_adherence = len(completions)
 
     adherence_pct = (
-        100.0 * len(completions) / planned
+        100.0 * completed_for_adherence / planned
         if planned > 0 else 0.0
     )
     cardio_mins, zone2_mins = _sum_cardio_minutes(completions)
@@ -345,7 +428,7 @@ def compute_weekly_review(
             priority="suggest",
             title=f"Drop to {max(2, planned - 1)} days / week",
             detail=(
-                f"You completed {len(completions)} of {planned} planned sessions "
+                f"You completed {completed_for_adherence} of {planned} planned sessions "
                 f"({adherence_pct:.0f}%). Dropping a day keeps consistency high."
             ),
             action={"type": "change_days_per_week", "value": max(2, planned - 1)},
@@ -561,7 +644,7 @@ def compute_weekly_review(
 
     headline = _build_headline(
         goal_bucket=goal_bucket,
-        sessions_completed=len(completions),
+        sessions_completed=completed_for_adherence,
         sessions_planned=planned,
         adherence_pct=adherence_pct,
         volume=volume,
@@ -569,6 +652,12 @@ def compute_weekly_review(
         poor_recovery=poor_recovery,
         avg_sleep_hours=avg_sleep_hours,
     )
+    if planned > 0 and completed_for_adherence == 0 and len(completions) > 0:
+        extra = len(completions)
+        headline = (
+            f"0/{planned} planned sessions, plus {extra} other logged "
+            f"session{'s' if extra != 1 else ''}. Keep logging; align one with the plan to unlock adherence coaching."
+        )
 
     # Smoothed weight (EMA) — pulled from the 7-day UserRollup. Cleaner
     # than the raw slope alone (which is noisy week-to-week) and gives
@@ -589,7 +678,7 @@ def compute_weekly_review(
         week_start=start,
         week_end=end_date,
         goal=goal_bucket,
-        sessions_completed=len(completions),
+        sessions_completed=completed_for_adherence,
         sessions_planned=planned,
         adherence_pct=adherence_pct,
         cardio_minutes=cardio_mins,

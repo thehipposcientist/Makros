@@ -54,6 +54,7 @@ class CompletedExercisePayload(BaseModel):
     of sets the user actually logged — may be shorter than the planned
     target set count."""
     name: str
+    slug: str | None = None
     target_sets: int | None = None
     target_reps: str | None = None
     equipment: str | None = None
@@ -69,6 +70,9 @@ class WorkoutCompleteRequest(BaseModel):
     focus_label: str
     duration_seconds: int = 0
     stimulus: str | None = None  # strength/hypertrophy/volume/conditioning/etc.
+    source_context: str | None = None
+    template_id: str | None = None
+    plan_day_id: int | None = None
     # ── NEW: optional per-exercise detail ─────────────────────────
     # When present, the completion path ALSO creates matching
     # WorkoutSession / WorkoutExercise / ExerciseSet rows so downstream
@@ -439,8 +443,8 @@ def generate_single_day(
     )
 
     # Resolve equipment slugs
-    from app.routers.ai.plans import _resolve_owned_equipment_slugs
-    owned_slugs = _resolve_owned_equipment_slugs(body.equipment)
+    from app.services.workout.equipment import resolve_owned_equipment_slugs
+    owned_slugs = resolve_owned_equipment_slugs(body.equipment)
 
     # Get recent history for rotation + exercise variation
     recent_focus_buckets: tuple[str, ...] = ()
@@ -783,9 +787,9 @@ def generate_full_week(
         build_history_familiarity, most_recent_completed_focus,
         recent_exercise_slugs_by_muscle,
     )
-    from app.routers.ai.plans import _resolve_owned_equipment_slugs
+    from app.services.workout.equipment import resolve_owned_equipment_slugs
 
-    owned_slugs = _resolve_owned_equipment_slugs(body.equipment)
+    owned_slugs = resolve_owned_equipment_slugs(body.equipment)
 
     recent_focus_buckets: tuple[str, ...] = ()
     recent_focus_families: tuple[str, ...] = ()
@@ -1360,6 +1364,9 @@ def mark_workout_complete(
     if existing:
         existing.duration_seconds   = body.duration_seconds
         existing.stimulus           = body.stimulus if body.stimulus is not None else existing.stimulus
+        existing.source_context     = body.source_context or existing.source_context
+        existing.template_id        = body.template_id or existing.template_id
+        existing.plan_day_id        = body.plan_day_id if body.plan_day_id is not None else existing.plan_day_id
         existing.activity_category  = body.activity_category or existing.activity_category
         existing.activity_subtype   = body.activity_subtype or existing.activity_subtype
         existing.activity_intensity = body.activity_intensity or existing.activity_intensity
@@ -1382,6 +1389,9 @@ def mark_workout_complete(
             focus_label=body.focus_label,
             duration_seconds=body.duration_seconds,
             stimulus=body.stimulus,
+            source_context=body.source_context,
+            template_id=body.template_id,
+            plan_day_id=body.plan_day_id,
             activity_category=body.activity_category,
             activity_subtype=body.activity_subtype,
             activity_intensity=body.activity_intensity,
@@ -1435,6 +1445,29 @@ def mark_workout_complete(
                     return EquipmentType[raw.upper()]
                 except Exception:
                     return EquipmentType.OTHER
+
+            def _muscle_value(raw) -> str | None:
+                if raw is None:
+                    return None
+                return (raw.value if hasattr(raw, "value") else str(raw)).lower()
+
+            def _muscle_list(raw) -> list[str]:
+                if not raw:
+                    return []
+                return [
+                    v
+                    for v in (_muscle_value(item) for item in raw)
+                    if v
+                ]
+
+            def _session_source(raw: str | None) -> WorkoutSource:
+                normalized = (raw or "planned").strip().lower()
+                if normalized in ("planned", "plan", "generated"):
+                    return WorkoutSource.GENERATED
+                if normalized in ("manual_activity", "apple_health", "watch", "coach_log"):
+                    return WorkoutSource.LOGGED
+                return WorkoutSource.CUSTOM
+
             # Upsert WorkoutSession by (user, date, focus). If the same
             # (date, focus) pair already has a session, overwrite its
             # exercises so re-submitting a completion replaces rather
@@ -1462,6 +1495,7 @@ def mark_workout_complete(
                     db.exec(sql_delete(ExerciseSet).where(col(ExerciseSet.workout_exercise_id).in_(old_ex_ids)))
                     db.exec(sql_delete(WorkoutExercise).where(col(WorkoutExercise.id).in_(old_ex_ids)))
                 existing_session.completed_at = datetime.now(timezone.utc)
+                existing_session.source = _session_source(body.source_context)
                 session_row = existing_session
                 db.add(session_row)
                 db.flush()
@@ -1471,7 +1505,7 @@ def mark_workout_complete(
                     name=body.focus_label or "Workout",
                     focus=body.focus_label or "",
                     workout_date=body.workout_date,
-                    source=WorkoutSource.GENERATED,
+                    source=_session_source(body.source_context),
                     completed_at=datetime.now(timezone.utc),
                 )
                 db.add(session_row)
@@ -1479,12 +1513,37 @@ def mark_workout_complete(
 
             for idx, ex_payload in enumerate(body.exercises):
                 resolved_exercise_id = None
-                if ex_payload.name:
+                seed = None
+                if ex_payload.slug:
+                    seed = db.exec(
+                        select(_Exercise).where(_Exercise.slug == ex_payload.slug)
+                    ).first()
+                if seed is None and ex_payload.name:
                     seed = db.exec(
                         select(_Exercise).where(_Exercise.name.ilike(ex_payload.name))
                     ).first()
-                    if seed is not None:
-                        resolved_exercise_id = seed.id
+                if seed is not None:
+                    resolved_exercise_id = seed.id
+
+                primary_snapshot = (
+                    (ex_payload.primary_muscle or "").strip().lower()
+                    or _muscle_value(getattr(seed, "primary_muscle", None))
+                )
+                secondary_snapshot = (
+                    [str(m).lower() for m in ex_payload.secondary_muscles]
+                    if ex_payload.secondary_muscles is not None
+                    else _muscle_list(getattr(seed, "secondary_muscles", None))
+                )
+                slug_snapshot = (
+                    (ex_payload.slug or "").strip()
+                    or getattr(seed, "slug", None)
+                    or None
+                )
+                is_compound_snapshot = (
+                    ex_payload.is_compound
+                    if ex_payload.is_compound is not None
+                    else getattr(seed, "is_compound", None)
+                )
 
                 exercise = WorkoutExercise(
                     session_id=session_row.id,
@@ -1492,6 +1551,10 @@ def mark_workout_complete(
                     name=ex_payload.name,
                     order_index=ex_payload.order_index or idx,
                     equipment=_coerce_equipment(ex_payload.equipment),
+                    exercise_slug_snapshot=slug_snapshot,
+                    primary_muscle_snapshot=primary_snapshot,
+                    secondary_muscles_snapshot=secondary_snapshot,
+                    is_compound_snapshot=is_compound_snapshot,
                     target_reps_text=ex_payload.target_reps,
                     rest_seconds=None,
                 )
@@ -1565,9 +1628,10 @@ def mark_workout_complete(
             elif body.exercises:
                 from app.seed_exercises_data import SEED_EXERCISES
                 seed_map = {e["name"].lower(): e for e in SEED_EXERCISES}
+                seed_slug_map = {e.get("slug", "").lower(): e for e in SEED_EXERCISES if e.get("slug")}
                 ex_list = []
                 for ep in body.exercises:
-                    seed = seed_map.get(ep.name.lower(), {})
+                    seed = seed_slug_map.get((ep.slug or "").lower()) or seed_map.get(ep.name.lower(), {})
                     secondary_muscles = (
                         ep.secondary_muscles
                         if ep.secondary_muscles is not None
@@ -1584,6 +1648,7 @@ def mark_workout_complete(
                     ]
                     ex_list.append({
                         "name": ep.name,
+                        "slug": ep.slug or seed.get("slug"),
                         "primary_muscle": ep.primary_muscle or seed.get("primary_muscle", ""),
                         "secondary_muscles": secondary_muscles or [],
                         "is_compound": ep.is_compound if ep.is_compound is not None else seed.get("is_compound", False),

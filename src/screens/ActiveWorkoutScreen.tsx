@@ -3427,6 +3427,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           const hasExtras = Object.keys(extras).length > 0;
           return {
             name: ex.name,
+            slug: ex.slug ?? (ex as any).exerciseSlug ?? (ex as any)._slug ?? null,
             target_sets: typeof ex.targetSets === 'number' ? ex.targetSets : null,
             target_reps: typeof ex.targetReps === 'string' ? ex.targetReps : null,
             equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
@@ -3486,12 +3487,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           // Network or auth flake — fall back to legacy keyword auto-match.
         }
 
+        const sourceContext = (workout as any)._source_context ?? (workout as any).sourceContext ?? 'planned';
+        const templateId = (workout as any)._template_id ?? (workout as any).templateId ?? null;
+        const planDayId = (workout as any).plan_day_id ?? (workout as any).planDayId ?? null;
         const completeResp = await logWorkoutDone(authToken, dateKey(now), workout.focus, actualDurationSeconds, exercisesPayload, {
           category: pureCardioFocus ? 'cardio' : 'strength',
           subtype: workout.focus.toLowerCase().replace(/\s+/g, '_'),
           intensity: workout.stimulus === 'strength' ? 'hard' : workout.stimulus === 'volume' ? 'easy' : 'moderate',
           cardioStyle: cardioLikeFocus ? (/interval|hiit/i.test(workout.focus) ? 'intervals' : 'steady') : undefined,
-        }, healthMetrics, undefined, gearIdsForLog);
+        }, healthMetrics, undefined, gearIdsForLog, {
+          sourceContext,
+          templateId,
+          planDayId,
+          stimulus: workout.stimulus ?? null,
+        });
         console.log('[workout] logWorkoutDone OK — fatigue should update on next load');
 
         // Refresh the daily health snapshot so today's workout minutes

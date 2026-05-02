@@ -1276,6 +1276,7 @@ export type LoggedSetPayload = {
 
 export type LoggedExercisePayload = {
   name: string;
+  slug?: string | null;
   target_sets?: number | null;
   target_reps?: string | null;
   equipment?: string | null;
@@ -1428,12 +1429,23 @@ export async function logWorkoutDone(
    *  running shoes both keyworded with 'run'). Passing [] is a deliberate
    *  "no gear used today" signal. */
   gearIds?: number[],
+  source?: {
+    sourceContext?: 'planned' | 'saved_template' | 'custom_strength' | 'manual_activity' | 'apple_health' | 'watch' | 'coach_log' | string;
+    templateId?: string | null;
+    planDayId?: number | null;
+    stimulus?: string | null;
+  },
 ): Promise<WorkoutCompleteResponse> {
   const activityHrSummary = activity?.avgHeartRate
     ? { avgBpm: activity.avgHeartRate, maxBpm: activity.avgHeartRate, zoneMinutes: [] }
     : undefined;
   const hrSummary = healthMetrics?.hrSummary ?? activityHrSummary;
   const caloriesBurned = healthMetrics?.caloriesBurned ?? activity?.caloriesBurned;
+  const sourceContext = source?.sourceContext
+    ?? (activity?.source === 'apple_health' ? 'apple_health'
+      : activity?.source === 'watch' ? 'watch'
+        : activity?.category ? 'manual_activity'
+          : undefined);
 
   const result = await request<WorkoutCompleteResponse>('/workouts/complete', {
     method: 'POST',
@@ -1442,6 +1454,10 @@ export async function logWorkoutDone(
       workout_date,
       focus_label,
       duration_seconds,
+      ...(sourceContext ? { source_context: sourceContext } : {}),
+      ...(source?.templateId ? { template_id: source.templateId } : {}),
+      ...(source?.planDayId != null ? { plan_day_id: source.planDayId } : {}),
+      ...(source?.stimulus ? { stimulus: source.stimulus } : {}),
       ...(exercises && exercises.length > 0 ? { exercises } : {}),
       ...(activity?.category ? {
         activity_category: activity.category,
@@ -1468,7 +1484,7 @@ export async function logWorkoutDone(
     focus_label,
     duration_seconds,
     exercise_count: exercises?.length ?? 0,
-    source: activity?.source ?? 'phone',
+    source: sourceContext ?? activity?.source ?? 'phone',
   }, token);
   return result;
 }

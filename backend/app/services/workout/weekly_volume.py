@@ -1,9 +1,10 @@
 """Weekly volume-by-muscle-group tracker.
 
 Counts hard sets per muscle group per week from completed `ExerciseSet`
-rows, joined through `WorkoutExercise` and `Exercise` for the muscle
-tag. Secondary-muscle contributions are weighted at 0.5x since a
-primary-muscle set is a stronger stimulus than being a synergist.
+rows. Seed-library exercises read muscle tags from `Exercise`; custom or
+template exercises use the muscle snapshot stored on `WorkoutExercise`.
+Secondary-muscle contributions are weighted at 0.5x since a primary-muscle
+set is a stronger stimulus than being a synergist.
 
 Used by:
   - `plan_review_v2.py` — decide whether volume is high/low/balanced per
@@ -137,6 +138,20 @@ def _classify(muscle: str, total_sets: float, spike_ratio: float = 1.0) -> tuple
     return "in_range", lo, hi
 
 
+def _muscle_to_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = value.value if hasattr(value, "value") else str(value)
+    text = text.strip().lower()
+    return text or None
+
+
+def _muscles_to_list(value: Any) -> list[str]:
+    if not value:
+        return []
+    return [m for m in (_muscle_to_str(item) for item in value) if m]
+
+
 def compute_weekly_volume(
     db: Any,
     user_id: int,
@@ -191,10 +206,12 @@ def compute_weekly_volume(
             WorkoutExercise.id,
             Exercise.primary_muscle,
             Exercise.secondary_muscles,
+            WorkoutExercise.primary_muscle_snapshot,
+            WorkoutExercise.secondary_muscles_snapshot,
             ExerciseSet.completed,
             ExerciseSet.set_type,
         )
-        .join(Exercise, WorkoutExercise.exercise_id == Exercise.id)
+        .outerjoin(Exercise, WorkoutExercise.exercise_id == Exercise.id)
         .join(ExerciseSet, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
         .where(WorkoutExercise.session_id.in_(session_ids))
     ).all()
@@ -205,15 +222,17 @@ def compute_weekly_volume(
     secondary_counts: dict[str, float] = defaultdict(float)
     total_hard_sets = 0.0
 
-    for we_id, pm, sm, completed, set_type in joined_rows:
+    for we_id, pm, sm, pm_snapshot, sm_snapshot, completed, set_type in joined_rows:
         # Build muscle map lazily on first encounter for this workout_exercise.
         if we_id not in we_muscle:
-            prim_str = (pm.value if hasattr(pm, "value") else str(pm)).lower()
-            sec_list: list[str] = []
-            for s in (sm or []):
-                sec_list.append((str(s.value) if hasattr(s, "value") else str(s)).lower())
+            prim_str = _muscle_to_str(pm) or _muscle_to_str(pm_snapshot)
+            sec_list = _muscles_to_list(sm) or _muscles_to_list(sm_snapshot)
+            if not prim_str:
+                continue
             we_muscle[we_id] = (prim_str, sec_list)
 
+        if we_id not in we_muscle:
+            continue
         if not completed:
             continue
         st = (set_type or "working").lower()
@@ -306,18 +325,24 @@ def _compute_prior_weeks_avg(
         select(
             WorkoutExercise.id,
             Exercise.primary_muscle,
+            WorkoutExercise.primary_muscle_snapshot,
             ExerciseSet.completed,
             ExerciseSet.set_type,
         )
-        .join(Exercise, WorkoutExercise.exercise_id == Exercise.id)
+        .outerjoin(Exercise, WorkoutExercise.exercise_id == Exercise.id)
         .join(ExerciseSet, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
         .where(WorkoutExercise.session_id.in_(session_ids))
     ).all()
     we_muscle: dict[int, str] = {}
     totals: dict[str, float] = {}
-    for we_id, pm, completed, set_type in rows:
+    for we_id, pm, pm_snapshot, completed, set_type in rows:
         if we_id not in we_muscle:
-            we_muscle[we_id] = (pm.value if hasattr(pm, "value") else str(pm)).lower()
+            muscle = _muscle_to_str(pm) or _muscle_to_str(pm_snapshot)
+            if not muscle:
+                continue
+            we_muscle[we_id] = muscle
+        if we_id not in we_muscle:
+            continue
         if not completed:
             continue
         st = (set_type or "working").lower()

@@ -1307,6 +1307,39 @@ def assemble_nutrition_response(
 
     meals_per_day = _clamp_meals_per_day(req.mealsPerDay)
     generate_count = max(0, meals_per_day - routine_count)
+    nutrition_warnings: list[dict] = []
+    generation_foods = list(allowed_foods or [])
+    try:
+        from .deterministic_skeleton import _filter_pantry
+        generation_foods = _filter_pantry(
+            generation_foods,
+            getattr(req, "dietaryPreference", None),
+            getattr(req, "allergies", None) or [],
+        )
+    except Exception as exc:
+        nutrition_warnings.append({
+            "severity": "warning",
+            "code": "pre_generation_food_filter_failed",
+            "message": f"Could not pre-filter foods for diet/allergy constraints: {exc}",
+        })
+    if allowed_foods and not generation_foods:
+        nutrition_warnings.append({
+            "severity": "error",
+            "code": "no_compatible_foods",
+            "message": (
+                "All selected foods conflict with the current diet or allergy "
+                "settings. Add compatible foods before external testing this plan."
+            ),
+            "allowed_foods_count": len(allowed_foods),
+        })
+    elif len(generation_foods) < len(allowed_foods or []):
+        nutrition_warnings.append({
+            "severity": "info",
+            "code": "incompatible_foods_filtered",
+            "message": "Some selected foods were removed before meal generation because of diet or allergy settings.",
+            "allowed_foods_count": len(allowed_foods or []),
+            "compatible_foods_count": len(generation_foods),
+        })
 
     # Always log the inputs the assembler saw so it's obvious from the
     # server log whether routines made it through the client → backend
@@ -1347,6 +1380,12 @@ def assemble_nutrition_response(
                 "fat":      t_fat,
             },
             "meals": [],
+            "nutrition_validation": {
+                "ok": not any(w.get("severity") == "error" for w in nutrition_warnings),
+                "warnings": list(nutrition_warnings),
+                "allowed_foods_count": len(allowed_foods or []),
+                "compatible_foods_count": len(generation_foods),
+            },
         } for _ in range(max(1, variety_n))]
         return {
             "nutritionistNote": note,
@@ -1366,9 +1405,10 @@ def assemble_nutrition_response(
     if variety_n == 1:
         print(
             f"[meal_assembler] deterministic variety=1 path — skipping skeleton AI, "
-            f"building {generate_count} balanced meals from {len(allowed_foods)} foods"
+            f"building {generate_count} balanced meals from {len(generation_foods)} "
+            f"compatible foods ({len(allowed_foods or [])} selected)"
         )
-        templates = [_build_deterministic_template(allowed_foods, generate_count)]
+        templates = [_build_deterministic_template(generation_foods, generate_count)]
         note = ""
         supps = []
     elif _deterministic_skeleton_enabled():
@@ -1393,7 +1433,7 @@ def assemble_nutrition_response(
         try:
             req.mealsPerDay = generate_count
             templates, note, supps = generate_deterministic_skeleton(
-                req, variety_n, allowed_foods, db=db, user_id=user_id,
+                req, variety_n, generation_foods, db=db, user_id=user_id,
                 preferred_foods=getattr(req, "customFoodNames", None) or [],
                 recent_meal_names=_recent_names,
             )
@@ -1401,7 +1441,8 @@ def assemble_nutrition_response(
             req.mealsPerDay = original_mpd
         print(
             f"[meal_assembler] deterministic skeleton path — variety_n={variety_n}, "
-            f"generate_count={generate_count}, pantry={len(allowed_foods)} foods"
+            f"generate_count={generate_count}, pantry={len(generation_foods)} "
+            f"compatible foods ({len(allowed_foods or [])} selected)"
         )
     else:
         # Temporarily override mealsPerDay on the request so the AI prompt +
@@ -1412,13 +1453,13 @@ def assemble_nutrition_response(
         try:
             req.mealsPerDay = generate_count
             templates, note, supps = call_skeleton_ai(
-                client, req, adjusted, variety_n, allowed_foods,
+                client, req, adjusted, variety_n, generation_foods,
                 db=db, user_id=user_id,
             )
         finally:
             req.mealsPerDay = original_mpd
 
-    templates = validate_and_repair_skeletons(templates, allowed_foods, generate_count)
+    templates = validate_and_repair_skeletons(templates, generation_foods, generate_count)
 
     # Step 3 — food lookup
     food_lookup = build_food_lookup(enriched)
@@ -1448,6 +1489,7 @@ def assemble_nutrition_response(
     # validator miscounted. Client overlays `routine_count` routines on
     # top, so the final displayed count lands on `meals_per_day`.
     for idx, tpl_out in enumerate(plans_list):
+        template_warnings = list(nutrition_warnings)
         actual = len(tpl_out.get("meals") or [])
         # Micronutrient coverage audit — count how many of the outgoing
         # meals actually carry non-zero micros, and which fields are
@@ -1455,6 +1497,7 @@ def assemble_nutrition_response(
         # on the client has nothing to work with.
         meals_with_micros = 0
         micro_field_fills: dict[str, int] = {}
+        low_confidence_meals: list[str] = []
         for m in tpl_out.get("meals") or []:
             micros = m.get("micronutrients") if isinstance(m.get("micronutrients"), dict) else {}
             nonzero = {k: v for k, v in micros.items() if isinstance(v, (int, float)) and v > 0}
@@ -1462,7 +1505,9 @@ def assemble_nutrition_response(
                 meals_with_micros += 1
             for k in nonzero:
                 micro_field_fills[k] = micro_field_fills.get(k, 0) + 1
-        total_meals = max(1, len(tpl_out.get("meals") or []))
+            if m.get("confidence") == "low":
+                low_confidence_meals.append(str(m.get("name") or f"Meal {len(low_confidence_meals) + 1}"))
+        total_meals = len(tpl_out.get("meals") or [])
         top_fields = sorted(micro_field_fills.items(), key=lambda kv: -kv[1])[:6]
         print(
             f"[meal_assembler] OUT template {idx}: meals={actual} "
@@ -1471,15 +1516,50 @@ def assemble_nutrition_response(
             f"top micros={[f'{k}:{v}' for k, v in top_fields]}"
         )
         if actual != generate_count:
+            template_warnings.append({
+                "severity": "error",
+                "code": "meal_count_mismatch",
+                "message": f"Expected {generate_count} generated meals, got {actual}.",
+                "expected": generate_count,
+                "actual": actual,
+            })
             print(
                 f"[meal_assembler] WARN template {idx} meal count mismatch: "
                 f"expected {generate_count}, got {actual}"
             )
+        if actual == 0 and generate_count > 0:
+            template_warnings.append({
+                "severity": "error",
+                "code": "empty_generated_meals",
+                "message": "No generated meals could be assembled from the compatible food list.",
+            })
         if meals_with_micros == 0 and total_meals > 0:
+            template_warnings.append({
+                "severity": "warning",
+                "code": "zero_micronutrient_coverage",
+                "message": "Generated meals have no micronutrient data; score confidence may be low.",
+            })
             print(
                 f"[meal_assembler] WARN template {idx} has ZERO micronutrient data — "
                 f"check enrichment path + DB seed (extra_nutrients JSON)"
             )
+        if low_confidence_meals:
+            template_warnings.append({
+                "severity": "warning",
+                "code": "low_confidence_meals",
+                "message": "Some meals relied on stub foods or could not hit macro targets cleanly.",
+                "meals": low_confidence_meals[:6],
+            })
+        tpl_out["nutrition_validation"] = {
+            "ok": not any(w.get("severity") == "error" for w in template_warnings),
+            "warnings": template_warnings,
+            "allowed_foods_count": len(allowed_foods or []),
+            "compatible_foods_count": len(generation_foods),
+            "meals_expected": generate_count,
+            "meals_actual": actual,
+            "micronutrient_meals": meals_with_micros,
+            "total_meals": total_meals,
+        }
 
     print(
         f"[meal_assembler] assembled {len(plans_list)} template(s) "

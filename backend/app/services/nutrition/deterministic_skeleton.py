@@ -507,13 +507,6 @@ def generate_deterministic_skeleton(
         getattr(req, "dietaryPreference", None),
         getattr(req, "allergies", None) or [],
     )
-    # If filtering emptied the pantry entirely, fall back to the raw list —
-    # the downstream `validate_and_repair_skeletons` / allergen filter will
-    # still strip disallowed foods, and we'd rather emit a flagged meal
-    # than an empty plan.
-    if not pantry:
-        pantry = list(allowed_foods)
-
     slot_types = _slot_types_for(meals_per_day)
 
     _recent_set: set[str] = {

@@ -50,6 +50,7 @@ import {
   loadWorkoutTemplates,
   deleteWorkoutTemplate,
 } from '../utils/workoutHistory';
+import { workoutFromTemplateForToday } from '../utils/workoutTemplates';
 import { workoutSessionToLoggedPayload } from '../utils/workoutLogPayload';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
@@ -2267,10 +2268,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 cyclePhase: cycle?.phase ?? null,
                 dayOfCycle: cycle?.dayOfCycle ?? null,
               });
-              unifiedPrepScore = prep.score;
-              unifiedPrepLabel = prep.label;
-              // Update the ref so subsequent syncs reuse this value.
-              canonicalPrepRef.current = { score: prep.score, label: prep.label, computedAt: Date.now() };
+              if (prep.label === '—' || prep.score <= 0) {
+                unifiedPrepScore = null;
+                unifiedPrepLabel = null;
+                canonicalPrepRef.current = null;
+              } else {
+                unifiedPrepScore = prep.score;
+                unifiedPrepLabel = prep.label;
+                // Update the ref so subsequent syncs reuse this value.
+                canonicalPrepRef.current = { score: prep.score, label: prep.label, computedAt: Date.now() };
+              }
             }
           } catch { /* keep the last displayed readiness score */ }
         }
@@ -4446,6 +4453,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 session.focus,
                 session.durationSeconds,
                 exercisesPayload.length > 0 ? exercisesPayload : undefined,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+                { sourceContext: 'coach_log' },
               ).catch(() => null);
             }
             if (w.date === today) {
@@ -5502,6 +5514,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Full prep result from the background card — passed as initialPrep to the
   // modal card so it renders immediately without a blank → pop-in flash.
   const bgPrepDataRef = useRef<import('../services/preparedness').PreparednessResult | null>(null);
+  const applyReadinessScore = useCallback((score: number, label: string) => {
+    if (label === '—' || score <= 0) {
+      canonicalPrepRef.current = null;
+      setReadinessBadge(null);
+      return;
+    }
+    canonicalPrepRef.current = { score, label, computedAt: Date.now() };
+    setReadinessBadge({ score, label });
+  }, []);
 
   // Prefer the persisted PlanWeek (dated, stable for 7 days). Fall back
   // to the legacy rolling-from-today schedule only for users who don't
@@ -6172,10 +6193,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     calorieTarget={todayPlan?.targets?.calories ?? null}
                     todaysFocus={todaysFocus}
                     workoutDone={todayDone}
-                    onScoreComputed={(score, label) => {
-                      canonicalPrepRef.current = { score, label, computedAt: Date.now() };
-                      setReadinessBadge({ score, label });
-                    }}
+                    onScoreComputed={applyReadinessScore}
                     onDataComputed={(prep) => { bgPrepDataRef.current = prep; }}
                   />
                 </View>
@@ -6926,10 +6944,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       isFreeTier={isFreeTier}
                       onStartTemplate={(template) => {
                         import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {});
-                        onStartWorkout({
-                          ...template.workout,
-                          day: new Date().toLocaleDateString('en-US', { weekday: 'long' }),
-                        });
+                        onStartWorkout(workoutFromTemplateForToday(template));
                       }}
                       onDeleteTemplate={(template) => {
                         Alert.alert('Delete template?', `Remove ${template.name}?`, [
@@ -7063,10 +7078,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             defaultExpanded
                             lockedExpanded
                             initialPrep={bgPrepDataRef.current}
-                            onScoreComputed={(score, label) => {
-                              canonicalPrepRef.current = { score, label, computedAt: Date.now() };
-                              setReadinessBadge({ score, label });
-                            }}
+                            onScoreComputed={applyReadinessScore}
                           />
                         </View>
                       );
@@ -8554,6 +8566,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             focus,
             exercises: [],
             stimulus: 'mixed',
+            _source_context: 'custom_strength',
           };
           onStartWorkout?.(emptyDay);
         }}
@@ -12153,7 +12166,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           </View>
         )}
       </View>
-      {isToday && readinessBadge && (() => {
+      {isToday && readinessBadge && readinessBadge.label !== '—' && readinessBadge.score > 0 && (() => {
         const rc = readinessBadge.label === 'Primed' || readinessBadge.label === 'Ready'
           ? accentColor
           : readinessBadge.label === 'Moderate' ? tc.warning : tc.error;

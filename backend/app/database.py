@@ -273,6 +273,56 @@ def _ensure_workout_completion_health_columns() -> None:
         print(f"[migration] workout_completions health columns add failed (non-fatal): {e}")
 
 
+def _ensure_workout_history_source_columns() -> None:
+    """Add source/origin + custom-exercise snapshots used by history rollups."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS source_context VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS template_id VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS plan_day_id INTEGER"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_exercises "
+                "ADD COLUMN IF NOT EXISTS exercise_slug_snapshot VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_exercises "
+                "ADD COLUMN IF NOT EXISTS primary_muscle_snapshot VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_exercises "
+                "ADD COLUMN IF NOT EXISTS secondary_muscles_snapshot JSONB"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_exercises "
+                "ADD COLUMN IF NOT EXISTS is_compound_snapshot BOOLEAN"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_completion_source_context "
+                "ON workout_completions(source_context)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_completion_plan_day_id "
+                "ON workout_completions(plan_day_id)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_workout_exercise_slug_snapshot "
+                "ON workout_exercises(exercise_slug_snapshot)"
+            ))
+    except Exception as e:
+        print(f"[migration] workout history source columns add failed (non-fatal): {e}")
+
+
 def _ensure_user_preferences_equipment_settings_column() -> None:
     """Add strength-equipment load settings to user_preferences.
 
@@ -1399,6 +1449,7 @@ def create_db_and_tables():
     _ensure_food_nutrition_extras_column()
     _ensure_workout_completion_stimulus_column()
     _ensure_workout_completion_health_columns()
+    _ensure_workout_history_source_columns()
     _ensure_user_preferences_equipment_settings_column()
     _ensure_user_supplement_stack_group_column()
     _ensure_coach_apply_state_columns()

@@ -1,6 +1,6 @@
 # Database Migrations
 
-Last updated: 2026-04-30
+Last updated: 2026-05-02
 
 ## Pattern
 
@@ -18,6 +18,7 @@ SQLModel `create_all` creates tables but does NOT ALTER existing columns. Idempo
 | `_ensure_user_subscription_tier_column` | `User.subscription_tier` plus one-shot existing-user Pro backfill marker in `app_migrations`. |
 | `_ensure_workout_completion_stimulus_column` | Stimulus tracking on completions. |
 | `_ensure_workout_completion_health_columns` | Health signals on completions. |
+| `_ensure_workout_history_source_columns` | Completion source metadata plus custom exercise muscle/slug snapshots for history rollups. |
 | `_ensure_user_preferences_equipment_settings_column` | `UserPreferences.equipment_settings` JSONB for plate/dumbbell loading constraints. |
 | `_ensure_coach_apply_state_columns` | Durable coach-apply settings: workout duration, core frequency, preference-level injury flags, deload date, and one-day macro overrides. |
 | `_ensure_exercise_tracking_mode_column` | `Exercise.default_tracking_mode`. |

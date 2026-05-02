@@ -29,6 +29,8 @@ Where historical workout data is read:
       `actual_reps`, `actual_weight_lbs`, `rpe`, `completed`
     - `Exercise`         (table `exercises`)         — joins on `slug`
       so the planner's `_slug` field can resolve to a `WorkoutExercise`.
+      When there is no seed-library match, `WorkoutExercise` snapshots
+      carry slug + muscle metadata for custom/template movements.
 
 Where it influences the new targets:
     - `recommend_next_session_load` reads the prior session's working
@@ -101,8 +103,8 @@ def build_history_familiarity(
 
     cutoff = date.today() - timedelta(days=days)
     rows = db_session.exec(
-        select(Exercise.slug)
-        .join(WorkoutExercise, WorkoutExercise.exercise_id == Exercise.id)
+        select(Exercise.slug, WorkoutExercise.exercise_slug_snapshot)
+        .outerjoin(Exercise, WorkoutExercise.exercise_id == Exercise.id)
         .join(WorkoutSession, WorkoutSession.id == WorkoutExercise.session_id)
         .where(WorkoutSession.user_id == user_id)
         .where(WorkoutSession.completed_at.is_not(None))
@@ -110,7 +112,8 @@ def build_history_familiarity(
     ).all()
 
     counts: dict[str, int] = {}
-    for slug in rows:
+    for seed_slug, snapshot_slug in rows:
+        slug = seed_slug or snapshot_slug
         if slug:
             counts[slug] = counts.get(slug, 0) + 1
     return counts
@@ -135,8 +138,13 @@ def recent_exercise_slugs_by_muscle(
 
     cutoff = date.today() - timedelta(days=days)
     rows = db_session.exec(
-        select(ExModel.slug, ExModel.primary_muscle)
-        .join(WorkoutExercise, WorkoutExercise.exercise_id == ExModel.id)
+        select(
+            ExModel.slug,
+            ExModel.primary_muscle,
+            WorkoutExercise.exercise_slug_snapshot,
+            WorkoutExercise.primary_muscle_snapshot,
+        )
+        .outerjoin(ExModel, WorkoutExercise.exercise_id == ExModel.id)
         .join(WorkoutSession, WorkoutSession.id == WorkoutExercise.session_id)
         .where(WorkoutSession.user_id == user_id)
         .where(WorkoutSession.completed_at.is_not(None))
@@ -144,8 +152,11 @@ def recent_exercise_slugs_by_muscle(
     ).all()
 
     result: dict[str, set[str]] = {}
-    for slug, muscle in rows:
+    for seed_slug, seed_muscle, snapshot_slug, snapshot_muscle in rows:
+        slug = seed_slug or snapshot_slug
+        muscle = seed_muscle or snapshot_muscle
         if slug and muscle:
+            muscle = (muscle.value if hasattr(muscle, "value") else str(muscle)).lower()
             if muscle not in result:
                 result[muscle] = set()
             result[muscle].add(slug)
@@ -463,7 +474,7 @@ def get_recent_completions_for_fatigue(
     activity fields. Used by `compute_rolling_fatigue` in activity_impact.py.
     """
     from sqlmodel import select
-    from app.models import WorkoutCompletion
+    from app.models import RecoveryActivity, WorkoutCompletion
     cutoff = date.today() - timedelta(days=days)
     rows = db_session.exec(
         select(WorkoutCompletion)
@@ -472,7 +483,7 @@ def get_recent_completions_for_fatigue(
         .order_by(WorkoutCompletion.workout_date.desc())
         .limit(20)
     ).all()
-    return [
+    completion_items = [
         {
             "workout_date": row.workout_date,
             # Wall-clock finish time. When present, the fatigue engine
@@ -485,12 +496,48 @@ def get_recent_completions_for_fatigue(
             "activity_category": getattr(row, "activity_category", None),
             "activity_subtype": getattr(row, "activity_subtype", None),
             "activity_intensity": getattr(row, "activity_intensity", None),
+            "source_context": getattr(row, "source_context", None),
             "cardio_style": getattr(row, "cardio_style", None),
             "resolved_muscle_fatigue": getattr(row, "resolved_muscle_fatigue", None),
             "soreness_areas": getattr(row, "soreness_areas", None),
         }
         for row in rows
     ]
+    recovery_rows = db_session.exec(
+        select(RecoveryActivity)
+        .where(RecoveryActivity.user_id == user_id)
+        .where(RecoveryActivity.activity_date >= cutoff)
+        .order_by(RecoveryActivity.activity_date.desc())
+        .limit(20)
+    ).all()
+    mobility_modalities = {"stretching", "mobility", "yoga"}
+    recovery_items = []
+    for row in recovery_rows:
+        modality = (row.modality or "recovery").strip().lower()
+        focus_label = "Mobility" if modality in mobility_modalities else "Recovery"
+        recovery_items.append({
+            "workout_date": row.activity_date,
+            "completed_at": getattr(row, "created_at", None),
+            "focus_label": focus_label,
+            "duration_seconds": max(1, int(row.duration_min or 1)) * 60,
+            "stimulus": "mobility" if focus_label == "Mobility" else "recovery",
+            "activity_category": "recovery",
+            "activity_subtype": modality,
+            "activity_intensity": "easy",
+            "source_context": "recovery_activity",
+            "cardio_style": None,
+            "resolved_muscle_fatigue": None,
+            "soreness_areas": None,
+        })
+
+    return sorted(
+        completion_items + recovery_items,
+        key=lambda item: (
+            item.get("workout_date") or date.min,
+            item.get("completed_at").isoformat() if hasattr(item.get("completed_at"), "isoformat") else "",
+        ),
+        reverse=True,
+    )
 
 
 # ─── Layer 2 — Last session lookup ───────────────────────────────────────────

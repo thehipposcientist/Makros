@@ -1,6 +1,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, CompletedSet, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, MealRoutineEntry, DailyNutritionPlan, MealSuggestion, WorkoutDay, SavedWorkoutTemplate } from '../types';
 import { migrateNutritionPlanShape } from './mealItems';
+import {
+  deleteWorkoutTemplateFromStorage,
+  loadWorkoutTemplatesFromStorage,
+  saveWorkoutTemplatesToStorage,
+  upsertWorkoutTemplateInStorage,
+} from './workoutTemplates';
 
 const HISTORY_KEY        = 'workoutHistory';
 const SKIPPED_KEY        = 'skippedWorkouts';
@@ -8,7 +14,6 @@ const SUMMARIES_KEY      = 'workoutSummaries';
 const GOAL_HIST_KEY      = 'goalHistory';
 const PLAN_CHANGES_KEY   = 'planChangeHistory';
 const MEAL_ROUTINES_KEY  = 'mealRoutines';
-const WORKOUT_TEMPLATES_KEY = 'workoutTemplates';
 const PRESERVED_WORKOUTS_KEY = 'preservedCompletedWorkouts';
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -159,28 +164,17 @@ export async function loadPreservedCompletedWorkouts(): Promise<PreservedWorkout
 // ── Workout templates ────────────────────────────────────────────────────────
 
 export async function loadWorkoutTemplates(): Promise<SavedWorkoutTemplate[]> {
-  try {
-    const raw = await AsyncStorage.getItem(WORKOUT_TEMPLATES_KEY);
-    const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  return loadWorkoutTemplatesFromStorage(AsyncStorage);
 }
 
 export async function saveWorkoutTemplates(templates: SavedWorkoutTemplate[]): Promise<void> {
   try {
-    await AsyncStorage.setItem(WORKOUT_TEMPLATES_KEY, JSON.stringify(templates));
+    await saveWorkoutTemplatesToStorage(AsyncStorage, templates);
   } catch {}
 }
 
 export async function deleteWorkoutTemplate(templateId: string): Promise<void> {
-  if (!templateId) return;
-  const templates = await loadWorkoutTemplates();
-  const next = templates.filter(t => t.id !== templateId);
-  if (next.length !== templates.length) {
-    await saveWorkoutTemplates(next);
-  }
+  await deleteWorkoutTemplateFromStorage(AsyncStorage, templateId);
 }
 
 /**
@@ -196,32 +190,24 @@ export async function deleteWorkoutTemplate(templateId: string): Promise<void> {
  * instead of silently no-op'ing.
  */
 export async function upsertWorkoutTemplate(template: SavedWorkoutTemplate): Promise<SavedWorkoutTemplate[]> {
-  const templates = await loadWorkoutTemplates();
-  const idx = templates.findIndex(t => t.id === template.id);
-  if (idx < 0) {
-    // New row — gate against the per-tier limit.
-    try {
-      const [{ canCreateWorkoutTemplate, FREE_WORKOUT_TEMPLATE_LIMIT }] = await Promise.all([
-        import('./subscription'),
-      ]);
-      const raw = await AsyncStorage.getItem('userProfile');
-      const profile = raw ? JSON.parse(raw) : null;
-      if (!canCreateWorkoutTemplate(profile, templates.length)) {
-        throw new Error(
-          `Free accounts can save up to ${FREE_WORKOUT_TEMPLATE_LIMIT} workout templates. Upgrade to Pro for unlimited.`,
-        );
-      }
-    } catch (e: any) {
-      // Re-throw the cap error so the caller can show a typed alert.
-      // Only a missing subscription module is silenced (dev / offline).
-      if (typeof e?.message === 'string' && e.message.includes('templates')) throw e;
-    }
+  try {
+    const { canCreateWorkoutTemplate, FREE_WORKOUT_TEMPLATE_LIMIT } = await import('./subscription');
+    return upsertWorkoutTemplateInStorage(template, {
+      storage: AsyncStorage,
+      loadProfile: async () => {
+        const raw = await AsyncStorage.getItem('userProfile');
+        return raw ? JSON.parse(raw) : null;
+      },
+      canCreateWorkoutTemplate,
+      freeWorkoutTemplateLimit: FREE_WORKOUT_TEMPLATE_LIMIT,
+    });
+  } catch (e: any) {
+    // Re-throw the cap error so the caller can show a typed alert. If
+    // subscription gating fails to import in a dev/offline harness, fall
+    // back to persistence only, matching the previous best-effort behavior.
+    if (typeof e?.message === 'string' && e.message.includes('templates')) throw e;
+    return upsertWorkoutTemplateInStorage(template, { storage: AsyncStorage });
   }
-  const next = idx >= 0
-    ? templates.map(t => t.id === template.id ? template : t)
-    : [template, ...templates];
-  await saveWorkoutTemplates(next);
-  return next;
 }
 
 // ── Skipped days ──────────────────────────────────────────────────────────────
