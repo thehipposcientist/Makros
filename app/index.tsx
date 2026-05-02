@@ -1583,6 +1583,7 @@ export default function Index() {
         onStartWorkout={handleStartWorkout}
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}
+        onOpenSettings={() => setShowSettings(true)}
         onSaveProfile={(updated, mode) => handleSaveProfile(updated, mode)}
         onActivePlanWeekEndChange={setActivePlanWeekEnd}
         onSwitchDayRegen={handleSwitchDayRegen}
@@ -1734,6 +1735,10 @@ export default function Index() {
             // to settle without a perceptible delay.
             setShowAccount(false);
             setTimeout(() => setShowTutorial(true), 200);
+          }}
+          onOpenSettings={() => {
+            setShowAccount(false);
+            setTimeout(() => setShowSettings(true), 200);
           }}
         />
       )}

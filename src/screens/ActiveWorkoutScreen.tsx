@@ -473,70 +473,128 @@ function getTimedExerciseTip(name: string, targetReps?: string | number, loggedS
   return null;
 }
 
-type MetricField = { key: string; label: string; placeholder: string; keyboard: 'decimal-pad' | 'number-pad' | 'default' };
+type MetricField = {
+  key: string;
+  label: string;
+  placeholder: string;
+  keyboard: 'decimal-pad' | 'number-pad' | 'default';
+  helper: string;
+};
 
-function getTimedMetricsFields(name: string, cardioGuidance?: any): MetricField[] | null {
+type TimedMetricsConfig = {
+  title: string;
+  subtitle: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  fields: MetricField[];
+};
+
+function getTimedMetricsConfig(name: string, cardioGuidance?: any): TimedMetricsConfig | null {
   const n = (name || '').toLowerCase();
   // Incline walk — speed + incline are the primary metrics
   if (/incline.?walk|incline.*tread|\bwalk\b/.test(n)) {
-    return [
-      { key: 'speed', label: 'Speed (mph)', placeholder: 'e.g. 3.5', keyboard: 'decimal-pad' },
-      { key: 'incline', label: 'Incline %', placeholder: 'e.g. 6', keyboard: 'decimal-pad' },
-      { key: 'distance', label: 'Distance (mi)', placeholder: 'e.g. 1.5', keyboard: 'decimal-pad' },
-    ];
+    return {
+      title: 'Incline walk details',
+      subtitle: 'Speed, incline, and distance make incline sessions comparable in Progress.',
+      icon: 'walk-outline',
+      fields: [
+        { key: 'speed', label: 'Speed', placeholder: cardioGuidance?.speed_range ?? '3.5 mph', keyboard: 'decimal-pad', helper: 'Console average' },
+        { key: 'incline', label: 'Incline', placeholder: cardioGuidance?.incline_range ?? '6%', keyboard: 'decimal-pad', helper: 'Average grade' },
+        { key: 'distance', label: 'Distance', placeholder: '1.5 mi', keyboard: 'decimal-pad', helper: 'Total session' },
+      ],
+    };
   }
   if (/treadmill|running|jogging|run\b/.test(n)) {
-    return [
-      { key: 'pace', label: 'Avg Pace', placeholder: 'e.g. 8:30 /mi', keyboard: 'default' },
-      { key: 'distance', label: 'Distance (mi)', placeholder: 'e.g. 3.1', keyboard: 'decimal-pad' },
-      { key: 'incline', label: 'Incline %', placeholder: 'e.g. 2', keyboard: 'decimal-pad' },
-    ];
+    return {
+      title: 'Run details',
+      subtitle: 'Distance and pace feed endurance charts and pace history.',
+      icon: 'analytics-outline',
+      fields: [
+        { key: 'pace', label: 'Avg Pace', placeholder: '8:30 /mi', keyboard: 'default', helper: 'Overall pace' },
+        { key: 'distance', label: 'Distance', placeholder: '3.1 mi', keyboard: 'decimal-pad', helper: 'Total distance' },
+        { key: 'incline', label: 'Incline', placeholder: cardioGuidance?.incline_range ?? '2%', keyboard: 'decimal-pad', helper: 'If treadmill' },
+      ],
+    };
   }
   if (/row|rowing|erg/.test(n)) {
-    return [
-      { key: 'split', label: 'Avg Split', placeholder: 'e.g. 2:05 /500m', keyboard: 'default' },
-      { key: 'distance', label: 'Distance (m)', placeholder: 'e.g. 5000', keyboard: 'number-pad' },
-      { key: 'spm', label: 'Strokes/min', placeholder: 'e.g. 24', keyboard: 'number-pad' },
-    ];
+    return {
+      title: 'Row details',
+      subtitle: 'Split and stroke rate keep erg sessions apples-to-apples.',
+      icon: 'boat-outline',
+      fields: [
+        { key: 'split', label: 'Avg Split', placeholder: cardioGuidance?.pace_per_500m ?? '2:05 /500m', keyboard: 'default', helper: 'Overall split' },
+        { key: 'distance', label: 'Distance', placeholder: '5000 m', keyboard: 'number-pad', helper: 'Meters rowed' },
+        { key: 'spm', label: 'Stroke Rate', placeholder: cardioGuidance?.stroke_rate ?? '24 spm', keyboard: 'number-pad', helper: 'Average SPM' },
+      ],
+    };
   }
   if (/bike|cycling|ride|peloton|spin/.test(n)) {
     // If equipment has watts capability (IC6, smart bike), show watts + RPM
     if (cardioGuidance?.watts_range || cardioGuidance?.rpm_range) {
-      return [
-        { key: 'watts', label: 'Avg Watts', placeholder: 'e.g. 175', keyboard: 'number-pad' },
-        { key: 'cadence', label: 'Cadence (rpm)', placeholder: 'e.g. 85', keyboard: 'number-pad' },
-        { key: 'output', label: 'Output (kJ)', placeholder: 'e.g. 350', keyboard: 'number-pad' },
-      ];
+      return {
+        title: 'Bike power details',
+        subtitle: 'Power and cadence are the cleanest way to compare bike sessions.',
+        icon: 'bicycle-outline',
+        fields: [
+          { key: 'watts', label: 'Avg Watts', placeholder: cardioGuidance?.watts_range ?? '175', keyboard: 'number-pad', helper: 'Console average' },
+          { key: 'cadence', label: 'Cadence', placeholder: cardioGuidance?.rpm_range ?? '85 rpm', keyboard: 'number-pad', helper: 'Average RPM' },
+          { key: 'output', label: 'Output', placeholder: '350 kJ', keyboard: 'number-pad', helper: 'If shown' },
+        ],
+      };
     }
-    return [
-      { key: 'distance', label: 'Distance (mi)', placeholder: 'e.g. 12.5', keyboard: 'decimal-pad' },
-      { key: 'cadence', label: 'Avg Cadence', placeholder: 'e.g. 85 rpm', keyboard: 'number-pad' },
-      { key: 'output', label: 'Output (kJ)', placeholder: 'e.g. 350', keyboard: 'number-pad' },
-    ];
+    return {
+      title: 'Bike details',
+      subtitle: 'Use the bike console values so future rides compare cleanly.',
+      icon: 'bicycle-outline',
+      fields: [
+        { key: 'distance', label: 'Distance', placeholder: '12.5 mi', keyboard: 'decimal-pad', helper: 'Total ride' },
+        { key: 'cadence', label: 'Cadence', placeholder: '85 rpm', keyboard: 'number-pad', helper: 'Average RPM' },
+        { key: 'output', label: 'Output', placeholder: '350 kJ', keyboard: 'number-pad', helper: 'If shown' },
+      ],
+    };
   }
   if (/swim/.test(n)) {
-    return [
-      { key: 'distance', label: 'Distance (m)', placeholder: 'e.g. 1500', keyboard: 'number-pad' },
-      { key: 'laps', label: 'Laps', placeholder: 'e.g. 30', keyboard: 'number-pad' },
-    ];
+    return {
+      title: 'Swim details',
+      subtitle: 'Distance and laps make pool sessions easier to compare over time.',
+      icon: 'water-outline',
+      fields: [
+        { key: 'distance', label: 'Distance', placeholder: '1500 m', keyboard: 'number-pad', helper: 'Total swim' },
+        { key: 'laps', label: 'Laps', placeholder: '30', keyboard: 'number-pad', helper: 'Pool lengths' },
+      ],
+    };
   }
   if (/stair|elliptical/.test(n)) {
-    return [
-      { key: 'floors', label: 'Floors / Level', placeholder: 'e.g. 45', keyboard: 'number-pad' },
-      { key: 'calories', label: 'Calories', placeholder: 'e.g. 280', keyboard: 'number-pad' },
-    ];
+    return {
+      title: /stair/.test(n) ? 'Stair details' : 'Elliptical details',
+      subtitle: 'Levels, floors, and calories help compare machine sessions.',
+      icon: 'speedometer-outline',
+      fields: [
+        { key: 'floors', label: /stair/.test(n) ? 'Floors' : 'Level', placeholder: /stair/.test(n) ? '45' : '8', keyboard: 'number-pad', helper: 'Machine value' },
+        { key: 'calories', label: 'Calories', placeholder: '280', keyboard: 'number-pad', helper: 'Optional' },
+      ],
+    };
   }
   if (/hik/.test(n)) {
-    return [
-      { key: 'distance', label: 'Distance (mi)', placeholder: 'e.g. 4.2', keyboard: 'decimal-pad' },
-      { key: 'elevation', label: 'Elevation (ft)', placeholder: 'e.g. 800', keyboard: 'number-pad' },
-    ];
+    return {
+      title: 'Hike details',
+      subtitle: 'Distance plus elevation tells a better story than duration alone.',
+      icon: 'trail-sign-outline',
+      fields: [
+        { key: 'distance', label: 'Distance', placeholder: '4.2 mi', keyboard: 'decimal-pad', helper: 'Total hike' },
+        { key: 'elevation', label: 'Elevation', placeholder: '800 ft', keyboard: 'number-pad', helper: 'Gain' },
+      ],
+    };
   }
   if (/farmer|carry|suitcase/.test(n)) {
-    return [
-      { key: 'weight', label: 'Weight (lbs)', placeholder: 'e.g. 70 each', keyboard: 'default' },
-      { key: 'distance', label: 'Distance (ft)', placeholder: 'e.g. 120', keyboard: 'number-pad' },
-    ];
+    return {
+      title: 'Carry details',
+      subtitle: 'Load and distance are the useful progression signals for carries.',
+      icon: 'walk-outline',
+      fields: [
+        { key: 'weight', label: 'Load', placeholder: '70 each', keyboard: 'default', helper: 'Per hand if split' },
+        { key: 'distance', label: 'Distance', placeholder: '120 ft', keyboard: 'number-pad', helper: 'Total carry' },
+      ],
+    };
   }
   // Boxing, kickboxing, yoga, stretching, etc — no metrics to capture
   return null;
@@ -4733,27 +4791,41 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               )}
                               {/* Optional metrics input — shown when done, exercise-type-specific */}
                               {allDone && (() => {
-                                const metrics = getTimedMetricsFields(ex.name, (ex as any).cardioGuidance);
-                                if (!metrics) return null;
+                                const metricConfig = getTimedMetricsConfig(ex.name, (ex as any).cardioGuidance);
+                                if (!metricConfig) return null;
                                 return (
-                                  <View style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 12, marginTop: 10, gap: 8, borderWidth: 1, borderColor: themeColors.border }}>
-                                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                                      <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textMuted }}>Session Details</Text>
-                                      <Text style={{ fontSize: 10, color: themeColors.textMuted, fontStyle: 'italic' }}>Fill in what's relevant</Text>
+                                  <View style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 12, marginTop: 10, gap: 10, borderWidth: 1, borderColor: themeColors.border }}>
+                                    <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 9 }}>
+                                      <View style={{ width: 30, height: 30, borderRadius: 8, backgroundColor: workoutPalette.soft, alignItems: 'center', justifyContent: 'center' }}>
+                                        <Ionicons name={metricConfig.icon} size={16} color={workoutPalette.strong} />
+                                      </View>
+                                      <View style={{ flex: 1 }}>
+                                        <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.textPrimary }}>{metricConfig.title}</Text>
+                                        <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2, lineHeight: 15 }}>
+                                          {metricConfig.subtitle}
+                                        </Text>
+                                      </View>
                                     </View>
-                                    {metrics.map(m => (
-                                      <View key={m.key} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                                        <Text style={{ fontSize: 13, color: themeColors.textSecondary, fontWeight: '600' }}>{m.label}</Text>
+                                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                                      {metricConfig.fields.map(m => (
+                                      <View key={m.key} style={{ flexGrow: 1, flexBasis: '47%', minWidth: 128 }}>
+                                        <Text style={{ fontSize: 11, color: themeColors.textMuted, fontWeight: '800', textTransform: 'uppercase', marginBottom: 4 }}>
+                                          {m.label}
+                                        </Text>
                                         <TextInput
-                                          style={[styles.inlineInput, { width: 110, textAlign: 'center' }]}
+                                          style={[styles.inlineInput, { width: '100%', textAlign: 'center' }]}
                                           placeholder={m.placeholder}
                                           placeholderTextColor={themeColors.textMuted}
                                           keyboardType={m.keyboard}
                                           value={timedMetrics[`${i}-${m.key}`] ?? ''}
                                           onChangeText={v => setTimedMetrics(prev => ({ ...prev, [`${i}-${m.key}`]: v }))}
                                         />
+                                        <Text style={{ fontSize: 10, color: themeColors.textMuted, marginTop: 3 }} numberOfLines={1}>
+                                          {m.helper}
+                                        </Text>
                                       </View>
-                                    ))}
+                                      ))}
+                                    </View>
                                   </View>
                                 );
                               })()}

@@ -122,6 +122,7 @@ interface HomeScreenProps {
   onStartWorkout: (workout: WorkoutDay) => void;
   onViewProgress: () => void;
   onViewAccount: () => void;
+  onOpenSettings?: () => void;
   onProfileUpdate?: (changes: Partial<UserProfile>, skipRegen?: boolean) => void;
   /** Optional: push local AsyncStorage state to the backend. Called by
    *  the trainer-chat Apply flow so plan changes persist cross-device
@@ -1283,7 +1284,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onBackendSync, onSaveProfile, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onOpenSettings, onProfileUpdate, onBackendSync, onSaveProfile, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -1804,6 +1805,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showFriends, setShowFriends] = useState(false);
   const [showGoalEditor, setShowGoalEditor] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const openSettingsHub = useCallback(() => {
+    if (onOpenSettings) {
+      onOpenSettings();
+      return;
+    }
+    setShowSettings(true);
+  }, [onOpenSettings]);
   const [showGearScreen, setShowGearScreen] = useState(false);
   const [showReadiness, setShowReadiness] = useState(false);
   const [readinessBadge, setReadinessBadge] = useState<{ score: number; label: string } | null>(null);
@@ -8254,7 +8262,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               )}
             </View>
             <TouchableOpacity
-              onPress={() => setShowSettings(true)}
+              onPress={openSettingsHub}
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               style={{ padding: 4 }}
             >
@@ -8321,13 +8329,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
             {/* Settings & reminders */}
-            <TouchableOpacity style={styles.profileMenuItem} onPress={() => setShowSettings(true)}>
+            <TouchableOpacity style={styles.profileMenuItem} onPress={openSettingsHub}>
               <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
                 <Ionicons name="notifications-outline" size={18} color={themeColors.primary} />
               </View>
               <View style={{ flex: 1, marginLeft: 10 }}>
-                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Settings & Reminders</Text>
-                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Theme, workout reminders, meal reminders, and device feedback</Text>
+                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Settings</Text>
+                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Notifications, units, plan pause, and permissions</Text>
               </View>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
@@ -12013,19 +12021,20 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           </Text>
         </View>
       )}
-      <View style={[styles.dayCardRow, { paddingTop: (isToday || isCompleted) ? 0 : 16 }]}>
-        <View style={styles.dayCardLeft}>
+      <View style={[styles.dayCardRow, isToday && styles.dayCardRowToday, { paddingTop: (isToday || isCompleted) ? 0 : 16 }]}>
+        <View style={[styles.dayCardLeft, isToday && styles.dayCardLeftToday]}>
           <Text style={[
             styles.dayCardDow,
-            { color: isToday ? accentColor : tc.textSecondary, fontSize: isToday ? 22 : 14, fontWeight: isToday ? '900' : '700' },
+            isToday && styles.dayCardDowTodayCompact,
+            { color: isToday ? accentColor : tc.textSecondary, fontSize: isToday ? 12 : 14, fontWeight: isToday ? '800' : '700' },
           ]}>{dow}</Text>
           <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
         </View>
-        <View style={styles.dayCardRight}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+        <View style={[styles.dayCardRight, isToday && styles.dayCardRightToday]}>
+          <View style={[styles.focusHeaderRow, isToday && styles.focusHeaderRowToday]}>
             <FocusLabelCrossfade focus={item.workout!.focus} style={[
               styles.focusLabel,
-              { color: completedDashed ? tc.textSecondary : tc.textPrimary, textDecorationLine: completedDashed ? 'line-through' : 'none', fontSize: isToday ? 20 : 16, fontWeight: isToday ? '800' : '700' },
+              { color: completedDashed ? tc.textSecondary : tc.textPrimary, textDecorationLine: completedDashed ? 'line-through' : 'none', fontSize: isToday ? 19 : 16, fontWeight: isToday ? '800' : '700', lineHeight: isToday ? 23 : undefined },
             ]} />
             {(() => {
               const stim = item.workout?.stimulus;
@@ -12998,13 +13007,19 @@ const styles = StyleSheet.create({
   dayCardComplete: { borderColor: colors.success },
   dayCardSkipped:  { opacity: 0.6 },
   dayCardRow:      { flexDirection: 'row', alignItems: 'center' },
+  dayCardRowToday: { alignItems: 'flex-start' },
   dayCardLeft:     { width: 70 },
+  dayCardLeftToday:{ width: 88, paddingTop: 3, marginRight: 6 },
   dayCardRight:    { flex: 1 },
   dayCardDow:      { fontSize: 14, fontWeight: '700', color: colors.textSecondary, marginBottom: 2 },
+  dayCardDowTodayCompact: { textTransform: 'uppercase', marginBottom: 4 },
   dayCardDowToday: { color: colors.primary },
   dayCardDate:     { fontSize: 12, color: colors.textMuted },
 
   focusLabel:    { fontSize: 16, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
+  dayCardRightToday: { paddingTop: 0 },
+  focusHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+  focusHeaderRowToday: { alignItems: 'flex-start', gap: 8 },
   exerciseCount: { fontSize: 13, color: colors.textMuted },
   chevron:       { width: 22, height: 22, marginLeft: 8, alignItems: 'center', justifyContent: 'center' },
 

@@ -225,6 +225,16 @@ type TrainingSignalItem = {
   color: string;
 };
 
+type ProgressOverviewItem = {
+  key: string;
+  label: string;
+  value: string;
+  detail: string;
+  icon: any;
+  color: string;
+  targetTab: 'health' | 'body' | 'prs' | 'charts';
+};
+
 const PR_MOMENTUM_WINDOW_DAYS = 30;
 const MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE = 4;
 
@@ -600,6 +610,144 @@ function buildProgressAnalytics(
   return rows.slice(0, 4);
 }
 
+function buildThisWeekOverview(
+  history: WorkoutSession[],
+  summaries: StoredWorkoutSummary[],
+  prs: PR[],
+  weightEntries: Array<{ date: string; weightLbs: number }>,
+  paceHistory: PaceHistoryPoint[],
+  mealHistory: Array<{ meal_date: string }> | null,
+): ProgressOverviewItem[] {
+  const now = Date.now();
+  const dayMs = 86400000;
+  const sevenAgo = now - 7 * dayMs;
+  const fourteenAgo = now - 14 * dayMs;
+  const timeOf = (raw: string): number => {
+    const key = String(raw ?? '').slice(0, 10);
+    return key ? +new Date(`${key}T12:00:00`) : 0;
+  };
+  const trendText = (current: number, previous: number, noun: string): string => {
+    if (previous <= 0) return `${noun} in the last 7 days`;
+    const delta = current - previous;
+    if (delta === 0) return `unchanged vs previous 7 days`;
+    return `${delta > 0 ? '+' : ''}${delta} vs previous 7 days`;
+  };
+
+  const workoutRows = (summaries.length > 0
+    ? summaries.map(s => ({
+        date: s.date,
+        sets: s.totalSets ?? 0,
+        minutes: Math.round((s.durationSeconds ?? 0) / 60),
+      }))
+    : history
+        .filter(s => s.completed && !s.skipped)
+        .map(s => ({
+          date: s.date,
+          sets: (s.exercises ?? []).reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0),
+          minutes: Math.round((s.durationSeconds ?? 0) / 60),
+        })))
+    .filter(row => row.sets > 0 || row.minutes > 0);
+
+  const recentWorkoutDays = new Set(workoutRows.filter(row => timeOf(row.date) >= sevenAgo).map(row => row.date.slice(0, 10))).size;
+  const previousWorkoutDays = new Set(workoutRows.filter(row => {
+    const t = timeOf(row.date);
+    return t >= fourteenAgo && t < sevenAgo;
+  }).map(row => row.date.slice(0, 10))).size;
+  const recentSets = workoutRows.filter(row => timeOf(row.date) >= sevenAgo).reduce((sum, row) => sum + row.sets, 0);
+  const previousSets = workoutRows.filter(row => {
+    const t = timeOf(row.date);
+    return t >= fourteenAgo && t < sevenAgo;
+  }).reduce((sum, row) => sum + row.sets, 0);
+
+  const items: ProgressOverviewItem[] = [];
+  if (recentWorkoutDays > 0) {
+    items.push({
+      key: 'week-workouts',
+      label: 'Training days',
+      value: `${recentWorkoutDays}`,
+      detail: trendText(recentWorkoutDays, previousWorkoutDays, 'active days'),
+      icon: 'calendar-outline',
+      color: '#22C55E',
+      targetTab: 'health',
+    });
+  }
+  if (recentSets > 0) {
+    items.push({
+      key: 'week-volume',
+      label: 'Lift volume',
+      value: `${recentSets}`,
+      detail: trendText(recentSets, previousSets, 'sets logged'),
+      icon: 'barbell-outline',
+      color: '#6366F1',
+      targetTab: 'charts',
+    });
+  }
+
+  const recentPrs = prs.filter(pr => timeOf(pr.date) >= sevenAgo);
+  if (recentPrs.length > 0) {
+    const top = recentPrs[0];
+    items.push({
+      key: 'week-prs',
+      label: 'New PRs',
+      value: `${recentPrs.length}`,
+      detail: top ? `${top.exerciseName}: ${Math.round(top.weightLbs)} lb x ${top.reps}` : 'records this week',
+      icon: 'trophy-outline',
+      color: '#F59E0B',
+      targetTab: 'prs',
+    });
+  }
+
+  const weights = [...weightEntries]
+    .filter(w => Number.isFinite(w.weightLbs))
+    .sort((a, b) => timeOf(a.date) - timeOf(b.date));
+  if (weights.length >= 2) {
+    const latest = weights[weights.length - 1];
+    const baseline = [...weights].reverse().find(w => timeOf(w.date) <= sevenAgo) ?? weights[0];
+    const delta = Math.round((latest.weightLbs - baseline.weightLbs) * 10) / 10;
+    items.push({
+      key: 'week-weight',
+      label: 'Body weight',
+      value: `${latest.weightLbs} lb`,
+      detail: `${delta > 0 ? '+' : ''}${delta} lb since ${formatDate(baseline.date)}`,
+      icon: delta < 0 ? 'trending-down-outline' : delta > 0 ? 'trending-up-outline' : 'remove-outline',
+      color: delta < 0 ? '#22C55E' : delta > 0 ? '#F59E0B' : '#0EA5E9',
+      targetTab: 'body',
+    });
+  }
+
+  const recentCardioMiles = paceHistory
+    .filter(p => timeOf(p.date) >= sevenAgo)
+    .reduce((sum, p) => sum + (p.distance ?? 0), 0);
+  if (recentCardioMiles > 0) {
+    items.push({
+      key: 'week-cardio',
+      label: 'Cardio distance',
+      value: `${recentCardioMiles.toFixed(1)} mi`,
+      detail: 'distance logged in the last 7 days',
+      icon: 'pulse-outline',
+      color: '#EF4444',
+      targetTab: 'charts',
+    });
+  }
+
+  const mealDays = new Set((mealHistory ?? [])
+    .filter(row => timeOf(row.meal_date) >= sevenAgo)
+    .map(row => row.meal_date.slice(0, 10)));
+  if (mealDays.size > 0) {
+    items.push({
+      key: 'week-meals',
+      label: 'Meal signal',
+      value: `${mealDays.size}/7`,
+      detail: 'days with meal data this week',
+      icon: 'nutrition-outline',
+      color: '#14B8A6',
+      targetTab: 'health',
+    });
+  }
+
+  return items.slice(0, 4);
+}
+
 function workoutCompletionKey(dateISO?: string | null, focus?: string | null): string | null {
   const date = typeof dateISO === 'string' ? dateISO.slice(0, 10) : '';
   const focusKey = typeof focus === 'string' ? focus.trim().toLowerCase() : '';
@@ -833,6 +981,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [bodyScanLoading, setBodyScanLoading] = useState(false);
   const [bodyScanResult, setBodyScanResult] = useState<BodyScanResult | null>(null);
   const [bodyScanHistory, setBodyScanHistory] = useState<BodyScanEntry[]>([]);
+  const [bodyScanPrepSource, setBodyScanPrepSource] = useState<'camera' | 'library' | null>(null);
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
   const [sleepHistoryCount, setSleepHistoryCount] = useState<number>(0);
   const [healthEnabled, setHealthEnabled] = useState<boolean>(false);
@@ -963,6 +1112,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const progressAnalytics = useMemo(
     () => buildProgressAnalytics(history, summaries, prs, plateaus),
     [history, plateaus, prs, summaries],
+  );
+  const thisWeekOverview = useMemo(
+    () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory),
+    [history, mealHistory, paceHistory, prs, summaries, weightEntries],
   );
   const trainingSignals = useMemo(
     () => buildTrainingSignals(history, summaries, isHealthKitAvailable(), healthEnabled),
@@ -1349,6 +1502,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         mediaTypes: 'images' as any,
         base64: true,
         quality: 0.7,
+        maxWidth: 1200,
+        maxHeight: 1200,
       };
       const result = source === 'camera'
         ? await ImagePicker.launchCameraAsync(opts)
@@ -2943,6 +3098,36 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'health' ? (
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
+          {thisWeekOverview.length > 0 && (
+            <View style={styles.weekOverviewCard}>
+              <View style={styles.weekOverviewHeader}>
+                <View>
+                  <Text style={styles.weekOverviewEyebrow}>THIS WEEK</Text>
+                  <Text style={styles.weekOverviewTitle}>What changed</Text>
+                </View>
+                <Text style={styles.weekOverviewHint}>Tap a tile for detail</Text>
+              </View>
+              <View style={styles.weekOverviewGrid}>
+                {thisWeekOverview.map(item => (
+                  <TouchableOpacity
+                    key={item.key}
+                    activeOpacity={0.82}
+                    style={styles.weekOverviewTile}
+                    onPress={() => {
+                      import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                      setTab(item.targetTab);
+                    }}>
+                    <View style={[styles.weekOverviewIcon, { backgroundColor: item.color + '20' }]}>
+                      <Ionicons name={item.icon} size={15} color={item.color} />
+                    </View>
+                    <Text style={styles.weekOverviewLabel} numberOfLines={1}>{item.label}</Text>
+                    <Text style={styles.weekOverviewValue} numberOfLines={1}>{item.value}</Text>
+                    <Text style={styles.weekOverviewDetail} numberOfLines={2}>{item.detail}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
           {!isProTier && (
             <View style={styles.vitalsCard}>
               <View style={{ alignItems: 'center', paddingVertical: 12 }}>
@@ -4219,7 +4404,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
               <TouchableOpacity
                 style={[styles.bodyScanBtn, { flex: 1 }, bodyScanLoading && { opacity: 0.55 }]}
-                onPress={() => handleBodyScan('camera')}
+                onPress={() => setBodyScanPrepSource('camera')}
                 disabled={bodyScanLoading}>
                 <View style={styles.bodyScanBtnContent}>
                   <Ionicons name="camera-outline" size={16} color={primaryButtonTextColor} />
@@ -4228,7 +4413,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.bodyScanBtn, { flex: 1, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }, bodyScanLoading && { opacity: 0.55 }]}
-                onPress={() => handleBodyScan('library')}
+                onPress={() => setBodyScanPrepSource('library')}
                 disabled={bodyScanLoading}>
                 <View style={styles.bodyScanBtnContent}>
                   <Ionicons name="images-outline" size={16} color={tc.textPrimary} />
@@ -4237,7 +4422,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </TouchableOpacity>
             </View>
             <Text style={{ fontSize: 10, color: tc.textMuted, textAlign: 'center', marginTop: 6, lineHeight: 14 }}>
-              For best results: front-facing, good lighting, minimal clothing. Accuracy varies with lighting and angle.
+              For best results: front-facing, good lighting, form-fitting clothing. Do not submit nude photos. Accuracy varies with lighting and angle.
             </Text>
           </View>}
 
@@ -4701,6 +4886,70 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           </View>
         </View>
       )}
+      <Modal
+        visible={!!bodyScanPrepSource}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setBodyScanPrepSource(null)}>
+        <View style={styles.bodyScanPrepBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setBodyScanPrepSource(null)}
+          />
+          <View style={styles.bodyScanPrepSheet}>
+            <View style={styles.bodyScanPrepHandle} />
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+              <View style={styles.bodyScanPrepIcon}>
+                <Ionicons name="body-outline" size={18} color={tc.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.bodyScanPrepTitle}>Before body check</Text>
+                <Text style={styles.bodyScanPrepSub}>
+                  {bodyScanPrepSource === 'camera' ? 'Camera works best with a quick setup check.' : 'Choose a clear, recent front-facing photo.'}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setBodyScanPrepSource(null)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={20} color={tc.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <View style={styles.bodyScanPrepChecklist}>
+              {[
+                { icon: 'sunny-outline', text: 'Use bright, even lighting with the full body in frame.' },
+                { icon: 'resize-outline', text: 'Stand straight, arms relaxed slightly away from your torso.' },
+                { icon: 'shirt-outline', text: 'Wear form-fitting clothing, not nude; shorts and a fitted top work well.' },
+                { icon: 'shield-checkmark-outline', text: 'Only the selected photo is sent for this analysis; keep faces out if you prefer.' },
+              ].map(item => (
+                <View key={item.text} style={styles.bodyScanPrepRow}>
+                  <Ionicons name={item.icon as any} size={16} color={tc.primary} />
+                  <Text style={styles.bodyScanPrepText}>{item.text}</Text>
+                </View>
+              ))}
+            </View>
+            <Text style={styles.bodyScanPrepFootnote}>
+              The result is an estimate, so compare scans taken under similar conditions instead of treating one scan as exact.
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 16 }}>
+              <TouchableOpacity
+                style={styles.bodyScanPrepSecondary}
+                onPress={() => setBodyScanPrepSource(null)}>
+                <Text style={styles.bodyScanPrepSecondaryText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.bodyScanPrepPrimary}
+                onPress={() => {
+                  const source = bodyScanPrepSource;
+                  setBodyScanPrepSource(null);
+                  if (source) handleBodyScan(source);
+                }}>
+                <Text style={styles.bodyScanPrepPrimaryText}>
+                  {bodyScanPrepSource === 'camera' ? 'Open Camera' : 'Choose Photo'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
       <BodyMeasurementsModal
         visible={measurementsModalVisible}
         authToken={authToken}
@@ -4821,6 +5070,81 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     ...typography.label,
     color: colors.textSecondary,
     marginBottom: 12,
+  },
+
+  weekOverviewCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
+    marginBottom: 16,
+  },
+  weekOverviewHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 12,
+  },
+  weekOverviewEyebrow: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+    color: colors.textMuted,
+  },
+  weekOverviewTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginTop: 2,
+  },
+  weekOverviewHint: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textMuted,
+  },
+  weekOverviewGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  weekOverviewTile: {
+    flexGrow: 1,
+    flexBasis: '47%',
+    minHeight: 122,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    padding: 11,
+  },
+  weekOverviewIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  weekOverviewLabel: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  weekOverviewValue: {
+    fontSize: 22,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginTop: 2,
+  },
+  weekOverviewDetail: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    lineHeight: 15,
+    marginTop: 3,
   },
 
   emptyBox:  { alignItems: 'center', paddingTop: 60, gap: 12 },
@@ -5221,6 +5545,98 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   bodyScanBtnText: {
     fontSize: 14,
     fontWeight: '700',
+    color: getContrastingTextColor(colors.primary),
+  },
+  bodyScanPrepBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.58)',
+    justifyContent: 'flex-end',
+  },
+  bodyScanPrepSheet: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 18,
+    paddingTop: 10,
+    paddingBottom: 22,
+  },
+  bodyScanPrepHandle: {
+    width: 42,
+    height: 4,
+    borderRadius: 999,
+    backgroundColor: colors.border,
+    alignSelf: 'center',
+    marginBottom: 14,
+  },
+  bodyScanPrepIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: colors.primary + '18',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bodyScanPrepTitle: {
+    fontSize: 17,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  bodyScanPrepSub: {
+    fontSize: 12,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  bodyScanPrepChecklist: {
+    backgroundColor: colors.surfaceRaised,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 12,
+    gap: 10,
+  },
+  bodyScanPrepRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 9,
+  },
+  bodyScanPrepText: {
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
+    color: colors.textSecondary,
+  },
+  bodyScanPrepFootnote: {
+    fontSize: 11,
+    lineHeight: 16,
+    color: colors.textMuted,
+    marginTop: 10,
+  },
+  bodyScanPrepSecondary: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    backgroundColor: colors.surfaceRaised,
+  },
+  bodyScanPrepSecondaryText: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: colors.textSecondary,
+  },
+  bodyScanPrepPrimary: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: radius.md,
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+  },
+  bodyScanPrepPrimaryText: {
+    fontSize: 14,
+    fontWeight: '900',
     color: getContrastingTextColor(colors.primary),
   },
   bodyScanResultCard: {
