@@ -1584,6 +1584,11 @@ export default function Index() {
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}
         onOpenSettings={() => setShowSettings(true)}
+        onHomeTabNavigate={() => {
+          setShowSettings(false);
+          setShowAccount(false);
+          setShowProgress(false);
+        }}
         onSaveProfile={(updated, mode) => handleSaveProfile(updated, mode)}
         onActivePlanWeekEndChange={setActivePlanWeekEnd}
         onSwitchDayRegen={handleSwitchDayRegen}

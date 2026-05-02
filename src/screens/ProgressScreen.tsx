@@ -1168,24 +1168,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           .catch(() => null);
       }
       import('../utils/weightHistory').then(({ loadWeightHistory }) =>
-        loadWeightHistory().then(async (local) => {
+        loadWeightHistory().then((local) => {
           setWeightEntries(local);
-          if (authToken) {
-            try {
-              const { getWeightEntries, syncWeightEntries } = await import('../services/api');
-              if (local.length > 0) {
-                await syncWeightEntries(authToken, local.map(e => ({ date: e.date, weight_lbs: e.weightLbs, source: e.source || 'manual' }))).catch(() => null);
-              }
-              const remote = await getWeightEntries(authToken);
-              if (remote.length > 0) {
-                const merged = new Map<string, { date: string; weightLbs: number; source: string }>();
-                for (const e of local) merged.set(e.date, { ...e, source: e.source || 'manual' });
-                for (const e of remote) merged.set(e.date, { date: e.date, weightLbs: e.weight_lbs, source: e.source });
-                const sorted = Array.from(merged.values()).sort((a, b) => a.date.localeCompare(b.date));
-                setWeightEntries(sorted as any);
-              }
-            } catch { /* backend sync non-fatal */ }
-          }
         }).catch(() => null)
       );
       if (authToken && isProTier) {
@@ -4276,10 +4260,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                                 const { deleteWeightEntry } = await import('../utils/weightHistory');
                                 const next = await deleteWeightEntry(e.date);
                                 setWeightEntries(next);
-                                // Sync latest to profile so macros/goal progress update.
-                                if (next.length > 0 && onUpdateWeight) {
-                                  onUpdateWeight(next[next.length - 1].weightLbs);
-                                }
                               },
                             },
                           ],
@@ -4874,11 +4854,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   setWeightInputVisible(false);
                   if (onUpdateWeight) onUpdateWeight(val);
                   import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
-                  if (authToken) {
-                    import('../services/api').then(({ saveWeightEntryAPI }) =>
-                      saveWeightEntryAPI(authToken, new Date().toISOString().slice(0, 10), val, 'manual').catch(() => null)
-                    );
-                  }
                 }}>
                 <Text style={{ fontSize: 15, fontWeight: '700', color: getContrastingTextColor(tc.primary) }}>Save</Text>
               </TouchableOpacity>

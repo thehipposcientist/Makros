@@ -41,6 +41,7 @@ async function test_wipe_preserves_safelist() {
     // Preserved
     authToken: 'abc',
     userProfile: '{"goal":"muscle_gain"}',
+    weightHistory: '[]',
     weightEntries: '[]',
     workoutTemplates: '[]',
     workoutHistoryList: '[]',
@@ -71,7 +72,7 @@ async function test_wipe_preserves_safelist() {
   const remainingKeys = new Set(storage._data.keys());
 
   const expectedKept = new Set([
-    'authToken', 'userProfile', 'weightEntries',
+    'authToken', 'userProfile', 'weightHistory', 'weightEntries',
     'workoutTemplates',
     'workoutHistoryList', 'user_username', 'themePreference',
   ]);
@@ -131,7 +132,7 @@ async function test_empty_storage_noop() {
 function test_preserved_keys_shape() {
   const required = [
     'authToken', 'userProfile', 'weightEntries', 'workoutHistoryList',
-    'workoutTemplates', 'user_username', 'themePreference', 'metaData_v1',
+    'weightHistory', 'workoutTemplates', 'user_username', 'themePreference', 'metaData_v1',
   ];
   for (const r of required) {
     if (!PRESERVED_KEYS.includes(r)) {

@@ -16,6 +16,10 @@ export interface ThemeColors {
   background: string;
   surface: string;
   surfaceRaised: string;
+  /** Floating app chrome (bottom nav, future persistent toolbars). */
+  chrome?: string;
+  chromeMuted?: string;
+  chromeBorder?: string;
   border: string;
   primary: string;
   primaryDark: string;
@@ -844,6 +848,9 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       background:    '#000000',
       surface:       '#0E0E0E',
       surfaceRaised: '#1A1A1A',
+      chrome:        '#050505',
+      chromeMuted:   '#101010',
+      chromeBorder:  '#3A3A3A',
       border:        '#2A2A2A',
       // Primary is intentionally white in onyx — it's the brand color
       // when stripped of all hue. Buttons read as solid blocks.
@@ -878,6 +885,9 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       background:    '#FFFFFF',
       surface:       '#F7F7F7',
       surfaceRaised: '#EFEFEF',
+      chrome:        '#E7E7E7',
+      chromeMuted:   '#F0F0F0',
+      chromeBorder:  '#AFAFAF',
       border:        '#D8D8D8',
       // Primary is black — the ink. Bright color buttons would clash
       // with the minimalist intent.
@@ -939,6 +949,21 @@ export function resolveThemeName(themeName?: AppThemeName | string): AppThemeNam
 
 export function isLightThemeName(themeName?: AppThemeName | string): boolean {
   return (LIGHT_THEME_NAMES as readonly string[]).includes(resolveThemeName(themeName));
+}
+
+export function getChromeColors(themeName?: AppThemeName | string): {
+  surface: string;
+  muted: string;
+  border: string;
+} {
+  const theme = APP_THEMES[resolveThemeName(themeName)];
+  const c = theme.colors;
+  const light = isLightThemeName(theme.name);
+  return {
+    surface: c.chrome ?? (light ? c.surfaceRaised : c.background),
+    muted: c.chromeMuted ?? (light ? c.surfaceRaised : c.surface),
+    border: c.chromeBorder ?? (light ? c.textMuted + '55' : c.border + 'F0'),
+  };
 }
 
 // Pick black or white text for readability on the given background color.

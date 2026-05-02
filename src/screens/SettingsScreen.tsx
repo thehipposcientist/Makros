@@ -7,11 +7,11 @@
 
 import { useEffect, useState } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, Switch, Alert, StyleSheet, Platform,
+  View, Text, ScrollView, TouchableOpacity, Switch, Alert, StyleSheet, Platform, Linking,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
+import { APP_THEMES, THEME_PICKER_ORDER, getContrastingTextColor, getTheme, radius, resolveThemeName } from '../constants/theme';
 import { AppThemeName, UserProfile } from '../types';
 import {
   loadReminderSettings, saveReminderSettings, type ReminderSettings,
@@ -48,9 +48,27 @@ function formatTime(hour: number, minute: number): string {
   return `${h12}:${pad2(minute)} ${am ? 'AM' : 'PM'}`;
 }
 
+async function openDeviceSettings() {
+  try {
+    if (Platform.OS === 'ios') {
+      await Linking.openURL('app-settings:');
+      return;
+    }
+    await Linking.openSettings();
+  } catch {
+    Alert.alert(
+      'Unable to open Settings',
+      Platform.OS === 'ios'
+        ? 'Open iPhone Settings -> Privacy & Security -> Health -> Thallo manually.'
+        : 'Open device Settings and choose Thallo manually.',
+    );
+  }
+}
+
 export default function SettingsScreen({ visible, profile, themeName, authToken, onClose, onProfileUpdate }: Props) {
   const insets = useSafeAreaInsets();
   const tc = getTheme(themeName).colors;
+  const bottomNavClearance = Math.max(insets.bottom, 10) + 78;
 
   const [workoutReminder, setWorkoutReminder] = useState<ReminderSettings>({ enabled: false, hour: 8, minute: 0 });
   const [mealReminder, setMealReminder] = useState<MealReminderSettings>({ enabled: true, hour: 21, minute: 0 });
@@ -90,6 +108,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
 
   const weightUnit: WeightUnit = profile.weightUnit ?? 'lbs';
   const distanceUnit: DistanceUnit = profile.distanceUnit ?? 'mi';
+  const currentTheme = resolveThemeName(profile.themePreference ?? themeName);
 
   const updateWorkoutReminder = async (next: ReminderSettings) => {
     setWorkoutReminder(next);
@@ -141,7 +160,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
   };
 
   return (
-    <View style={[styles.root, { backgroundColor: tc.background }]}>
+    <View style={[styles.root, { backgroundColor: tc.background, bottom: bottomNavClearance }]}>
       {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + 12, borderBottomColor: tc.border }]}>
         <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -152,6 +171,49 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
       </View>
 
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 40 }}>
+
+        {/* ── Appearance ────────────────────────────────────────────── */}
+        <Text style={[styles.sectionLabel, { color: tc.textMuted }]}>APPEARANCE</Text>
+        <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+          <View style={styles.themeGrid}>
+            {THEME_PICKER_ORDER.map((key) => {
+              const theme = APP_THEMES[key];
+              const active = currentTheme === key;
+              return (
+                <TouchableOpacity
+                  key={key}
+                  onPress={() => onProfileUpdate({ themePreference: key } as Partial<UserProfile>, true)}
+                  activeOpacity={0.8}
+                  style={[
+                    styles.themeTile,
+                    {
+                      backgroundColor: tc.surfaceRaised,
+                      borderColor: active ? theme.colors.primary : tc.border,
+                      borderWidth: active ? 2 : 1,
+                    },
+                  ]}>
+                  <View style={[styles.themeSwatch, { borderColor: theme.colors.border }]}>
+                    <View style={{ flex: 1, backgroundColor: theme.colors.background }} />
+                    <View style={{ flex: 1, backgroundColor: theme.colors.surfaceRaised }} />
+                    <View style={{ flex: 1, backgroundColor: theme.colors.primary }} />
+                    <View style={{ flex: 1, backgroundColor: theme.colors.accent }} />
+                  </View>
+                  <Text numberOfLines={2} style={[styles.themeLabel, { color: tc.textPrimary }]}>
+                    {theme.label}
+                  </Text>
+                  {active && (
+                    <Ionicons
+                      name="checkmark-circle"
+                      size={15}
+                      color={theme.colors.primary}
+                      style={styles.themeCheck}
+                    />
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
 
         {/* ── Notifications ─────────────────────────────────────────── */}
         <Text style={[styles.sectionLabel, { color: tc.textMuted }]}>NOTIFICATIONS</Text>
@@ -435,9 +497,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
         <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
           <TouchableOpacity
             style={styles.row}
-            onPress={() => {
-              import('react-native').then(({ Linking }) => Linking.openSettings()).catch(() => {});
-            }}>
+            onPress={openDeviceSettings}>
             <View style={{ flex: 1 }}>
               <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Open iOS Settings</Text>
               <Text style={[styles.rowSub, { color: tc.textMuted }]}>
@@ -493,5 +553,36 @@ const styles = StyleSheet.create({
   },
   toggleOptText: {
     fontSize: 12, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.4,
+  },
+  themeGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  themeTile: {
+    width: '30.9%',
+    minHeight: 92,
+    borderRadius: radius.md,
+    padding: 9,
+    position: 'relative',
+  },
+  themeSwatch: {
+    height: 34,
+    borderRadius: 8,
+    borderWidth: 1,
+    overflow: 'hidden',
+    flexDirection: 'row',
+    marginBottom: 7,
+  },
+  themeLabel: {
+    flexShrink: 1,
+    fontSize: 11,
+    lineHeight: 14,
+    fontWeight: '800',
+  },
+  themeCheck: {
+    position: 'absolute',
+    top: 5,
+    right: 5,
   },
 });

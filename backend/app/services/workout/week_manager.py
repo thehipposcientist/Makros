@@ -12,6 +12,7 @@ from typing import Optional
 from sqlmodel import Session, select
 
 from app.models import PlanWeek, PlanDay, WorkoutPlan, NutritionPlan, WorkoutCompletion, UserProfile, UserPreferences
+from app.services.nutrition.day_targets import adapt_template_targets_for_day
 from app.services.workout.goals import effective_goal_id
 
 
@@ -160,7 +161,11 @@ def create_plan_week(
 
         nutrition_payload = None
         if nutrition_templates:
-            nutrition_payload = nutrition_templates[i % len(nutrition_templates)]
+            nutrition_payload = _nutrition_payload_for_day(
+                nutrition_templates[i % len(nutrition_templates)],
+                workout_payload=workout_payload,
+                goal=goal,
+            )
 
         pd = PlanDay(
             plan_week_id=pw.id,
@@ -179,6 +184,19 @@ def create_plan_week(
     db.commit()
     db.refresh(pw)
     return pw
+
+
+def _nutrition_payload_for_day(
+    template: dict | None,
+    *,
+    workout_payload: dict | None,
+    goal: str | None,
+) -> dict | None:
+    return adapt_template_targets_for_day(
+        template,
+        workout_payload=workout_payload,
+        goal_bucket=goal,
+    )
 
 
 def lock_day(
@@ -334,7 +352,11 @@ def adapt_remaining_days(
         remaining_all = [d for d in days if not d.locked and d.day_date >= today]
         for j, plan_day in enumerate(remaining_all):
             if nutrition_templates:
-                plan_day.nutrition_json = nutrition_templates[j % len(nutrition_templates)]
+                plan_day.nutrition_json = _nutrition_payload_for_day(
+                    nutrition_templates[j % len(nutrition_templates)],
+                    workout_payload=plan_day.workout_json,
+                    goal=plan_week.goal,
+                )
                 plan_day.updated_at = now
                 db.add(plan_day)
 
@@ -379,7 +401,11 @@ def regenerate_remaining_days(
             plan_day.workout_json = None
 
         if nutrition_templates:
-            plan_day.nutrition_json = nutrition_templates[plan_day.day_index % len(nutrition_templates)]
+            plan_day.nutrition_json = _nutrition_payload_for_day(
+                nutrition_templates[plan_day.day_index % len(nutrition_templates)],
+                workout_payload=plan_day.workout_json,
+                goal=plan_week.goal,
+            )
 
         plan_day.generation_source = "adapt"
         plan_day.status = "planned"

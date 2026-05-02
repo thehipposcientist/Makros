@@ -686,7 +686,7 @@ _CALS_PER_LB   = 3500   # calories per pound of body weight
 _MIN_CALORIES   = 1200
 
 
-def compute_tdee_and_targets(req: PlanRequest) -> dict:
+def compute_tdee_and_targets(req: PlanRequest, db=None, user_id: int | None = None) -> dict:
     """
     Compute TDEE via Mifflin-St Jeor, then derive a calorie target and
     macro split appropriate for the user's goal.
@@ -697,39 +697,9 @@ def compute_tdee_and_targets(req: PlanRequest) -> dict:
     builds the inputs and re-shapes the output into the dict shape the
     prompt builder expects (with per-meal splits).
     """
-    from app.services.nutrition.calorie_calculator import (
-        CalorieInputs, CustomMacroOverrides, compute_targets,
-    )
+    from app.services.nutrition.targets import resolve_targets_for_request
 
-    ps = req.physicalStats
-
-    # Build the calculator's input dataclass from the PlanRequest shape.
-    # PlanRequest stores the user's goal config under slightly different
-    # field names; this is the ONLY place that bridges the two.
-    overrides = None
-    if req.customMacros:
-        overrides = CustomMacroOverrides(
-            calories=req.customMacros.calories,
-            protein=req.customMacros.protein,
-            carbs=req.customMacros.carbs,
-            fat=req.customMacros.fat,
-        )
-    calc_inputs = CalorieInputs(
-        weight_lbs=ps.weightLbs,
-        height_feet=ps.heightFeet,
-        height_inches=ps.heightInches,
-        age=ps.age,
-        gender=ps.gender,
-        training_days_per_week=req.daysPerWeek,
-        session_minutes=getattr(req, "workoutDurationMinutes", 60) or 60,
-        goal_id=req.goal,
-        pace=req.goalDetails.pace,
-        target_weight_lbs=req.goalDetails.targetWeightLbs,
-        timeline_weeks=req.goalDetails.timelineWeeks,
-        custom_overrides=overrides,
-    )
-
-    targets = compute_targets(calc_inputs)
+    targets = resolve_targets_for_request(req, db=db, user_id=user_id)
 
     # Diagnostic log — lets us (and the user) verify that the numbers
     # flowing into the prompt match the user's profile + goal. If the
@@ -738,10 +708,11 @@ def compute_tdee_and_targets(req: PlanRequest) -> dict:
     # not in our calculator.
     print(
         f"[compute_tdee_and_targets] goal={req.goal} pace={req.goalDetails.pace} "
-        f"weight={ps.weightLbs}lb days/wk={req.daysPerWeek} → "
+        f"weight={targets.source_weight_lbs}lb({targets.source_weight_kind}) days/wk={req.daysPerWeek} → "
         f"bucket={targets.bucket_name} bmr={targets.bmr} tdee={targets.tdee} "
         f"kcal={targets.calories} protein={targets.protein_g}g "
         f"carbs={targets.carbs_g}g fat={targets.fat_g}g "
+        f"coach={targets.coaching_adjustment_kcal:+d} health={targets.health_activity_adjustment_kcal:+d} "
         f"override={targets.override_applied} floor={targets.min_calories_enforced} "
         f"[{targets.rate_summary}]"
     )

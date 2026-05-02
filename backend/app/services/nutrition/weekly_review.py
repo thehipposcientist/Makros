@@ -145,40 +145,13 @@ def _compute_planned_targets(
     db: Any,
     user_id: int,
 ) -> tuple[int, int, int, int]:
-    """Return (calories, protein_g, carbs_g, fat_g) from CalorieTargets.
+    """Return the same adaptive targets used by scoring and plan generation."""
+    from app.services.nutrition.targets import resolve_targets_for_user
 
-    Applies UserCoachingState.calorie_adjustment the same way the meal
-    router does so the planned baseline is consistent."""
-    from app.services.nutrition.calorie_calculator import CalorieInputs, compute_targets
-
-    profile = db.exec(
-        select(UserProfile).where(UserProfile.user_id == user_id)
-    ).first()
-    goal_row = db.exec(
-        select(UserGoal).where(UserGoal.user_id == user_id, UserGoal.is_active == True)
-    ).first()
-    state = db.exec(
-        select(UserCoachingState).where(UserCoachingState.user_id == user_id)
-    ).first()
-
-    if not profile:
+    targets = resolve_targets_for_user(db, user_id)
+    if not targets:
         return 2000, 150, 200, 70   # safe fallback
-
-    goal_id = _goal_str(goal_row)
-    cal_adj = state.calorie_adjustment if state else 0
-
-    inputs = CalorieInputs(
-        weight_lbs=float(profile.weight_lbs or 150),
-        height_feet=int(profile.height_feet or 5),
-        height_inches=int(profile.height_inches or 7),
-        age=int(profile.age or 30),
-        gender=str(profile.gender.value if hasattr(profile.gender, "value") else profile.gender or "male"),
-        training_days_per_week=int(getattr(profile, "days_per_week", 4) or 4),
-        goal_id=goal_id,
-        pace=str(goal_row.pace.value if goal_row and hasattr(goal_row.pace, "value") else "moderate"),
-    )
-    t = compute_targets(inputs)
-    return t.calories + cal_adj, t.protein_g, t.carbs_g, t.fat_g
+    return targets.calories, targets.protein_g, targets.carbs_g, targets.fat_g
 
 
 def _weight_trend(rollups: list[DailyRollup]) -> float | None:

@@ -30,9 +30,7 @@ from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
 from app.services.nutrition.nutrition_score import (
     NutritionIndicators, compute_nutrition_score, NutritionScore, RDA,
 )
-from app.services.nutrition.calorie_calculator import (
-    CalorieInputs, compute_targets,
-)
+from app.services.nutrition.targets import resolve_targets_for_user
 
 
 def _get_profile_and_goal(db: Any, user_id: int) -> tuple[UserProfile | None, UserGoal | None]:
@@ -43,28 +41,16 @@ def _get_profile_and_goal(db: Any, user_id: int) -> tuple[UserProfile | None, Us
     return profile, goal
 
 
-def _compute_targets(profile: UserProfile | None, goal: UserGoal | None) -> tuple[int, int, str, str | None]:
+def _compute_targets(db: Any, user_id: int, profile: UserProfile | None, goal: UserGoal | None) -> tuple[int, int, str, str | None]:
     """Return (calorie_target, protein_target_g, goal_id, sex)."""
     if not profile:
         return 2000, 120, "body_recomp", None
-    from app.enums import GoalType, GoalPace
-    goal_id = (goal.goal_type.value if goal else "body_recomp")
-    pace = (goal.pace.value if goal else "moderate")
-    sex = (profile.gender.value if profile.gender else None)
+    goal_id = (goal.goal_type.value if goal and hasattr(goal.goal_type, "value") else str(goal.goal_type) if goal else "body_recomp")
+    sex = (profile.gender.value if hasattr(profile.gender, "value") else str(profile.gender) if profile.gender else None)
     try:
-        targets = compute_targets(CalorieInputs(
-            weight_lbs=profile.weight_lbs,
-            height_feet=profile.height_feet,
-            height_inches=profile.height_inches,
-            age=profile.age,
-            gender=sex or "",
-            training_days_per_week=3,
-            session_minutes=60,
-            goal_id=goal_id,
-            pace=pace,
-            target_weight_lbs=goal.target_weight_lbs if goal else None,
-            timeline_weeks=goal.timeline_weeks if goal else None,
-        ))
+        targets = resolve_targets_for_user(db, user_id)
+        if not targets:
+            return 2000, 120, goal_id, sex
         return targets.calories, targets.protein_g, goal_id, sex
     except Exception:
         return 2000, 120, goal_id, sex
@@ -270,7 +256,7 @@ def build_indicators(
 ) -> tuple[NutritionIndicators, str, str | None]:
     """Assemble today's NutritionIndicators. Returns (indicators, goal_id, sex)."""
     profile, goal = _get_profile_and_goal(db, user_id)
-    cal_target, pro_target, goal_id, sex = _compute_targets(profile, goal)
+    cal_target, pro_target, goal_id, sex = _compute_targets(db, user_id, profile, goal)
 
     # Ensure today's metrics row is fresh — cheap if already computed.
     # allow_ai=True so collagen_g + probiotic_cfu_billions populate on

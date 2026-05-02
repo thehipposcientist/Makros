@@ -998,9 +998,8 @@ def adjusted_daily_target(
       - ``note``: human-readable explanation
     """
     from datetime import date as date_cls, timedelta
-    from app.models import UserProfile, UserGoal, UserCoachingState
-    from app.services.nutrition.calorie_calculator import compute_targets, CalorieInputs
     from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
+    from app.services.nutrition.targets import resolve_targets_for_user
     from app.services.nutrition.weekly_calorie_budget import (
         compute_adjusted_daily_target, compute_adjusted_macros,
     )
@@ -1032,29 +1031,12 @@ def adjusted_daily_target(
     else:
         calories_this_week = 0.0
 
-    # User profile + goal for base target computation
-    profile = db.exec(select(UserProfile).where(UserProfile.user_id == current_user.id)).first()
-    goal_row = db.exec(select(UserGoal).where(UserGoal.user_id == current_user.id)).first()
-    state = db.exec(select(UserCoachingState).where(UserCoachingState.user_id == current_user.id)).first()
-
-    if not profile:
+    targets = resolve_targets_for_user(db, current_user.id, as_of=today)
+    if not targets:
         raise HTTPException(status_code=404, detail="User profile not found")
 
-    goal_id   = goal_row.goal_id if goal_row else "general_health"
-    cal_adj   = state.calorie_adjustment if state else 0
-
-    inputs = CalorieInputs(
-        weight_lbs=float(profile.weight_lbs or 150),
-        height_feet=int(profile.height_feet or 5),
-        height_inches=int(profile.height_inches or 7),
-        age=int(profile.age or 30),
-        gender=str(profile.gender or "male"),
-        training_days_per_week=int(getattr(profile, "days_per_week", 4) or 4),
-        goal_id=goal_id,
-        pace=str(goal_row.pace if goal_row else "moderate"),
-    )
-    targets = compute_targets(inputs)
-    base_daily = targets.calories + cal_adj
+    goal_id = targets.bucket_name
+    base_daily = targets.calories
 
     result = compute_adjusted_daily_target(
         base_daily_target=base_daily,

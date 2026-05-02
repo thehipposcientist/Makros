@@ -83,7 +83,7 @@ import GroceryListModal from '../components/GroceryListModal';
 import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
-import { APP_THEMES, THEME_PICKER_ORDER, colors, elevations, getContrastingTextColor, getTheme, isLightThemeName, radius, resolveThemeName, typography } from '../constants/theme';
+import { APP_THEMES, THEME_PICKER_ORDER, colors, elevations, getChromeColors, getContrastingTextColor, getTheme, isLightThemeName, radius, resolveThemeName, typography } from '../constants/theme';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // Inline-rendered tab content. Goals and Progress used to be modal
 // overlays via parent callbacks; they now mount inside the tab body
@@ -124,6 +124,7 @@ interface HomeScreenProps {
   onViewProgress: () => void;
   onViewAccount: () => void;
   onOpenSettings?: () => void;
+  onHomeTabNavigate?: () => void;
   onProfileUpdate?: (changes: Partial<UserProfile>, skipRegen?: boolean) => void;
   /** Optional: push local AsyncStorage state to the backend. Called by
    *  the trainer-chat Apply flow so plan changes persist cross-device
@@ -1285,7 +1286,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onOpenSettings, onProfileUpdate, onBackendSync, onSaveProfile, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onOpenSettings, onHomeTabNavigate, onProfileUpdate, onBackendSync, onSaveProfile, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -1364,6 +1365,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const progressFade = useRef(new Animated.Value(0)).current;
   const bottomNavFloat = useRef(new Animated.Value(1)).current;
   const setActiveTab = useCallback((tab: typeof activeTab) => {
+    onHomeTabNavigate?.();
     if (tab === activeTab) return;
     bottomNavFloat.setValue(0);
     Animated.spring(bottomNavFloat, {
@@ -1378,7 +1380,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       Animated.timing(progressFade, { toValue: 1, duration: 300, useNativeDriver: true }).start();
     }
     AsyncStorage.setItem('lastActiveTab', tab).catch(() => {});
-  }, [activeTab, bottomNavFloat, progressFade]);
+  }, [activeTab, bottomNavFloat, onHomeTabNavigate, progressFade]);
   // Sub-tab inside each main tab.
   // Workouts: plan | library | equipment | history
   // Meals:    plan | foods     | supplements | macros
@@ -5610,9 +5612,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const headerGradientColors: [string, string] = isLightTheme
     ? [themeColors.surface, themeColors.surface]
     : [themeColors.primary + '18', themeColors.surfaceRaised];
+  const chromeColors = getChromeColors(userProfile.themePreference);
   const bottomBarGradientColors: [string, string] = isLightTheme
-    ? [themeColors.surface + 'FA', themeColors.surface + 'F4']
-    : [themeColors.surfaceRaised + 'F4', themeColors.surface + 'EA'];
+    ? [chromeColors.surface + 'F4', chromeColors.muted + 'E8']
+    : [chromeColors.surface + 'F4', chromeColors.muted + 'E8'];
 
   return (
     <View style={[styles.container, { backgroundColor: themeColors.background }]}>
@@ -5757,7 +5760,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           start={{ x: 0, y: 0 }}
           end={{ x: 0, y: 1 }}
           style={[styles.fixedSubTabBar, { top: insets.top + 68, borderBottomColor: 'transparent' }]}>
-          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface + 'E8', borderColor: themeColors.border + '99' }]}>
+          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             <SubTabBtn label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
             <SubTabBtn label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setSelectedExercise(null); setShowExerciseLibrary(true); ensureExerciseLibrary().catch(() => {}); }} />
             <SubTabBtn label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
@@ -5773,7 +5776,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           start={{ x: 0, y: 0 }}
           end={{ x: 0, y: 1 }}
           style={[styles.fixedSubTabBar, { top: insets.top + 68, borderBottomColor: 'transparent' }]}>
-          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface + 'E8', borderColor: themeColors.border + '99' }]}>
+          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             <SubTabBtn label="Plan"    active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
             <SubTabBtn label="Foods"   active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
             <SubTabBtn label="Supps" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
@@ -7890,17 +7893,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           authToken={authToken}
                           themeName={userProfile.themePreference}
                           weightEntries={adaptiveMacroWeightEntries}
-                          onAccept={(newTarget) => {
-                            onProfileUpdate?.({
-                              customMacros: {
-                                ...(userProfile.customMacros ?? {}),
-                                calories: newTarget,
-                              },
-                            } as any, true);
-                            Alert.alert(
-                              'Target updated',
-                              `Your new calorie target is ${newTarget} kcal/day. The plan will pick this up on your next regeneration.`,
-                            );
+                          onAccept={async (newTarget, result) => {
+                            try {
+                              if (result.action) {
+                                const { applyRecommendationAction } = await import('../services/api');
+                                await applyRecommendationAction(authToken, result.action, 'adaptive_macros');
+                              } else {
+                                onProfileUpdate?.({
+                                  customMacros: {
+                                    ...(userProfile.customMacros ?? {}),
+                                    calories: newTarget,
+                                  },
+                                } as any, true);
+                              }
+                              Alert.alert(
+                                'Target updated',
+                                `Your new calorie target is ${newTarget} kcal/day. Daily targets update right away; generated meal templates refresh on your next plan.`,
+                              );
+                            } catch (e) {
+                              Alert.alert('Could not update target', e instanceof Error ? e.message : 'Please try again.');
+                            }
                           }}
                         />
                       </>
@@ -8347,7 +8359,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
               <View style={{ flex: 1, marginLeft: 10 }}>
                 <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Settings</Text>
-                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Notifications, units, plan pause, and permissions</Text>
+                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Themes, notifications, units, plan pause, and permissions</Text>
               </View>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
@@ -10968,8 +10980,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           styles.bottomBarShell,
           {
             bottom: Math.max(insets.bottom, 10),
-            shadowColor: isLightTheme ? themeColors.border : '#000',
-            shadowOpacity: isLightTheme ? 0.08 : 0.22,
+            shadowColor: isLightTheme ? themeColors.textMuted : '#000',
+            shadowOpacity: isLightTheme ? 0.12 : 0.24,
             transform: [
               {
                 translateY: bottomNavFloat.interpolate({
@@ -10988,7 +11000,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         ]}>
         <LinearGradient
           colors={bottomBarGradientColors}
-          style={[styles.bottomBar, { borderColor: themeColors.border + 'B8' }]}>
+          style={[styles.bottomBar, { borderColor: chromeColors.border }]}>
           <BottomTabButton
             label="Social"
             iconName="people-outline"
@@ -11419,9 +11431,9 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
         paddingVertical: 8,
         paddingHorizontal: 8,
         borderRadius: 999,
-        backgroundColor: active ? tint + '24' : 'transparent',
+        backgroundColor: active ? tint + '1C' : 'transparent',
         borderWidth: active ? 1 : 0,
-        borderColor: active ? tint + '55' : 'transparent',
+        borderColor: active ? tint + '33' : 'transparent',
         alignItems: 'center',
         justifyContent: 'center',
         }}>
@@ -11491,8 +11503,8 @@ function BottomTabButton({
         <Animated.View style={[
           btStyles.inner,
           active && {
-            backgroundColor: tint + '18',
-            borderColor: tint + '42',
+            backgroundColor: tint + '22',
+            borderColor: tint + '5A',
           },
           {
             transform: [
@@ -11504,7 +11516,7 @@ function BottomTabButton({
           <View style={{ position: 'relative' }}>
             <Animated.View style={[
               btStyles.iconWrap,
-              active && { backgroundColor: tint + '18' },
+              active && { backgroundColor: tint + '20' },
               { transform: [{ scale: iconScale }] },
             ]}>
               <Ionicons
@@ -12606,10 +12618,10 @@ const styles = StyleSheet.create({
     height: 64,
     borderRadius: 32,
     shadowColor: '#000',
-    shadowOpacity: 0.22,
-    shadowRadius: 24,
-    shadowOffset: { width: 0, height: 12 },
-    elevation: 18,
+    shadowOpacity: 0.2,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 16,
     zIndex: 50,
   },
   bottomBar: {
@@ -12620,7 +12632,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 7,
     borderRadius: 32,
-    borderWidth: 1,
+    borderWidth: 1.5,
     overflow: 'hidden',
   },
 

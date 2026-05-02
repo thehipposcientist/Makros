@@ -23,9 +23,8 @@ interface Props {
   /** {date: 'YYYY-MM-DD', weight_lbs: number}[] — user's logged weight
    *  history from client-side storage. */
   weightEntries: Array<{ date: string; weight_lbs: number }>;
-  /** Called with the accepted target so parent can persist it to the
-   *  user's nutrition plan. */
-  onAccept?: (newTargetKcal: number) => void;
+  /** Called with the accepted target and server action. */
+  onAccept?: (newTargetKcal: number, result: api.AdaptiveMacroResult) => void | Promise<void>;
 }
 
 export default function AdaptiveMacroCard({ authToken, themeName, weightEntries, onAccept }: Props) {
@@ -139,7 +138,7 @@ export default function AdaptiveMacroCard({ authToken, themeName, weightEntries,
         { text: 'Keep current', style: 'cancel' },
         {
           text: 'Accept', onPress: () => {
-            onAccept?.(data.suggested_target!);
+            void onAccept?.(data.suggested_target!, data);
           },
         },
       ],

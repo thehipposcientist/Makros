@@ -2127,7 +2127,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             }},
             { text: 'Open Settings', onPress: () => {
               AsyncStorage.setItem(dismissedKey, '1').catch(() => {});
-              import('react-native').then(({ Linking }) => Linking.openSettings()).catch(() => {});
+              const opener = Platform.OS === 'ios'
+                ? Linking.openURL('app-settings:')
+                : Linking.openSettings();
+              opener.catch(() => {});
             }},
           ],
         );

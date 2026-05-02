@@ -23,6 +23,7 @@ from sqlmodel import Session, select
 
 from app.models import (
     DailyRollup,
+    DailyHealthSnapshot,
     ExerciseSet,
     Meal,
     MealItem,
@@ -57,6 +58,7 @@ class _WindowCache:
     exercises_by_session: dict[int, list] = field(default_factory=lambda: defaultdict(list))
     sets_by_exercise: dict[int, list] = field(default_factory=lambda: defaultdict(list))
     checkin_by_day: dict[date, "WeeklyCheckIn"] = field(default_factory=dict)
+    health_by_day: dict[date, "DailyHealthSnapshot"] = field(default_factory=dict)
     # Sorted ascending so we can find "latest ≤ day" via reverse linear scan.
     checkins_sorted: list = field(default_factory=list)
     rollup_by_day: dict[date, "DailyRollup"] = field(default_factory=dict)
@@ -114,6 +116,17 @@ def _preload_window(db: Session, user_id: int, start: date, end: date) -> _Windo
     for c in checkins:
         if start <= c.checkin_date <= end:
             cache.checkin_by_day[c.checkin_date] = c
+
+    health_rows = db.exec(
+        select(DailyHealthSnapshot)
+        .where(
+            DailyHealthSnapshot.user_id == user_id,
+            DailyHealthSnapshot.snapshot_date >= start,
+            DailyHealthSnapshot.snapshot_date <= end,
+        )
+    ).all()
+    for h in health_rows:
+        cache.health_by_day[h.snapshot_date] = h
 
     rollups = db.exec(
         select(DailyRollup)
@@ -290,6 +303,7 @@ def compute_daily_rollup(
         sess = _session_stats_for_day_cached(cache, day)
         exact_checkin = cache.checkin_by_day.get(day)
         latest_checkin = exact_checkin or _latest_checkin_on_or_before_cached(cache, day)
+        health = cache.health_by_day.get(day)
         existing = cache.rollup_by_day.get(day)
     else:
         kcal, protein, carbs, fat, meals_logged = _sum_nutrition_for_day(db, user_id, day)
@@ -301,11 +315,17 @@ def compute_daily_rollup(
             )
         ).first()
         latest_checkin = exact_checkin or _latest_checkin_on_or_before(db, user_id, day)
+        health = db.exec(
+            select(DailyHealthSnapshot).where(
+                DailyHealthSnapshot.user_id == user_id,
+                DailyHealthSnapshot.snapshot_date == day,
+            )
+        ).first()
         existing = db.exec(
             select(DailyRollup).where(DailyRollup.user_id == user_id, DailyRollup.day == day)
         ).first()
 
-    weight_lbs = exact_checkin.weight_lbs if exact_checkin else None
+    weight_lbs = exact_checkin.weight_lbs if exact_checkin else (health.weight_lbs if health else None)
     # Map 1–5 sleep rating to approximate hours (rough, until HealthKit wiring lands).
     sleep_h: float | None = None
     energy: int | None = None
@@ -333,6 +353,7 @@ def compute_daily_rollup(
     row.weight_lbs = weight_lbs
     row.sleep_h = sleep_h
     row.energy = energy
+    row.steps = health.steps if health and health.steps is not None else None
     row.computed_at = datetime.now(timezone.utc)
     db.add(row)
     return row
@@ -460,6 +481,13 @@ def compute_user_rollups(db: Session, user_id: int, as_of: date) -> list[UserRol
         )
         .order_by(DailyRollup.day.asc())
     ).all()
+    existing_rollups = db.exec(
+        select(UserRollup).where(
+            UserRollup.user_id == user_id,
+            UserRollup.window_days.in_(WINDOWS),
+        )
+    ).all()
+    existing_by_window = {r.window_days: r for r in existing_rollups}
 
     out: list[UserRollup] = []
     for window in WINDOWS:
@@ -467,12 +495,7 @@ def compute_user_rollups(db: Session, user_id: int, as_of: date) -> list[UserRol
         window_rows = [r for r in all_rows if r.day >= window_start]
         agg = _aggregate_window(window_rows)
 
-        existing = db.exec(
-            select(UserRollup).where(
-                UserRollup.user_id == user_id,
-                UserRollup.window_days == window,
-            )
-        ).first()
+        existing = existing_by_window.get(window)
         row = existing or UserRollup(user_id=user_id, window_days=window, as_of=as_of)
         row.as_of = as_of
         row.kcal_avg = agg.kcal_avg

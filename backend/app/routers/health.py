@@ -51,6 +51,19 @@ def _row_to_dict(r: DailyHealthSnapshot) -> dict:
     }
 
 
+def _refresh_health_dependents(session: Session, user_id: int, as_of: date) -> None:
+    try:
+        from app.services.readiness.compute import invalidate_readiness_cache
+        invalidate_readiness_cache(user_id)
+    except Exception:
+        pass
+    try:
+        from app.services.coach.rollups import recompute_user
+        recompute_user(session, user_id=user_id, as_of=as_of, lookback_days=35)
+    except Exception:
+        pass
+
+
 @router.post("/snapshot")
 def upsert_snapshot(
     body: DailyHealthSnapshotUpsert,
@@ -94,13 +107,7 @@ def upsert_snapshot(
         )
         session.add(row)
     session.commit()
-    # Sleep / HRV / RHR are readiness pillars — drop the cache so the
-    # next /readiness/today reflects the freshly pushed snapshot.
-    try:
-        from app.services.readiness.compute import invalidate_readiness_cache
-        invalidate_readiness_cache(current_user.id)
-    except Exception:
-        pass
+    _refresh_health_dependents(session, current_user.id, body.snapshot_date)
     return {"status": "ok"}
 
 
@@ -149,11 +156,12 @@ def upsert_snapshot_batch(
                 updated_at=now,
             ))
     session.commit()
-    try:
-        from app.services.readiness.compute import invalidate_readiness_cache
-        invalidate_readiness_cache(current_user.id)
-    except Exception:
-        pass
+    if body:
+        _refresh_health_dependents(
+            session,
+            current_user.id,
+            max(snap.snapshot_date for snap in body),
+        )
     return {"status": "ok", "count": len(body)}
 
 

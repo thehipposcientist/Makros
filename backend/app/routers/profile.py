@@ -859,10 +859,8 @@ def put_user_state(
 # ─── Adaptive macro recommendations ──────────────────────────────────────────
 
 class AdaptiveMacroRequest(BaseModel):
-    """Client sends its local weight history so we can run the TDEE
-    estimator without needing a separate WeightEntry table. V1 keeps
-    weight storage on the client (AsyncStorage) — this endpoint just
-    consumes the data."""
+    """Client may send local weight history; the server also folds in
+    persisted WeightEntry rows and Apple Health weight snapshots."""
     weight_entries: list[dict] = []   # [{date: "YYYY-MM-DD", weight_lbs: float}, ...]
 
 
@@ -879,6 +877,7 @@ def adaptive_macros(
     from app.services.nutrition.adaptive_macros import (
         compute_adaptive_recommendation,
     )
+    from app.services.nutrition.targets import resolve_targets_for_user
 
     goal = session.exec(
         select(UserGoal).where(UserGoal.user_id == current_user.id)
@@ -890,44 +889,54 @@ def adaptive_macros(
     # Parse dates coming in as ISO strings.
     from datetime import date as _d
     entries_parsed: list[dict] = []
+    entries_by_date: dict[_d, float] = {}
     for e in body.weight_entries or []:
         try:
             d = _d.fromisoformat(str(e.get("date") or "").strip())
             w = float(e.get("weight_lbs") or 0)
             if w > 0:
-                entries_parsed.append({"date": d, "weight_lbs": w})
+                entries_by_date[d] = w
         except (ValueError, TypeError):
             continue
 
-    current_target = None
-    if profile:
-        # UserProfile doesn't currently store a computed calorie target
-        # in a uniform field. Pull it from the latest nutrition plan if
-        # available, else leave None and the UI will just show the
-        # suggested target on its own.
-        from app.models import NutritionPlan
-        np_row = session.exec(
-            select(NutritionPlan)
-            .where(NutritionPlan.user_id == current_user.id)
-            .where(NutritionPlan.is_active == True)  # noqa: E712
-            .order_by(NutritionPlan.created_at.desc())
-        ).first()
-        if np_row and np_row.plan_json:
-            try:
-                current_target = int(
-                    (np_row.plan_json.get("targets") or {}).get("calories")
-                    or (np_row.plan_json.get("macros") or {}).get("calories")
-                    or 0
-                ) or None
-            except Exception:
-                current_target = None
+    cutoff = date.today() - timedelta(days=60)
+    for row in session.exec(
+        select(WeightEntry)
+        .where(WeightEntry.user_id == current_user.id)
+        .where(WeightEntry.entry_date >= cutoff)
+    ).all():
+        if row.weight_lbs and row.weight_lbs > 0:
+            entries_by_date[row.entry_date] = float(row.weight_lbs)
+
+    for row in session.exec(
+        select(DailyHealthSnapshot)
+        .where(DailyHealthSnapshot.user_id == current_user.id)
+        .where(DailyHealthSnapshot.snapshot_date >= cutoff)
+        .where(DailyHealthSnapshot.weight_lbs != None)  # noqa: E711
+    ).all():
+        if row.weight_lbs and row.weight_lbs > 0:
+            entries_by_date.setdefault(row.snapshot_date, float(row.weight_lbs))
+
+    entries_parsed = [
+        {"date": d, "weight_lbs": w}
+        for d, w in sorted(entries_by_date.items(), key=lambda item: item[0])
+    ]
+
+    resolved = resolve_targets_for_user(session, current_user.id) if profile else None
+    current_target = resolved.calories if resolved else None
+    goal_bucket = resolved.bucket_name if resolved else (
+        goal.goal_type.value if goal and hasattr(goal.goal_type, "value") else str(goal.goal_type) if goal else None
+    )
 
     rec = compute_adaptive_recommendation(
         session, current_user.id,
-        profile_goal=(goal.goal_type if goal else None),
+        profile_goal=goal_bucket,
         current_target_kcal=current_target,
         weight_entries=entries_parsed,
     )
+    action = None
+    if rec.status == "ok" and rec.delta is not None and abs(rec.delta) >= 25:
+        action = {"type": "adjust_calorie_target", "delta": rec.delta}
     return {
         "status": rec.status,
         "estimated_tdee": rec.estimated_tdee,
@@ -941,6 +950,7 @@ def adaptive_macros(
         "confidence": rec.confidence,
         "reason": rec.reason,
         "goal_bucket": rec.goal_bucket,
+        "action": action,
     }
 
 

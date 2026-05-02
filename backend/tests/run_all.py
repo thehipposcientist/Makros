@@ -63,6 +63,9 @@ _TEST_MODULES = (
     "tests.test_cardio_prescription",
     # Weekly calorie budget smoothing — formula, caps, macro redistribution.
     "tests.test_weekly_calorie_budget",
+    # DB-aware nutrition target resolver — coach deltas, Apple Health signals,
+    # recent weight, and per-day macro redistribution.
+    "tests.test_adaptive_nutrition_targets",
     "tests.test_plan_week",
     # Mid-week regeneration: done-day protection + split/dpw/equipment changes.
     "tests.test_plan_week_midweek_regen",

@@ -3343,6 +3343,7 @@ export type AdaptiveMacroResult = {
   confidence: 'low' | 'medium' | 'high';
   reason: string;
   goal_bucket: string | null;
+  action?: Record<string, any> | null;
 };
 
 export async function getAdaptiveMacros(
