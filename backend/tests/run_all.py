@@ -75,6 +75,10 @@ _TEST_MODULES = (
     # plan_cadence_anchor: pure helper that locks the user's sign-up
     # day-of-week as the rhythm for every future plan-week start_date.
     "tests.test_plan_cadence_anchor",
+    # Plan generation respects the user's session_minutes budget — fills
+    # close to the target without going far under (the underfill bug
+    # density_adjust_slots was extended to fix).
+    "tests.test_plan_time_budget",
     # Change Day Type — conflict detection + smart adjust reconciliation.
     "tests.test_change_day_type",
     # Switch Day pin/rotate/swap algorithm — pure-function helper.

@@ -11,6 +11,7 @@ const tests = [
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/hydration.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/screens/__tests__/progressData.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/planEffectiveDate.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/planChangeBehavior.test.ts'],
 ];
 
 for (const args of tests) {

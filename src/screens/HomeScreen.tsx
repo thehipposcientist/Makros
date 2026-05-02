@@ -135,6 +135,12 @@ interface HomeScreenProps {
   // `mode` argument tells the parent which section to regenerate so the
   // right loading state fires (workout vs nutrition).
   onSaveProfile?: (updated: UserProfile, mode?: 'goal' | 'workout' | 'mealplan' | 'theme') => void;
+  /** Bubble the active PlanWeek's end_date up to the app root so the
+   *  pending-save confirmation modal can show the correct "applies on"
+   *  date (end_date + 1 = first day of the next plan week, on the
+   *  user's sign-up cadence). HomeScreen calls this whenever planWeek
+   *  state changes. Null when no active week exists. */
+  onActivePlanWeekEndChange?: (endDate: string | null) => void;
   /** Switch-Day full regen — takes the pinned day index + focus, runs the
    *  AI workout-plan job with the big "Building your new plan" splash,
    *  then overrides the pinned day to the chosen focus post-hoc. Lets
@@ -1277,7 +1283,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onBackendSync, onSaveProfile, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onProfileUpdate, onBackendSync, onSaveProfile, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -1339,6 +1345,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // need the freshest value before React commits the state update.
   const [planWeek, setPlanWeek] = useState<import('../services/api').PlanWeekResponse | null>(null);
   const planWeekRef = useRef<import('../services/api').PlanWeekResponse | null>(null);
+
+  // Bubble the active week's end_date up to app root whenever planWeek
+  // changes — used by the pending-save modal to show the user the right
+  // "applies on" date. No deps on activeWeekEndChange callback identity
+  // (parent's callback is stable enough; over-firing is harmless).
+  useEffect(() => {
+    onActivePlanWeekEndChange?.(planWeek?.end_date ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planWeek?.end_date]);
   const [nutritionPlansByDate, setNutritionPlansByDate] = useState<Record<string, DailyNutritionPlan>>({});
   // Bottom-tab navigation. All five tabs render inline content within
   // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
@@ -6709,31 +6724,81 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
                   }) : async (newFocus) => {
                     setSwitchDayIdx(-1);
-                    if (!workoutPlan || !item.workout) return;
+                    if (!workoutPlan) return;
                     // Map the tapped schedule item back to the matching
                     // entry in workoutPlan.days. With PlanWeek hydration this
                     // is the dated calendar index; legacy fallback plans keep
-                    // their recipe index.
-                    const recipeIdx = workoutPlan.days.indexOf(item.workout as any);
+                    // their recipe index. For rest days `item.workout` is
+                    // null — handled below by appending a new shell instead
+                    // of overwriting an existing day.
+                    const recipeIdx = item.workout
+                      ? workoutPlan.days.indexOf(item.workout as any)
+                      : -1;
                     const dayIdx = recipeIdx >= 0 ? recipeIdx : i;
 
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
 
                     // 'Custom' / 'Empty' are blank-slate focuses — don't
-                    // hit the generator. Local update only so the day
-                    // becomes "fill it yourself" and the user can use Live
-                    // Tracker / templates / change-focus picker from there.
+                    // hit the generator. The day becomes "fill it yourself"
+                    // and the user can use Live Tracker / templates /
+                    // change-focus picker from there.
                     if (newFocus === 'Custom' || newFocus === 'Empty') {
-                      const updatedDays = [...workoutPlan.days];
-                      updatedDays[dayIdx] = {
-                        ...updatedDays[dayIdx],
+                      const newDay = {
+                        ...(item.workout ?? { day: DAY_NAMES[item.date.getDay()] }),
                         focus: newFocus,
                         exercises: [],
-                      };
+                        stimulus: null,
+                      } as any;
+                      // Update legacy workoutPlan cache for non-PlanWeek
+                      // paths and offline fallback.
+                      const updatedDays = [...workoutPlan.days];
+                      if (item.workout && recipeIdx >= 0) {
+                        updatedDays[recipeIdx] = newDay;
+                      } else {
+                        // Rest-day conversion: append the new shell to
+                        // the legacy days list. The PlanWeek path is
+                        // what actually drives rendering for Pro users
+                        // (see patchPlanDayWorkout below); the legacy
+                        // cache is just a safety net.
+                        updatedDays.push(newDay);
+                      }
                       const updatedPlan = { ...workoutPlan, days: updatedDays };
                       setWorkoutPlan(updatedPlan);
                       AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
+
+                      // CRITICAL: persist to PlanWeek server-side so the
+                      // change survives a reload. The previous version
+                      // only mutated the legacy AsyncStorage cache; on
+                      // next loadPlans the PlanDay would still report
+                      // is_rest=true and the user's switch was lost.
+                      // patchPlanDayWorkout sets is_rest=false, writes
+                      // workout_json, and locks the day as manual_edit
+                      // so future regens don't blow it away.
+                      if (authToken && planWeek?.days?.length) {
+                        try {
+                          const dateISO = dateKey(item.date);
+                          const { patchPlanDayWorkout } = await import('../services/api');
+                          const updatedPlanDay = await patchPlanDayWorkout(authToken, dateISO, newDay);
+                          // Mirror the server response into local planWeek
+                          // state so the UI reflects is_rest=false + the
+                          // new workout_json without waiting for the next
+                          // loadPlans cycle.
+                          setPlanWeek(prev => {
+                            if (!prev) return prev;
+                            return {
+                              ...prev,
+                              days: prev.days.map(pd =>
+                                pd.day_date === dateISO
+                                  ? { ...pd, is_rest: updatedPlanDay.is_rest, workout: updatedPlanDay.workout, status: updatedPlanDay.status, locked: updatedPlanDay.locked }
+                                  : pd,
+                              ),
+                            };
+                          });
+                        } catch (e) {
+                          console.warn('[switchDay] patchPlanDayWorkout failed (legacy cache still updated):', e);
+                        }
+                      }
                       return;
                     }
 

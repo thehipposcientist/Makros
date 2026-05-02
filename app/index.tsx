@@ -381,6 +381,12 @@ export default function Index() {
   const [planRefreshKey, setPlanRefreshKey] = useState(0);
   const [isWorkoutUpdating, setIsWorkoutUpdating] = useState(false);
   const [isNutritionUpdating, setIsNutritionUpdating] = useState(false);
+  // Active PlanWeek's end_date — pushed up from HomeScreen so the
+  // pending-save modal can show the user the correct "applies on" date
+  // (last day of their current plan-week + 1, on their actual sign-up
+  // cadence). Null when no PlanWeek exists yet (free users, brand-new
+  // signups). The modal falls back to a 7-day default in that case.
+  const [activePlanWeekEnd, setActivePlanWeekEnd] = useState<string | null>(null);
   const [showProgress, setShowProgress]   = useState(false);
   const [showAccount, setShowAccount]     = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
@@ -1346,15 +1352,21 @@ export default function Index() {
       await pushUserStateToBackend(authToken).catch(() => null);
       await syncOnboarding(authToken, stamped).catch(() => null);
 
-      // Keep the active PlanWeek stable. Goal/workout settings are saved
-      // immediately, but the dated week in progress is not replaced from
-      // this profile-save path. Meal-plan and goal edits can refresh
-      // NutritionPlan templates for future weeks because active PlanDay
-      // nutrition remains the source of truth for the current week.
-      const { isPro } = await import('../src/utils/subscription');
-      const canRegen = isPro(stamped);
+      // CRITICAL: never regenerate the active plan from a profile-save.
+      // The user's in-flight week (workouts AND meals) must stay stable;
+      // their new settings only take effect at the NEXT plan-week boundary
+      // via `auto_renew_week`. Previously this path eagerly regenerated
+      // nutrition on goal/mealplan edits, which:
+      //   1. Wiped today's planned meals out from under the user
+      //   2. Made goal changes apply to meals but NOT workouts
+      //      (regenWorkout was already false), creating a confusing
+      //      "half-applied" state
+      //   3. Disagreed with the modal copy that promised changes wouldn't
+      //      take effect until the next plan week
+      // syncOnboarding above already persists the new settings; the next
+      // auto-renew at week boundary picks them up on its own.
       const regenWorkout = false;
-      const regenNutrition = canRegen && (priorEditMode === 'mealplan' || (priorEditMode === 'goal' && goalChanged));
+      const regenNutrition = false;
 
       if (goalChanged) {
         await appendUserLog({
@@ -1566,6 +1578,7 @@ export default function Index() {
         onViewProgress={() => setShowProgress(true)}
         onViewAccount={() => setShowAccount(true)}
         onSaveProfile={(updated, mode) => handleSaveProfile(updated, mode)}
+        onActivePlanWeekEndChange={setActivePlanWeekEnd}
         onSwitchDayRegen={handleSwitchDayRegen}
         onBackendSync={async () => {
           // Called by the trainer chat Apply flow after a plan is
@@ -1891,11 +1904,13 @@ export default function Index() {
         const tc = getTheme(userProfile?.themePreference).colors;
         const isGoal = pendingSave.mode === 'goal';
         const isMealplan = pendingSave.mode === 'mealplan';
-        // Plan changes always apply to the NEXT plan week (Mondays)
+        // Plan changes always apply to the start of the NEXT plan week
         // because mid-week regen would invalidate the user's in-flight
-        // schedule. Compute and show the exact date so they know when
-        // it kicks in.
-        const effectiveDate = nextPlanWeekStart();
+        // schedule. The next-week start is the active PlanWeek's
+        // end_date + 1 (sign-up-day cadence) — pulled up from HomeScreen
+        // via setActivePlanWeekEnd. Falls back to today + 7 only when
+        // no PlanWeek exists (free users, brand-new signup).
+        const effectiveDate = nextPlanWeekStart(activePlanWeekEnd);
         const effectiveDateLabel = formatPlanStartDateShort(effectiveDate);
         const titleText = isGoal
           ? 'Save Goal Change?'
