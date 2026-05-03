@@ -60,7 +60,7 @@ TabView: **Today** (workout) / **Meals** / **Hydration** / **Supps** / **Sleep**
 
 **Actions:** widget links open the watch app through the `thallowatch://` URL scheme. `thallowatch://start-workout` starts or rejoins today's workout through the existing watch `start_workout` command path; `thallowatch://hydration/add?oz=8` switches to Hydration, optimistically adds water locally, and sends the existing `log_hydration` command to the phone. Phone/backend remain authoritative.
 
-**Signing requirement:** the App Group `group.com.thallo.app` must be enabled for both `com.thallo.app.watch` and `com.thallo.app.watch.complication` in Apple Developer before device/TestFlight signing.
+**Signing requirement:** the App Group `group.com.thallo.app` must be enabled for both `com.thallo.app.watch` and `com.thallo.app.watch.widget` in Apple Developer before device/TestFlight signing.
 
 ## Siri Intent Scaffold (#111 — NOT YET SHIPPED)
 

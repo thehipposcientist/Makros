@@ -5,6 +5,7 @@ module.exports = {
   // the watch app for actions so persistence stays on the WCSession path.
   type: 'watch-widget',
   name: 'ThalloWatchComplication',
+  bundleIdentifier: '.watch.widget',
   deploymentTarget: '10.0',
   colors: {
     $accent: '#15C7B8',

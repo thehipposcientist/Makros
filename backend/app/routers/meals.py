@@ -2,7 +2,7 @@ from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session, select, delete as _sm_delete
 from datetime import date, datetime
 from typing import Optional
 
@@ -1120,8 +1120,19 @@ def delete_meal(
     affected_date = meal.meal_date
 
     try:
-        for item in db.exec(select(MealItem).where(MealItem.meal_id == meal_id)).all():
-            db.delete(item)
+        # Issue a bulk DELETE for the child rows in a single statement,
+        # then flush so the SQL actually hits the DB BEFORE we mark the
+        # parent for deletion. The earlier per-row `db.delete(item)` +
+        # `db.delete(meal)` + `db.commit()` pattern relied on SQLAlchemy's
+        # unit-of-work to topologically order the deletes — which it
+        # USUALLY does, but in some session states (post-commit, after
+        # certain reads) the meal DELETE was being issued first and
+        # tripping the FK constraint:
+        #   "update or delete on table meals violates foreign key
+        #    constraint, still referenced from meal_items".
+        # Forcing a flush between child + parent removes the ambiguity.
+        db.exec(_sm_delete(MealItem).where(MealItem.meal_id == meal_id))
+        db.flush()
         db.delete(meal)
         db.commit()
     except Exception as e:

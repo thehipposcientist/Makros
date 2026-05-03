@@ -145,6 +145,7 @@ Use plain text for each. **Do not leave any value blank** — App Runner rejects
 | `EMAIL_VERIFICATION_URL_TEMPLATE` | optional deep-link/web template containing `{email}` and `{token}` |
 | `PASSWORD_RESET_URL_TEMPLATE` | optional deep-link/web template containing `{email}` and `{token}` |
 | `SOCIAL_FEED_ENABLED` | omit or set `1`; set `0` only to disable friends activity feed |
+| `GOOGLE_CLIENT_IDS` | comma-separated Google OAuth client IDs accepted by the backend, including the web/iOS/Android IDs used by builds |
 
 **Do NOT set `DEV_PASSWORD_RESET`.** Omitting it disables the dev-mode password reset endpoint in prod.
 
@@ -248,6 +249,21 @@ Edit `app.json` → `expo.extra.apiBaseUrl` → paste your App Runner URL:
 ```
 `freeBetaFullAccess` should stay `true` for the free external beta. Turn it off only when StoreKit/RevenueCat and server-side entitlement checks are ready.
 Commit and push.
+
+For Google sign-in, add the OAuth client IDs to the EAS build environment before building. These IDs are public identifiers, not secrets, and `app.config.js` exposes them to the app through Expo `extra`.
+
+Required for iOS:
+```bash
+eas env:create --environment production --name GOOGLE_IOS_CLIENT_ID --value "<ios-client-id>.apps.googleusercontent.com" --visibility plaintext
+eas env:create --environment production --name GOOGLE_WEB_CLIENT_ID --value "<web-client-id>.apps.googleusercontent.com" --visibility plaintext
+```
+
+Required for Android later:
+```bash
+eas env:create --environment production --name GOOGLE_ANDROID_CLIENT_ID --value "<android-client-id>.apps.googleusercontent.com" --visibility plaintext
+```
+
+For local builds, export the same variables in your shell or put the `EXPO_PUBLIC_GOOGLE_*` equivalents in a root `.env` file.
 
 ## 9. First iOS build (EAS)
 

@@ -145,6 +145,7 @@ public class ThalloWatchBridgeModule: Module {
 // Keeps the WCSession delegate alive across hot reloads and routes
 // incoming commands into the Expo event stream.
 private class _SessionHolder: NSObject, WCSessionDelegate {
+    private let queuedHydrationCommandsKey = "thallo.watchBridge.queuedHydrationCommands"
     private var dispatchEvent: ((String, [String: Any]) -> Void)?
     private var userId: String?
     private var commandListenerCount = 0
@@ -165,8 +166,9 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     }
 
     func drainQueuedCommands() -> [[String: Any]] {
-        let queued = queuedCommands
+        let queued = dedupCommandEvents(queuedCommands + loadQueuedHydrationCommands())
         queuedCommands.removeAll()
+        saveQueuedHydrationCommands([])
         return queued
     }
 
@@ -516,12 +518,49 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
                 self.dispatchEvent?("command", event)
             } else {
                 self.queuedCommands.append(event)
+                self.persistQueuedHydrationCommand(event)
                 if self.queuedCommands.count > 50 {
                     self.queuedCommands.removeFirst(self.queuedCommands.count - 50)
                 }
                 os_log("[wc-bridge] queued command=%{public}@ until JS listener attaches", log: wcLog, type: .default, cmd)
             }
         }
+    }
+
+    private func loadQueuedHydrationCommands() -> [[String: Any]] {
+        UserDefaults.standard.array(forKey: queuedHydrationCommandsKey) as? [[String: Any]] ?? []
+    }
+
+    private func saveQueuedHydrationCommands(_ events: [[String: Any]]) {
+        if events.isEmpty {
+            UserDefaults.standard.removeObject(forKey: queuedHydrationCommandsKey)
+        } else {
+            UserDefaults.standard.set(events, forKey: queuedHydrationCommandsKey)
+        }
+    }
+
+    private func persistQueuedHydrationCommand(_ event: [String: Any]) {
+        guard (event["command"] as? String) == "log_hydration" else { return }
+        var events = loadQueuedHydrationCommands()
+        events.append(event)
+        if events.count > 50 {
+            events.removeFirst(events.count - 50)
+        }
+        saveQueuedHydrationCommands(dedupCommandEvents(events))
+    }
+
+    private func dedupCommandEvents(_ events: [[String: Any]]) -> [[String: Any]] {
+        var seen = Set<String>()
+        var deduped: [[String: Any]] = []
+        for event in events {
+            let commandId = (event["payload"] as? [String: Any])?["commandId"] as? String
+            if let commandId = commandId, !commandId.isEmpty {
+                if seen.contains(commandId) { continue }
+                seen.insert(commandId)
+            }
+            deduped.append(event)
+        }
+        return deduped
     }
 
     private func shouldDropStaleWorkoutCommand(_ command: String, _ msg: [String: Any]) -> Bool {

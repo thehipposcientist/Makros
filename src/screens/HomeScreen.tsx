@@ -2057,17 +2057,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     if (dateISO === todayKey()) setHydration(optimistic);
     try {
       const result = await logHydration(authToken, next, dateISO);
-      const saved = {
-        date: result.date,
-        ounces: result.ounces,
-        target_ounces: currentRow?.target_ounces ?? hydration?.target_ounces ?? 64,
+      const fresh = await getHydration(authToken, result.date).catch(() => null);
+      const saved = fresh
+        ? { date: fresh.date, ounces: fresh.ounces, target_ounces: fresh.target_ounces }
+        : {
+          date: result.date,
+          ounces: result.ounces,
+          target_ounces: currentRow?.target_ounces ?? hydration?.target_ounces ?? 64,
       };
-      setHydrationByDate(prev => ({ ...prev, [result.date]: saved }));
-      if (result.date === todayKey()) setHydration(saved);
-      if (result.date === todayKey()) pushHydrationSnapshotToWatch(result.date, saved).catch(() => {});
+      setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
+      if (saved.date === todayKey()) setHydration(saved);
+      if (saved.date === todayKey()) pushHydrationSnapshotToWatch(saved.date, saved).catch(() => {});
     } catch {
-      if (currentRow) setHydrationByDate(prev => ({ ...prev, [dateISO]: { ...currentRow, ounces: current } }));
-      if (dateISO === todayKey()) setHydration(prev => prev ? { ...prev, ounces: current } : prev);
+      if (currentRow) {
+        setHydrationByDate(prev => ({ ...prev, [dateISO]: { ...currentRow, ounces: current } }));
+        if (dateISO === todayKey()) setHydration({ ...currentRow, ounces: current });
+      } else {
+        setHydrationByDate(prev => {
+          const nextRows = { ...prev };
+          delete nextRows[dateISO];
+          return nextRows;
+        });
+        if (dateISO === todayKey()) setHydration(null);
+      }
       Alert.alert('Hydration not saved', 'Could not update water intake right now.');
     } finally {
       setHydrationLoading(false);
@@ -2087,17 +2099,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     if (dateISO === todayKey()) setHydration(optimistic);
     try {
       const result = await logHydration(authToken, next, dateISO);
-      const saved = {
-        date: result.date,
-        ounces: result.ounces,
-        target_ounces: currentRow?.target_ounces ?? hydration?.target_ounces ?? 64,
+      const fresh = await getHydration(authToken, result.date).catch(() => null);
+      const saved = fresh
+        ? { date: fresh.date, ounces: fresh.ounces, target_ounces: fresh.target_ounces }
+        : {
+          date: result.date,
+          ounces: result.ounces,
+          target_ounces: currentRow?.target_ounces ?? hydration?.target_ounces ?? 64,
       };
-      setHydrationByDate(prev => ({ ...prev, [result.date]: saved }));
-      if (result.date === todayKey()) setHydration(saved);
-      if (result.date === todayKey()) pushHydrationSnapshotToWatch(result.date, saved).catch(() => {});
+      setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
+      if (saved.date === todayKey()) setHydration(saved);
+      if (saved.date === todayKey()) pushHydrationSnapshotToWatch(saved.date, saved).catch(() => {});
     } catch {
-      if (currentRow) setHydrationByDate(prev => ({ ...prev, [dateISO]: { ...currentRow, ounces: current } }));
-      if (dateISO === todayKey()) setHydration(prev => prev ? { ...prev, ounces: current } : prev);
+      if (currentRow) {
+        setHydrationByDate(prev => ({ ...prev, [dateISO]: { ...currentRow, ounces: current } }));
+        if (dateISO === todayKey()) setHydration({ ...currentRow, ounces: current });
+      } else {
+        setHydrationByDate(prev => {
+          const nextRows = { ...prev };
+          delete nextRows[dateISO];
+          return nextRows;
+        });
+        if (dateISO === todayKey()) setHydration(null);
+      }
       Alert.alert('Hydration not saved', 'Could not update water intake right now.');
     } finally {
       setHydrationLoading(false);
@@ -3199,15 +3223,32 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             // the phone hydration panel uses, then re-push the server
             // target so the wrist stays aligned with today's formula.
             (async () => {
+              let rollbackDateISO = todayKey();
+              let rollbackRow: HydrationSummary | null = null;
               try {
                 if (!authToken) return;
+                const commandUserId = typeof payload?.userId === 'string' && payload.userId.trim()
+                  ? payload.userId.trim()
+                  : null;
+                const currentUserId = await AsyncStorage.getItem('last_user_id').catch(() => null);
+                if (commandUserId && currentUserId && commandUserId !== currentUserId) return;
                 const rawOunces = Number(payload?.ounces);
                 if (!Number.isFinite(rawOunces) || rawOunces < 0 || rawOunces > 400) return;
                 const dateISO = String(payload?.dateISO || todayKey()).slice(0, 10);
+                rollbackDateISO = dateISO;
+                const commandTsMs = Number(payload?.tsMs ?? 0);
+                const commandOwner = currentUserId ?? commandUserId ?? 'unknown';
+                const commandKey = `watch_hydration_command_ts_v1:${commandOwner}:${dateISO}`;
+                if (Number.isFinite(commandTsMs) && commandTsMs > 0) {
+                  const lastRaw = await AsyncStorage.getItem(commandKey).catch(() => null);
+                  const lastTsMs = lastRaw ? Number(lastRaw) : 0;
+                  if (Number.isFinite(lastTsMs) && commandTsMs <= lastTsMs) return;
+                }
                 const next = Math.max(0, Math.round(rawOunces * 10) / 10);
                 const s = rePushStateRef.current;
                 const currentRow = s.hydrationByDate?.[dateISO]
                   ?? (dateISO === todayKey() ? s.hydration : null);
+                rollbackRow = currentRow;
                 const optimistic: HydrationSummary = {
                   date: dateISO,
                   ounces: next,
@@ -3226,13 +3267,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   };
                 setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
                 if (saved.date === todayKey()) setHydration(saved);
+                if (Number.isFinite(commandTsMs) && commandTsMs > 0) {
+                  await AsyncStorage.setItem(commandKey, String(commandTsMs)).catch(() => {});
+                }
                 const { pushHydrationToWatch } = await import('../utils/watchSync');
                 await pushHydrationToWatch({
                   dateISO: saved.date,
                   ounces: saved.ounces,
                   targetOunces: saved.target_ounces,
                 });
-              } catch { /* non-fatal */ }
+              } catch {
+                const restored = rollbackRow ?? await getHydration(authToken, rollbackDateISO)
+                  .then(row => ({ date: row.date, ounces: row.ounces, target_ounces: row.target_ounces }))
+                  .catch(() => null);
+                if (restored) {
+                  setHydrationByDate(prev => ({ ...prev, [restored.date]: restored }));
+                  if (restored.date === todayKey()) setHydration(restored);
+                } else {
+                  setHydrationByDate(prev => {
+                    const nextRows = { ...prev };
+                    delete nextRows[rollbackDateISO];
+                    return nextRows;
+                  });
+                  if (rollbackDateISO === todayKey()) setHydration(null);
+                }
+                const { pushHydrationToWatch } = await import('../utils/watchSync');
+                await pushHydrationToWatch({
+                  dateISO: restored?.date ?? rollbackDateISO,
+                  ounces: restored?.ounces ?? 0,
+                  targetOunces: restored?.target_ounces ?? 64,
+                }).catch(() => {});
+              }
             })();
           } else if (command === 'toggle_supplement') {
             // Watch tapped a supplement row — log the dose on the

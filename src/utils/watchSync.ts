@@ -653,6 +653,7 @@ export async function pushWeightToWatch(opts: {
 export async function clearWatchData(): Promise<void> {
   if (!canPush()) return;
   const now = Date.now();
+  const userId = await stampBridgeUserId();
   // clearWorkoutMs tells the watch to discard its stored workout before absorbing
   // this payload, bypassing the syncedAtMs ordering guard. Safe to leave in
   // applicationContext — the watch tracks the last processed timestamp and
@@ -666,14 +667,14 @@ export async function clearWatchData(): Promise<void> {
     readiness: null,
     readinessLabel: null,
     exercises: [],
-    userId: '',
+    userId,
     syncedAtMs: now,
     clearWorkoutMs: now,
   } as WatchWorkoutPayload & { clearWorkoutMs: number };
   await WatchBridge.syncWorkout(buildWatchWorkoutEnvelope(clearWorkout, {
     reason: 'clear',
     sentAtMs: now,
-    userId: '',
+    userId,
   })).catch(() => {});
   await WatchBridge.syncMeals({
     dateISO: localDateISO(),

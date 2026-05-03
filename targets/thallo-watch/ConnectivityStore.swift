@@ -220,7 +220,8 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             handleUserSwitch(incomingUserId)
         }
 
-        let envelopeHandled = absorbWorkoutEnvelope(ctx["workoutEnvelope"])
+        let contextUserId = normalizedUserId(ctx["userId"] as? String)
+        let envelopeHandled = absorbWorkoutEnvelope(ctx["workoutEnvelope"], contextUserId: contextUserId)
         if !envelopeHandled {
             absorbLegacyWorkout(ctx)
         }
@@ -336,7 +337,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         NotificationCenter.default.post(name: .watchProgressUpdate, object: nil, userInfo: msg)
     }
 
-    private func absorbWorkoutEnvelope(_ raw: Any?) -> Bool {
+    private func absorbWorkoutEnvelope(_ raw: Any?, contextUserId: String?) -> Bool {
         guard let raw = raw else { return false }
         guard let dict = raw as? [String: Any] else {
             HeartRateStore.saveDiag("workoutEnvelope key present but not a dict")
@@ -358,7 +359,10 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                 return true
             }
 
-            handleUserSwitch(envelope.userId)
+            let envelopeUserId = normalizedUserId(envelope.userId) ?? contextUserId
+            if let envelopeUserId = envelopeUserId {
+                handleUserSwitch(envelopeUserId)
+            }
 
             let lastRevision = UserDefaults.standard.double(forKey: Self.lastWorkoutRevisionKey)
             if envelope.revision < lastRevision {
@@ -376,7 +380,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             }
 
             let stored = currentUserId ?? ""
-            let workoutUserId = envelope.workout.userId ?? envelope.userId ?? ""
+            let workoutUserId = normalizedUserId(envelope.workout.userId) ?? envelopeUserId ?? ""
             if !stored.isEmpty && !workoutUserId.isEmpty && workoutUserId != stored {
                 let msg = "rejected: userId \(workoutUserId.prefix(4))≠\(stored.prefix(4))"
                 HeartRateStore.saveDiag("rejected workoutEnvelope: userId \(workoutUserId.prefix(4))≠stored \(stored.prefix(4))")
@@ -396,6 +400,13 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             HeartRateStore.saveLastAbsorb(msg)
             return false
         }
+    }
+
+    private func normalizedUserId(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty
+        else { return nil }
+        return trimmed
     }
 
     private func absorbLegacyWorkout(_ ctx: [String: Any]) {
@@ -664,6 +675,9 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         body["command"] = command
         let tsMs = Date().timeIntervalSince1970 * 1000
         body["tsMs"] = tsMs
+        if let userId = currentUserId, !userId.isEmpty {
+            body["userId"] = userId
+        }
         if command != "watch_log" {
             body["commandId"] = "\(command)-\(Int(tsMs))-\(UUID().uuidString)"
         }
@@ -707,6 +721,9 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                     self?.lastError = err.localizedDescription
                     HeartRateStore.saveDiag("→ \(command) ERR: \(err.localizedDescription.prefix(40))")
                 }
+            }
+            if command == "log_hydration" {
+                session.transferUserInfo(body)
             }
         } else {
             // Queue for later delivery via transferUserInfo when phone
