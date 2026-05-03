@@ -15,6 +15,7 @@ const GOAL_HIST_KEY      = 'goalHistory';
 const PLAN_CHANGES_KEY   = 'planChangeHistory';
 const MEAL_ROUTINES_KEY  = 'mealRoutines';
 const PRESERVED_WORKOUTS_KEY = 'preservedCompletedWorkouts';
+const MANUAL_WORKOUT_OVERRIDES_KEY = 'manualWorkoutOverrides';
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
 
@@ -155,6 +156,33 @@ export async function savePreservedCompletedWorkout(date: string, workout: Worko
 export async function loadPreservedCompletedWorkouts(): Promise<PreservedWorkoutMap> {
   try {
     const raw = await AsyncStorage.getItem(PRESERVED_WORKOUTS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+// ── Manual workout overrides ─────────────────────────────────────────────────
+// Local/free schedules do not have PlanDay rows to patch. Store a dated
+// workout shell so a user can turn a rendered rest day into a custom workout.
+
+type ManualWorkoutOverrideMap = Record<string, WorkoutDay>;
+
+export async function saveManualWorkoutOverride(date: string, workout: WorkoutDay): Promise<void> {
+  try {
+    const raw = await AsyncStorage.getItem(MANUAL_WORKOUT_OVERRIDES_KEY);
+    const all: ManualWorkoutOverrideMap = raw ? JSON.parse(raw) : {};
+    all[date] = workout;
+    const keys = Object.keys(all).sort().reverse().slice(0, 30);
+    const pruned: ManualWorkoutOverrideMap = {};
+    keys.forEach(k => { pruned[k] = all[k]; });
+    await AsyncStorage.setItem(MANUAL_WORKOUT_OVERRIDES_KEY, JSON.stringify(pruned));
+  } catch {}
+}
+
+export async function loadManualWorkoutOverrides(): Promise<ManualWorkoutOverrideMap> {
+  try {
+    const raw = await AsyncStorage.getItem(MANUAL_WORKOUT_OVERRIDES_KEY);
     return raw ? JSON.parse(raw) : {};
   } catch {
     return {};

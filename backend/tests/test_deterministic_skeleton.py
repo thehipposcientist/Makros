@@ -31,6 +31,7 @@ from app.services.nutrition.deterministic_skeleton import (
     generate_deterministic_skeleton,
 )
 from app.services.nutrition.meal_assembler import (
+    DEFAULT_NUTRITION_PANTRY,
     FoodMacros,
     assemble_nutrition_response,
     assemble_template,
@@ -130,6 +131,28 @@ def _enriched_for(pantry: list[str]) -> dict[str, FoodMacros]:
     in the default table. Unknown foods become stubs downstream."""
     table = {k: v for k, v in _DEFAULT_FOOD_TABLE.items() if k in {f.lower() for f in pantry}}
     return _stub_food_lookup({name: vals for name, vals in table.items()})
+
+
+def _enriched_payload_for(pantry: list[str]) -> dict:
+    """Build the enrichment payload shape consumed by assemble_nutrition_response."""
+    foods: list[dict] = []
+    for name in pantry:
+        vals = _DEFAULT_FOOD_TABLE.get(name.lower())
+        if not vals:
+            continue
+        cal, p, c, f = vals
+        foods.append({
+            "name": name,
+            "serving": "1 cup",
+            "calories": cal,
+            "protein": p,
+            "carbs": c,
+            "fat": f,
+            "fiber": 2,
+            "sugar": 1,
+            "sodium": 50,
+        })
+    return {"foods": foods, "routine_meals": []}
 
 
 def _total_macros(template_out: dict) -> tuple[float, float, float, float]:
@@ -429,6 +452,37 @@ def test_assembler_surfaces_no_compatible_foods_validation() -> None:
     _ok("nutrition_validation reports no_compatible_foods and emits no blocked items")
 
 
+def test_assembler_uses_default_pantry_when_foods_are_skipped() -> None:
+    """Skipping the optional foods step should still produce real meals."""
+    print("\n[test] assembler uses default pantry when foods are skipped")
+    req = _make_plan_request(
+        goal="fat_loss",
+        mealsPerDay=3,
+        mealVariety=2,
+    )
+    out = assemble_nutrition_response(
+        None,
+        req,
+        (1900, 150, 190, 60),
+        2,
+        [],
+        _enriched_payload_for(list(DEFAULT_NUTRITION_PANTRY)),
+    )
+    plans = out.get("nutrition_plans") or []
+    assert len(plans) == 2, f"expected 2 templates, got {len(plans)}"
+    validation = plans[0].get("nutrition_validation") or {}
+    codes = {w.get("code") for w in validation.get("warnings") or []}
+    assert validation.get("ok") is True, validation
+    assert "default_pantry_used" in codes, f"missing default pantry warning: {codes}"
+    assert validation.get("allowed_foods_count") == 0, validation
+    assert validation.get("compatible_foods_count", 0) > 0, validation
+    for plan in plans:
+        meals = plan.get("meals") or []
+        assert len(meals) == 3, f"expected 3 meals, got {len(meals)}"
+        assert all(m.get("items") for m in meals), meals
+    _ok("skipped foods emits full meal templates from defaults")
+
+
 # ─── 7. mealsPerDay in {5, 7} ───────────────────────────────────────────────
 
 
@@ -502,6 +556,7 @@ cases = [
     test_filter_pantry_applies_both_gates,
     test_incompatible_pantry_does_not_fall_back_to_blocked_foods,
     test_assembler_surfaces_no_compatible_foods_validation,
+    test_assembler_uses_default_pantry_when_foods_are_skipped,
     test_meals_per_day_5,
     test_meals_per_day_7,
     test_determinism_identical_inputs_produce_identical_output,

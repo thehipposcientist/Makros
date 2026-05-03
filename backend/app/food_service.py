@@ -34,6 +34,11 @@ def _normalize(name: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", name.lower()).strip()
 
 
+def normalize_food_name(name: str) -> str:
+    """Public normalizer for food search/result de-duping."""
+    return _normalize(name)
+
+
 def _serving_grams_estimate(unit: str) -> float:
     """Best-effort gram estimate from a unit label."""
     u = unit.lower().strip()
@@ -75,6 +80,77 @@ def _food_to_read(food: Food, nutrition: FoodNutrition | None, servings: list[Fo
             for s in servings
         ],
     )
+
+
+def _first_serving(food: FoodRead) -> FoodServingRead | None:
+    default = next((s for s in food.servings if s.is_default), None)
+    return default or (food.servings[0] if food.servings else None)
+
+
+def food_read_to_search_result(food: FoodRead, *, preferred_names: set[str] | None = None) -> dict:
+    """Convert a DB food read model into the search-result shape used by
+    the mobile food picker. Existing clients expect USDA/AI-style fields,
+    so this keeps `serving`, top-level macros, and `source` stable while
+    adding IDs when we have them."""
+    preferred_names = preferred_names or set()
+    serving = _first_serving(food)
+    serving_label = serving.label if serving else (food.reference_unit or "100 g")
+    serving_grams = serving.grams if serving else None
+    result = {
+        "name": food.name,
+        "serving": serving_label,
+        "calories": serving.calories if serving else food.calories,
+        "protein": serving.protein if serving else food.protein,
+        "carbs": serving.carbs if serving else food.carbs,
+        "fat": serving.fat if serving else food.fat,
+        "fiber": food.fiber,
+        "source": food.source,
+        "food_id": food.id,
+        "serving_id": serving.id if serving else None,
+        "serving_grams": serving_grams,
+        "brand": food.brand,
+        "is_verified": food.is_verified,
+        "is_preferred": _normalize(food.name) in preferred_names,
+    }
+    if food.fiber is not None:
+        result["micronutrients"] = {"fiber": food.fiber}
+    return result
+
+
+def merge_food_search_results(
+    *,
+    local_results: list[dict],
+    remote_results: list[dict],
+    preferred_names: set[str] | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Merge local and remote search results with stable source priority.
+
+    Local DB rows win de-dupes because they can carry `food_id` and user
+    history. Remote rows still fill gaps, which gives the MyFitnessPal-style
+    broad search without demoting the user's own foods or the curated set.
+    """
+    preferred_names = preferred_names or set()
+    merged: list[dict] = []
+    seen: set[str] = set()
+
+    for group in (local_results, remote_results):
+        for item in group:
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            source = str(item.get("source") or "")
+            key = _normalize(name)
+            if key in seen:
+                continue
+            seen.add(key)
+            copy = dict(item)
+            copy["source"] = source or "unknown"
+            copy["is_preferred"] = copy.get("is_preferred", key in preferred_names)
+            merged.append(copy)
+            if len(merged) >= limit:
+                return merged
+    return merged
 
 
 # ─── Search ───────────────────────────────────────────────────────────────────
@@ -307,7 +383,7 @@ def create_food(
     return food
 
 
-def touch_recent_food(db: Session, user_id: int, food_id: int) -> None:
+def touch_recent_food(db: Session, user_id: int, food_id: int, *, commit: bool = True) -> None:
     """Record that a user just logged this food (upsert)."""
     existing = db.exec(
         select(UserRecentFood).where(
@@ -321,7 +397,8 @@ def touch_recent_food(db: Session, user_id: int, food_id: int) -> None:
         db.add(existing)
     else:
         db.add(UserRecentFood(user_id=user_id, food_id=food_id))
-    db.commit()
+    if commit:
+        db.commit()
 
 
 # ─── USDA Import ──────────────────────────────────────────────────────────────

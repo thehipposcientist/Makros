@@ -21,82 +21,187 @@ tags:
   - smoke
   - critical
 
-# Generate a fresh email each run so signup doesn't collide with existing users.
-# Maestro supports JS expressions in ${...} via output.* / env.* — we use MAESTRO_RUN_ID
-# or current millis via a small JS block below.
+# Generate a fresh account each run so signup doesn't collide with existing users.
 ---
-- evalScript: |
-    var ts = Date.now().toString();
-    output.testEmail    = 'smoke+' + ts + '@thallo.test';
-    output.testUsername = 'smoke' + ts;
-    output.testPassword = 'SmokeTest!2345';
+- evalScript: ${output.testRunId = Date.now().toString()}
+- evalScript: ${output.testEmail = 'smoke' + output.testRunId + '@test.thallo'}
+- evalScript: ${output.testUsername = 'smoke' + output.testRunId}
+- evalScript: ${output.testPassword = 'smoketest1234'}
 
 - launchApp:
     appId: com.thallo.app
     clearState: true
     clearKeychain: true
 
+# Dev-client builds open the Expo launcher first. Release/TestFlight builds skip
+# this screen and land directly in Thallo.
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
 # ── Auth ──────────────────────────────────────────────────────────────────────
 # AuthScreen defaults to login mode — switch to Sign Up first.
-- assertVisible: "Sign Up"
-- tapOn: "Sign Up"
+- extendedWaitUntil:
+    visible: "Sign Up"
+    timeout: 120000
+- tapOn:
+    id: "auth-mode-signup"
 
-# TextInputs are matched by their placeholder text on both iOS and Android.
-- tapOn: "Email"
+# Auth form controls use stable testIDs so visual copy/layout changes don't
+# move typed text into the wrong field.
+- tapOn:
+    id: "auth-first-name-input"
+- inputText: "Smoke"
+- pressKey: enter
+
+- inputText: "Tester"
+- pressKey: enter
+
 - inputText: ${output.testEmail}
+- pressKey: enter
 
-- tapOn: "Username"
 - inputText: ${output.testUsername}
+- pressKey: enter
 
 - tapOn:
-    text: "^Password$"   # avoid matching "Confirm password"
+    id: "auth-password-toggle"
+- tapOn:
+    id: "auth-password-input"
 - inputText: ${output.testPassword}
-
-- tapOn: "Confirm password"
+- pressKey: enter
 - inputText: ${output.testPassword}
+- tapOn: "Set up in under 3 minutes"
 
-- hideKeyboard
+- scrollUntilVisible:
+    element:
+      id: "auth-signup-recovery-answer-input"
+    direction: DOWN
+    timeout: 15000
+
+- tapOn:
+    id: "auth-signup-recovery-answer-input"
+- inputText: "blue"
+- tapOn: "Security question · used to reset your password"
+
+- scrollUntilVisible:
+    element:
+      id: "auth-legal-accept"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+
+- tapOn:
+    id: "auth-legal-accept"
+
+- scrollUntilVisible:
+    element:
+      id: "auth-submit"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
 
 # AuthScreen uses "Get Started" as the submit label in signup mode (the
 # "Sign Up" label is only on the mode toggle above). This distinction matters
 # — tapping "Sign Up" a second time would just re-toggle the form.
-- tapOn: "Get Started"
+- tapOn:
+    id: "auth-submit"
 
 # ── Onboarding — goal step ────────────────────────────────────────────────────
 - assertVisible: "What's Your Goal?"
 
 # Tap the Lose Fat card via its semantic testID (stable across copy tweaks).
+- scrollUntilVisible:
+    element:
+      id: "goal-category-fat_loss"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "goal-category-fat_loss"
 - tapOn:
     id: "goal-card-lose_fat"
 
 # Key assertion: inline pace picker appears on the same step when a
 # pace-aware goal is selected. If this disappears, ETA calc breaks silently.
-- assertVisible:
-    id: "pace-picker-inline"
+- scrollUntilVisible:
+    element:
+      id: "pace-picker-inline"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
 - assertVisible: "How fast?"
+- tapOn:
+    id: "pace-option-moderate"
 
 # Target weight is required for lose_fat — asterisk + the "Required" hint.
-- assertVisible: "Target weight"
+- scrollUntilVisible:
+    element:
+      id: "onboarding-target-weight-input"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
 - assertVisible: "Required — we need this to build your calorie target and ETA."
 
 # Direction rule: target weight must be LESS than current for fat loss.
 # Default current weight defaults aren't set yet, so pick a plausible low target
 # that will still pass the < current check on the physicalStats step.
 - tapOn:
-    text: "e.g. 175"
+    id: "onboarding-target-weight-input"
 - inputText: "160"
-- hideKeyboard
+- tapOn: "lbs"
 
-# Pick moderate pace explicitly so the downstream calorie delta is deterministic.
-- tapOn: "Moderate"
-
-- tapOn: "Next"
+- scrollUntilVisible:
+    element:
+      id: "onboarding-next"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "onboarding-next"
 
 # ── Physical stats ────────────────────────────────────────────────────────────
 - assertVisible: "About You"
-# We keep this light — just advance. Defaults are plausible for a smoke test.
-# If physicalStats gains a hard-required field in the future, add taps here.
-- tapOn: "Next"
+- tapOn:
+    id: "onboarding-weight-input"
+- inputText: "180"
+- tapOn:
+    id: "onboarding-height-feet-input"
+- inputText: "5"
+- tapOn:
+    id: "onboarding-height-inches-input"
+- inputText: "10"
+- tapOn: "Height"
+- scrollUntilVisible:
+    element:
+      id: "gender-option-male"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "gender-option-male"
+- tapOn: "Biological sex"
+- scrollUntilVisible:
+    element:
+      id: "onboarding-next"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "onboarding-next"
 
 # ── Training days ─────────────────────────────────────────────────────────────
 - assertVisible: "Training Schedule"
@@ -107,38 +212,61 @@ tags:
 - tapOn:
     text: "^4$"
 - assertVisible: "3–4 days is ideal for most people."
-- tapOn: "Next"
+- scrollUntilVisible:
+    element:
+      id: "onboarding-next"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "onboarding-next"
 
 # ── Equipment ─────────────────────────────────────────────────────────────────
 - assertVisible: "Your Equipment"
-# Pick a couple common items so the planner has something to work with.
-- tapOn: "Dumbbells"
-- tapOn: "Barbell"
-- tapOn: "Next"
+# Pick a common preset so the planner has useful equipment without relying on
+# the manual list being in the current viewport.
+- tapOn:
+    id: "equipment-template-home_basic"
+- scrollUntilVisible:
+    element:
+      id: "onboarding-next"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "onboarding-next"
 
 # ── Foods ─────────────────────────────────────────────────────────────────────
 - assertVisible: "Your Kitchen"
 # Foods step is optional — just finish.
-- tapOn: "Get Started"
+- scrollUntilVisible:
+    element:
+      text: "Skip to use default meal suggestions"
+    direction: DOWN
+    timeout: 20000
+    visibilityPercentage: 50
+- tapOn:
+    id: "onboarding-submit"
 
 # ── Plan generation ───────────────────────────────────────────────────────────
-# Plan gen can take 30–90s. ShimmerLogo should be on screen during the wait.
+# New accounts land on the post-plan tutorial once generation finishes.
 - extendedWaitUntil:
-    visible:
-      id: "shimmer-logo"
-    timeout: 15000
+    visible: "Welcome to Thallo Pro"
+    timeout: 180000
+- tapOn:
+    id: "tutorial-skip"
 
-# Wait for HomeScreen to settle. We anchor on a label that only the home
-# layout renders — the bottom nav "Plan" tab is a safe bet.
+# Wait for HomeScreen to settle. The tab label is exposed through
+# accessibility text rather than the visual all-caps segment label.
 - extendedWaitUntil:
-    visible: "Plan"
+    visible: "Plan tab"
     timeout: 120000
 
 # ── Assert plan card renders with a focus ─────────────────────────────────────
 # One of these focus words must be visible somewhere on the Plan tab.
 # (Upper/Lower/Push/Pull/Legs/Full are the common split labels.)
 - assertVisible:
-    text: "(?i)(Upper|Lower|Push|Pull|Legs|Full Body|Chest|Back|Recovery|Mobility|Conditioning)"
+    text: "(?i)(Upper|Lower|Push|Pull|Legs|Full Body|Chest|Back|Recovery|Mobility|Conditioning|Rest Day)"
 
 # Heuristic guard against back-to-back same-family focuses.
 # If the UI ever renders "Push ... Push" on consecutive day cards, this fails.
@@ -150,44 +278,107 @@ tags:
 - assertNotVisible:
     text: "Legs Legs"
 
-# ── Regen via Settings → equipment toggle ─────────────────────────────────────
-- tapOn: "Settings"
+# ── Broadened beta smoke: meals, pro foods, progress, profile ────────────────
+# These screens catch the beta entitlement contract and the most common
+# post-onboarding plan surfaces without depending on fragile marketing copy.
+- tapOn:
+    id: "bottom-tab-meals"
+- extendedWaitUntil:
+    visible: "Meal week"
+    timeout: 30000
+- assertVisible:
+    id: "today-meal-card"
 
-# Toggle one equipment item off/on to force a plan regen.
-# EditProfileScreen is rendered inline (noHeader) from the Settings tab,
-# so the Save button uses testID "edit-profile-save" only when noHeader=false.
-# When embedded, changes auto-save via parent's onSave on tab navigation —
-# but we want to explicitly trigger the regen modal, so we tap the Plan tab
-# which flushes pending changes through handleSaveProfile → pendingSave modal.
-- tapOn: "Dumbbells"   # deselect
-
-# Navigate away to trigger auto-save → confirm "Update Plan?" modal.
-- tapOn: "Plan"
-
-# If the parent gates the save behind a confirm modal (workout-only edit path):
-- runFlow:
-    when:
-      visible: "Regenerate Workout Plan?"
-    commands:
-      - tapOn: "Regenerate"
-
-# Assert the shimmer overlay appears during regen.
+# Expand today's meal card and check the first meal. This exercises the
+# generated meal plan render plus the checked-meal persistence path.
+- tapOn:
+    id: "today-meal-card-header"
 - extendedWaitUntil:
     visible:
-      id: "shimmer-logo"
-    timeout: 10000
-
-# Wait for regen to complete.
+      id: "today-nutrition-card"
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      id: "meal-row-meal_1"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
 - extendedWaitUntil:
-    visible: "Start Workout"
+    visible:
+      id: "meal-row-meal_0"
+    timeout: 15000
+- tapOn:
+    id: "meal-check-meal_0"
+
+# New beta users should have Pro access, so the Foods/Grocery affordance should
+# be visible without a paywall.
+- tapOn: "Foods tab"
+- scrollUntilVisible:
+    element:
+      id: "foods-grocery-list-card"
+    direction: UP
+    timeout: 15000
+    visibilityPercentage: 50
+
+- tapOn:
+    id: "bottom-tab-progress"
+- extendedWaitUntil:
+    visible:
+      id: "progress-tab-screen"
+    timeout: 30000
+
+- tapOn:
+    id: "bottom-tab-you"
+- extendedWaitUntil:
+    visible:
+      id: "you-tab-screen"
+    timeout: 30000
+
+- tapOn:
+    id: "bottom-tab-workouts"
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 30000
+
+# ── Save workout settings for next week ───────────────────────────────────────
+- tapOn: "Settings tab"
+
+# Change session length to verify workout settings persist through the inline
+# editor. The active PlanWeek must stay stable; this save only affects the next
+# generated training week.
+- tapOn:
+    id: "edit-workout-duration-75"
+
+- scrollUntilVisible:
+    element:
+      id: "edit-profile-save"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "edit-profile-save"
+
+# Confirm the next-week settings contract.
+- assertVisible: "Save Workout Settings?"
+- tapOn:
+    id: "pending-save-confirm"
+
+# Saving returns to the current Plan tab without a mid-week regeneration.
+- extendedWaitUntil:
+    visible: "Extra workouts"
     timeout: 120000
 
 # ── Start Workout → ActiveWorkoutScreen ───────────────────────────────────────
-- tapOn: "Start Workout"
+- tapOn:
+    point: "36%,55%"
 
 # ActiveWorkoutScreen shows a warmup acknowledgement "Start Workout" button too.
 # Confirm we actually navigated (exercise list, rest timer, or warmup copy visible).
 - extendedWaitUntil:
     visible:
-      text: "(?i)(Warm[- ]?up|Exercise|Rest|Set)"
+      id: "active-workout-screen"
     timeout: 15000
+- extendedWaitUntil:
+    visible:
+      id: "exercise-card-0"
+    timeout: 30000

@@ -478,6 +478,9 @@ export interface MealItem {
   protein: number;
   carbs: number;
   fat: number;
+  food_id?: number | null;
+  serving_id?: number | null;
+  serving_grams?: number | null;
   // Baseline rate used by the edit UI to scale macros proportionally when
   // the user changes `quantity`. Captured at add-time so zero → N edits
   // still work (scaling off `current` breaks when current hits 0).
@@ -622,8 +625,13 @@ export interface PlanChangeEntry {
   question: string;           // for coach-driven changes — the chat message that triggered it
   /** The local date (YYYY-MM-DD) when the change is scheduled to take
    *  effect on the user's plan. For mid-week edits this is the next
-   *  Monday; for immediate changes it's the date the change was saved. */
+   *  plan-week start; for immediate changes it's the date the change was saved. */
   effectiveDate?: string;
+  /** For future-dated user setting changes, keep enough local context to
+   *  cancel the request before it takes effect without touching the active
+   *  PlanWeek. Older history rows will not have these snapshots. */
+  previousProfile?: Partial<UserProfile>;
+  nextProfile?: Partial<UserProfile>;
 }
 
 export interface MealRoutineFood {

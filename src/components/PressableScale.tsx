@@ -16,7 +16,7 @@ interface Props {
 
 type PressableScaleProps = Props & Pick<
   TouchableOpacityProps,
-  'accessibilityLabel' | 'accessibilityRole' | 'accessibilityState' | 'hitSlop'
+  'accessibilityLabel' | 'accessibilityRole' | 'accessibilityState' | 'hitSlop' | 'testID'
 >;
 
 export default function PressableScale({
@@ -29,6 +29,7 @@ export default function PressableScale({
   accessibilityRole,
   accessibilityState,
   hitSlop,
+  testID,
 }: PressableScaleProps) {
   const reducedMotion = useReducedMotion();
   const scale = useRef(new Animated.Value(1)).current;
@@ -59,8 +60,9 @@ export default function PressableScale({
       accessibilityLabel={accessibilityLabel}
       accessibilityRole={accessibilityRole}
       accessibilityState={accessibilityState}
+      testID={testID}
       hitSlop={hitSlop}>
-      <Animated.View style={[style, { transform: [{ scale }, { translateY }] }]}>
+      <Animated.View testID={testID} style={[style, { transform: [{ scale }, { translateY }] }]}>
         {children}
       </Animated.View>
     </TouchableOpacity>

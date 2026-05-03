@@ -47,7 +47,7 @@ import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
-import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord } from '../services/api';
+import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord, listWorkoutSessions, WorkoutSessionRecord, getWeightEntries } from '../services/api';
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
@@ -59,6 +59,7 @@ interface ProgressScreenProps {
   authToken: string;
   userProfile: UserProfile;
   onUpdateWeight?: (weightLbs: number) => void;
+  onCancelScheduledPlanChange?: (restoredProfile: UserProfile) => Promise<void> | void;
   themeName?: AppThemeName;
   // When true, hide the top "← Back / Progress" header bar. Used when
   // this screen is rendered inline as bottom-tab content — the bottom
@@ -70,6 +71,105 @@ interface ProgressScreenProps {
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function planChangeIsScheduled(change: PlanChangeEntry): boolean {
+  return change.changedBy === 'user'
+    && !!change.effectiveDate
+    && change.effectiveDate > dateKey(new Date());
+}
+
+function planScopeSnapshot(profile: Partial<UserProfile>, scope?: PlanChangeEntry['scope']): Record<string, unknown> {
+  if (scope === 'goal') {
+    return {
+      goal: profile.goal ?? null,
+      goalSelection: profile.goalSelection ?? null,
+      goalDetails: profile.goalDetails ?? null,
+      secondaryGoal: profile.secondaryGoal ?? null,
+      focusedMuscleGroup: profile.focusedMuscleGroup ?? null,
+    };
+  }
+  if (scope === 'workout') {
+    return {
+      priorityRegion: profile.priorityRegion ?? null,
+      daysPerWeek: profile.daysPerWeek ?? null,
+      trainingDays: profile.trainingDays ?? null,
+      workoutDurationMinutes: profile.workoutDurationMinutes ?? null,
+      equipment: profile.equipment ?? [],
+      equipmentSettings: profile.equipmentSettings ?? null,
+      injuries: profile.injuries ?? null,
+      injuryEntries: profile.injuryEntries ?? [],
+      experienceLevel: profile.experienceLevel ?? null,
+      preferredSplit: profile.preferredSplit ?? null,
+      dislikedExercises: profile.dislikedExercises ?? [],
+    };
+  }
+  if (scope === 'mealplan') {
+    return {
+      foodsAvailable: profile.foodsAvailable ?? [],
+      customFoods: profile.customFoods ?? [],
+      cookingSkill: profile.cookingSkill ?? null,
+      prepTimeMinutes: profile.prepTimeMinutes ?? null,
+      dietaryPreference: profile.dietaryPreference ?? null,
+      mealVariety: profile.mealVariety ?? null,
+      mealsPerDay: profile.mealsPerDay ?? null,
+      savedMeals: profile.savedMeals ?? [],
+      mealRoutine: profile.mealRoutine ?? null,
+      customMacros: profile.customMacros ?? null,
+      allergies: profile.allergies ?? [],
+    };
+  }
+  return profile as unknown as Record<string, unknown>;
+}
+
+function planScopeMatches(current: UserProfile, scheduled: Partial<UserProfile>, scope?: PlanChangeEntry['scope']): boolean {
+  return JSON.stringify(planScopeSnapshot(current, scope)) === JSON.stringify(planScopeSnapshot(scheduled, scope));
+}
+
+function restorePlanScope(current: UserProfile, previous: Partial<UserProfile>, scope?: PlanChangeEntry['scope']): UserProfile {
+  if (scope === 'goal') {
+    return {
+      ...current,
+      goal: previous.goal ?? current.goal,
+      goalSelection: previous.goalSelection,
+      goalDetails: previous.goalDetails ?? current.goalDetails,
+      secondaryGoal: previous.secondaryGoal,
+      focusedMuscleGroup: previous.focusedMuscleGroup,
+    };
+  }
+  if (scope === 'workout') {
+    return {
+      ...current,
+      priorityRegion: previous.priorityRegion,
+      daysPerWeek: previous.daysPerWeek ?? current.daysPerWeek,
+      trainingDays: previous.trainingDays,
+      workoutDurationMinutes: previous.workoutDurationMinutes ?? current.workoutDurationMinutes,
+      equipment: previous.equipment ?? current.equipment,
+      equipmentSettings: previous.equipmentSettings,
+      injuries: previous.injuries,
+      injuryEntries: previous.injuryEntries,
+      experienceLevel: previous.experienceLevel,
+      preferredSplit: previous.preferredSplit,
+      dislikedExercises: previous.dislikedExercises,
+    };
+  }
+  if (scope === 'mealplan') {
+    return {
+      ...current,
+      foodsAvailable: previous.foodsAvailable ?? current.foodsAvailable,
+      customFoods: previous.customFoods ?? current.customFoods,
+      cookingSkill: previous.cookingSkill,
+      prepTimeMinutes: previous.prepTimeMinutes,
+      dietaryPreference: previous.dietaryPreference,
+      mealVariety: previous.mealVariety,
+      mealsPerDay: previous.mealsPerDay,
+      savedMeals: previous.savedMeals,
+      mealRoutine: previous.mealRoutine,
+      customMacros: previous.customMacros,
+      allergies: previous.allergies,
+    };
+  }
+  return { ...current, ...previous };
+}
 
 const SHARE_LOGO_LIGHT = require('../../assets/images/thallo-logo-black.png');
 const SHARE_LOGO_DARK  = require('../../assets/images/thallo-logo-white-transparent-New.png');
@@ -754,23 +854,174 @@ function workoutCompletionKey(dateISO?: string | null, focus?: string | null): s
   return date && focusKey ? `${date}|${focusKey}` : null;
 }
 
+function normalizeHrZoneMinutes(raw?: number[] | null): [number, number, number, number, number] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const zones = raw.slice(0, 5).map(v => Number.isFinite(Number(v)) ? Number(v) : 0);
+  while (zones.length < 5) zones.push(0);
+  return zones as [number, number, number, number, number];
+}
+
+function mergeCompletionMetrics(summary: StoredWorkoutSummary, completion: WorkoutCompletionRecord): StoredWorkoutSummary {
+  const hr = completion.hr_summary;
+  const zones = normalizeHrZoneMinutes(hr?.zoneMinutes);
+  return {
+    ...summary,
+    caloriesBurned: summary.caloriesBurned || completion.calories_burned || 0,
+    hrAvg: summary.hrAvg ?? (hr?.avgBpm != null ? Math.round(Number(hr.avgBpm)) : undefined),
+    hrMax: summary.hrMax ?? (hr?.maxBpm != null ? Math.round(Number(hr.maxBpm)) : undefined),
+    hrZoneMinutes: summary.hrZoneMinutes ?? zones,
+  };
+}
+
+function summaryFromCompletion(completion: WorkoutCompletionRecord): StoredWorkoutSummary | null {
+  const hasHealthMetrics = Boolean(
+    completion.calories_burned
+    || completion.hr_summary?.avgBpm
+    || completion.hr_summary?.maxBpm
+    || completion.hr_summary?.zoneMinutes?.some(m => Number(m) > 0),
+  );
+  if (!hasHealthMetrics) return null;
+  return mergeCompletionMetrics({
+    id: `server-summary-${completion.id}`,
+    date: completion.completed_at ?? `${completion.workout_date}T12:00:00.000Z`,
+    focus: completion.focus_label,
+    durationSeconds: completion.duration_seconds,
+    totalSets: 0,
+    totalReps: 0,
+    caloriesBurned: completion.calories_burned ?? 0,
+    motivationMessage: 'Workout logged.',
+    achievements: [],
+    recommendations: [],
+    headline: 'Workout logged',
+    coachingPoint: '',
+    motivation: '',
+  }, completion);
+}
+
+function manualActivityFromCompletion(completion: WorkoutCompletionRecord): WorkoutSession['manualActivity'] | undefined {
+  if (!completion.activity_category) return undefined;
+  return {
+    category: completion.activity_category as any,
+    subtype: completion.activity_subtype ?? '',
+    intensity: (completion.activity_intensity ?? 'moderate') as any,
+    cardioStyle: completion.cardio_style as any,
+    distanceMiles: completion.distance_miles ?? undefined,
+    caloriesBurned: completion.calories_burned ?? undefined,
+    avgHeartRate: completion.hr_summary?.avgBpm != null ? Math.round(Number(completion.hr_summary.avgBpm)) : undefined,
+  };
+}
+
+function mergeCompletionIntoSession(session: WorkoutSession, completion: WorkoutCompletionRecord): WorkoutSession {
+  return {
+    ...session,
+    date: session.date || completion.completed_at || `${completion.workout_date}T12:00:00.000Z`,
+    durationSeconds: session.durationSeconds || completion.duration_seconds || 0,
+    completed: true,
+    manualActivity: session.manualActivity ?? manualActivityFromCompletion(completion),
+  };
+}
+
+function targetRepsFromServerExercise(exercise: NonNullable<WorkoutSessionRecord['exercises']>[number]): string {
+  if (exercise.target_reps_text) return exercise.target_reps_text;
+  const first = exercise.sets?.[0];
+  const min = first?.target_reps_min;
+  const max = first?.target_reps_max;
+  if (min != null && max != null && min !== max) return `${min}-${max}`;
+  if (max != null) return String(max);
+  if (min != null) return String(min);
+  return '';
+}
+
+function workoutSessionFromServer(row: WorkoutSessionRecord): WorkoutSession {
+  const exercises = (row.exercises ?? []).map(exercise => {
+    const sets = (exercise.sets ?? [])
+      .filter(set => set.completed !== false)
+      .map((set, index) => ({
+        setNumber: Number(set.set_number ?? index + 1),
+        reps: Number(set.actual_reps ?? set.target_reps_max ?? set.target_reps_min ?? 0),
+        weightLbs: Number(set.actual_weight_lbs ?? set.target_weight_lbs ?? 0),
+        durationSeconds: set.duration_seconds ?? undefined,
+        comfortRating: set.comfort_rating ?? undefined,
+        rir: set.actual_rir ?? undefined,
+        actualDistance: set.actual_distance ?? undefined,
+        actualPace: set.actual_pace ?? undefined,
+        heartRateAvg: set.heart_rate_avg ?? undefined,
+        cardioMetrics: set.cardio_metrics ?? undefined,
+      }));
+    return {
+      name: exercise.name,
+      targetSets: sets.length,
+      targetReps: targetRepsFromServerExercise(exercise),
+      targetRestSeconds: exercise.rest_seconds ?? 60,
+      equipment: exercise.equipment ?? 'other',
+      sets,
+      slug: exercise.exercise_slug_snapshot ?? undefined,
+      primaryMuscle: exercise.primary_muscle_snapshot ?? undefined,
+      primary_muscle: exercise.primary_muscle_snapshot ?? undefined,
+      secondaryMuscles: exercise.secondary_muscles_snapshot ?? undefined,
+      secondary_muscles: exercise.secondary_muscles_snapshot ?? undefined,
+      isCompound: exercise.is_compound_snapshot ?? undefined,
+    };
+  });
+  return {
+    id: `server-session-${row.id}`,
+    date: row.completed_at ?? `${row.workout_date}T12:00:00.000Z`,
+    focus: row.focus,
+    durationSeconds: 0,
+    startedAt: row.created_at ?? undefined,
+    endedAt: row.completed_at ?? undefined,
+    exercises,
+    completed: Boolean(row.completed_at),
+  };
+}
+
+function mergeWorkoutSessionSources(localHistory: WorkoutSession[], serverRows: WorkoutSessionRecord[] | null): WorkoutSession[] {
+  if (!serverRows) return localHistory;
+  const byKey = new Map<string, WorkoutSession>();
+  for (const session of localHistory) {
+    const key = workoutCompletionKey(session.date, session.focus);
+    if (key) byKey.set(key, session);
+  }
+  for (const row of serverRows) {
+    const session = workoutSessionFromServer(row);
+    const key = workoutCompletionKey(session.date, session.focus);
+    if (!key) continue;
+    const existing = byKey.get(key);
+    const existingSetCount = existing?.exercises?.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0) ?? 0;
+    const serverSetCount = session.exercises.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0);
+    if (!existing || (existingSetCount === 0 && serverSetCount > 0)) {
+      byKey.set(key, session);
+    }
+  }
+  return Array.from(byKey.values()).sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+}
+
 function reconcileWorkoutProgressData(
   history: WorkoutSession[],
   summaries: StoredWorkoutSummary[],
   completions: WorkoutCompletionRecord[] | null,
 ): { history: WorkoutSession[]; summaries: StoredWorkoutSummary[] } {
   if (!completions) return { history, summaries };
-  const completionKeys = new Set(
+  const completionsByKey = new Map(
     completions
-      .map(c => workoutCompletionKey(c.workout_date, c.focus_label))
-      .filter((key): key is string => !!key),
+      .map(c => [workoutCompletionKey(c.workout_date, c.focus_label), c] as const)
+      .filter((entry): entry is [string, WorkoutCompletionRecord] => !!entry[0]),
+  );
+  const completionKeys = new Set(
+    completionsByKey.keys(),
   );
   if (completionKeys.size === 0) return { history: [], summaries: [] };
 
-  const scopedHistory = history.filter(session => {
-    const key = workoutCompletionKey(session.date, session.focus);
-    return !!key && completionKeys.has(key);
-  });
+  const scopedHistory = history
+    .map(session => {
+      const key = workoutCompletionKey(session.date, session.focus);
+      const completion = key ? completionsByKey.get(key) : undefined;
+      return completion ? mergeCompletionIntoSession(session, completion) : session;
+    })
+    .filter(session => {
+      const key = workoutCompletionKey(session.date, session.focus);
+      return !!key && completionKeys.has(key);
+    });
   const existingKeys = new Set(
     scopedHistory
       .map(session => workoutCompletionKey(session.date, session.focus))
@@ -786,15 +1037,7 @@ function reconcileWorkoutProgressData(
       durationSeconds: completion.duration_seconds,
       exercises: [],
       completed: true,
-      ...(completion.activity_category ? {
-        manualActivity: {
-          category: completion.activity_category as any,
-          subtype: completion.activity_subtype ?? '',
-          intensity: completion.activity_intensity as any,
-          distanceMiles: completion.distance_miles ?? undefined,
-          caloriesBurned: completion.calories_burned ?? undefined,
-        },
-      } : {}),
+      ...(manualActivityFromCompletion(completion) ? { manualActivity: manualActivityFromCompletion(completion) } : {}),
     });
     existingKeys.add(key);
   }
@@ -804,7 +1047,25 @@ function reconcileWorkoutProgressData(
     const key = workoutCompletionKey(summary.date, summary.focus);
     return !!key && completionKeys.has(key);
   });
-  return { history: scopedHistory, summaries: scopedSummaries };
+  const summariesByKey = new Map(
+    scopedSummaries
+      .map(summary => [workoutCompletionKey(summary.date, summary.focus), summary] as const)
+      .filter((entry): entry is [string, StoredWorkoutSummary] => !!entry[0]),
+  );
+  for (const completion of completions) {
+    const key = workoutCompletionKey(completion.workout_date, completion.focus_label);
+    if (!key) continue;
+    const existing = summariesByKey.get(key);
+    if (existing) {
+      summariesByKey.set(key, mergeCompletionMetrics(existing, completion));
+      continue;
+    }
+    const serverSummary = summaryFromCompletion(completion);
+    if (serverSummary) summariesByKey.set(key, serverSummary);
+  }
+  const reconciledSummaries = Array.from(summariesByKey.values())
+    .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+  return { history: scopedHistory, summaries: reconciledSummaries };
 }
 
 function buildTrainingSignals(
@@ -937,7 +1198,7 @@ function AnimatedChartBar({
   return <Animated.View style={[style, { height }]} />;
 }
 
-export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0 }: ProgressScreenProps) {
+export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0 }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
   const styles = useMemo(() => createStyles(tc), [themeName]);
   const primaryButtonTextColor = getContrastingTextColor(tc.primary);
@@ -1147,9 +1408,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       loadWorkoutSummaries(),
       loadGoalHistory(),
       loadPlanChanges(),
+      authToken ? listWorkoutSessions(authToken, 100).catch(() => null) : Promise.resolve(null),
       authToken ? listWorkoutCompletions(authToken, 100).catch(() => null) : Promise.resolve(null),
-    ]).then(([h, s, g, c, completions]) => {
-      const scoped = reconcileWorkoutProgressData(h, s, completions);
+    ]).then(([h, s, g, c, serverSessions, completions]) => {
+      const historyWithServerSets = mergeWorkoutSessionSources(h, serverSessions);
+      const scoped = reconcileWorkoutProgressData(historyWithServerSets, s, completions);
       const p = derivePersonalRecords(scoped.history);
       setPrs(p);
       setHistory(scoped.history);
@@ -1168,8 +1431,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           .catch(() => null);
       }
       import('../utils/weightHistory').then(({ loadWeightHistory }) =>
-        loadWeightHistory().then((local) => {
-          setWeightEntries(local);
+        Promise.all([
+          loadWeightHistory(),
+          authToken ? getWeightEntries(authToken).catch(() => null) : Promise.resolve(null),
+        ]).then(([local, server]) => {
+          const byDate = new Map(local.map(entry => [entry.date, entry] as const));
+          for (const row of server ?? []) {
+            byDate.set(row.date, {
+              date: row.date,
+              weightLbs: Math.round(Number(row.weight_lbs) * 10) / 10,
+              source: row.source as any,
+            });
+          }
+          const merged = Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+          setWeightEntries(merged);
+          if (server?.length) {
+            AsyncStorage.setItem('weightHistory', JSON.stringify(merged)).catch(() => {});
+          }
         }).catch(() => null)
       );
       if (authToken && isProTier) {
@@ -1398,6 +1676,56 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       setZone2DetectedWorkouts([]);
     }
   }, [authToken, isProTier, nutritionPlan, userProfile.goal, userProfile.mealsPerDay, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
+
+  const handleDeletePlanChange = (change: PlanChangeEntry) => {
+    if (!change.id) return;
+    const scheduled = planChangeIsScheduled(change);
+    const canCancel = scheduled
+      && !!change.previousProfile
+      && !!change.nextProfile
+      && !!onCancelScheduledPlanChange
+      && planScopeMatches(userProfile, change.nextProfile, change.scope);
+
+    const removeEntry = async () => {
+      await deletePlanChange(change.id);
+      setPlanChanges(prev => prev.filter(x => x.id !== change.id));
+    };
+
+    if (canCancel) {
+      Alert.alert(
+        'Cancel this request?',
+        'This restores your previous settings for the upcoming plan and removes the scheduled request. Your current week stays unchanged.',
+        [
+          { text: 'Keep', style: 'cancel' },
+          {
+            text: 'Cancel Request',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                const restored = restorePlanScope(userProfile, change.previousProfile!, change.scope);
+                await onCancelScheduledPlanChange!(restored);
+                await removeEntry();
+              } catch (e: any) {
+                Alert.alert('Could not cancel', e?.message ?? 'Try again in a moment.');
+              }
+            },
+          },
+        ],
+      );
+      return;
+    }
+
+    Alert.alert(
+      scheduled ? 'Remove this request?' : 'Delete this entry?',
+      scheduled
+        ? 'This removes the row from your history. It cannot safely restore settings because newer profile edits may have superseded it.'
+        : 'Removes this plan change from your history. The plan itself stays unchanged.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: removeEntry },
+      ],
+    );
+  };
 
   useEffect(() => {
     if (nutritionRefreshSeenRef.current === nutritionLogRefreshKey) return;
@@ -2056,6 +2384,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 {progressMilestones.map(item => (
                   <View
                     key={item.key}
+                    testID={`progress-milestone-${item.key}`}
+                    accessibilityLabel={`${item.title}: ${item.value}. ${item.detail}`}
                     style={{
                       flexGrow: 1,
                       flexBasis: '47%',
@@ -3001,25 +3331,31 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
 
-          {/* Plan Change History — display cap 20. The full log still
-              lives in storage for audit / debug purposes. */}
+          {/* Plan Change Requests & History — display cap 20. The full log
+              still lives in storage for audit / debug purposes. */}
           <Text style={[styles.sectionLabel, { marginTop: 16 }]}>
-            Plan Change History
+            Plan Change Requests & History
             {planChanges.length > 20 ? ` · showing most recent 20 of ${planChanges.length}` : ''}
           </Text>
           {planChanges.length === 0 ? (
             <View style={[styles.emptyBox, { marginBottom: 24 }]}>
               <Ionicons name="clipboard-outline" size={40} color={tc.textMuted} />
               <Text style={styles.emptyTitle}>No plan changes yet</Text>
-              <Text style={styles.emptyBody}>Edits you make to your goal, workout, or meal plan settings — and updates from your trainer / nutritionist — will be logged here.</Text>
+              <Text style={styles.emptyBody}>Future-dated setting requests and trainer / nutritionist updates will appear here.</Text>
             </View>
           ) : planChanges.slice(0, 20).map((c, i) => {
             const d = new Date(c.changedAt);
             const label = `${MONTH_NAMES[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()} ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+            const isScheduled = planChangeIsScheduled(c);
+            const canCancel = isScheduled
+              && !!c.previousProfile
+              && !!c.nextProfile
+              && !!onCancelScheduledPlanChange
+              && planScopeMatches(userProfile, c.nextProfile, c.scope);
             // Title varies by author. User-driven entries get a scope
             // tag (Goal / Workout / Meal Plan) so the user can scan
             // their own settings tweaks at a glance.
-            const sourceLabel = c.changedBy === 'trainer'
+            const baseSourceLabel = c.changedBy === 'trainer'
               ? 'Trainer Update'
               : c.changedBy === 'nutritionist'
                 ? 'Nutritionist Update'
@@ -3030,6 +3366,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     : c.scope === 'mealplan'
                       ? 'You · Meal Plan Settings'
                       : 'You · Settings';
+            const sourceLabel = isScheduled
+              ? baseSourceLabel.replace('You ·', 'Scheduled ·')
+              : baseSourceLabel;
             return (
               <View key={c.id ?? i} style={[styles.sessionCard, { gap: 6, marginBottom: 8 }]}>
                 <View style={styles.sessionHeader}>
@@ -3039,22 +3378,24 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </View>
                   {c.id && (
                     <TouchableOpacity
-                      onPress={() => {
-                        Alert.alert(
-                          'Delete this entry?',
-                          'Removes this plan change from your history. The plan itself stays unchanged.',
-                          [
-                            { text: 'Cancel', style: 'cancel' },
-                            { text: 'Delete', style: 'destructive', onPress: async () => {
-                              await deletePlanChange(c.id!);
-                              setPlanChanges(prev => prev.filter(x => x.id !== c.id));
-                            }},
-                          ],
-                        );
-                      }}
+                      onPress={() => handleDeletePlanChange(c)}
                       hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      style={{ paddingHorizontal: 8, paddingVertical: 4, marginLeft: 6 }}>
-                      <Text style={{ fontSize: 18, color: tc.textMuted, fontWeight: '600' }}>✕</Text>
+                      style={{
+                        paddingHorizontal: isScheduled ? 10 : 8,
+                        paddingVertical: 5,
+                        marginLeft: 6,
+                        borderRadius: 999,
+                        borderWidth: isScheduled ? 1 : 0,
+                        borderColor: canCancel ? tc.primary + '66' : tc.border,
+                        backgroundColor: isScheduled ? tc.surfaceRaised : 'transparent',
+                      }}>
+                      {isScheduled ? (
+                        <Text style={{ fontSize: 12, color: canCancel ? tc.primary : tc.textMuted, fontWeight: '800' }}>
+                          {canCancel ? 'Cancel' : 'Remove'}
+                        </Text>
+                      ) : (
+                        <Ionicons name="trash-outline" size={17} color={tc.textMuted} />
+                      )}
                     </TouchableOpacity>
                   )}
                 </View>
@@ -3069,7 +3410,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>{c.summary}</Text>
                 {c.effectiveDate && (
                   <Text style={{ fontSize: 11, color: tc.primary, fontWeight: '700', marginTop: 2 }}>
-                    Took effect {(() => {
+                    {isScheduled ? 'Scheduled for ' : 'Took effect '}{(() => {
                       const ed = new Date(`${c.effectiveDate}T12:00:00`);
                       return `${MONTH_NAMES[ed.getMonth()]} ${ed.getDate()}, ${ed.getFullYear()}`;
                     })()}
@@ -3095,6 +3436,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 {thisWeekOverview.map(item => (
                   <TouchableOpacity
                     key={item.key}
+                    testID={`progress-overview-${item.key}`}
+                    accessibilityLabel={`${item.label}: ${item.value}. ${item.detail}`}
                     activeOpacity={0.82}
                     style={styles.weekOverviewTile}
                     onPress={() => {
@@ -4131,7 +4474,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {/* Weight Trend */}
-          <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
+          <View
+            testID="progress-weight-card"
+            style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
               <Ionicons name="scale-outline" size={22} color={tc.primary} />
               <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>Weight</Text>
@@ -4154,7 +4499,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 }}>
                   <View>
-                    <Text style={{ fontSize: 28, fontWeight: '800', color: tc.textPrimary }}>
+                    <Text
+                      testID="progress-weight-current-value"
+                      style={{ fontSize: 28, fontWeight: '800', color: tc.textPrimary }}>
                       {weightEntries[weightEntries.length - 1].weightLbs} <Text style={{ fontSize: 14, fontWeight: '500', color: tc.textMuted }}>lbs</Text>
                     </Text>
                     <Text style={{ fontSize: 11, color: tc.textMuted }}>

@@ -283,6 +283,44 @@ struct WatchMealsDay: Codable, Equatable {
     let syncedAtMs: Double
 }
 
+// ─── Hydration ──────────────────────────────────────────────────────
+
+struct WatchHydrationDay: Codable, Equatable {
+    let dateISO: String
+    let ounces: Double
+    let targetOunces: Double
+    let syncedAtMs: Double
+
+    enum CodingKeys: String, CodingKey {
+        case dateISO, ounces, targetOunces, target_ounces, syncedAtMs
+    }
+
+    init(dateISO: String, ounces: Double, targetOunces: Double, syncedAtMs: Double) {
+        self.dateISO = dateISO
+        self.ounces = ounces
+        self.targetOunces = targetOunces
+        self.syncedAtMs = syncedAtMs
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.dateISO = c.decodeFlexibleStringIfPresent(forKey: .dateISO) ?? String(ISO8601DateFormatter().string(from: Date()).prefix(10))
+        self.ounces = max(0, c.decodeFlexibleDoubleIfPresent(forKey: .ounces) ?? 0)
+        self.targetOunces = max(0, c.decodeFlexibleDoubleIfPresent(forKey: .targetOunces)
+            ?? c.decodeFlexibleDoubleIfPresent(forKey: .target_ounces)
+            ?? 64)
+        self.syncedAtMs = c.decodeFlexibleDoubleIfPresent(forKey: .syncedAtMs) ?? Date().timeIntervalSince1970 * 1000
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(dateISO, forKey: .dateISO)
+        try c.encode(ounces, forKey: .ounces)
+        try c.encode(targetOunces, forKey: .targetOunces)
+        try c.encode(syncedAtMs, forKey: .syncedAtMs)
+    }
+}
+
 // ─── Supplements ─────────────────────────────────────────────────────
 
 struct WatchSupplementItem: Codable, Identifiable, Equatable {

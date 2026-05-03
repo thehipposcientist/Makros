@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from app.models import Meal, MealItem, Food, FoodNutrition, FoodMetadata, DailyNutritionMetrics
@@ -86,12 +87,33 @@ def compute_daily_metrics(
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
 
-    if existing:
-        row = existing
-    else:
-        row = DailyNutritionMetrics(user_id=user_id, metric_date=metric_date)
+    row = existing or DailyNutritionMetrics(user_id=user_id, metric_date=metric_date)
+    if existing is None:
         db.add(row)
 
+    _apply_daily_metrics(row, raw, now)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        # Parallel home-screen reads can both observe "no row" and then race
+        # to create today's empty metrics placeholder. Let the winner keep the
+        # row, then rewrite it with this request's freshly computed signals.
+        db.rollback()
+        row = db.exec(
+            select(DailyNutritionMetrics)
+            .where(DailyNutritionMetrics.user_id == user_id)
+            .where(DailyNutritionMetrics.metric_date == metric_date)
+        ).first()
+        if row is None:
+            raise
+        _apply_daily_metrics(row, raw, now)
+        db.commit()
+    db.refresh(row)
+    return row
+
+
+def _apply_daily_metrics(row: DailyNutritionMetrics, raw: DailyRawSignals, now: Any) -> None:
     row.metrics_version = METRICS_VERSION
     row.classifier_version_used = CLASSIFIER_VERSION
     row.calories_total = raw.calories_total
@@ -125,10 +147,6 @@ def compute_daily_metrics(
     row.food_quality_score = 0
     row.longevity_signals_score = 0
     row.updated_at = now
-
-    db.commit()
-    db.refresh(row)
-    return row
 
 
 def compute_weekly_rollup(
@@ -171,6 +189,10 @@ def compute_weekly_rollup(
                 try:
                     compute_daily_metrics(db, user_id=user_id, metric_date=d, allow_ai=allow_ai)
                 except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
                     continue
 
     rows = db.exec(

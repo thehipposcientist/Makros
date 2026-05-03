@@ -453,8 +453,6 @@ export async function readDailySnapshot(dayStartMs: number, dayEndMs: number): P
 
 // ── Workout HR annotation ───────────────────────────────────────────────────
 //
-/** Returns the most recent heart rate sample from the last 30 seconds.
- *  Designed for near-live HR display during an active workout. */
 /** Write a finished workout to Apple Health.
  *
  *  Phone-started sessions (lift workouts via ActiveWorkoutScreen,
@@ -495,16 +493,19 @@ export async function saveWorkoutToHealth(opts: {
   }
 }
 
+/** Returns the most recent heart rate sample from the last 2 minutes.
+ *  Designed for near-live HR display during an active workout. */
 export async function getLatestHeartRate(): Promise<number | null> {
   const mod = getModule();
   if (!mod || typeof mod.getHeartRate !== 'function') return null;
   try {
     const now = Date.now();
-    const samples = await mod.getHeartRate(now - 30_000, now, 5);
+    const lookbackMs = 120_000;
+    const samples = await mod.getHeartRate(now - lookbackMs, now, 10);
     if (!Array.isArray(samples) || samples.length === 0) return null;
     const sorted = samples
       .map((s: any) => ({ v: Number(s.value), t: new Date(s.startDate).getTime() }))
-      .filter((x: any) => x.v > 0)
+      .filter((x: any) => x.v > 0 && x.t > 0 && now - x.t <= lookbackMs)
       .sort((a: any, b: any) => b.t - a.t);
     return sorted.length > 0 ? Math.round(sorted[0].v) : null;
   } catch {
@@ -657,17 +658,21 @@ export async function getAppleWorkoutCaloriesForWindow(
     // Widen the query by 30 min each side to catch misaligned timestamps.
     const workouts = await mod.getWorkouts(startMs - 30 * 60_000, endMs + 30 * 60_000);
     if (!Array.isArray(workouts) || !workouts.length) return null;
-    // Find the workout with the largest overlap with our window.
-    let best: any = null;
-    let bestOverlap = 0;
+    const candidates: Array<{ workout: any; overlap: number; calories: number }> = [];
     for (const w of workouts) {
       const ws = new Date(w.startDate).getTime();
       const we = new Date(w.endDate).getTime();
       const overlap = Math.max(0, Math.min(endMs, we) - Math.max(startMs, ws));
-      if (overlap > bestOverlap) { best = w; bestOverlap = overlap; }
+      if (overlap >= 60_000) {
+        candidates.push({ workout: w, overlap, calories: Number(w.calories) });
+      }
     }
-    if (!best || bestOverlap < 60_000) return null; // <1 min overlap = not the same session
-    const cal = Number(best.calories);
+    if (candidates.length === 0) return null;
+    const pool = candidates.some(c => c.calories > 0)
+      ? candidates.filter(c => c.calories > 0)
+      : candidates;
+    const best = pool.reduce((a, b) => (b.overlap > a.overlap ? b : a));
+    const cal = Number(best.workout.calories);
     return cal > 0 ? Math.round(cal) : null;
   } catch {
     return null;

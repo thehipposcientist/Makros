@@ -119,6 +119,9 @@ _TEST_MODULES = (
     # End-to-end /workouts/generate-week with current_days (pin-against-
     # current-week single-day swap behavior).
     "tests.test_generate_week_endpoint",
+    # HTTP injury integration: /workouts/generate-week and /plans/start-new-week
+    # response + persisted plan rows honor injury movement blocks.
+    "tests.test_injury_http_integration",
     # Coach apply-action: every action type, every safety cap, every
     # mutation path on UserPreferences/UserCoachingState/UserDayState.
     "tests.test_apply_action",
@@ -134,6 +137,9 @@ _TEST_MODULES = (
     # Food classifier: per-food tagging (probiotic, omega3, processing
     # bucket, protein source, v3 flags).
     "tests.test_food_classifier",
+    # Food catalog search: local/recent/USDA/AI merge contract + recent
+    # tracking for search-selected food IDs.
+    "tests.test_food_search",
     # Allergen filter safety net: plural matching + macro re-sum
     # (real bugs found and fixed).
     "tests.test_allergen_filter",
@@ -159,6 +165,9 @@ _TEST_MODULES = (
     # Seed-to-consumer integration — reference rows are idempotently
     # inserted into a real DB and consumed by meta/hydration services.
     "tests.test_seed_integration",
+    # E2E seed personas — deterministic returning-user fixtures for
+    # Maestro/API smoke coverage.
+    "tests.test_e2e_seed",
     # Session-duration slot injection — bonus isolations at 75/90 min,
     # PLUS_CARDIO/non-lift exclusions, density interaction, integration.
     "tests.test_session_duration_slots",

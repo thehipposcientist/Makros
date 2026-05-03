@@ -124,7 +124,13 @@ export async function hapticSelection() {
 let _Audio: typeof import('expo-av').Audio | null = null;
 // Keyed by sound name so switching sounds forces a fresh load.
 const _soundCache: Partial<Record<RestTimerSound, import('expo-av').Audio.Sound>> = {};
-let _audioSessionConfigured = false;
+type AudioSessionUse = 'ping' | 'keepalive';
+let _audioSessionUse: AudioSessionUse | null = null;
+
+// Expo AV iOS enum values:
+// 0 = MixWithOthers, 1 = DoNotMix, 2 = DuckOthers.
+const IOS_MIX_WITH_OTHERS = 0;
+const ANDROID_DUCK_OTHERS = 2;
 
 function getSoundAsset(name: RestTimerSound) {
   // require() must be static — bundler resolves at build time.
@@ -147,32 +153,30 @@ async function getAudio() {
   }
 }
 
-/** Configure the iOS audio session ONCE per app launch so the rest-
- *  timer chime:
+/** Configure the iOS audio session so the rest-timer chime:
  *    • Plays through headphones / Bluetooth
  *    • Plays even with the silent switch flipped (playsInSilentModeIOS)
  *    • MIXES with other audio (Spotify keeps playing at full volume) —
  *      we do NOT duck. Was the source of "sound takes over too long":
  *      ducking holds Spotify down for ~1s after our 0.45s chime ends.
- *    • staysActiveInBackground: true so the chime can fire if the
- *      screen turns off between rest start and rest end. The bigger
- *      background-sound path is the scheduled local notification in
- *      restNotifications.ts (which also works without UIBackgroundModes). */
-async function ensureAudioSession(Audio: typeof import('expo-av').Audio): Promise<void> {
-  if (_audioSessionConfigured) return;
+ * Keep normal pings out of the background audio mode so reopening the
+ * app cannot reactivate an old audio player and interrupt music. */
+async function ensureAudioSession(
+  Audio: typeof import('expo-av').Audio,
+  use: AudioSessionUse = 'ping',
+): Promise<void> {
+  if (_audioSessionUse === use) return;
   try {
     await Audio.setAudioModeAsync({
       playsInSilentModeIOS: true,
-      staysActiveInBackground: true,
-      shouldDuckAndroid: false,
+      staysActiveInBackground: use === 'keepalive',
+      shouldDuckAndroid: true,
       playThroughEarpieceAndroid: false,
-      // 1 = MixWithOthers, 2 = DuckOthers. We mix so podcasts / music
-      // keep playing at full volume; our chime layers on top briefly.
-      interruptionModeIOS: 1,
-      interruptionModeAndroid: 1,
+      interruptionModeIOS: IOS_MIX_WITH_OTHERS,
+      interruptionModeAndroid: ANDROID_DUCK_OTHERS,
       allowsRecordingIOS: false,
     } as any);
-    _audioSessionConfigured = true;
+    _audioSessionUse = use;
   } catch {
     // Session config can fail on devices without audio hardware (rare)
     // — playback then either works at default settings or fails too.
@@ -187,7 +191,7 @@ export async function preloadRestTimerSound(): Promise<void> {
   try {
     const Audio = await getAudio();
     if (!Audio) return;
-    await ensureAudioSession(Audio);
+    await ensureAudioSession(Audio, 'ping');
     const s = await loadSettings();
     const name = s.restTimerSound ?? 'chime';
     if (_soundCache[name]) return;
@@ -210,7 +214,7 @@ export async function playRestTimerDone() {
   try {
     const Audio = await getAudio();
     if (!Audio) return;
-    await ensureAudioSession(Audio);
+    await ensureAudioSession(Audio, 'ping');
     const name = s.restTimerSound ?? 'chime';
     if (!_soundCache[name]) {
       const { sound } = await Audio.Sound.createAsync(
@@ -219,7 +223,14 @@ export async function playRestTimerDone() {
       );
       _soundCache[name] = sound;
     }
-    await _soundCache[name]!.replayAsync();
+    const sound = _soundCache[name]!;
+    sound.setOnPlaybackStatusUpdate((status) => {
+      if (!status.isLoaded || !status.didJustFinish) return;
+      sound.setOnPlaybackStatusUpdate(null);
+      if (_soundCache[name] === sound) delete _soundCache[name];
+      sound.unloadAsync().catch(() => {});
+    });
+    await sound.replayAsync();
   } catch {
     // Any failure — silent. Vibration above already ran.
   }
@@ -244,7 +255,7 @@ export async function startRestTimerKeepalive(): Promise<void> {
     }
     const Audio = await getAudio();
     if (!Audio) return;
-    await ensureAudioSession(Audio);
+    await ensureAudioSession(Audio, 'keepalive');
     if (_keepaliveSound) {
       await _keepaliveSound.stopAsync().catch(() => {});
       await _keepaliveSound.unloadAsync().catch(() => {});
@@ -265,6 +276,10 @@ export async function stopRestTimerKeepalive(): Promise<void> {
     await _keepaliveSound.unloadAsync();
   } catch {}
   _keepaliveSound = null;
+  try {
+    const Audio = await getAudio();
+    if (Audio) await ensureAudioSession(Audio, 'ping');
+  } catch {}
 }
 
 // ── Vibration ───────────────────────────────────────────────────

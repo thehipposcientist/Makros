@@ -81,7 +81,7 @@ def prescribe_for_slot(
 
     training_type = meta.training_type
     if training_type == "volume":
-        return _prescribe_by_stimulus("volume", slot, exercise)
+        return _prescribe_by_stimulus("volume", slot, exercise, inputs)
     # Stimulus-differentiated archetypes: the new LIFT_*_HEAVY and
     # LIFT_*_HYPERTROPHY archetypes carry an explicit training_type of
     # "strength" or "hypertrophy". We detect them by checking whether
@@ -104,7 +104,7 @@ def prescribe_for_slot(
         DayArchetype.LIFT_LEGS_HEAVY,
     }
     if archetype in _STIMULUS_ARCHETYPES:
-        return _prescribe_by_stimulus(training_type, slot, exercise)
+        return _prescribe_by_stimulus(training_type, slot, exercise, inputs)
     if training_type in ("strength", "hypertrophy"):
         return _prescribe_lifting(slot, exercise, inputs)
     if training_type == "power":
@@ -133,18 +133,50 @@ def _prescribe_lifting(slot, exercise: dict, inputs) -> Prescription:
     can swap it out without touching the archetype dispatch."""
     from .planner import prescribe_sets_reps
     pres = prescribe_sets_reps(exercise, slot, inputs)
-    return Prescription(
+    return _apply_lifting_session_density(Prescription(
         sets=pres.sets, reps=pres.reps,
         rest_seconds=pres.rest_seconds, rir_target=pres.rir_target,
         prescription_type="strength",
-    )
+    ), slot, inputs)
+
+
+def _apply_lifting_session_density(prescription: Prescription, slot, inputs) -> Prescription:
+    """Scale working sets for longer lifting sessions.
+
+    Slot expansion adds more exercises when the catalog can support it, but
+    long sessions still underfill when eligible accessories run out. Adding
+    sets to the existing movement pattern is deterministic and keeps the day
+    focused without forcing awkward duplicate exercises.
+    """
+    if prescription.prescription_type != "strength":
+        return prescription
+    role = getattr(slot, "role", "")
+    if role in ("warmup", "core"):
+        return prescription
+    try:
+        session_minutes = int(getattr(inputs, "session_minutes", None) or 45)
+    except (TypeError, ValueError):
+        session_minutes = 45
+    if session_minutes < 60:
+        return prescription
+
+    bonus = 2 if session_minutes >= 90 else 1
+    caps = {
+        "primary": 6 if session_minutes >= 90 else 5,
+        "secondary": 5 if session_minutes >= 90 else 4,
+        "isolation": 5 if session_minutes >= 90 else 4,
+        "accessory": 5 if session_minutes >= 90 else 4,
+    }
+    cap = caps.get(role, 4 if session_minutes < 90 else 5)
+    prescription.sets = min(cap, prescription.sets + bonus)
+    return prescription
 
 
 # ── Stimulus-driven lifting ────────────────────────────────────────
 
 
 def _prescribe_by_stimulus(
-    training_type: str, slot, exercise: dict,
+    training_type: str, slot, exercise: dict, inputs=None,
 ) -> Prescription:
     """Prescription for stimulus-differentiated lifting archetypes.
 
@@ -160,26 +192,29 @@ def _prescribe_by_stimulus(
     """
     role = slot.role
 
+    def _done(prescription: Prescription) -> Prescription:
+        return _apply_lifting_session_density(prescription, slot, inputs)
+
     if training_type == "strength":
         if role == "primary":
-            return Prescription(sets=4, reps="3-5", rest_seconds=180, rir_target=1.5, prescription_type="strength")
+            return _done(Prescription(sets=4, reps="3-5", rest_seconds=180, rir_target=1.5, prescription_type="strength"))
         if role == "secondary":
-            return Prescription(sets=3, reps="5-8", rest_seconds=150, rir_target=2.0, prescription_type="strength")
-        return Prescription(sets=3, reps="8-12", rest_seconds=90, rir_target=2.0, prescription_type="strength")
+            return _done(Prescription(sets=3, reps="5-8", rest_seconds=150, rir_target=2.0, prescription_type="strength"))
+        return _done(Prescription(sets=3, reps="8-12", rest_seconds=90, rir_target=2.0, prescription_type="strength"))
 
     if training_type == "hypertrophy":
         if role == "primary":
-            return Prescription(sets=4, reps="6-10", rest_seconds=120, rir_target=2.0, prescription_type="strength")
+            return _done(Prescription(sets=4, reps="6-10", rest_seconds=120, rir_target=2.0, prescription_type="strength"))
         if role == "secondary":
-            return Prescription(sets=3, reps="8-12", rest_seconds=90, rir_target=2.0, prescription_type="strength")
-        return Prescription(sets=3, reps="10-15", rest_seconds=75, rir_target=2.5, prescription_type="strength")
+            return _done(Prescription(sets=3, reps="8-12", rest_seconds=90, rir_target=2.0, prescription_type="strength"))
+        return _done(Prescription(sets=3, reps="10-15", rest_seconds=75, rir_target=2.5, prescription_type="strength"))
 
     # training_type == "volume"
     if role == "primary":
-        return Prescription(sets=3, reps="10-15", rest_seconds=90, rir_target=2.5, prescription_type="strength")
+        return _done(Prescription(sets=3, reps="10-15", rest_seconds=90, rir_target=2.5, prescription_type="strength"))
     if role == "secondary":
-        return Prescription(sets=3, reps="12-15", rest_seconds=75, rir_target=3.0, prescription_type="strength")
-    return Prescription(sets=3, reps="12-20", rest_seconds=60, rir_target=3.0, prescription_type="strength")
+        return _done(Prescription(sets=3, reps="12-15", rest_seconds=75, rir_target=3.0, prescription_type="strength"))
+    return _done(Prescription(sets=3, reps="12-20", rest_seconds=60, rir_target=3.0, prescription_type="strength"))
 
 
 # ── Power / plyometric ─────────────────────────────────────────────

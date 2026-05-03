@@ -7,7 +7,7 @@ Last synced from app state: 2026-05-01
 - **Bridge**: `modules/thallo-watch-bridge/` (phone) ↔ `targets/thallo-watch/ConnectivityStore.swift` (watch).
 
 **Outbound (phone → watch):**
-`pushWorkoutToWatch`, `pushMealsToWatch`, `pushSupplementsToWatch`, `pushThemeToWatch`, `pushProgressToWatch` (per-set updates). `pushProgressToWatch` carries rest timer state (`restRemainingSec`, `restStartedAtMs`, `restDurationSec`, `restEndsAtMs`) and the latest live recommendation text so the watch can refresh next-set guidance during rest and recompute the countdown from wall clock after screen sleep. Full snapshots are dual-path: they update `applicationContext` for cold-start persistence and, when reachable, also send an immediate `sendMessage` mirror. `sendMessage` failures fall back to `transferUserInfo`.
+`pushWorkoutToWatch`, `pushMealsToWatch`, `pushHydrationToWatch`, `pushSupplementsToWatch`, `pushThemeToWatch`, `pushProgressToWatch` (per-set updates). `pushProgressToWatch` carries rest timer state (`restRemainingSec`, `restStartedAtMs`, `restDurationSec`, `restEndsAtMs`) and the latest live recommendation text so the watch can refresh next-set guidance during rest and recompute the countdown from wall clock after screen sleep. Full snapshots are dual-path: they update `applicationContext` for cold-start persistence and, when reachable, also send an immediate `sendMessage` mirror. `sendMessage` failures fall back to `transferUserInfo`.
 
 Workout snapshots use a v2 envelope:
 `{ schemaVersion: 2, channel: "workout", eventId, revision, reason, sentAtMs, userId, workout }`.
@@ -16,7 +16,7 @@ The bridge stores it under `workoutEnvelope` and also writes a legacy top-level 
 Active workout exercise rows can include `plannedTargetWeightLbs` and up to five phone-ranked `swapOptions`. The phone ranks swaps with the same library scorer used by the in-workout picker, so substitutions stay in the same archetype/slot while the watch keeps the original placement, sets, reps, and rest prescription.
 
 **Inbound (watch → phone):**
-`start_workout`, `skip_workout`, `cancel_workout`, `end_workout`, `log_set`, `swap_exercise`, `toggle_meal`, `toggle_supplement`, `take_all_supplements`, `pull_state`.
+`start_workout`, `skip_workout`, `cancel_workout`, `end_workout`, `log_set`, `swap_exercise`, `toggle_meal`, `log_hydration`, `toggle_supplement`, `take_all_supplements`, `pull_state`.
 
 Watch commands carry a `commandId`; the phone bridge de-dupes recent IDs so `sendMessage` fallback to `transferUserInfo` cannot double-apply a set log or end command.
 
@@ -31,7 +31,9 @@ If a phone rest timer is currently active, the phone also sends a fresh `pushPro
 
 ## Watch App Pages
 
-TabView: **Today** (workout) / **Meals** / **Supps**. Page dots always visible.
+TabView: **Today** (workout) / **Meals** / **Hydration** / **Supps** / **Sleep** / **Readiness** / **Quick Start** / **Weight**. Page dots always visible.
+
+**Hydration**: quick-add 8 / 16 / 24 oz buttons, -8 oz correction, and a Digital Crown total setter. Watch sends absolute `log_hydration` ounce totals; phone persists through `POST /meals/hydration` and re-pushes the server-computed target.
 
 **Active workout**: Digital Crown + −/+ steppers, recommended-weight quick-use row, rest timer, HR persistent chip, live recommendation text, swipe-right HR zones tab, warm-up card before first set, end + cancel + skip/swap-exercise menu.
 

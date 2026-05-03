@@ -1,0 +1,210 @@
+# Thallo seeded returning-user smoke flow.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: seeded-returning-user
+tags:
+  - smoke
+  - seeded
+  - returning-user
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+# Dev-client builds open the Expo launcher first. Release/TestFlight builds skip
+# this screen and land directly in Thallo.
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- runFlow:
+    when:
+      visible: "Welcome to Thallo Pro"
+    commands:
+      - tapOn:
+          id: "tutorial-skip"
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+# Returning user should land with persisted PlanWeek data and a visible workout.
+- assertVisible:
+    text: ".*Upper.*"
+
+# Walk the full persisted 7-day PlanWeek. This catches stale cache fallbacks,
+# missing PlanDay rows, and date-strip regressions before we hand testers a build.
+- extendedWaitUntil:
+    visible: "Workout week"
+    timeout: 30000
+- tapOn:
+    text: "Today, Sat 2, .*"
+- assertVisible:
+    text: ".*Upper.*"
+- tapOn:
+    text: "Sun 3, .*"
+- assertVisible:
+    text: ".*Lower.*"
+- tapOn:
+    text: "Mon 4, Rest day"
+- assertVisible: "Rest Day"
+- tapOn:
+    text: "Tue 5, .*"
+- assertVisible:
+    text: ".*Upper.*"
+- tapOn:
+    text: "Wed 6, .*"
+- assertVisible:
+    text: ".*Lower.*"
+- tapOn:
+    text: "Thu 7, Rest day"
+- assertVisible: "Rest Day"
+- tapOn:
+    text: "Fri 8, Rest day"
+- assertVisible: "Rest Day"
+- tapOn:
+    text: "Today, Sat 2, .*"
+
+# Weekly digest is time-gated by the app (Sunday or after 6pm local). When it
+# is eligible, assert the seeded summary card has real session/adherence/set data.
+- runFlow:
+    when:
+      visible: ".*Week in review.*"
+    commands:
+      - assertVisible: "sessions"
+      - assertVisible: "adherence"
+      - assertVisible: "sets"
+
+# Meals: seeded DayState nutrition plan plus checked-plan history should render.
+- tapOn:
+    id: "bottom-tab-meals"
+- extendedWaitUntil:
+    visible: "Meal week"
+    timeout: 30000
+- assertVisible:
+    id: "today-meal-card"
+- tapOn:
+    id: "today-meal-card-header"
+- extendedWaitUntil:
+    visible:
+      id: "today-nutrition-card"
+    timeout: 30000
+
+# Pro food surface should be available for seeded beta/pro users.
+- tapOn: "Foods tab"
+- scrollUntilVisible:
+    element:
+      id: "foods-grocery-list-card"
+    direction: UP
+    timeout: 15000
+    visibilityPercentage: 50
+
+# Progress should hydrate seeded backend history, meal history, PRs, and weight data.
+- tapOn:
+    id: "bottom-tab-progress"
+- extendedWaitUntil:
+    visible:
+      id: "progress-tab-screen"
+    timeout: 30000
+- extendedWaitUntil:
+    visible: "THIS WEEK"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "progress-overview-week-workouts"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "progress-overview-week-meals"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "progress-overview-week-weight"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "progress-overview-week-prs"
+    timeout: 30000
+- tapOn: "PRs"
+- extendedWaitUntil:
+    visible:
+      id: "progress-milestone-recent-prs"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "progress-milestone-nutrition-data"
+    timeout: 30000
+- tapOn: "Body"
+- extendedWaitUntil:
+    visible:
+      id: "progress-weight-card"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "progress-weight-current-value"
+    timeout: 30000
+
+- tapOn:
+    id: "bottom-tab-you"
+- extendedWaitUntil:
+    visible:
+      id: "you-tab-screen"
+    timeout: 30000
+
+# Social should load the seeded friend graph and privacy copy.
+- tapOn:
+    id: "bottom-tab-social"
+- extendedWaitUntil:
+    visible: "Activity"
+    timeout: 30000
+- assertVisible:
+    text: ".*Friends only see workouts.*"
+
+# Start Workout still needs to hydrate from the seeded PlanWeek.
+- tapOn:
+    id: "bottom-tab-workouts"
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      text: "Extra workouts"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "start-workout-cta"
+- extendedWaitUntil:
+    visible:
+      id: "active-workout-screen"
+    timeout: 15000
+- extendedWaitUntil:
+    visible:
+      id: "exercise-card-0"
+    timeout: 30000

@@ -400,6 +400,7 @@ def log_meal_from_plan(
     # library. Without this link, downstream code (gut_health metrics,
     # micronutrient aggregation) can't pull fiber/sodium/added_sugar
     # from FoodNutrition and everything reports zero.
+    from app.food_service import touch_recent_food
     from app.models import Food
     import re as _re
 
@@ -450,13 +451,27 @@ def log_meal_from_plan(
     # Pre-load FoodNutrition for matched food_ids so we can reverse-
     # compute grams from calories (more robust than unit parsing, which
     # has to handle oz / fl_oz / cup / slice / piece / etc).
-    from app.models import FoodNutrition, FoodServing
     from app.enums import FoodCategory, FoodSource
+    from app.models import FoodNutrition, FoodServing
     match_cache: dict[str, tuple[int | None, float | None]] = {}
+
+    def _food_from_incoming_id(raw_id) -> tuple[int | None, float | None]:
+        try:
+            fid = int(raw_id)
+        except (TypeError, ValueError):
+            return (None, None)
+        food = db.get(Food, fid)
+        if not food or not food.is_active:
+            return (None, None)
+        if food.owner_user_id is not None and food.owner_user_id != user_id:
+            return (None, None)
+        return (food.id, food.serving_grams)
+
     for it in (meal_data.get("items") or []):
         nm = it.get("name") or ""
         if nm and nm not in match_cache:
-            match_cache[nm] = _match_food(nm)
+            incoming = _food_from_incoming_id(it.get("food_id"))
+            match_cache[nm] = incoming if incoming[0] is not None else _match_food(nm)
     all_food_ids = [fid for fid, _ in match_cache.values() if fid is not None]
     nut_by_food: dict[int, FoodNutrition] = {}
     if all_food_ids:
@@ -604,11 +619,14 @@ def log_meal_from_plan(
         return (food.id, grams)
 
     items = meal_data.get("items") or []
+    recent_food_ids: set[int] = set()
     for item in items:
         name = item.get("name", "Unknown")
         food_id, default_grams = match_cache.get(name, (None, None))
         if food_id is None:
             food_id, default_grams = _upsert_logged_food_from_item(item)
+        if food_id is not None:
+            recent_food_ids.add(food_id)
         qty = float(item.get("quantity", 1) or 1)
         unit = str(item.get("unit") or "").strip().lower()
         item_cal = float(item.get("calories", 0) or 0)
@@ -651,6 +669,9 @@ def log_meal_from_plan(
             carbs_g=float(item.get("carbs", 0)),
             fat_g=float(item.get("fat", 0)),
         ))
+
+    for food_id in recent_food_ids:
+        touch_recent_food(db, user_id, food_id, commit=False)
 
     # If no structured items, create a single synthetic item from totals.
     if not items:

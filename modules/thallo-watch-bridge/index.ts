@@ -6,13 +6,15 @@
 //     mirrors over sendMessage when reachable so start/rejoin transitions
 //     are immediate.
 //   • syncTheme({...palette}) — pushes the user's current theme colors.
+//   • syncHydration({...}) — pushes today's water total + target.
 //   • updateProgress({exerciseIndex, setNumber, restRemainingSec,
-//                     restEndsAtMs, recommendation}) — live mid-workout
-//     updates. Absolute rest timestamps let the watch recover after sleep.
+//                     restEndsAtMs, progressRevision, sessionId,
+//                     recommendation}) — live mid-workout updates.
+//     Absolute rest timestamps let the watch recover after sleep.
 //
 // Watch → Phone commands arrive via `addCommandListener`:
 //   "start_workout", "skip_workout", "end_workout", "start_rest",
-//   "skip_rest", "log_set", "swap_exercise".
+//   "skip_rest", "log_set", "swap_exercise", "log_hydration".
 
 import { requireOptionalNativeModule } from 'expo';
 
@@ -127,6 +129,13 @@ export type WatchSupplementsPayload = {
   syncedAtMs: number;
 };
 
+export type WatchHydrationPayload = {
+  dateISO: string;
+  ounces: number;
+  targetOunces: number;
+  syncedAtMs: number;
+};
+
 export type WatchReadinessFactor = {
   label: string;
   value: number;
@@ -164,6 +173,8 @@ export type WatchSleepPayload = {
 };
 
 export type WatchPalette = {
+  themeName?: string;
+  syncedAtMs?: number;
   background: string;
   surface: string;
   surfaceRaised: string;
@@ -177,6 +188,9 @@ export type WatchPalette = {
 };
 
 export type WatchProgress = {
+  sessionId?: string | null;
+  progressRevision?: number;
+  sentAtMs?: number;
   exerciseIndex?: number;
   setNumber?: number;
   restRemainingSec?: number | null;
@@ -222,6 +236,11 @@ export const WatchBridge = {
   async syncSupplements(payload: WatchSupplementsPayload): Promise<boolean> {
     if (!native) return false;
     try { return await native.syncSupplements(payload); } catch { return false; }
+  },
+
+  async syncHydration(payload: WatchHydrationPayload): Promise<boolean> {
+    if (!native) return false;
+    try { return await native.syncHydration(payload); } catch { return false; }
   },
 
   async syncSleep(payload: WatchSleepPayload): Promise<boolean> {

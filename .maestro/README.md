@@ -48,6 +48,31 @@ Or via the Makefile shortcut:
 make smoke-mobile
 ```
 
+## Seeded returning-user flow
+
+The signup flow should remain the main lifecycle smoke. For faster
+returning-user regression coverage, seed deterministic E2E personas first:
+
+```bash
+make seed-e2e
+maestro test .maestro/flows/seeded-returning-user.yaml
+```
+
+Or run both through the Makefile shortcut:
+
+```bash
+make smoke-mobile-seeded
+```
+
+Seeded credentials:
+
+- `e2e_returning@test.thallo` / `SeedTest1234` — pro returning user with active
+  PlanWeek, meals, progress, social, gear, and supplement data.
+- `e2e_long@test.thallo` / `SeedTest1234` — pro 90-minute workout persona.
+- `e2e_social_a@test.thallo` / `SeedTest1234` and
+  `e2e_social_b@test.thallo` / `SeedTest1234` — friend graph fixtures.
+- `e2e_free@test.thallo` / `SeedTest1234` — free entitlement control.
+
 ## iOS simulator vs device vs Android
 
 Maestro auto-detects whatever's running. If multiple devices are attached,
@@ -125,4 +150,6 @@ maestro test \
 
 - `flows/signup-and-regen.yaml` — the critical smoke flow (signup → onboarding
   → plan gen → equipment toggle regen → Start Workout)
+- `flows/seeded-returning-user.yaml` — returning-user smoke flow backed by
+  `make seed-e2e`
 - `flows/login.yaml` — helper flow for logging in an existing user

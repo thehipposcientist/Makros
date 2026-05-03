@@ -1023,6 +1023,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             return (
               <TouchableOpacity
                 key={cat.id}
+                testID={`goal-category-${cat.id}`}
+                accessibilityLabel={`goal-category-${cat.id}`}
                 activeOpacity={0.75}
                 onPress={() => scrollToGoalCategory(cat.id)}
                 style={{
@@ -1072,6 +1074,9 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             return (
               <PressableScale
                 key={g.id}
+                testID={`goal-card-${g.id}`}
+                accessibilityLabel={`goal-card-${g.id}`}
+                accessibilityRole="button"
                 style={[
                   styles.goalCard,
                   active && styles.goalCardActive,
@@ -1174,6 +1179,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                   return (
                     <TouchableOpacity
                       key={opt.value}
+                      testID={`pace-option-${opt.value}`}
+                      accessibilityLabel={`pace-option-${opt.value}`}
                       style={{
                         flex: 1, minWidth: '30%',
                         paddingVertical: 12, paddingHorizontal: 10, borderRadius: 10,
@@ -1215,6 +1222,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               </Text>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <TextInput
+                  testID="onboarding-target-weight-input"
+                  accessibilityLabel="onboarding-target-weight-input"
                   style={{
                     flex: 1,
                     backgroundColor: colors.surface, borderRadius: 10,
@@ -1390,6 +1399,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         <Text style={styles.fieldLabel}>Current weight</Text>
         <View style={styles.inlineInput}>
           <TextInput
+            testID="onboarding-weight-input"
+            accessibilityLabel="onboarding-weight-input"
             style={[styles.input, { flex: 1 }]}
             placeholder="e.g. 185"
             placeholderTextColor={colors.textMuted}
@@ -1406,6 +1417,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         <View style={styles.heightRow}>
           <View style={[styles.inlineInput, { flex: 1 }]}>
             <TextInput
+              testID="onboarding-height-feet-input"
+              accessibilityLabel="onboarding-height-feet-input"
               style={[styles.input, { flex: 1 }]}
               placeholder="5"
               placeholderTextColor={colors.textMuted}
@@ -1418,6 +1431,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           </View>
           <View style={[styles.inlineInput, { flex: 1 }]}>
             <TextInput
+              testID="onboarding-height-inches-input"
+              accessibilityLabel="onboarding-height-inches-input"
               style={[styles.input, { flex: 1 }]}
               placeholder="10"
               placeholderTextColor={colors.textMuted}
@@ -1452,6 +1467,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           ] as { value: Gender; label: string }[]).map(opt => (
             <TouchableOpacity
               key={opt.value}
+              testID={`gender-option-${opt.value}`}
+              accessibilityLabel={`gender-option-${opt.value}`}
               style={[styles.genderButton, gender === opt.value && styles.genderButtonActive]}
               onPress={() => setGender(opt.value)}
             >
@@ -1749,6 +1766,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           return (
             <TouchableOpacity
               key={t.id}
+              testID={`equipment-template-${t.id}`}
+              accessibilityLabel={`equipment-template-${t.id}`}
               style={[styles.templateChip, active && styles.templateChipActive]}
               onPress={() => applyTemplate(t)}
               activeOpacity={0.75}>
@@ -2526,6 +2545,9 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           ) : <View style={{ flex: 1 }} />}
           <View style={{ flex: currentStep === totalSteps - 1 ? 2 : 1 }}>
             <PressableScale
+              testID={currentStep === totalSteps - 1 ? 'onboarding-submit' : 'onboarding-next'}
+              accessibilityLabel={currentStep === totalSteps - 1 ? 'onboarding-submit' : 'onboarding-next'}
+              accessibilityRole="button"
               style={[styles.nextButton, currentStep === totalSteps - 1 && styles.nextButtonFinal]}
               onPress={handleNext}>
               <Text style={[styles.nextButtonText, currentStep === totalSteps - 1 && styles.nextButtonTextFinal]}>

@@ -177,7 +177,7 @@ def test_04_me_returns_current_user():
     body = _check(r, 200, "GET /auth/me")
     assert body.get("email") == EMAIL
     assert body.get("id") == _user_id
-    assert body.get("subscription_tier") == "free"
+    assert body.get("subscription_tier") == "pro"
 
 
 def test_05_meta_exercises_seeded():
@@ -194,7 +194,17 @@ def test_06_meta_goals_seeded():
     assert isinstance(body, list) and len(body) > 0, "no goals seeded"
 
 
-def test_07_pro_workout_analytics_require_pro_then_work_for_pro():
+def test_07_pro_workout_analytics_work_for_beta_pro_then_gate_free():
+    # External beta is intentionally full-access: new users register as
+    # beta Pro. Verify the Pro endpoints work, then explicitly downgrade
+    # the smoke user to keep the free entitlement gate covered.
+    r = _http.get(f"{BASE_URL}/workouts/fatigue", headers=_auth(), timeout=15)
+    body = _check(r, 200, "GET /workouts/fatigue beta pro")
+    assert body.get("readiness_score") == 100, (
+        f"fresh beta user should be at 100%% readiness, got {body.get('readiness_score')}"
+    )
+
+    _set_subscription_tier("free")
     for path, label in (
         ("/workouts/fatigue", "GET /workouts/fatigue free gate"),
         ("/workouts/e1rm?exercise_name=NonExistentExercise123", "GET /workouts/e1rm free gate"),
@@ -282,6 +292,54 @@ def test_12_meals_defaults_to_30_day_window():
     r = _http.get(f"{BASE_URL}/meals", headers=_auth(), timeout=10)
     body = _check(r, 200, "GET /meals")
     assert isinstance(body, list), f"meals should be a list, got {type(body)}"
+
+
+def test_12b_meal_static_routes_are_not_shadowed_by_meal_id():
+    r = _http.post(
+        f"{BASE_URL}/profile/onboarding",
+        headers=_auth(),
+        json={
+            "profile": {
+                "weight_lbs": 180,
+                "height_feet": 5,
+                "height_inches": 10,
+                "age": 30,
+                "gender": "male",
+            },
+            "goal": {
+                "goal_type": "body_recomp",
+                "goal_track": "body_recomp",
+                "pace": "moderate",
+                "target_weight_lbs": None,
+                "timeline_weeks": None,
+            },
+            "preferences": {
+                "days_per_week": 4,
+                "workout_duration_minutes": 60,
+                "equipment": ["Dumbbells"],
+                "foods_available": ["chicken breast"],
+            },
+        },
+        timeout=15,
+    )
+    _check(r, 200, "POST /profile/onboarding")
+
+    r = _http.get(
+        f"{BASE_URL}/meals/adjusted-daily-target?target_date=2026-04-20",
+        headers=_auth(),
+        timeout=10,
+    )
+    body = _check(r, 200, "GET /meals/adjusted-daily-target")
+    assert "adjusted_calories" in body, f"adjusted target response wrong shape: {body!r}"
+
+    r = _http.get(
+        f"{BASE_URL}/meals/summary/2026-04-20",
+        headers=_auth(),
+        timeout=10,
+    )
+    body = _check(r, 200, "GET /meals/summary/{date}")
+    assert body.get("date") == "2026-04-20"
+    assert isinstance(body.get("meals"), list), f"summary meals should be a list: {body!r}"
 
 
 def test_13_profile_export_round_trip():
@@ -394,12 +452,13 @@ _ALL_CASES = [
     test_04_me_returns_current_user,
     test_05_meta_exercises_seeded,
     test_06_meta_goals_seeded,
-    test_07_pro_workout_analytics_require_pro_then_work_for_pro,
+    test_07_pro_workout_analytics_work_for_beta_pro_then_gate_free,
     test_08_log_complete_workout,
     test_09_list_completions_contains_new_workout,
     test_10_list_workouts_respects_limit,
     test_11_list_workouts_rejects_limit_over_cap,
     test_12_meals_defaults_to_30_day_window,
+    test_12b_meal_static_routes_are_not_shadowed_by_meal_id,
     test_13_profile_export_round_trip,
     test_14_security_headers_present,
     test_15_password_reset_email_request_is_generic,

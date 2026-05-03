@@ -877,6 +877,75 @@ def test_gut_rollup_uses_logged_days_not_empty_metric_placeholders() -> None:
     _ok("empty today row no longer dilutes gut averages")
 
 
+def test_compute_daily_metrics_recovers_from_duplicate_insert_race() -> None:
+    """Two home-screen reads can race to create today's metrics row. The
+    loser should rollback, fetch the winner, and return one clean row."""
+    print("\n[test] daily metrics recovers from duplicate insert race")
+    from datetime import date
+    from sqlalchemy.exc import IntegrityError
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import DailyNutritionMetrics, User  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.gut_health import compute_daily_metrics
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    today = date.today()
+
+    class RacingSession:
+        def __init__(self, inner: Session, user_id: int):
+            self.inner = inner
+            self.user_id = user_id
+            self.raised = False
+
+        def exec(self, *args, **kwargs):
+            return self.inner.exec(*args, **kwargs)
+
+        def add(self, *args, **kwargs):
+            return self.inner.add(*args, **kwargs)
+
+        def refresh(self, *args, **kwargs):
+            return self.inner.refresh(*args, **kwargs)
+
+        def rollback(self):
+            return self.inner.rollback()
+
+        def commit(self):
+            if not self.raised:
+                self.raised = True
+                self.inner.rollback()
+                with Session(engine) as other:
+                    other.add(DailyNutritionMetrics(
+                        user_id=self.user_id,
+                        metric_date=today,
+                        calories_total=123,
+                    ))
+                    other.commit()
+                raise IntegrityError("insert", {}, Exception("duplicate"))
+            return self.inner.commit()
+
+    with Session(engine) as s:
+        u = User(email="metrics-race@example.com", username="metricsrace", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        row = compute_daily_metrics(RacingSession(s, u.id), user_id=u.id, metric_date=today, allow_ai=False)
+        rows = s.exec(
+            select(DailyNutritionMetrics)
+            .where(DailyNutritionMetrics.user_id == u.id)
+            .where(DailyNutritionMetrics.metric_date == today)
+        ).all()
+        assert len(rows) == 1, rows
+        assert row.id == rows[0].id, (row, rows)
+        assert row.calories_total == 0, row.model_dump()
+        assert row.item_count == 0, row.model_dump()
+    _ok("duplicate insert loser rewrites and returns winner row")
+
+
 def test_hydration_get_reads_requested_date() -> None:
     """Past-day hydration should be readable by explicit log_date, not
     hard-wired to today's row."""
@@ -1144,6 +1213,7 @@ cases = [
     test_logged_ai_food_micros_are_persisted_for_gut_metrics,
     test_score_micros_read_unsuffixed_aliases_and_calorie_fallback,
     test_gut_rollup_uses_logged_days_not_empty_metric_placeholders,
+    test_compute_daily_metrics_recovers_from_duplicate_insert_race,
     test_hydration_get_reads_requested_date,
     test_feedback_patch_preserves_exercise_based_fatigue_same_focus,
     test_feedback_patch_targets_focus_corrected_completion,

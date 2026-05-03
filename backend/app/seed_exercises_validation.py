@@ -18,10 +18,11 @@ Checks:
      `leverage_machines` after the specific-machine refactor
   7. movement_pattern / exercise_type combinations that don't make
      sense (e.g. `plyometric` pattern with `mobility` type)
-  8. power/plyometric movements that don't carry a `power_type`
-  9. empty `equipment` list on entries whose name implies external
+  8. movement patterns that no planner slot can ever request
+  9. power/plyometric movements that don't carry a `power_type`
+ 10. empty `equipment` list on entries whose name implies external
      equipment (barbell / dumbbell / machine / cable / kettlebell)
- 10. missing or empty descriptions
+ 11. missing or empty descriptions
 
 Warnings are not fatal — the seeder still runs. Intent is to keep
 problems visible so they get fixed.
@@ -63,6 +64,24 @@ _INCONSISTENT_COMBOS: set[tuple[str, str]] = {
     ("vertical_pull", "mobility"),
 }
 
+_PLANNER_REACHABLE_PATTERNS = {
+    "anti_extension",
+    "anti_rotation",
+    "cardio",
+    "carry",
+    "flexion",
+    "hinge",
+    "horizontal_press",
+    "horizontal_pull",
+    "isolation",
+    "lunge",
+    "mobility",
+    "plyometric",
+    "squat",
+    "vertical_press",
+    "vertical_pull",
+}
+
 _FREE_WEIGHT_NAME_TOKENS = (
     "barbell", "dumbbell", "kettlebell", "cable", "machine",
     "smith", "trap bar", "preacher", "pec deck", "hyperextension",
@@ -82,6 +101,7 @@ class ExerciseValidationReport:
     generic_machine: int = 0
     bad_combo: int = 0
     missing_power_type: int = 0
+    planner_unreachable_pattern: int = 0
     missing_equipment: int = 0
     missing_description: int = 0
     missing_substitution_group: int = 0
@@ -203,7 +223,17 @@ def validate_exercise_seed(
                 f"movement_pattern={combo[0]}, exercise_type={combo[1]}"
             )
 
-    # ── 8. plyometric/power without power_type ──────────────────────────
+    # ── 8. movement patterns the deterministic planner can request ──────
+    for e in entries:
+        mp = e.get("movement_pattern")
+        if mp and mp not in _PLANNER_REACHABLE_PATTERNS:
+            report.planner_unreachable_pattern += 1
+            report.warn(
+                f"'{e.get('slug')}' has movement_pattern={mp}, but no planner "
+                f"slot emits that pattern"
+            )
+
+    # ── 9. plyometric/power without power_type ──────────────────────────
     for e in entries:
         mp = e.get("movement_pattern")
         if mp in _PLYO_PATTERNS and "power_type" not in e:
@@ -213,7 +243,7 @@ def validate_exercise_seed(
                 f"power_type — should be 'power' or 'plyometric'"
             )
 
-    # ── 9. external-equipment names with empty equipment list ───────────
+    # ── 10. external-equipment names with empty equipment list ──────────
     for e in entries:
         name_lower = e.get("name", "").lower()
         eq = e.get("equipment", []) or []
@@ -226,14 +256,14 @@ def validate_exercise_seed(
                 f"equipment list is empty"
             )
 
-    # ── 10. missing description ─────────────────────────────────────────
+    # ── 11. missing description ─────────────────────────────────────────
     for e in entries:
         desc = (e.get("description") or "").strip()
         if not desc:
             report.missing_description += 1
             report.warn(f"'{e.get('slug')}' has no description")
 
-    # ── 11. major-family entries should declare a substitution_group ────
+    # ── 12. major-family entries should declare a substitution_group ────
     # The planner's swap logic only works when entries opt in to a group.
     # We don't require it on prehab/mobility/cardio entries (those rarely
     # need 1-for-1 substitution), but compound strength + plyometric work
@@ -267,6 +297,7 @@ def validate_exercise_seed(
             f"laterality={report.laterality_inconsistent} "
             f"generic_machine={report.generic_machine} "
             f"bad_combo={report.bad_combo} "
+            f"dead_pattern={report.planner_unreachable_pattern} "
             f"no_power_type={report.missing_power_type} "
             f"no_eq={report.missing_equipment} "
             f"no_desc={report.missing_description} "

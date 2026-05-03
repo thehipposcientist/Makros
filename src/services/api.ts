@@ -1518,10 +1518,62 @@ export interface WorkoutCompletionRecord {
   cardio_style?: string | null;
   distance_miles?: number | null;
   calories_burned?: number | null;
+  hr_summary?: {
+    avgBpm?: number | null;
+    maxBpm?: number | null;
+    zoneMinutes?: number[] | null;
+  } | null;
 }
 
-/** Fetch the user's recent completion markers. Skeleton data only — no set
- *  detail. Used to rehydrate local workoutHistory after a wipe. */
+export interface WorkoutSessionSetRecord {
+  set_number: number;
+  target_reps_min?: number | null;
+  target_reps_max?: number | null;
+  target_weight_lbs?: number | null;
+  actual_reps?: number | null;
+  actual_weight_lbs?: number | null;
+  actual_rir?: number | null;
+  completed?: boolean | null;
+  duration_seconds?: number | null;
+  comfort_rating?: number | null;
+  actual_distance?: number | null;
+  actual_pace?: string | null;
+  heart_rate_avg?: number | null;
+  cardio_metrics?: Record<string, string> | null;
+}
+
+export interface WorkoutSessionExerciseRecord {
+  name: string;
+  equipment?: string | null;
+  target_reps_text?: string | null;
+  rest_seconds?: number | null;
+  exercise_slug_snapshot?: string | null;
+  primary_muscle_snapshot?: string | null;
+  secondary_muscles_snapshot?: string[] | null;
+  is_compound_snapshot?: boolean | null;
+  sets?: WorkoutSessionSetRecord[];
+}
+
+export interface WorkoutSessionRecord {
+  id: number;
+  workout_date: string;
+  focus: string;
+  completed_at?: string | null;
+  created_at?: string | null;
+  exercises?: WorkoutSessionExerciseRecord[];
+}
+
+export async function listWorkoutSessions(
+  token: string,
+  limit: number = 100,
+): Promise<WorkoutSessionRecord[]> {
+  return request(`/workouts?limit=${limit}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** Fetch the user's recent completion markers. No per-set detail. Used to
+ *  rehydrate local workoutHistory after a wipe. */
 export async function listWorkoutCompletions(
   token: string,
   limit: number = 100,
@@ -2091,17 +2143,51 @@ export async function lookupBarcode(
   }, 10000);
 }
 
-/** Search food nutrition info by name using AI. */
+export type FoodSearchResult = {
+  name: string;
+  serving: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  fiber?: number;
+  micronutrients?: Record<string, number>;
+  source?: 'seed' | 'user' | 'usda' | 'barcode' | 'ai';
+  food_id?: number | null;
+  serving_id?: number | null;
+  serving_grams?: number | null;
+  brand?: string | null;
+  is_verified?: boolean;
+  is_preferred?: boolean;
+};
+
+/** Search food nutrition info by name. Local/recent foods rank first,
+ *  USDA fills broad results, and forceAi asks the AI fallback directly. */
 export async function searchFoodNutrition(
   token: string,
   query: string,
   opts?: { forceAi?: boolean },
-): Promise<{ results: Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; fiber?: number; micronutrients?: Record<string, number>; source?: 'usda' | 'ai' }> }> {
-  return request<any>('/ai/food-search', {
+): Promise<{ results: FoodSearchResult[]; sources?: { local: number; usda: number; ai: number }; preferred_foods?: string[] }> {
+  const params = new URLSearchParams({
+    q: query,
+    include_remote: 'true',
+    force_ai: String(opts?.forceAi ?? false),
+  });
+  return request<any>(`/foods/search?${params.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  }, 45000);
+}
+
+export async function addPreferredFood(
+  token: string,
+  name: string,
+): Promise<{ foods_available: string[] }> {
+  return request<any>('/foods/preferred', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ query, force_ai: opts?.forceAi ?? false }),
-  }, 45000);
+    body: JSON.stringify({ name }),
+  }, 10000);
 }
 
 export async function classifyFoods(

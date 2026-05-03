@@ -20,6 +20,7 @@ import { FoodItem, FoodCategoryGroup, lookupFood } from '../hooks/useMetaData';
 import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { scanFoodsPhoto, searchFoodNutrition, getMealInstructions } from '../services/api';
+import type { FoodSearchResult } from '../services/api';
 import { ensureItems, syncLegacyFieldsFromItems, splitFoodString, convertQuantity, parseAmountString, guessUnitForFood, validUnitsForFood } from '../utils/mealItems';
 import type { ProFeature } from '../utils/subscription';
 
@@ -318,7 +319,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const [barcodeScanning, setBarcodeScanning] = useState(false);
   const [barcodeFallback, setBarcodeFallback] = useState<string | null>(null);
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
-  const [aiResults, setAiResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; micronutrients?: Record<string, number>; source?: 'usda' | 'ai' }>>([]);
+  const [aiResults, setAiResults] = useState<FoodSearchResult[]>([]);
   // Track which item is currently showing the unit picker popover.
   const [unitPickerIdx, setUnitPickerIdx] = useState<number | null>(null);
   // In-progress text for each row's quantity input. Lets the user type
@@ -668,7 +669,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const handleMicToggle = async () => {
     if (!authToken) return;
     try {
-      if (!isRecording && !(await requireStoredPro('ai_meal_plan'))) return;
+      if (!isRecording && !(await requireStoredPro('ai_meal_voice'))) return;
       if (!isRecording) {
         const AV = await import('expo-av');
         const { granted } = await AV.Audio.requestPermissionsAsync();
@@ -697,8 +698,8 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       recordingRef.current = null;
       if (!uri) { setSpeechLoading(false); return; }
       // Read the file as base64 and post to /ai/speech-to-meal.
-      const FileSystem = await import('expo-file-system');
-      const audio_base64 = await (FileSystem as any).readAsStringAsync(uri, { encoding: 'base64' });
+      const FileSystem = await import('expo-file-system/legacy');
+      const audio_base64 = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
       const mime = uri.toLowerCase().endsWith('.wav') ? 'audio/wav'
         : uri.toLowerCase().endsWith('.mp3') ? 'audio/mp3'
         : uri.toLowerCase().endsWith('.webm') ? 'audio/webm'
@@ -792,7 +793,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     }
   };
 
-  const addAiFood = (aiItem: { name: string; serving?: string; calories: number; protein: number; carbs: number; fat: number; micronutrients?: Record<string, number> }) => {
+  const addAiFood = (aiItem: FoodSearchResult) => {
     if (!items.some(it => it.name.toLowerCase() === aiItem.name.toLowerCase())) {
       const parsed = aiItem.serving
         ? splitFoodString(`${aiItem.serving} ${aiItem.name}`)
@@ -809,6 +810,9 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
         calories: cal, protein: prot, carbs: carb, fat,
         baseQuantity: qty > 0 ? qty : 1,
         baseCalories: cal, baseProtein: prot, baseCarbs: carb, baseFat: fat,
+        food_id: aiItem.food_id ?? null,
+        serving_id: aiItem.serving_id ?? null,
+        serving_grams: aiItem.serving_grams ?? null,
         ...(aiItem.micronutrients ? { micronutrients: aiItem.micronutrients } : {}),
       };
       setItems(prev => {
@@ -1476,22 +1480,30 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             )}
 
             {aiResults.length > 0 && (() => {
-              const hasUsda = aiResults.some(r => r.source === 'usda');
+              const hasVerified = aiResults.some(r => r.source !== 'ai');
               const hasAi = aiResults.some(r => r.source === 'ai');
               return (
               <View style={{ marginBottom: 16 }}>
                 <Text style={s.sectionLabel}>Search Results</Text>
                 {aiResults.map((item, idx) => {
                   const isUsda = item.source === 'usda';
+                  const isAi = item.source === 'ai';
+                  const badgeLabel =
+                    item.source === 'seed' ? 'THALLO'
+                    : item.source === 'user' ? 'MINE'
+                    : item.source === 'barcode' ? 'BARCODE'
+                    : isUsda ? 'USDA'
+                    : isAi ? 'AI'
+                    : String(item.source ?? '').toUpperCase();
                   return (
                     <TouchableOpacity key={`${item.source ?? ''}-${item.name}-${idx}`} style={s.aiResultRow} onPress={() => addAiFood(item)}>
                       <View style={{ flex: 1 }}>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           <Text style={s.aiResultName}>{item.name}</Text>
                           {item.source && (
-                            <View style={[s.sourceBadge, isUsda ? s.sourceBadgeUsda : s.sourceBadgeAi]}>
-                              <Text style={[s.sourceBadgeText, isUsda ? s.sourceBadgeTextUsda : s.sourceBadgeTextAi]}>
-                                {isUsda ? 'USDA' : 'AI'}
+                            <View style={[s.sourceBadge, isUsda ? s.sourceBadgeUsda : isAi ? s.sourceBadgeAi : s.sourceBadgeLocal]}>
+                              <Text style={[s.sourceBadgeText, isUsda ? s.sourceBadgeTextUsda : isAi ? s.sourceBadgeTextAi : s.sourceBadgeTextLocal]}>
+                                {badgeLabel}
                               </Text>
                             </View>
                           )}
@@ -1505,7 +1517,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                     </TouchableOpacity>
                   );
                 })}
-                {hasUsda && !hasAi && !aiSearchLoading && (
+                {hasVerified && !hasAi && !aiSearchLoading && (
                   <TouchableOpacity
                     style={s.alsoAskAiBtn}
                     onPress={() => handleAiSearch({ forceAi: true, append: true })}>
@@ -1826,9 +1838,11 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   },
   sourceBadgeUsda: { backgroundColor: '#10B98122', borderColor: '#10B98177' },
   sourceBadgeAi:   { backgroundColor: colors.primary + '22', borderColor: colors.primary + '77' },
+  sourceBadgeLocal: { backgroundColor: colors.surfaceRaised, borderColor: colors.border },
   sourceBadgeText: { fontSize: 9, fontWeight: '800', letterSpacing: 0.5 },
   sourceBadgeTextUsda: { color: '#059669' },
   sourceBadgeTextAi:   { color: colors.primary },
+  sourceBadgeTextLocal: { color: colors.textSecondary },
 
   alsoAskAiBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,

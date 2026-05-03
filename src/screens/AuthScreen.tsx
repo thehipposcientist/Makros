@@ -45,6 +45,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const emailTouched = email.length > 0;
   const emailValid = EMAIL_RE.test(email.trim());
   const signupDisabled = mode === 'signup' && emailTouched && !emailValid;
+  const maestroTestAccount = __DEV__ && email.trim().endsWith('@test.thallo');
 
   const firstNameRef       = useRef<TextInput>(null);
   const lastNameRef        = useRef<TextInput>(null);
@@ -190,12 +191,14 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           {/* Login / Sign Up toggle — sliding pill indicator */}
           <View style={styles.toggle}>
             <TouchableOpacity
+              testID="auth-mode-login"
               activeOpacity={0.75}
               style={[styles.toggleButton, mode === 'login' && styles.toggleButtonActive]}
               onPress={() => switchMode('login')}>
               <Text style={[styles.toggleText, mode === 'login' && styles.toggleTextActive]}>Log In</Text>
             </TouchableOpacity>
             <TouchableOpacity
+              testID="auth-mode-signup"
               activeOpacity={0.75}
               style={[styles.toggleButton, mode === 'signup' && styles.toggleButtonActive]}
               onPress={() => switchMode('signup')}>
@@ -206,6 +209,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           {mode === 'signup' && (
             <View style={{ flexDirection: 'row', gap: 10 }}>
               <TextInput
+                testID="auth-first-name-input"
                 ref={firstNameRef}
                 style={[styles.input, { flex: 1 }]}
                 placeholder="First name"
@@ -219,6 +223,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                 blurOnSubmit={false}
               />
               <TextInput
+                testID="auth-last-name-input"
                 ref={lastNameRef}
                 style={[styles.input, { flex: 1 }]}
                 placeholder="Last name"
@@ -238,6 +243,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           {mode !== 'reset_answer' && (
             <>
               <TextInput
+                testID="auth-email-input"
                 ref={emailRef}
                 style={[styles.input, signupDisabled && styles.inputError]}
                 placeholder="Email"
@@ -266,6 +272,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           {/* Username (signup only) */}
           {mode === 'signup' && (
             <TextInput
+              testID="auth-username-input"
               ref={usernameRef}
               style={styles.input}
               placeholder="Username"
@@ -288,6 +295,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                 <Text style={styles.questionText}>{recoveryQuestion}</Text>
               </View>
               <TextInput
+                testID="auth-recovery-answer-input"
                 ref={answerRef}
                 style={styles.input}
                 placeholder="Your answer"
@@ -307,18 +315,19 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           {mode !== 'reset_email' && (
             <View style={styles.passwordRow}>
               <TextInput
+                testID="auth-password-input"
                 ref={passwordRef}
                 style={[styles.input, styles.passwordInput]}
                 placeholder={mode === 'reset_answer' ? 'New password' : 'Password'}
                 placeholderTextColor={colors.textMuted}
                 value={password}
                 onChangeText={setPassword}
-                secureTextEntry={!showPassword}
+                secureTextEntry={!showPassword && !maestroTestAccount}
                 returnKeyType={mode === 'login' ? 'go' : 'next'}
                 onSubmitEditing={() => mode === 'login' ? handleSubmit() : confirmPasswordRef.current?.focus()}
                 blurOnSubmit={false}
               />
-              <TouchableOpacity style={styles.eyeBtn} activeOpacity={0.75} hitSlop={{ top: 12, bottom: 12, left: 8, right: 12 }} onPress={() => setShowPassword(v => !v)}>
+              <TouchableOpacity testID="auth-password-toggle" style={styles.eyeBtn} activeOpacity={0.75} hitSlop={{ top: 12, bottom: 12, left: 8, right: 12 }} onPress={() => setShowPassword(v => !v)}>
                 <Text style={styles.eyeText}>{showPassword ? 'Hide' : 'Show'}</Text>
               </TouchableOpacity>
             </View>
@@ -328,17 +337,18 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           {(mode === 'signup' || mode === 'reset_answer') && (
             <View style={styles.passwordRow}>
               <TextInput
+                testID="auth-confirm-password-input"
                 ref={confirmPasswordRef}
                 style={[styles.input, styles.passwordInput]}
                 placeholder={mode === 'reset_answer' ? 'Confirm new password' : 'Confirm password'}
                 placeholderTextColor={colors.textMuted}
                 value={confirmPassword}
                 onChangeText={setConfirmPassword}
-                secureTextEntry={!showConfirmPassword}
+                secureTextEntry={!showConfirmPassword && !maestroTestAccount}
                 returnKeyType="next"
                 onSubmitEditing={() => mode === 'signup' ? answerRef.current?.focus() : handleSubmit()}
               />
-              <TouchableOpacity style={styles.eyeBtn} activeOpacity={0.75} hitSlop={{ top: 12, bottom: 12, left: 8, right: 12 }} onPress={() => setShowConfirmPassword(v => !v)}>
+              <TouchableOpacity testID="auth-confirm-password-toggle" style={styles.eyeBtn} activeOpacity={0.75} hitSlop={{ top: 12, bottom: 12, left: 8, right: 12 }} onPress={() => setShowConfirmPassword(v => !v)}>
                 <Text style={styles.eyeText}>{showConfirmPassword ? 'Hide' : 'Show'}</Text>
               </TouchableOpacity>
             </View>
@@ -383,6 +393,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
                 ))}
               </View>
               <TextInput
+                testID="auth-signup-recovery-answer-input"
                 ref={answerRef}
                 style={styles.input}
                 placeholder="Your answer"
@@ -400,6 +411,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           {mode === 'signup' && (
             <View style={styles.legalBox}>
               <TouchableOpacity
+                testID="auth-legal-accept"
                 activeOpacity={0.75}
                 style={styles.legalRow}
                 onPress={() => setAcceptedLegal(v => !v)}
@@ -423,6 +435,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           ) : null}
 
           <TouchableOpacity
+            testID="auth-submit"
             style={[styles.submitButton, (loading || signupDisabled) && styles.submitButtonDisabled]}
             onPress={handleSubmit}
             disabled={loading || signupDisabled}>

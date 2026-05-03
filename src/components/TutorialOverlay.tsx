@@ -143,7 +143,7 @@ export default function TutorialOverlay({
       <Animated.View style={[styles.container, { opacity: fade }]}>
         {/* Top bar — Skip + step counter */}
         <View style={styles.topBar}>
-          <TouchableOpacity onPress={goSkip} hitSlop={12}>
+          <TouchableOpacity testID="tutorial-skip" onPress={goSkip} hitSlop={12}>
             <Text style={styles.skipText}>Skip</Text>
           </TouchableOpacity>
           <Text style={styles.counterText}>

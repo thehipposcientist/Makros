@@ -58,6 +58,7 @@ from typing import Iterable
 # signatures) so removed Layer 4 block can stay removed.
 from .slots import Slot, density_adjust_slots  # noqa: F401
 from .cardio import classify_cardio
+from .equipment import expand_owned_equipment_aliases
 
 
 class PlannerValidationError(ValueError):
@@ -330,14 +331,7 @@ def weekly_set_targets(inputs: PlannerInputs) -> dict[str, int]:
 
 def _expanded_owned_equipment(owned: set[str]) -> set[str]:
     """Expand equivalent equipment slugs used by seed requirements."""
-    expanded = set(owned)
-    if "adjustable_dumbbells" in expanded:
-        expanded.add("dumbbells")
-    if "adjustable_bench" in expanded:
-        expanded.update({"flat_bench", "incline_bench", "decline_bench"})
-    if "incline_bench" in expanded or "decline_bench" in expanded:
-        expanded.add("adjustable_bench")
-    return expanded
+    return expand_owned_equipment_aliases(set(owned))
 
 
 def _equipment_satisfied(exercise: dict, owned: set[str]) -> bool:
@@ -392,6 +386,68 @@ _FOCUS_FAMILY_MUSCLES: dict[str, frozenset[str] | None] = {
 }
 
 
+_MUSCLE_HINT_EQUIVALENTS: dict[str, frozenset[str]] = {
+    "back": frozenset({"back", "lats"}),
+    "lats": frozenset({"back", "lats"}),
+}
+
+
+def _exercise_primary_muscle(exercise: dict) -> str:
+    return (exercise.get("primary_muscle") or "").lower()
+
+
+def _exercise_trained_muscles(exercise: dict) -> set[str]:
+    muscles = {_exercise_primary_muscle(exercise)}
+    muscles.update((m or "").lower() for m in (exercise.get("secondary_muscles") or []))
+    return {m for m in muscles if m}
+
+
+def _is_rear_delt_slot(slot: Slot) -> bool:
+    return "rear delt" in (slot.label or "").lower()
+
+
+def _is_rear_delt_exercise(exercise: dict) -> bool:
+    slug = (exercise.get("slug") or "").lower()
+    name = (exercise.get("name") or "").lower()
+    group = (exercise.get("substitution_group") or "").lower()
+    return (
+        "rear_delt" in group
+        or "rear_delt" in slug
+        or "rear delt" in name
+        or "face_pull" in slug
+        or "face pull" in name
+    )
+
+
+def _primary_muscle_matches_hint(exercise: dict, hint: str) -> bool:
+    primary = _exercise_primary_muscle(exercise)
+    allowed = _MUSCLE_HINT_EQUIVALENTS.get(hint, frozenset({hint}))
+    return primary in allowed
+
+
+def _slot_hint_matches_exercise(slot: Slot, exercise: dict, *, primary_only: bool) -> bool:
+    hint = (slot.primary_muscle_hint or "").lower()
+    if not hint:
+        return True
+    if _primary_muscle_matches_hint(exercise, hint):
+        return True
+    if _is_rear_delt_slot(slot) and _is_rear_delt_exercise(exercise):
+        return True
+    return not primary_only and hint in _exercise_trained_muscles(exercise)
+
+
+def _family_allows_exercise(day_focus_family: str | None, slot: Slot, exercise: dict) -> bool:
+    if not day_focus_family:
+        return True
+    family_muscles = _FOCUS_FAMILY_MUSCLES.get(day_focus_family)
+    if family_muscles is None:
+        return True
+    ex_muscle = _exercise_primary_muscle(exercise)
+    if not ex_muscle or ex_muscle in family_muscles:
+        return True
+    return day_focus_family == "pull" and _is_rear_delt_slot(slot) and _is_rear_delt_exercise(exercise)
+
+
 def filter_candidates(
     all_exercises: list[dict],
     slot: Slot,
@@ -415,8 +471,9 @@ def filter_candidates(
       4. Movement pattern is not in `injury_blocked_patterns` (which
          the caller builds from `PlannerInputs.injuries`)
       5. Primary muscle compatible with slot hint (when slot specifies
-         a hint AND the slot is an isolation slot — compounds get to
-         bleed across muscles)
+         a hint AND the slot is an isolation slot). Rear-delt slots accept
+         rear-delt-group exercises even when the seed's broad primary
+         muscle is "shoulders".
       6. Not in the user's disliked set
       7. For compound slots (primary/secondary) on days with a known
          focus family, candidate's primary_muscle must belong to the
@@ -425,11 +482,6 @@ def filter_candidates(
     """
     blocked = injury_blocked_patterns or set()
     accepts = accepts_types or frozenset({"strength"})
-    # Resolve the allowed muscle set for the day's focus family.
-    # None means "no restriction" (full_body, cardio, etc.).
-    family_muscles: frozenset[str] | None = None
-    if day_focus_family:
-        family_muscles = _FOCUS_FAMILY_MUSCLES.get(day_focus_family)
     out: list[dict] = []
     for ex in all_exercises:
         if ex.get("deprecated") or ex.get("retired"):
@@ -449,11 +501,10 @@ def filter_candidates(
         if mp in blocked:
             continue
         # For isolation slots with a muscle hint, also require the
-        # primary muscle to match. Compounds skip this — a horizontal
-        # press slot accepts bench press even though its primary is chest
-        # but the slot hint is also chest.
+        # primary muscle to match. Rear-delt work is represented by a
+        # substitution group because the broad seed primary is shoulders.
         if slot.role == "isolation" and slot.primary_muscle_hint:
-            if ex.get("primary_muscle") != slot.primary_muscle_hint:
+            if not _slot_hint_matches_exercise(slot, ex, primary_only=True):
                 continue
         if slot.role == "core":
             from .core_programmer import core_slot_accepts_exercise
@@ -471,12 +522,10 @@ def filter_candidates(
         # day's focus.
         if (
             slot.role in ("primary", "secondary", "isolation", "accessory")
-            and family_muscles is not None
             and mp not in ("cardio", "mobility", "plyometric")
+            and not _family_allows_exercise(day_focus_family, slot, ex)
         ):
-            ex_muscle = ex.get("primary_muscle") or ""
-            if ex_muscle and ex_muscle not in family_muscles:
-                continue
+            continue
         out.append(ex)
     return out
 
@@ -824,7 +873,21 @@ def pick_for_slot(
     if not candidates:
         return None
 
+    def _slot_intent_pool(pool: list[dict]) -> list[dict]:
+        if slot.role not in ("primary", "secondary") or not slot.primary_muscle_hint:
+            return pool
+        hint = (slot.primary_muscle_hint or "").lower()
+        primary_matches = [c for c in pool if _primary_muscle_matches_hint(c, hint)]
+        if primary_matches:
+            return primary_matches
+        trained_matches = [
+            c for c in pool
+            if _slot_hint_matches_exercise(slot, c, primary_only=False)
+        ]
+        return trained_matches or pool
+
     def _best_of(pool: list[dict]) -> dict | None:
+        pool = _slot_intent_pool(pool)
         if not pool:
             return None
         scored = [

@@ -55,6 +55,7 @@ async function test_wipe_preserves_safelist() {
     aiNutritionPlanC: '{}',
     aiNutritionPlans: '[]',
     trainerNote: 'hi',
+    manualWorkoutOverrides: '{}',
     nutritionistNote: 'hi',
     supplementStack: '[]',
     mealEdits: '{}',

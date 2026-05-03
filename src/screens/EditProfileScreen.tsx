@@ -489,7 +489,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   }, [profile.injuryEntries]);
   const [showAddInjury, setShowAddInjury] = useState(false);
   const [equipmentExpanded, setEquipmentExpanded] = useState(false);
-  const [foodsExpanded, setFoodsExpanded] = useState(true);
+  const [foodsExpanded, setFoodsExpanded] = useState(false);
   const [injuryDesc, setInjuryDesc]   = useState('');
   const [injuryBodyPart, setInjuryBodyPart] = useState('');
   const [foodSearch, setFoodSearch]   = useState('');
@@ -2051,14 +2051,18 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               <TouchableOpacity
                 style={[styles.daysBtn, daysPerWeek <= 1 && styles.daysBtnDisabled]}
                 onPress={() => setDaysPerWeek(d => Math.max(1, d - 1))}
-                disabled={daysPerWeek <= 1}>
+                disabled={daysPerWeek <= 1}
+                testID="edit-workout-days-decrease"
+                accessibilityLabel="edit-workout-days-decrease">
                 <Text style={styles.daysBtnText}>−</Text>
               </TouchableOpacity>
               <Text style={styles.daysValue}>{daysPerWeek}</Text>
               <TouchableOpacity
                 style={[styles.daysBtn, daysPerWeek >= 7 && styles.daysBtnDisabled]}
                 onPress={() => setDaysPerWeek(d => Math.min(7, d + 1))}
-                disabled={daysPerWeek >= 7}>
+                disabled={daysPerWeek >= 7}
+                testID="edit-workout-days-increase"
+                accessibilityLabel="edit-workout-days-increase">
                 <Text style={styles.daysBtnText}>+</Text>
               </TouchableOpacity>
             </View>
@@ -2105,7 +2109,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 <TouchableOpacity
                   key={opt.value}
                   style={[styles.durationBtn, duration === opt.value && styles.durationBtnActive]}
-                  onPress={() => setDuration(opt.value)}>
+                  onPress={() => setDuration(opt.value)}
+                  testID={`edit-workout-duration-${opt.value}`}
+                  accessibilityLabel={`edit-workout-duration-${opt.value}`}>
                   <Text style={[styles.durationLabel, duration === opt.value && styles.durationLabelActive]}>{opt.label}</Text>
                   <Text style={[styles.durationDesc,  duration === opt.value && styles.durationDescActive]}>{opt.desc}</Text>
                 </TouchableOpacity>
@@ -2765,10 +2771,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           <View style={{ marginBottom: 20 }}>
             {/* Header row */}
             <TouchableOpacity
-              style={{
+              style={[{
                 flexDirection: 'row', alignItems: 'center', gap: 10,
                 marginBottom: foodsExpanded ? 12 : 0,
-              }}
+              }, !foodsExpanded && {
+                padding: 12,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: tc.primary + '44',
+                backgroundColor: tc.primary + '0E',
+              }]}
               onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setFoodsExpanded(p => !p); }}
               activeOpacity={0.7}>
               <View style={{
@@ -2786,12 +2798,26 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   {(() => { const n = foods.filter(f => !f.startsWith('__supp__')).length; return n > 0 ? `${n} food${n !== 1 ? 's' : ''} selected` : 'Tap to pick your foods'; })()}
                 </Text>
               </View>
-              {(() => { const n = foods.filter(f => !f.startsWith('__supp__')).length; return n > 0 ? (
+              {foodsExpanded && (() => { const n = foods.filter(f => !f.startsWith('__supp__')).length; return n > 0 ? (
                 <View style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10, backgroundColor: tc.primary + '18', borderWidth: 1, borderColor: tc.primary + '40' }}>
                   <Text style={{ fontSize: 11, fontWeight: '700', color: tc.primary }}>{n}</Text>
                 </View>
               ) : null; })()}
-              <Ionicons name={foodsExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
+              {foodsExpanded ? (
+                <Ionicons name="chevron-up" size={16} color={tc.textMuted} />
+              ) : (
+                <View style={{
+                  flexDirection: 'row', alignItems: 'center', gap: 4,
+                  paddingHorizontal: 10, paddingVertical: 6,
+                  borderRadius: 999,
+                  backgroundColor: tc.primary,
+                }}>
+                  <Text style={{ fontSize: 12, fontWeight: '800', color: tc.background }}>
+                    Open
+                  </Text>
+                  <Ionicons name="chevron-down" size={14} color={tc.background} />
+                </View>
+              )}
             </TouchableOpacity>
 
             {/* Add buttons — always visible so users can reach them even when list is collapsed */}
@@ -3430,7 +3456,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         )}
 
         {noHeader && (
-          <TouchableOpacity style={[styles.saveBtn, { marginTop: 20, marginBottom: 16 }]} onPress={handleSave}>
+          <TouchableOpacity
+            style={[styles.saveBtn, { marginTop: 20, marginBottom: 16 }]}
+            onPress={handleSave}
+            testID="edit-profile-save"
+            accessibilityLabel="edit-profile-save">
             <Text style={styles.saveBtnText}>{saveLabel}</Text>
           </TouchableOpacity>
         )}

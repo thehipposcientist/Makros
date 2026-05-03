@@ -25,11 +25,20 @@ def _approx_minutes_for_day(day: dict) -> float:
     use their second-count + rest, rep-based use ~3s per rep + rest.
     Per-set rest is between sets (sets−1 gaps).
     """
+    import re
+
     total = 0.0
     for ex in day.get("exercises", []):
         sets = int(ex.get("sets", 0) or 0)
         reps = str(ex.get("reps", "") or "")
-        rest = int(ex.get("rest_seconds", 60) or 60)
+        rest = int(ex.get("rest_seconds", ex.get("restSeconds", 60)) or 60)
+        # Min-based: "5 min", "8 min flow"
+        if "min" in reps:
+            match = re.search(r"(\d+(?:\.\d+)?)(?:\s*-\s*(\d+(?:\.\d+)?))?\s*min", reps)
+            if match:
+                mins = float(match.group(2) or match.group(1))
+                total += mins
+                continue
         # Time-based: "30s", "45s hold", "60s flow"
         if "s" in reps and reps.replace("s", "").replace(" hold", "").replace(" flow", "").replace(" each side", "").strip().split()[0:1]:
             try:
@@ -37,14 +46,6 @@ def _approx_minutes_for_day(day: dict) -> float:
                 each_side = "each" in reps
                 per_set = seconds * (2 if each_side else 1)
                 total += (per_set * sets + rest * max(0, sets - 1)) / 60
-                continue
-            except ValueError:
-                pass
-        # Min-based: "5 min", "8 min flow"
-        if "min" in reps:
-            try:
-                mins = int(reps.split()[0])
-                total += mins
                 continue
             except ValueError:
                 pass
@@ -72,10 +73,10 @@ def _build_inputs(session_minutes: int, days_per_week: int = 4):
 
 # ─── Underfill regression — long sessions get filled close to budget ────
 
-def test_60min_session_uses_at_least_45min():
-    """A 60-min lift session should land in the 45-65 min range. Anything
+def test_60min_session_uses_at_least_40min():
+    """A 60-min lift session should land in the 40-75 min range. Anything
     far under means the planner is leaving the user with idle time."""
-    print("\n[test] 60-min budget produces ≥45 min of work per lift day")
+    print("\n[test] 60-min budget produces ≥40 min of work per lift day")
     from app.services.workout.planner import generate_workout_plan
     from app.seed_exercises_data import SEED_EXERCISES
     plan = generate_workout_plan(_build_inputs(60), SEED_EXERCISES)
@@ -83,7 +84,7 @@ def test_60min_session_uses_at_least_45min():
     assert lift_days, "no lift days generated"
     for d in lift_days:
         mins = _approx_minutes_for_day(d)
-        assert 30 <= mins <= 75, (
+        assert 40 <= mins <= 75, (
             f"day '{d.get('focus')}' got {mins:.1f} min for a 60-min budget"
         )
     _ok(f"60-min plan: lift days {[round(_approx_minutes_for_day(d)) for d in lift_days]}")
@@ -104,6 +105,11 @@ def test_90min_session_fills_more_than_60min():
 
     avg_60 = avg_minutes(plan_60)
     avg_90 = avg_minutes(plan_90)
+    for d in [d for d in plan_90["workout_plan"]["days"] if d.get("category") == "lift"]:
+        mins = _approx_minutes_for_day(d)
+        assert mins >= 65, (
+            f"day '{d.get('focus')}' got {mins:.1f} min for a 90-min budget"
+        )
     assert avg_90 > avg_60 + 5, (
         f"90-min plan (avg {avg_90:.1f}) should be at least 5 min longer "
         f"than 60-min plan (avg {avg_60:.1f}); got delta {avg_90 - avg_60:.1f}"

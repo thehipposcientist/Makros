@@ -46,6 +46,8 @@ import {
   savePlanChange, loadMealRoutines, saveMealRoutines, applyRoutines, applyRoutinesToAll,
   loadPreservedCompletedWorkouts,
   savePreservedCompletedWorkout,
+  loadManualWorkoutOverrides,
+  saveManualWorkoutOverride,
   deleteWorkoutSession,
   loadWorkoutTemplates,
   deleteWorkoutTemplate,
@@ -138,6 +140,7 @@ interface HomeScreenProps {
   // `mode` argument tells the parent which section to regenerate so the
   // right loading state fires (workout vs nutrition).
   onSaveProfile?: (updated: UserProfile, mode?: 'goal' | 'workout' | 'mealplan' | 'theme') => void;
+  onCancelScheduledPlanChange?: (restoredProfile: UserProfile) => Promise<void> | void;
   /** Bubble the active PlanWeek's end_date up to the app root so the
    *  pending-save confirmation modal can show the correct "applies on"
    *  date (end_date + 1 = first day of the next plan week, on the
@@ -1286,7 +1289,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onOpenSettings, onHomeTabNavigate, onProfileUpdate, onBackendSync, onSaveProfile, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onOpenSettings, onHomeTabNavigate, onProfileUpdate, onBackendSync, onSaveProfile, onCancelScheduledPlanChange, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -1393,6 +1396,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     history: WorkoutSession[];
     summaries: any[];
     preserved: Awaited<ReturnType<typeof loadPreservedCompletedWorkouts>>;
+    manualOverrides: Awaited<ReturnType<typeof loadManualWorkoutOverrides>>;
   }> | null>(null);
   const loadWorkoutHistoryBundle = useCallback(() => {
     if (workoutHistoryBundlePromiseRef.current) return workoutHistoryBundlePromiseRef.current;
@@ -1400,8 +1404,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       loadWorkoutHistory(),
       loadWorkoutSummaries(),
       loadPreservedCompletedWorkouts(),
+      loadManualWorkoutOverrides(),
     ])
-      .then(([history, summaries, preserved]) => ({ history, summaries, preserved }))
+      .then(([history, summaries, preserved, manualOverrides]) => ({ history, summaries, preserved, manualOverrides }))
       .finally(() => {
         workoutHistoryBundlePromiseRef.current = null;
       });
@@ -1721,6 +1726,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [droppedSkipDates, setDroppedSkipDates] = useState<Set<string>>(new Set());
   const [todaySummary, setTodaySummary]   = useState<import('../types').StoredWorkoutSummary | null>(null);
   const [preservedWorkouts, setPreservedWorkouts] = useState<Record<string, WorkoutDay>>({});
+  const [manualWorkoutOverrides, setManualWorkoutOverrides] = useState<Record<string, WorkoutDay>>({});
   const [readinessScore, setReadinessScore] = useState<{
     score: number;
     label: string;
@@ -1857,6 +1863,33 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
   }, [activeTab, mealsSubTab, refreshHydration, selectedMealDayKey]);
 
+  const pushHydrationSnapshotToWatch = useCallback(async (
+    dateISO: string = todayKey(),
+    preferred?: HydrationSummary | null,
+  ) => {
+    let row = preferred
+      ?? hydrationByDate[dateISO]
+      ?? (dateISO === todayKey() ? hydration : null);
+    if (!row && authToken) {
+      const result = await getHydration(authToken, dateISO);
+      const loaded: HydrationSummary = {
+        date: result.date,
+        ounces: result.ounces,
+        target_ounces: result.target_ounces,
+      };
+      row = loaded;
+      setHydrationByDate(prev => ({ ...prev, [result.date]: loaded }));
+      if (result.date === todayKey()) setHydration(loaded);
+    }
+    const snapshot = row ?? { date: dateISO, ounces: 0, target_ounces: 64 };
+    const { pushHydrationToWatch } = await import('../utils/watchSync');
+    await pushHydrationToWatch({
+      dateISO: snapshot.date,
+      ounces: snapshot.ounces,
+      targetOunces: snapshot.target_ounces,
+    });
+  }, [authToken, hydration, hydrationByDate]);
+
   const handleHydrationDelta = useCallback(async (deltaOz: number, dateISO: string = todayKey()) => {
     if (!authToken) return;
     const currentRow = hydrationByDate[dateISO] ?? (dateISO === todayKey() ? hydration : null);
@@ -1877,6 +1910,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       };
       setHydrationByDate(prev => ({ ...prev, [result.date]: saved }));
       if (result.date === todayKey()) setHydration(saved);
+      if (result.date === todayKey()) pushHydrationSnapshotToWatch(result.date, saved).catch(() => {});
     } catch {
       if (currentRow) setHydrationByDate(prev => ({ ...prev, [dateISO]: { ...currentRow, ounces: current } }));
       if (dateISO === todayKey()) setHydration(prev => prev ? { ...prev, ounces: current } : prev);
@@ -1884,7 +1918,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } finally {
       setHydrationLoading(false);
     }
-  }, [authToken, hydration, hydrationByDate]);
+  }, [authToken, hydration, hydrationByDate, pushHydrationSnapshotToWatch]);
 
   const handleHydrationSet = useCallback(async (ounces: number, dateISO: string = todayKey()) => {
     if (!authToken) return;
@@ -1906,6 +1940,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       };
       setHydrationByDate(prev => ({ ...prev, [result.date]: saved }));
       if (result.date === todayKey()) setHydration(saved);
+      if (result.date === todayKey()) pushHydrationSnapshotToWatch(result.date, saved).catch(() => {});
     } catch {
       if (currentRow) setHydrationByDate(prev => ({ ...prev, [dateISO]: { ...currentRow, ounces: current } }));
       if (dateISO === todayKey()) setHydration(prev => prev ? { ...prev, ounces: current } : prev);
@@ -1913,7 +1948,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } finally {
       setHydrationLoading(false);
     }
-  }, [authToken, hydration, hydrationByDate]);
+  }, [authToken, hydration, hydrationByDate, pushHydrationSnapshotToWatch]);
 
   // Authoritative daily amounts from the server — collagen + probiotic
   // CFUs. Fetched alongside the score so NutritionCard can show real
@@ -2284,14 +2319,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           } catch { /* keep the last displayed readiness score */ }
         }
         const activeSessionId = status === 'active' ? getActiveWatchSessionId() : null;
-        await pushWorkoutToWatch(todayWorkout, {
-          dateISO: todayISO,
-          status,
-          sessionId: activeSessionId,
-          readiness: unifiedPrepScore,
-          readinessLabel: unifiedPrepLabel,
-          reason: 'home_snapshot',
-        });
+        if (!(status === 'active' && activeSessionId)) {
+          await pushWorkoutToWatch(todayWorkout, {
+            dateISO: todayISO,
+            status,
+            sessionId: activeSessionId,
+            readiness: unifiedPrepScore,
+            readinessLabel: unifiedPrepLabel,
+            reason: 'home_snapshot',
+          });
+        }
         await pushThemeToWatch(userProfile?.themePreference);
         const todayPlan = nutritionPlansByDate[todayISO]
           ?? (Object.values(nutritionPlansByDate)[0] as any);
@@ -2301,6 +2338,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           todayISO,
           nutritionScoreData?.score ?? null,
         );
+        await pushHydrationSnapshotToWatch(todayISO).catch(() => {});
         // Today's supplement stack — mirrored so the Supps tab on the
         // watch renders instantly. Commands from the watch round-trip
         // to api.logDose via the command listener above.
@@ -2395,7 +2433,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [
     planWeek, workoutPlan, userProfile?.themePreference, todayDone, skippedDates,
     nutritionPlansByDate, checkedMealsByDate,
-    readinessScore, nutritionScoreData,
+    hydration, hydrationByDate, readinessScore, nutritionScoreData,
+    pushHydrationSnapshotToWatch,
   ]);
 
   // Re-push the full snapshot (workout + meals + theme) whenever the
@@ -2416,28 +2455,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     skippedDates: new Set<string>(),
     nutritionPlansByDate: {} as any,
     checkedMealsByDate: {} as any,
+    hydration: null as HydrationSummary | null,
+    hydrationByDate: {} as Record<string, HydrationSummary>,
     readinessScore: null as any,
     nutritionScoreData: null as any,
     workoutPlan: null as any,
     planWeek: null as import('../services/api').PlanWeekResponse | null,
     profileAge: null as number | null,
   });
-  useEffect(() => {
-    rePushStateRef.current = {
-      schedule: schedule as any[],
-      themePreference: userProfile?.themePreference,
-      todayDone,
-      skippedDates,
-      nutritionPlansByDate,
-      checkedMealsByDate,
-      readinessScore,
-      nutritionScoreData,
-      workoutPlan,
-      planWeek,
-      profileAge: userProfile?.physicalStats?.age ?? null,
-    };
-  });
-
   // WCSession diagnostic firehose. Mirrors every delegate callback
   // from the phone bridge into console.log with a `[wc-diag]` prefix
   // — activation completion, reachability flips, every didReceiveMessage
@@ -2502,7 +2527,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const watchSync = await import('../utils/watchSync');
         const {
           onWatchReachabilityChange, pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
-          pushSleepToWatch, pushSupplementsToWatch, pushWeightToWatch,
+          pushHydrationToWatch, pushSleepToWatch, pushSupplementsToWatch, pushWeightToWatch,
           buildWatchSleepPayloadFromSummary,
         } = watchSync;
         const unsub = onWatchReachabilityChange((info) => {
@@ -2551,14 +2576,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               : 'scheduled';
             const reachSid = status === 'active' ? getActiveWatchSessionId() : null;
             console.log('[watch] reachable — re-pushing full home snapshot', { status });
-            await pushWorkoutToWatch(todayWorkout, {
-              dateISO: todayISO,
-              status,
-              sessionId: reachSid,
-              readiness: s.readinessScore?.score ?? null,
-              readinessLabel: s.readinessScore?.label ?? null,
-              reason: 'reachability',
-            }).catch(() => {});
+            if (!(status === 'active' && reachSid)) {
+              await pushWorkoutToWatch(todayWorkout, {
+                dateISO: todayISO,
+                status,
+                sessionId: reachSid,
+                readiness: s.readinessScore?.score ?? null,
+                readinessLabel: s.readinessScore?.label ?? null,
+                reason: 'reachability',
+              }).catch(() => {});
+            }
             await pushThemeToWatch(s.themePreference).catch(() => {});
             const todayPlan = s.nutritionPlansByDate[todayISO]
               ?? (Object.values(s.nutritionPlansByDate)[0] as any);
@@ -2568,6 +2595,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               todayISO,
               s.nutritionScoreData?.score ?? null,
             ).catch(() => {});
+            let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
+            if (!hydrationSnapshot && authToken) {
+              hydrationSnapshot = await getHydration(authToken, todayISO).catch(() => null);
+            }
+            await pushHydrationToWatch({
+              dateISO: hydrationSnapshot?.date ?? todayISO,
+              ounces: hydrationSnapshot?.ounces ?? 0,
+              targetOunces: hydrationSnapshot?.target_ounces ?? 64,
+            }).catch(() => {});
           })();
 
           // Sleep uses the canonical health summary fetcher: cached when
@@ -2811,7 +2847,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const watchSync = await import('../utils/watchSync');
                 const {
                   pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
-                  pushSleepToWatch, pushSupplementsToWatch, pushWeightToWatch,
+                  pushHydrationToWatch, pushSleepToWatch, pushSupplementsToWatch, pushWeightToWatch,
                   buildWatchSleepPayloadFromSummary,
                 } = watchSync;
                 const s = rePushStateRef.current;
@@ -2848,14 +2884,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 // before the next reads it. Concurrent fire-and-forget causes
                 // a race where all three read the same stale applicationContext
                 // and only the last writer's keys survive (dropping workout).
-                await pushWorkoutToWatch(todayWorkout, {
-                  dateISO: todayISO,
-                  status,
-                  sessionId: pullSid,
-                  readiness: s.readinessScore?.score ?? null,
-                  readinessLabel: s.readinessScore?.label ?? null,
-                  reason: 'pull_state',
-                }).catch(() => {});
+                if (!(status === 'active' && pullSid)) {
+                  await pushWorkoutToWatch(todayWorkout, {
+                    dateISO: todayISO,
+                    status,
+                    sessionId: pullSid,
+                    readiness: s.readinessScore?.score ?? null,
+                    readinessLabel: s.readinessScore?.label ?? null,
+                    reason: 'pull_state',
+                  }).catch(() => {});
+                }
                 await pushThemeToWatch(s.themePreference).catch(() => {});
                 const todayPlan = s.nutritionPlansByDate[todayISO]
                   ?? (Object.values(s.nutritionPlansByDate)[0] as any);
@@ -2865,6 +2903,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   todayISO,
                   s.nutritionScoreData?.score ?? null,
                 ).catch(() => {});
+                let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
+                if (!hydrationSnapshot && authToken) {
+                  hydrationSnapshot = await getHydration(authToken, todayISO).catch(() => null);
+                }
+                await pushHydrationToWatch({
+                  dateISO: hydrationSnapshot?.date ?? todayISO,
+                  ounces: hydrationSnapshot?.ounces ?? 0,
+                  targetOunces: hydrationSnapshot?.target_ounces ?? 64,
+                }).catch(() => {});
                 // push_state also sends the full data set that the
                 // reachability listener sends, so a manual sync is
                 // equivalent to re-opening the watch app.
@@ -2968,6 +3015,47 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const mealType = String(payload?.mealType || '');
             const todayISO = todayKey();
             if (mealType) watchCmdHandlersRef.current.toggleMeal(todayISO, mealType);
+          } else if (command === 'log_hydration') {
+            // Watch sends an absolute ounce total after its optimistic
+            // local update. Persist through the same backend endpoint
+            // the phone hydration panel uses, then re-push the server
+            // target so the wrist stays aligned with today's formula.
+            (async () => {
+              try {
+                if (!authToken) return;
+                const rawOunces = Number(payload?.ounces);
+                if (!Number.isFinite(rawOunces) || rawOunces < 0 || rawOunces > 400) return;
+                const dateISO = String(payload?.dateISO || todayKey()).slice(0, 10);
+                const next = Math.max(0, Math.round(rawOunces * 10) / 10);
+                const s = rePushStateRef.current;
+                const currentRow = s.hydrationByDate?.[dateISO]
+                  ?? (dateISO === todayKey() ? s.hydration : null);
+                const optimistic: HydrationSummary = {
+                  date: dateISO,
+                  ounces: next,
+                  target_ounces: currentRow?.target_ounces ?? 64,
+                };
+                setHydrationByDate(prev => ({ ...prev, [dateISO]: optimistic }));
+                if (dateISO === todayKey()) setHydration(optimistic);
+                const result = await logHydration(authToken, next, dateISO);
+                const fresh = await getHydration(authToken, result.date).catch(() => null);
+                const saved: HydrationSummary = fresh
+                  ? { date: fresh.date, ounces: fresh.ounces, target_ounces: fresh.target_ounces }
+                  : {
+                    date: result.date,
+                    ounces: result.ounces,
+                    target_ounces: currentRow?.target_ounces ?? 64,
+                  };
+                setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
+                if (saved.date === todayKey()) setHydration(saved);
+                const { pushHydrationToWatch } = await import('../utils/watchSync');
+                await pushHydrationToWatch({
+                  dateISO: saved.date,
+                  ounces: saved.ounces,
+                  targetOunces: saved.target_ounces,
+                });
+              } catch { /* non-fatal */ }
+            })();
           } else if (command === 'toggle_supplement') {
             // Watch tapped a supplement row — log the dose on the
             // phone, then re-push the stack so the watch picks up
@@ -3162,8 +3250,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const fresh = await loadPreservedCompletedWorkouts();
-      if (mounted) setPreservedWorkouts(fresh);
+      const [preserved, manualOverrides] = await Promise.all([
+        loadPreservedCompletedWorkouts(),
+        loadManualWorkoutOverrides(),
+      ]);
+      if (mounted) {
+        setPreservedWorkouts(preserved);
+        setManualWorkoutOverrides(manualOverrides);
+      }
     })();
     return () => { mounted = false; };
   }, [workoutPlan, todayDone]);
@@ -3252,7 +3346,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // Load skip reasons, completed dates, summaries, and preserved
     // completions through one shared in-flight read so mount effects do not
     // parse the same AsyncStorage blobs several times.
-    const { history, summaries, preserved } = await loadWorkoutHistoryBundle();
+    const { history, summaries, preserved, manualOverrides } = await loadWorkoutHistoryBundle();
     const completed = new Set<string>();
     for (const s of history) {
       if (s.skipped && s.skipReason && !reasonMap[s.date]) reasonMap[s.date] = s.skipReason;
@@ -3293,6 +3387,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setTodaySummary(todaySummaryEntry);
 
     setPreservedWorkouts(preserved);
+    setManualWorkoutOverrides(manualOverrides);
 
     if (authToken) {
       try {
@@ -5566,9 +5661,29 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       if (preserved) {
         return { ...item, workout: preserved, isRest: false };
       }
+      const manualOverride = planWeek?.days?.length ? null : manualWorkoutOverrides[k];
+      if (manualOverride) {
+        return { ...item, workout: manualOverride, isRest: false };
+      }
       return item;
     })
-  ), [scheduleRaw, preservedWorkouts]);
+  ), [scheduleRaw, preservedWorkouts, manualWorkoutOverrides, planWeek]);
+
+  rePushStateRef.current = {
+    schedule: schedule as any[],
+    themePreference: userProfile?.themePreference,
+    todayDone,
+    skippedDates,
+    nutritionPlansByDate,
+    checkedMealsByDate,
+    hydration,
+    hydrationByDate,
+    readinessScore,
+    nutritionScoreData,
+    workoutPlan,
+    planWeek,
+    profileAge: userProfile?.physicalStats?.age ?? null,
+  };
 
   if (!userProfile || !workoutPlan) return <View style={styles.container} />;
 
@@ -6774,21 +6889,32 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     if (!workoutPlan) return;
                     if (newFocus !== 'Custom' && newFocus !== 'Empty') return;
                     // Find the recipe slot for this calendar day so the
-                    // edit lands on the right entry. Same indexOf trick
-                    // as the Pro path.
-                    const recipeIdx = workoutPlan.days.indexOf(item.workout as any);
-                    if (recipeIdx < 0) return;
+                    // edit lands on the right entry. Rest days have no
+                    // workout object, so those become dated local
+                    // overrides instead of recipe edits.
+                    const recipeIdx = item.workout
+                      ? workoutPlan.days.indexOf(item.workout as any)
+                      : -1;
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
-                    const updatedDays = [...workoutPlan.days];
-                    updatedDays[recipeIdx] = {
-                      ...updatedDays[recipeIdx],
+                    const newDay = {
+                      ...(item.workout ?? { day: DAY_NAMES[item.date.getDay()] }),
                       focus: newFocus,
                       exercises: [],
-                    };
-                    const updatedPlan = { ...workoutPlan, days: updatedDays };
-                    setWorkoutPlan(updatedPlan);
-                    AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
+                      stimulus: null,
+                    } as WorkoutDay;
+                    const updatedDays = [...workoutPlan.days];
+                    if (recipeIdx >= 0) {
+                      updatedDays[recipeIdx] = newDay;
+                      const updatedPlan = { ...workoutPlan, days: updatedDays };
+                      setWorkoutPlan(updatedPlan);
+                      AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
+                    } else {
+                      const dayKey = dateKey(item.date);
+                      setManualWorkoutOverrides(prev => ({ ...prev, [dayKey]: newDay }));
+                      saveManualWorkoutOverride(dayKey, newDay).catch(() => {});
+                      setSelectedWorkoutDayKey(dayKey);
+                    }
                   }) : async (newFocus) => {
                     setSwitchDayIdx(-1);
                     if (!workoutPlan) return;
@@ -7163,6 +7289,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {mealsSubTab === 'foods' && !isFreeTier && (
                   <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
                     <TouchableOpacity
+                      testID="foods-grocery-list-card"
                       onPress={() => setShowGroceryList(true)}
                       activeOpacity={0.8}
                       style={{
@@ -7617,7 +7744,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     borderStyle: cardBorderStyle,
                     opacity: cardOpacity,
                   },
-                ]}>
+                ]}
+                testID={isToday ? 'today-meal-card' : undefined}>
                   {(isToday || isPastLogged) && (
                     <View style={[
                       styles.dayCardTopAccent,
@@ -7630,6 +7758,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     ]} />
                   )}
                   <TouchableOpacity
+                    testID={isToday ? 'today-meal-card-header' : undefined}
                     style={[styles.mealAccordionHeader, { backgroundColor: 'transparent' }]}
                     onPress={() => {
                       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
@@ -7738,6 +7867,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         fire underneath. */}
                     {!isPastSkipped && (
                       <TouchableOpacity
+                        testID={isToday ? 'today-add-meal' : undefined}
                         onPress={(e) => {
                           e.stopPropagation();
                           import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
@@ -7777,6 +7907,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   <AnimatedCollapsible visible={isExpanded} duration={360} slideDistance={14}>
                     <View style={styles.mealExpansionRail}>
                       <NutritionCard
+                        testID={d.key === todayKey() ? 'today-nutrition-card' : undefined}
                         embedded
                         themeName={userProfile.themePreference}
                         nutritionPlan={plan}
@@ -8202,7 +8333,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       )}
 
       {/* ── Progress tab — kept mounted to avoid white flash on tab switch */}
-      <Animated.View style={{ flex: 1, display: activeTab === 'progress' ? 'flex' : 'none', opacity: progressFade }}>
+      <Animated.View
+        testID="progress-tab-screen"
+        style={{ flex: 1, display: activeTab === 'progress' ? 'flex' : 'none', opacity: progressFade }}>
         <ErrorBoundary>
           <ProgressScreen
             authToken={authToken}
@@ -8212,6 +8345,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             nutritionPlan={nutritionPlansByDate[todayKey()] ?? null}
             nutritionLogRefreshKey={mealLogRefreshKey}
             onBack={() => setActiveTab('workout')}
+            onCancelScheduledPlanChange={onCancelScheduledPlanChange}
             onUpdateWeight={(weightLbs) => {
               onProfileUpdate?.({ physicalStats: { ...userProfile.physicalStats, weightLbs } } as any, true);
               import('../utils/weightHistory').then(({ saveWeightEntry }) => saveWeightEntry(weightLbs, 'manual')).catch(() => {});
@@ -8256,7 +8390,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           age != null && age > 0 ? `age ${Math.round(age)}` : null,
         ].filter((part): part is string => !!part);
         return (
-        <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+        <ScrollView testID="you-tab-screen" style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
           {/* User info header */}
           <View style={[styles.profileHero, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             <View style={[styles.profileAvatar, { backgroundColor: themeColors.primary + '22', borderColor: themeColors.primary + '55' }]}>
@@ -8706,7 +8840,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const libMatch = byName.get(name.toLowerCase().trim());
               return {
                 food_name: name,
-                food_id: libMatch?.id ?? libMatch?.food_id ?? null,
+                food_id: it.food_id ?? libMatch?.id ?? libMatch?.food_id ?? null,
+                serving_id: it.serving_id ?? null,
+                serving_grams: it.serving_grams ?? null,
                 quantity: Number(it.quantity || it.qty || 1),
                 unit: String(it.unit || 'serving'),
                 calories: Number(it.calories || 0),
@@ -8817,6 +8953,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               // back into the SavedMealItem shape.
               const items = (updated.items ?? []).map((it: any) => ({
                 food_name: it.name || 'Item',
+                food_id: it.food_id ?? null,
+                serving_id: it.serving_id ?? null,
+                serving_grams: it.serving_grams ?? null,
                 quantity: Number(it.quantity || 1),
                 unit: String(it.unit || 'serving'),
                 calories: Number(it.calories || 0),
@@ -10458,7 +10597,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   {([
                     { key: 'hapticsEnabled' as const, label: 'Haptic Feedback', desc: 'Vibrate on taps and actions' },
                     { key: 'soundsEnabled' as const, label: 'Sounds', desc: 'Play tone when rest timer ends while the app is open' },
-                    { key: 'restNotificationSoundEnabled' as const, label: 'Background Alert Sound', desc: 'Sound/keepalive when the app is closed. iOS can interrupt music — leave OFF if you listen to Spotify mid-workout.' },
+                    { key: 'restNotificationSoundEnabled' as const, label: 'Background Ping Assist', desc: 'Try to keep the app awake for the rest ping. Notifications stay silent so music keeps playing.' },
                     { key: 'vibrationEnabled' as const, label: 'Vibration', desc: 'Vibrate on rest timer and alerts' },
                   ]).map(opt => (
                     <View key={opt.key} style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
@@ -11002,6 +11141,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           colors={bottomBarGradientColors}
           style={[styles.bottomBar, { borderColor: chromeColors.border }]}>
           <BottomTabButton
+            testID="bottom-tab-social"
             label="Social"
             iconName="people-outline"
             active={activeTab === 'friends'}
@@ -11011,6 +11151,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             badge={pendingFriendCount > 0 ? pendingFriendCount : undefined}
           />
           <BottomTabButton
+            testID="bottom-tab-workouts"
             label="Workouts"
             iconName="barbell-outline"
             active={activeTab === 'workout'}
@@ -11019,6 +11160,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             onPress={() => setActiveTab('workout')}
           />
           <BottomTabButton
+            testID="bottom-tab-meals"
             label="Meals"
             iconName="nutrition-outline"
             active={activeTab === 'meals'}
@@ -11027,6 +11169,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             onPress={() => setActiveTab('meals')}
           />
           <BottomTabButton
+            testID="bottom-tab-progress"
             label="Progress"
             iconName="trending-up-outline"
             active={activeTab === 'progress'}
@@ -11035,6 +11178,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             onPress={() => setActiveTab('progress')}
           />
           <BottomTabButton
+            testID="bottom-tab-you"
             label="You"
             iconName="person-circle-outline"
             active={activeTab === 'you'}
@@ -11370,7 +11514,7 @@ function HydrationTodayPanel({
           }}>
           <Text style={{ fontSize: 10, fontWeight: '900', color: '#fff' }}>Set</Text>
         </PressableScale>
-        {[8, 16, 24, 40].map(oz => (
+        {[8, 16, 24, 32, 40].map(oz => (
           <PressableScale
             key={oz}
             onPress={() => onDelta(oz)}
@@ -11398,12 +11542,13 @@ function HydrationTodayPanel({
 }
 
 // ── SubTabBtn ─────────────────────────────────────────────────────────────────
-function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
+function SubTabBtn({ label, active, tint, mutedColor, onPress, testID }: {
   label: string;
   active: boolean;
   tint: string;
   mutedColor: string;
   onPress: () => void;
+  testID?: string;
 }) {
   const pressLock = useRef(false);
   const triggerPress = () => {
@@ -11421,6 +11566,7 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
         accessibilityRole="tab"
         accessibilityLabel={`${label} tab`}
         accessibilityState={{ selected: active }}
+        testID={testID}
         style={({ pressed }) => ({
           width: '100%',
           minHeight: 40,
@@ -11453,7 +11599,7 @@ function SubTabBtn({ label, active, tint, mutedColor, onPress }: {
 
 // ── BottomTabButton ───────────────────────────────────────────────────────────
 function BottomTabButton({
-  label, iconName, active, tint, mutedColor, onPress, badge,
+  label, iconName, active, tint, mutedColor, onPress, badge, testID,
 }: {
   label: string;
   iconName: string;
@@ -11462,6 +11608,7 @@ function BottomTabButton({
   mutedColor: string;
   onPress: () => void;
   badge?: number;
+  testID?: string;
 }) {
   const activeAnim = useRef(new Animated.Value(active ? 1 : 0)).current;
 
@@ -11499,7 +11646,8 @@ function BottomTabButton({
         hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
         accessibilityRole="tab"
         accessibilityLabel={`${label} tab`}
-        accessibilityState={{ selected: active }}>
+        accessibilityState={{ selected: active }}
+        testID={testID}>
         <Animated.View style={[
           btStyles.inner,
           active && {
@@ -11919,6 +12067,8 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           <TouchableOpacity
             onPress={() => onChangeFocus?.('Custom')}
             activeOpacity={0.75}
+            testID="switch-to-workout-cta"
+            accessibilityLabel="switch-to-workout-cta"
             style={{
               marginTop: 10, alignSelf: 'flex-start',
               flexDirection: 'row', alignItems: 'center', gap: 6,
@@ -12013,7 +12163,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
   const completedDashed = isCompleted && !isToday;
 
   return (
-    <TouchableOpacity
+    <View
       style={[
         styles.dayCard,
         {
@@ -12023,10 +12173,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           borderStyle: completedDashed ? 'dashed' : 'solid',
           opacity: completedDashed ? 0.78 : 1,
         },
-      ]}
-      onPress={onPress}
-      activeOpacity={0.8}
-      disabled={isRegenerating}>
+      ]}>
       {(isToday || isCompleted) && (
         <View style={[styles.dayCardTopAccent, { backgroundColor: accentColor, height: todayAccentHeight, opacity: completedDashed ? 0.55 : 1 }]} />
       )}
@@ -12046,7 +12193,13 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           </Text>
         </View>
       )}
-      <View style={[styles.dayCardRow, isToday && styles.dayCardRowToday, { paddingTop: (isToday || isCompleted) ? 0 : 16 }]}>
+      <TouchableOpacity
+        style={[styles.dayCardRow, isToday && styles.dayCardRowToday, { paddingTop: (isToday || isCompleted) ? 0 : 16 }]}
+        onPress={onPress}
+        activeOpacity={0.8}
+        disabled={isRegenerating}
+        accessibilityRole="button"
+        accessibilityLabel={`${dow} ${dateStr} ${item.workout!.focus}`}>
         <View style={[styles.dayCardLeft, isToday && styles.dayCardLeftToday]}>
           <Text style={[
             styles.dayCardDow,
@@ -12177,7 +12330,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
             <ExpandingChevron expanded={expanded} color={tc.textMuted} size={16} />
           </View>
         )}
-      </View>
+      </TouchableOpacity>
       {isToday && readinessBadge && readinessBadge.label !== '—' && readinessBadge.score > 0 && (() => {
         const rc = readinessBadge.label === 'Primed' || readinessBadge.label === 'Ready'
           ? accentColor
@@ -12213,8 +12366,9 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
             <PressableScale
               onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}
               accessibilityRole="button"
-              accessibilityLabel="Start workout">
-              <View style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
+              accessibilityLabel="start-workout-cta"
+              testID="start-workout-cta">
+              <View testID="start-workout-cta-visible" style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
                 <Ionicons name="play-circle" size={22} color={getContrastingTextColor(workoutPalette.strong)} />
                 <Text style={[styles.startWorkoutBtnText, { color: getContrastingTextColor(workoutPalette.strong) }]}>Start Workout</Text>
               </View>
@@ -12499,7 +12653,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           )}
         </View>
       </AnimatedCollapsible>
-    </TouchableOpacity>
+    </View>
   );
 }
 

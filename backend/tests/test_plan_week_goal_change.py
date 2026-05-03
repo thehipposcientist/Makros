@@ -79,6 +79,9 @@ class FakeSession:
     def add(self, obj):
         self.added.append(obj)
 
+    def get(self, *_args, **_kwargs):
+        return None
+
     def commit(self):
         pass
 

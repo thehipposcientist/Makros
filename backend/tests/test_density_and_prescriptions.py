@@ -58,13 +58,14 @@ def _make_slots(roles: list[str]) -> list[Slot]:
             for i, r in enumerate(roles)]
 
 
-def test_density_no_trim_when_budget_sufficient():
-    """If total cost <= budget, slots returned unchanged."""
-    print("\n[test] density: no trim when budget is large enough")
+def test_density_expands_when_budget_has_room():
+    """If a lift template underfills a larger budget, add bounded accessories."""
+    print("\n[test] density: lift template expands when budget has room")
     slots = _make_slots(["primary", "primary", "secondary", "isolation", "core"])
     result = density_adjust_slots(slots, 60, category="lift")
-    assert len(result) == 5, f"expected 5, got {len(result)}"
-    _ok("60 min budget fits 5 lift slots without trimming")
+    assert len(result) == 8, f"expected 8, got {len(result)}"
+    assert [s.role for s in result[-3:]] == ["isolation", "isolation", "isolation"]
+    _ok("60 min budget adds bounded isolation slots")
 
 
 def test_density_trims_warmup_first():
@@ -598,7 +599,7 @@ def test_program_core_across_week_does_not_duplicate_carry_slots():
 
 cases = [
     # Density
-    test_density_no_trim_when_budget_sufficient,
+    test_density_expands_when_budget_has_room,
     test_density_trims_warmup_first,
     test_density_never_drops_primary,
     test_density_drop_order_is_warmup_core_iso_secondary,

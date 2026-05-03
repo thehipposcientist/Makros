@@ -91,6 +91,10 @@ public class ThalloWatchBridgeModule: Module {
             return self.sessionHolder.sendContext(["supplements": payload], realtimeKind: "supplements")
         }
 
+        AsyncFunction("syncHydration") { (payload: [String: Any]) -> Bool in
+            return self.sessionHolder.sendContext(["hydration": payload], realtimeKind: "hydration")
+        }
+
         AsyncFunction("syncSleep") { (payload: [String: Any]) -> Bool in
             return self.sessionHolder.sendContext(["sleep": payload], realtimeKind: "sleep")
         }
@@ -112,14 +116,14 @@ public class ThalloWatchBridgeModule: Module {
             return self.sessionHolder.sendMessage(msg)
         }
 
-        // Live progress messages during an active session. We use
-        // sendMessage (not applicationContext) so the watch sees each
-        // tick when reachable; transferUserInfo is the fallback so
-        // updates still flow when the watch is asleep / off-wrist.
+        // Live progress messages during an active session. They are sent
+        // immediately and also written into applicationContext so a watch
+        // view that wakes up after the realtime packet still hydrates the
+        // latest set/rest state.
         AsyncFunction("updateProgress") { (progress: [String: Any]) -> Bool in
             var payload = progress
             payload["kind"] = "progress"
-            return self.sessionHolder.sendMessage(payload)
+            return self.sessionHolder.sendProgress(payload)
         }
 
         AsyncFunction("startWatchWorkout") { () -> Bool in
@@ -324,6 +328,41 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         var stamped = cleaned
         stampUserId(&stamped)
         flushPendingOutbound()
+        return sendMessageActivated(stamped, session: s)
+    }
+
+    @discardableResult
+    func sendProgress(_ dict: [String: Any]) -> Bool {
+        guard WCSession.isSupported() else { return false }
+        let s = WCSession.default
+        let cleaned = Self.stripNulls(dict)
+        guard s.activationState == .activated else {
+            pendingContext["progress"] = cleaned
+            pendingMessages.append(cleaned)
+            s.activate()
+            return true
+        }
+
+        var stamped = cleaned
+        stampUserId(&stamped)
+        flushPendingOutbound()
+        do {
+            var merged = s.applicationContext
+            merged["progress"] = stamped
+            if let uid = userId, !uid.isEmpty {
+                merged["userId"] = uid
+            } else {
+                merged.removeValue(forKey: "userId")
+            }
+            try s.updateApplicationContext(merged)
+            logDiag("sendProgress.updated", [
+                "revision": stamped["progressRevision"] ?? "",
+                "sessionId": stamped["sessionId"] ?? "",
+            ])
+        } catch {
+            os_log("[wc-bridge] progress applicationContext failed: %{public}@", log: wcLog, type: .error, error.localizedDescription)
+            logDiag("sendProgress.contextFailed", ["error": error.localizedDescription])
+        }
         return sendMessageActivated(stamped, session: s)
     }
 

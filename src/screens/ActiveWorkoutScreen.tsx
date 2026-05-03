@@ -29,6 +29,7 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
   });
 })();
 const SOCIAL_WORKOUT_POSTS_ENABLED = true;
+const SHARE_WORKOUT_MODAL_OPEN_DELAY_MS = 360;
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
@@ -37,7 +38,13 @@ import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle } from 'react-native-svg';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity, SavedWorkoutTemplate, UserProfile } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests, loadWorkoutTemplates, upsertWorkoutTemplate } from '../utils/workoutHistory';
-import { isHealthKitAvailable, readHealthSummary, getLatestHeartRate } from '../services/appleHealth';
+import {
+  getAppleWorkoutCaloriesForWindow,
+  getLatestHeartRate,
+  getWorkoutHrSummary,
+  isHealthKitAvailable,
+  readHealthSummary,
+} from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, type WorkoutPostSummary } from '../services/api';
@@ -70,6 +77,11 @@ function parseTargetRepMax(raw: string | number | null | undefined): number | nu
   if (m) return parseInt(m[2], 10);
   const n = s.match(/(\d+)/);
   return n ? parseInt(n[1], 10) : null;
+}
+
+function profileAgeFromStoredProfile(profile: any): number | null {
+  const age = Number(profile?.physicalStats?.age ?? profile?.age ?? profile?.profile?.age ?? null);
+  return Number.isFinite(age) && age > 0 ? age : null;
 }
 
 function shouldPromptRir(actualReps: number, targetReps: string | number | null | undefined): boolean {
@@ -945,10 +957,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     overrideDuration?: string,
     overrideWeight?: string,
     overrideReps?: string,
+    sourceActionAtMs?: number,
   ) => Promise<void> | void>(() => {});
   const exercisesRef = useRef<SessionExercise[]>([]);
-  const startRestTimerRef = useRef<(seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string }) => void>(() => {});
-  const clearRestStateRef = useRef<() => void>(() => {});
+  const startRestTimerRef = useRef<(seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string; startedAtMs?: number }) => void>(() => {});
+  const clearRestStateRef = useRef<(opts?: { pushToWatch?: boolean }) => void>(() => {});
   const rescheduleRestNotificationsRef = useRef<(params: {
     seconds: number;
     exerciseName: string;
@@ -999,6 +1012,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             const weight = payload?.weightLbs;
             const reps = payload?.reps;
             const durationSeconds = Number(payload?.durationSeconds ?? NaN);
+            const actionAtMs = Number(payload?.tsMs ?? NaN);
             watchLogSetChainRef.current = watchLogSetChainRef.current
               .catch(() => undefined)
               .then(async () => {
@@ -1016,9 +1030,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     : undefined,
                   weight != null ? String(weight) : undefined,
                   reps != null ? String(reps) : undefined,
+                  Number.isFinite(actionAtMs) && actionAtMs > 0 ? actionAtMs : undefined,
                 );
               });
             watchLogSetChainRef.current.catch(() => undefined);
+          } else if (command === 'skip_rest') {
+            const actionAtMs = Number(payload?.tsMs ?? Date.now());
+            const clearedAtMs = Number.isFinite(actionAtMs) && actionAtMs > 0 ? actionAtMs : Date.now();
+            lastRestClearedAtMsRef.current = Math.max(lastRestClearedAtMsRef.current, clearedAtMs);
+            const currentRestStart = restStartAtRef.current;
+            if (!currentRestStart || clearedAtMs >= currentRestStart) {
+              clearRestStateRef.current();
+            }
           } else if (command === 'swap_exercise') {
             const exIdx = Number(payload?.exerciseIndex ?? -1);
             const toExerciseName = typeof payload?.toExerciseName === 'string'
@@ -1059,6 +1082,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const restStartAtRef = useRef<number>(0);
   const restTotalSecondsRef = useRef<number>(0);
   const restExerciseNameRef = useRef<string | null>(null);
+  const lastRestClearedAtMsRef = useRef<number>(0);
   // Timestamp (ms) when the rest timer hit 0 — used to detect "still hasn't
   // logged a set" idle state and show a nudge after threshold.
   const restEndedAtRef = useRef<number>(0);
@@ -1281,6 +1305,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, []);
 
   const [activeExIdx, setActiveExIdx] = useState<number>(0);
+  const activeExIdxRef = useRef(activeExIdx);
+  useEffect(() => { activeExIdxRef.current = activeExIdx; }, [activeExIdx]);
   const [formVideoExerciseName, setFormVideoExerciseName] = useState<string | null>(null);
   // When the user hits or exceeds the top of the target rep range, prompt
   // them for RIR (reps in reserve) so the progression engine knows how
@@ -1559,17 +1585,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   useEffect(() => { restNextTargetRef.current = restNextTarget; }, [restNextTarget]);
   useEffect(() => { restCueRef.current = restCue; }, [restCue]);
 
-  pushRestProgressToWatchRef.current = async () => {
-    const startedAtMs = restStartAtRef.current;
-    const totalSeconds = restTotalSecondsRef.current;
-    if (!startedAtMs || !totalSeconds) return;
-    const endAtMs = startedAtMs + totalSeconds * 1000;
-    const remaining = Math.max(0, Math.ceil((endAtMs - Date.now()) / 1000));
-    if (remaining <= 0) return;
+  const buildWatchPositionProgress = useCallback(() => {
     const exerciseName = restExerciseNameRef.current;
     const exerciseIndex = exerciseName
       ? exercisesRef.current.findIndex(ex => ex.name === exerciseName)
-      : activeExIdx;
+      : activeExIdxRef.current;
     const exercise = exerciseIndex >= 0 ? exercisesRef.current[exerciseIndex] : undefined;
     const targetSetCount = exercise && exerciseIndex >= 0
       ? getEffectiveTargetSetCount(exerciseIndex, exercise, exercise.sets.length + 1)
@@ -1577,10 +1597,22 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const nextSetNumber = exercise && targetSetCount
       ? Math.min(targetSetCount, exercise.sets.length + 1)
       : undefined;
-    const { pushProgressToWatch } = await import('../utils/watchSync');
-    await pushProgressToWatch({
+    return {
       exerciseIndex: exerciseIndex >= 0 ? exerciseIndex : undefined,
       setNumber: nextSetNumber,
+    };
+  }, [getEffectiveTargetSetCount]);
+
+  pushRestProgressToWatchRef.current = async () => {
+    const startedAtMs = restStartAtRef.current;
+    const totalSeconds = restTotalSecondsRef.current;
+    if (!startedAtMs || !totalSeconds) return;
+    const endAtMs = startedAtMs + totalSeconds * 1000;
+    const remaining = Math.max(0, Math.ceil((endAtMs - Date.now()) / 1000));
+    if (remaining <= 0) return;
+    const { pushProgressToWatch } = await import('../utils/watchSync');
+    await pushProgressToWatch({
+      ...buildWatchPositionProgress(),
       restRemainingSec: remaining,
       restStartedAtMs: startedAtMs,
       restDurationSec: totalSeconds,
@@ -1758,7 +1790,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [gearPickerCandidates, setGearPickerCandidates] = useState<GearItem[]>([]);
   const [gearPickerResolver, setGearPickerResolver] = useState<((ids: number[] | null) => void) | null>(null);
   const summaryCardRef = useRef<ViewShot>(null);
+  const shareWorkoutOpenTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const repsInputRef = useRef<TextInput>(null);
+
+  useEffect(() => {
+    return () => {
+      if (shareWorkoutOpenTimerRef.current) {
+        clearTimeout(shareWorkoutOpenTimerRef.current);
+        shareWorkoutOpenTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const handleShareSummary = async () => {
     try {
@@ -2291,6 +2333,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     overrideDuration?: string,
     overrideWeight?: string,
     overrideReps?: string,
+    sourceActionAtMs?: number,
   ) => {
     const key = `${exIdx}-${setSlot}`;
     const input = setInputs[key];
@@ -2412,56 +2455,76 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setActiveExIdx(exIdx);
     }
 
-    // Mirror the phone's set + rest state to the watch so the wrist
-    // stays in sync whether the log came from phone or watch.
-    (async () => {
-      try {
-        const { pushProgressToWatch } = await import('../utils/watchSync');
-        await pushProgressToWatch({
-          exerciseIndex: nextExIdx,
-          setNumber: cleanSets.length + 1,
-        });
-      } catch { /* watch bridge optional */ }
-    })();
+    // Mirror the phone's set-only state when no rest is about to start.
+    // Rest pushes below carry the same exercise/set fields, so sending both
+    // can make WCSession deliver the older timer after a newer set-only packet.
+    if (cleanSets.length >= effectiveTotal) {
+      const progressSetNumber = nextExIdx === exIdx
+        ? Math.min(cleanSets.length, effectiveTotal)
+        : 1;
+      (async () => {
+        try {
+          const { pushProgressToWatch } = await import('../utils/watchSync');
+          await pushProgressToWatch({
+            exerciseIndex: nextExIdx,
+            setNumber: progressSetNumber,
+            restRemainingSec: 0,
+          });
+        } catch { /* watch bridge optional */ }
+      })();
+    }
 
     // Start rest timer automatically if more sets remain
     if (cleanSets.length < effectiveTotal) {
       const restSeconds = Math.max(15, ex.targetRestSeconds || 60);
+      const restStartedAtMs = sourceActionAtMs && Number.isFinite(sourceActionAtMs) && sourceActionAtMs > 0
+        ? sourceActionAtMs
+        : Date.now();
+      const restEndsAtMs = restStartedAtMs + restSeconds * 1000;
+      const remainingRestSeconds = Math.max(0, Math.ceil((restEndsAtMs - Date.now()) / 1000));
+      const clearedAfterRestStarted = Boolean(sourceActionAtMs && lastRestClearedAtMsRef.current >= restStartedAtMs);
       const nextSetLabel = timed
         ? `Set ${cleanSets.length + 1}: ${ex.targetReps}`
         : `Set ${cleanSets.length + 1}: ${newSet.weightLbs} lbs x ${ex.targetReps}`;
-      restDurationSeconds.current = restSeconds;
-      setRestForExercise(ex.name);
-      setRestRemaining(restSeconds);
-      setRestNextTarget(nextSetLabel);
-      setRestCue(null);
-      startRestTimerRef.current(restSeconds, ex.name, { nextTarget: nextSetLabel, cue: undefined });
-      // Push rest seconds to watch so its rest-timer view reflects the
-      // phone's timer without running a second independent clock.
-      (async () => {
-        try {
-          const { pushProgressToWatch } = await import('../utils/watchSync');
-          const startedAtMs = restStartAtRef.current || Date.now();
-          await pushProgressToWatch({
-            exerciseIndex: exIdx,
-            setNumber: cleanSets.length + 1,
-            restRemainingSec: restSeconds,
-            restStartedAtMs: startedAtMs,
-            restDurationSec: restSeconds,
-            restEndsAtMs: startedAtMs + restSeconds * 1000,
-            recommendation: nextSetLabel,
-          });
-        } catch { /* watch bridge optional */ }
-      })();
-      await rescheduleRestNotificationsRef.current({
-        seconds: restSeconds,
-        exerciseName: ex.name,
-        nextSetLabel,
-        aiCue: null,
-        includeStartAlert: true,
-      });
+      if (!clearedAfterRestStarted && remainingRestSeconds > 0) {
+        restDurationSeconds.current = restSeconds;
+        setRestForExercise(ex.name);
+        setRestRemaining(remainingRestSeconds);
+        setRestNextTarget(nextSetLabel);
+        setRestCue(null);
+        startRestTimerRef.current(restSeconds, ex.name, {
+          nextTarget: nextSetLabel,
+          cue: undefined,
+          startedAtMs: restStartedAtMs,
+        });
+        // Push rest seconds to watch so its rest-timer view reflects the
+        // phone's timer without running a second independent clock.
+        (async () => {
+          try {
+            const { pushProgressToWatch } = await import('../utils/watchSync');
+            await pushProgressToWatch({
+              exerciseIndex: exIdx,
+              setNumber: cleanSets.length + 1,
+              restRemainingSec: remainingRestSeconds,
+              restStartedAtMs,
+              restDurationSec: restSeconds,
+              restEndsAtMs,
+              recommendation: nextSetLabel,
+            });
+          } catch { /* watch bridge optional */ }
+        })();
+        await rescheduleRestNotificationsRef.current({
+          seconds: remainingRestSeconds,
+          exerciseName: ex.name,
+          nextSetLabel,
+          aiCue: null,
+          includeStartAlert: sourceActionAtMs == null,
+        });
+      } else if (!sourceActionAtMs || restStartAtRef.current <= restStartedAtMs) {
+        clearRestStateRef.current();
+      }
     } else {
-      clearRestStateRef.current();
+      clearRestStateRef.current({ pushToWatch: false });
     }
 
     const setsLogged = cleanSets.length;
@@ -2651,13 +2714,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, []);
 
   // Timestamp-based rest timer — avoids drift from re-running setInterval every second
-  const startRestTimer = useCallback((seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string }) => {
+  const startRestTimer = useCallback((seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string; startedAtMs?: number }) => {
     if (restTimerRef.current) clearInterval(restTimerRef.current);
-    restStartAtRef.current = Date.now();
+    const startedAtMs = opts?.startedAtMs && Number.isFinite(opts.startedAtMs) && opts.startedAtMs > 0
+      ? opts.startedAtMs
+      : Date.now();
+    const endAtMs = startedAtMs + seconds * 1000;
+    const initialRemaining = Math.max(0, Math.ceil((endAtMs - Date.now()) / 1000));
+    if (initialRemaining <= 0) {
+      restStartAtRef.current = 0;
+      restTotalSecondsRef.current = 0;
+      restExerciseNameRef.current = null;
+      lastRestClearedAtMsRef.current = Math.max(lastRestClearedAtMsRef.current, endAtMs);
+      AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
+      return;
+    }
+    restStartAtRef.current = startedAtMs;
     restTotalSecondsRef.current = seconds;
     restExerciseNameRef.current = exerciseName;
     restEndedAtRef.current = 0;
     setPostRestIdleSecs(0);
+    restRemainingRef.current = initialRemaining;
+    setRestRemaining(initialRemaining);
 
     // Keep the iOS background audio session alive so the rest countdown
     // continues ticking even when the user switches to another app.
@@ -2735,10 +2813,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         if (restTimerRef.current) clearInterval(restTimerRef.current);
         restTimerRef.current = null;
         restEndedAtRef.current = Date.now();
+        lastRestClearedAtMsRef.current = restEndedAtRef.current;
         setPostRestIdleSecs(0);
         AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
         import('../utils/watchSync').then(({ pushProgressToWatch }) =>
-          pushProgressToWatch({ restRemainingSec: 0 })
+          pushProgressToWatch({ ...buildWatchPositionProgress(), restRemainingSec: 0 })
         ).catch(() => undefined);
         import('../utils/feedback').then(f => {
           // Stop the silent keepalive loop before playing the chime so
@@ -2771,7 +2850,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }
       }
     }, 500); // 500ms tick for smooth countdown without drift
-  }, [getEffectiveTargetSetCount, theme.colors.primary, workout.focus]);
+  }, [buildWatchPositionProgress, getEffectiveTargetSetCount, theme.colors.primary, workout.focus]);
   startRestTimerRef.current = startRestTimer;
 
   // Force-update timers when app returns from background. Also re-persist
@@ -2905,7 +2984,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const clearRestState = useCallback(() => {
+  const clearRestState = useCallback((opts?: { pushToWatch?: boolean }) => {
+    lastRestClearedAtMsRef.current = Math.max(lastRestClearedAtMsRef.current, Date.now());
+    const watchPosition = buildWatchPositionProgress();
     if (restTimerRef.current) {
       clearInterval(restTimerRef.current);
       restTimerRef.current = null;
@@ -2919,9 +3000,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     restStartAtRef.current = 0;
     restTotalSecondsRef.current = 0;
     restExerciseNameRef.current = null;
-    import('../utils/watchSync').then(({ pushProgressToWatch }) =>
-      pushProgressToWatch({ restRemainingSec: 0 })
-    ).catch(() => undefined);
+    if (opts?.pushToWatch !== false) {
+      import('../utils/watchSync').then(({ pushProgressToWatch }) =>
+        pushProgressToWatch({ ...watchPosition, restRemainingSec: 0 })
+      ).catch(() => undefined);
+    }
     AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
     cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
     restNotificationIds.current = null;
@@ -2929,7 +3012,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       endRestActivity(liveActivityIdRef.current).catch(() => undefined);
       liveActivityIdRef.current = null;
     }
-  }, []);
+  }, [buildWatchPositionProgress]);
   clearRestStateRef.current = clearRestState;
 
   const rescheduleRestNotifications = useCallback(async (params: {
@@ -3048,7 +3131,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         includeStartAlert: true,
       });
     } else {
-      clearRestState();
+      (async () => {
+        try {
+          const { pushProgressToWatch } = await import('../utils/watchSync');
+          await pushProgressToWatch({
+            exerciseIndex: exIdx,
+            setNumber: Math.min(updatedSets.length, targetSetCount),
+            restRemainingSec: 0,
+          });
+        } catch { /* watch bridge optional */ }
+      })();
+      clearRestState({ pushToWatch: false });
     }
 
     // Clear any stale AI tip from a prior set, but keep the next-set
@@ -3414,6 +3507,42 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // downstream systems (plan reviewer, progression engine, analytics).
     let healthMetrics: { caloriesBurned?: number; hrSummary?: { avgBpm: number; maxBpm: number; zoneMinutes: number[] } } | undefined;
     try {
+      const canUseHealth = await cachedProfileIsPro();
+      const healthEnabled = canUseHealth && await isAppleHealthEnabled();
+      if (healthEnabled && isHealthKitAvailable()) {
+        let profileAge: number | null = null;
+        try {
+          const raw = await AsyncStorage.getItem('userProfile');
+          if (raw) profileAge = profileAgeFromStoredProfile(JSON.parse(raw));
+        } catch {}
+
+        const [hrSummary, appleCalories] = await Promise.all([
+          getWorkoutHrSummary(startTime.current, now.getTime(), profileAge).catch((err) => {
+            console.warn('[handleFinish] workout HR summary read failed:', err);
+            return null;
+          }),
+          getAppleWorkoutCaloriesForWindow(startTime.current, now.getTime()).catch((err) => {
+            console.warn('[handleFinish] workout calorie read failed:', err);
+            return null;
+          }),
+        ]);
+
+        if (hrSummary || appleCalories != null) {
+          healthMetrics = {};
+          if (hrSummary) healthMetrics.hrSummary = hrSummary;
+          if (appleCalories != null) healthMetrics.caloriesBurned = appleCalories;
+        }
+        console.log('[handleFinish] workout HealthKit metrics:', {
+          hrSamples: hrSummary?.samples ?? 0,
+          avgBpm: hrSummary?.avgBpm ?? null,
+          maxBpm: hrSummary?.maxBpm ?? null,
+          caloriesBurned: appleCalories ?? null,
+        });
+      }
+    } catch (healthErr) {
+      console.warn('[handleFinish] workout HealthKit metric capture failed:', healthErr);
+    }
+    try {
       if (authToken) {
         const exercisesPayload = session.exercises
           .filter(ex => ex.sets.length > 0)
@@ -3657,7 +3786,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         let profileAge: number | null = null;
         try {
           const r = await AsyncStorage.getItem('userProfile');
-          if (r) profileAge = JSON.parse(r)?.physicalStats?.age ?? null;
+          if (r) profileAge = profileAgeFromStoredProfile(JSON.parse(r));
         } catch {}
         const healthSummary = await readHealthSummary({ age: profileAge });
         if (healthSummary) {
@@ -3726,6 +3855,35 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       training_rating: (summaryData as any)?.trainingRating ?? null,
     };
   }, [exercises, finishedSession, summaryData, summaryDurationSeconds, summaryRepCount, summarySetCount, workout.focus]);
+
+  const handleOpenFriendsShare = useCallback(() => {
+    if (!authToken) {
+      Alert.alert('Sign in', 'You need to be signed in to post to friends.');
+      return;
+    }
+    if (!workoutPostSummary) {
+      Alert.alert('Still saving', 'Your workout summary is still being prepared. Try again in a moment.');
+      return;
+    }
+
+    if (shareWorkoutOpenTimerRef.current) {
+      clearTimeout(shareWorkoutOpenTimerRef.current);
+      shareWorkoutOpenTimerRef.current = null;
+    }
+
+    // iOS can refuse to present a second native Modal while the summary
+    // Modal is still dismissing. Swap sheets instead of stacking them.
+    setSummaryVisible(false);
+    shareWorkoutOpenTimerRef.current = setTimeout(() => {
+      shareWorkoutOpenTimerRef.current = null;
+      setShowShareWorkoutModal(true);
+    }, summaryVisible ? SHARE_WORKOUT_MODAL_OPEN_DELAY_MS : 0);
+  }, [authToken, summaryVisible, workoutPostSummary]);
+
+  const handleCloseFriendsShare = useCallback(() => {
+    setShowShareWorkoutModal(false);
+    if (finishedSession) setSummaryVisible(true);
+  }, [finishedSession]);
 
   const handleAskWorkoutCoach = useCallback(async () => {
     const q = coachInput.trim();
@@ -4041,7 +4199,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, [clearRestState, onCancel, workout]);
 
   return (
-    <View style={[styles.container, { backgroundColor: themeColors.background }] }>
+    <View
+      style={[styles.container, { backgroundColor: themeColors.background }]}
+      testID="active-workout-screen"
+      accessibilityLabel="active-workout-screen">
 
       {/* Header */}
       <View style={styles.header}>
@@ -4148,7 +4309,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   <TouchableOpacity style={styles.headerRestBtn} onPress={() => adjustActiveRestRemaining(15)}>
                     <Text style={styles.headerRestBtnText}>+15</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={[styles.headerRestBtn, { backgroundColor: workoutPalette.strong, borderColor: workoutPalette.strong }]} onPress={clearRestState}>
+                  <TouchableOpacity style={[styles.headerRestBtn, { backgroundColor: workoutPalette.strong, borderColor: workoutPalette.strong }]} onPress={() => clearRestState()}>
                     <Text style={[styles.headerRestBtnText, { color: themeColors.background }]}>Skip</Text>
                   </TouchableOpacity>
                 </View>
@@ -4317,6 +4478,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 </View>
               )}
               <View
+                testID={`exercise-card-${i}`}
                 style={[
                   styles.exerciseCard,
                   isCircuitItem && styles.liveCircuitExerciseCard,
@@ -5044,6 +5206,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 }
                                 return (
                                   <TouchableOpacity
+                                    testID={`log-set-${i}-${slot}`}
                                     style={[styles.inlineLoggedBadge, !isLogged && styles.inlineLoggedBadgePending]}
                                     onPress={() => {
                                       if (!isLogged) { handleLogSetInline(i, slot, false); }
@@ -5172,6 +5335,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               <Text style={styles.addExerciseBtnText}>+ Add Exercise</Text>
             </TouchableOpacity>
             <PressableScale
+              testID="finish-workout-button"
               style={[
                 styles.finishBtn,
                 completedCount > 0 && {
@@ -5790,15 +5954,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   </TouchableOpacity>
                   {SOCIAL_WORKOUT_POSTS_ENABLED ? (
                     <TouchableOpacity
-                      style={[styles.summaryFeedbackBtn, { flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }]}
-                      onPress={() => {
-                        if (!authToken) {
-                          Alert.alert('Sign in', 'You need to be signed in to post to friends.');
-                          return;
-                        }
-                        setShowShareWorkoutModal(true);
-                      }}
-                      disabled={summaryLoading || !workoutPostSummary}
+                      style={[
+                        styles.summaryFeedbackBtn,
+                        {
+                          flex: 1,
+                          backgroundColor: themeColors.surfaceRaised,
+                          borderWidth: 1,
+                          borderColor: themeColors.border,
+                          opacity: workoutPostSummary ? 1 : 0.55,
+                        },
+                      ]}
+                      onPress={handleOpenFriendsShare}
                       accessibilityRole="button"
                       accessibilityLabel="Open friends share sheet"
                       activeOpacity={0.85}>
@@ -5824,7 +5990,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         <ShareWorkoutModal
           visible={showShareWorkoutModal}
           authToken={authToken}
-          onClose={() => setShowShareWorkoutModal(false)}
+          onClose={handleCloseFriendsShare}
           themeName={themeName}
           workoutSummary={workoutPostSummary}
         />

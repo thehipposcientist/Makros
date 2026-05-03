@@ -83,6 +83,7 @@ interface NutritionCardProps {
   /** Removes the outer card shell so parent day cards can reveal the
    *  macro panel + individual meal cards as a clean expanding stack. */
   embedded?: boolean;
+  testID?: string;
 }
 
 export default function NutritionCard({
@@ -111,6 +112,7 @@ export default function NutritionCard({
   proteinBreakdown,
   todaySupplements,
   embedded = false,
+  testID,
 }: NutritionCardProps) {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [showProteinModal, setShowProteinModal] = useState(false);
@@ -230,7 +232,7 @@ export default function NutritionCard({
   }, [proteinBreakdown, allVisible]);
 
   return (
-    <View style={[styles.card, embedded && styles.cardEmbedded]}>
+    <View testID={testID} style={[styles.card, embedded && styles.cardEmbedded]}>
       {/* Header removed — the macro grid below acts as the hero. The
           "+ Add Meal" affordance moved to the bottom of the meal list
           so the card opens with the user's macros front-and-center,
@@ -1071,10 +1073,11 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
 
   return (
     <SwipeableRow actions={swipeActions}>
-    <Animated.View style={[styles.mealItem, checked && styles.mealItemDone, { backgroundColor: rowFlashBg }]}>
+    <Animated.View testID={`meal-row-${mealType}`} style={[styles.mealItem, checked && styles.mealItemDone, { backgroundColor: rowFlashBg }]}>
       {/* Title row — checkbox + meal name + inline pin badge + actions. */}
       <View style={styles.mealHeader}>
         <TouchableOpacity
+          testID={`meal-check-${mealType}`}
           style={[styles.checkbox, checked && styles.checkboxDone]}
           onPress={() => onToggle?.(mealType)}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}

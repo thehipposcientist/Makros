@@ -11,6 +11,8 @@
 import SwiftUI
 
 struct WatchPalette: Codable, Equatable {
+    var themeName: String?
+    var syncedAtMs: Double?
     var background:    String
     var surface:       String
     var surfaceRaised: String
@@ -23,6 +25,8 @@ struct WatchPalette: Codable, Equatable {
     var error:         String
 
     static let midnight = WatchPalette(
+        themeName: "midnight",
+        syncedAtMs: nil,
         background:    "#0D0F14",
         surface:       "#161A22",
         surfaceRaised: "#1E2430",

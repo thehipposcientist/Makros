@@ -2,7 +2,7 @@
 //
 // Responsibilities:
 //   1. Push today's workout (with correct lifecycle status) + theme +
-//      meals to the watch whenever they change.
+//      meals + hydration to the watch whenever they change.
 //   2. Subscribe to commands from the watch (Start / Skip / End / rest
 //      controls / toggle meal) and route them into phone actions.
 //
@@ -18,6 +18,7 @@ import {
   WatchPalette,
   WatchProgress,
   WatchMealsPayload,
+  WatchHydrationPayload,
   WatchSupplementsPayload,
   WatchSupplementItem,
   WatchSleepPayload,
@@ -27,14 +28,16 @@ import {
 } from '../../modules/thallo-watch-bridge';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutDay, AppThemeName, DailyNutritionPlan } from '../types';
-import { getTheme } from '../constants/theme';
+import { getTheme, resolveThemeName } from '../constants/theme';
 import { recordTelemetryEvent } from '../services/api';
+import { getActiveWatchSessionId } from './activeWatchSession';
 
 export { WatchBridge };
 
 const WATCH_SYNC_STATUS_KEY = 'watch_sync_status_v1';
 const WATCH_WORKOUT_SCHEMA_VERSION = 2 as const;
 let workoutRevisionSequence = 0;
+let progressRevisionSequence = 0;
 
 export type WatchSyncSnapshot = {
   surface: string;
@@ -100,6 +103,11 @@ function nullableString(value: unknown): string | null {
 function nextWorkoutRevision(nowMs: number = Date.now()): number {
   workoutRevisionSequence = (workoutRevisionSequence + 1) % 1000;
   return nowMs * 1000 + workoutRevisionSequence;
+}
+
+function nextProgressRevision(nowMs: number = Date.now()): number {
+  progressRevisionSequence = (progressRevisionSequence + 1) % 1000;
+  return nowMs * 1000 + progressRevisionSequence;
 }
 
 function workoutEventId(revision: number): string {
@@ -265,9 +273,12 @@ export function buildWatchWorkoutEnvelope(
 }
 
 export function buildWatchPalette(themeName: AppThemeName | undefined): WatchPalette {
-  const t = getTheme(themeName).colors;
+  const resolvedThemeName = resolveThemeName(themeName);
+  const t = getTheme(resolvedThemeName).colors;
   const fallback = { success: '#59D98E', warning: '#FFB454', error: '#FF5D73' };
   return {
+    themeName:     resolvedThemeName,
+    syncedAtMs:    Date.now(),
     background:    String(t.background),
     surface:       String(t.surface),
     surfaceRaised: String((t as any).surfaceRaised ?? t.surface),
@@ -279,6 +290,18 @@ export function buildWatchPalette(themeName: AppThemeName | undefined): WatchPal
     warning:       String((t as any).warning ?? fallback.warning),
     error:         String((t as any).error ?? fallback.error),
   };
+}
+
+async function getStoredThemePreference(): Promise<AppThemeName | undefined> {
+  try {
+    const raw = await AsyncStorage.getItem('userProfile');
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw);
+    if (typeof parsed?.themePreference === 'string') {
+      return resolveThemeName(parsed.themePreference);
+    }
+  } catch {}
+  return undefined;
 }
 
 export type WatchSleepInput = {
@@ -422,18 +445,28 @@ export async function pushWorkoutToWatch(
 }
 
 export async function pushThemeToWatch(themeName: AppThemeName | undefined) {
-  const palette = buildWatchPalette(themeName);
+  const latestThemeName = await getStoredThemePreference() ?? (themeName ? resolveThemeName(themeName) : undefined);
+  const palette = buildWatchPalette(latestThemeName);
   if (!canPush()) { await recordWatchSync('theme', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
+  wsLog('pushThemeToWatch', { theme: palette.themeName });
   const ok = await WatchBridge.syncTheme(palette);
-  await recordWatchSync('theme', !!ok);
+  await recordWatchSync('theme', !!ok, palette.themeName);
   return ok;
 }
 
 export async function pushProgressToWatch(progress: WatchProgress) {
   if (!canPush()) { await recordWatchSync('progress', false, 'bridge_unavailable'); return false; }
-  wsLog('pushProgressToWatch', progress);
-  const ok = await WatchBridge.updateProgress(progress);
+  await stampBridgeUserId();
+  const nowMs = Date.now();
+  const stamped: WatchProgress = {
+    ...progress,
+    sessionId: progress.sessionId ?? getActiveWatchSessionId() ?? undefined,
+    sentAtMs: progress.sentAtMs ?? nowMs,
+    progressRevision: progress.progressRevision ?? nextProgressRevision(nowMs),
+  };
+  wsLog('pushProgressToWatch', stamped);
+  const ok = await WatchBridge.updateProgress(stamped);
   await recordWatchSync('progress', !!ok);
   return ok;
 }
@@ -497,6 +530,30 @@ export async function pushMealsToWatch(
   };
   const ok = await WatchBridge.syncMeals(payload);
   await recordWatchSync('meals', !!ok, `${items.length} meals`);
+  return ok;
+}
+
+/** Push today's hydration status to the watch. The phone/backend remain
+ *  authoritative; the watch sends absolute ounce totals back via the
+ *  `log_hydration` command after optimistic local updates. */
+export async function pushHydrationToWatch(opts: {
+  dateISO?: string;
+  ounces?: number | null;
+  targetOunces?: number | null;
+}): Promise<boolean> {
+  if (!canPush()) { await recordWatchSync('hydration', false, 'bridge_unavailable'); return false; }
+  await stampBridgeUserId();
+  const ounces = finiteNumber(opts.ounces) ?? 0;
+  const target = finiteNumber(opts.targetOunces) ?? 64;
+  const payload: WatchHydrationPayload = {
+    dateISO: opts.dateISO || localDateISO(),
+    ounces: Math.max(0, Math.round(ounces * 10) / 10),
+    targetOunces: Math.max(0, Math.round(target)),
+    syncedAtMs: Date.now(),
+  };
+  wsLog('pushHydrationToWatch', { ounces: payload.ounces, target: payload.targetOunces });
+  const ok = await WatchBridge.syncHydration(payload);
+  await recordWatchSync('hydration', !!ok, `${payload.ounces}/${payload.targetOunces} oz`);
   return ok;
 }
 
@@ -582,7 +639,7 @@ export async function pushWeightToWatch(opts: {
 }
 
 /** Wipe the watch's local store on sign-out / user-switch. Pushes
- *  empty payloads for workout / meals / supplements / theme and
+ *  empty payloads for workout / meals / hydration / supplements / theme and
  *  clears userId so the watch doesn't retain the previous user's
  *  data after a swap. Theme is also cleared because it carries the
  *  previous user's palette and the watch would briefly flash it
@@ -627,6 +684,12 @@ export async function clearWatchData(): Promise<void> {
   await WatchBridge.syncSupplements({
     dateISO: localDateISO(),
     items: [],
+    syncedAtMs: now,
+  }).catch(() => {});
+  await WatchBridge.syncHydration({
+    dateISO: localDateISO(),
+    ounces: 0,
+    targetOunces: 0,
     syncedAtMs: now,
   }).catch(() => {});
   await WatchBridge.syncTheme(buildWatchPalette(undefined)).catch(() => {});

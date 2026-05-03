@@ -131,16 +131,97 @@ def test_generate_cardio_day_uses_seeded_names() -> None:
 
 def test_adjustable_dumbbells_unlock_dumbbell_library() -> None:
     print("\n[test] adjustable dumbbells unlock dumbbell exercises")
-    from app.seed_exercises_data import SEED_EQUIPMENT
+    from app.services.workout.equipment import resolve_owned_equipment_slugs
 
-    by_name = {e["name"].lower(): e["slug"] for e in SEED_EQUIPMENT}
-    assert by_name.get("adjustable dumbbells") == "adjustable_dumbbells"
+    owned = resolve_owned_equipment_slugs(["Adjustable dumbbells"])
+    assert "adjustable_dumbbells" in owned
+    assert "dumbbells" in owned
 
-    source = Path(__file__).parents[1] / "app" / "routers" / "ai" / "plans.py"
-    text = source.read_text()
-    assert '"adjustable_dumbbells" in owned' in text
-    assert 'owned.add("dumbbells")' in text
     _ok("adjustable_dumbbells is canonical and aliases to dumbbells in planner filtering")
+
+
+def test_planner_reachable_movement_patterns_are_enforced() -> None:
+    print("\n[test] seeded movement patterns are reachable by planner slots")
+    from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
+    from app.seed_exercises_validation import validate_exercise_seed
+
+    report = validate_exercise_seed(SEED_EXERCISES, {e["slug"] for e in SEED_EQUIPMENT})
+    assert report.planner_unreachable_pattern == 0
+    dead_patterns = {"complex", "leg_curl", "rotation"}
+    offenders = [
+        (e.get("slug"), e.get("movement_pattern"))
+        for e in SEED_EXERCISES
+        if e.get("movement_pattern") in dead_patterns
+    ]
+    assert not offenders, f"planner-dead movement patterns remain: {offenders}"
+    _ok("no exercise uses complex / leg_curl / rotation planner-dead patterns")
+
+
+def test_support_dependent_moves_require_support_equipment() -> None:
+    print("\n[test] support-dependent bodyweight-style moves require support gear")
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.planner import _equipment_satisfied
+
+    by_slug = {e["slug"]: e for e in SEED_EXERCISES}
+    bodyweight_only = {"bodyweight", "yoga_mat"}
+    required_support = {
+        "chair_step_up": {"sturdy_chair"},
+        "nordic_curl": {"nordic_anchor"},
+        "reverse_nordic_curl": {"nordic_anchor"},
+        "slider_hamstring_curl": {"slider_discs"},
+        "hanging_knee_raise": {"pull_up_bar"},
+        "weighted_pushup": {"weighted_vest"},
+        "weighted_plank": {"weight_plates"},
+    }
+    for slug, owned in required_support.items():
+        assert not _equipment_satisfied(by_slug[slug], bodyweight_only), f"{slug} should not be no-equipment eligible"
+        assert _equipment_satisfied(by_slug[slug], bodyweight_only | owned), f"{slug} should unlock with {owned}"
+    _ok(f"{len(required_support)} support-dependent moves are gated")
+
+
+def test_pull_rear_delt_slots_have_candidates() -> None:
+    print("\n[test] pull rear-delt slots retain rear-delt candidates")
+    from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
+    from app.services.workout.planner import Slot, filter_candidates
+
+    owned = {e["slug"] for e in SEED_EQUIPMENT}
+    slot = Slot("Rear Delt", "isolation", "shoulders", "isolation")
+    candidates = filter_candidates(
+        SEED_EXERCISES,
+        slot,
+        owned,
+        set(),
+        day_focus_family="pull",
+    )
+    slugs = {ex["slug"] for ex in candidates}
+    assert candidates, "pull rear-delt slot had no candidates"
+    assert {"rear_delt_fly", "cable_rear_delt_fly"} & slugs, sorted(slugs)[:20]
+    _ok(f"pull rear-delt slot has {len(candidates)} candidate(s)")
+
+
+def test_primary_slots_prefer_primary_muscle_intent() -> None:
+    print("\n[test] compound primary slots prefer their intended primary muscle")
+    from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
+    from app.services.workout.planner import PlannerInputs, Slot, pick_for_slot
+
+    pick = pick_for_slot(
+        SEED_EXERCISES,
+        Slot("Primary Press", "horizontal_press", "chest", "primary"),
+        PlannerInputs(
+            goal="muscle_gain",
+            days_per_week=5,
+            experience="intermediate",
+            equipment_slugs=tuple(sorted(e["slug"] for e in SEED_EQUIPMENT)),
+            rng_seed=12,
+        ),
+        set(),
+        set(),
+        day_focus_family="push",
+    )
+    assert pick is not None, "expected a chest primary press pick"
+    assert pick["primary_muscle"] == "chest", pick
+    assert pick["slug"] != "jm_press", pick
+    _ok(f"primary press picked {pick['name']} instead of a triceps-primary press")
 
 
 def test_strength_load_settings_snap_to_available_weights() -> None:
@@ -189,6 +270,8 @@ def test_scan_equipment_list_covers_new_equipment_names() -> None:
         "VersaClimber",
         "Heavy bag",
         "Ruck pack",
+        "Sturdy chair / low surface",
+        "Nordic strap / foot anchor",
         "Plyo box (24\"+)",
         "Sandbag",
     }
@@ -244,6 +327,10 @@ cases = [
     test_cardio_backfill_equipment_is_concrete,
     test_generate_cardio_day_uses_seeded_names,
     test_adjustable_dumbbells_unlock_dumbbell_library,
+    test_planner_reachable_movement_patterns_are_enforced,
+    test_support_dependent_moves_require_support_equipment,
+    test_pull_rear_delt_slots_have_candidates,
+    test_primary_slots_prefer_primary_muscle_intent,
     test_strength_load_settings_snap_to_available_weights,
     test_scan_equipment_list_covers_new_equipment_names,
     test_bodyweight_conditioning_replaces_generic_hiit_placeholder,

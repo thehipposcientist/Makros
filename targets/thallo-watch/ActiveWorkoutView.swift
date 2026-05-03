@@ -27,6 +27,7 @@ final class ActiveWorkoutState: ObservableObject {
     @Published var paused: Bool = false { didSet { persist() } }
     private var restEndAtMs: Double? = nil { didSet { persist() } }
     private var sessionId: String? = nil { didSet { persist() } }
+    private var lastProgressRevision: Double = 0 { didSet { persist() } }
     // Log-set inputs. Seeded from the exercise's planned target on
     // entry so a first-time user already has a reasonable number.
     @Published var pendingWeight: Double = 0 { didSet { persist() } }
@@ -46,29 +47,19 @@ final class ActiveWorkoutState: ObservableObject {
 
     init() {
         hydrate()
+        if let latest = ConnectivityStore.shared.latestProgress {
+            var info: [AnyHashable: Any] = [:]
+            for (key, value) in latest {
+                info[AnyHashable(key)] = value
+            }
+            applyProgress(info)
+        }
         // Still listen to phone progress pushes so if a user logs
         // a set on the phone the watch advances too.
         NotificationCenter.default.publisher(for: .watchProgressUpdate)
             .sink { [weak self] note in
                 guard let self, let info = note.userInfo else { return }
-                if let idx = info["exerciseIndex"] as? Int {
-                    if idx != self.exerciseIndex {
-                        self.currentRecommendation = nil
-                    }
-                    self.exerciseIndex = idx
-                }
-                if let setN = info["setNumber"] as? Int { self.setNumber = setN }
-                if let rest = Self.flexibleInt(info["restRemainingSec"]) {
-                    let endAt = Self.flexibleDouble(info["restEndsAtMs"])
-                    self.setRest(seconds: rest, endAtMs: endAt)
-                } else if info.keys.contains("restRemainingSec") {
-                    self.clearRest()
-                }
-                if let rec = info["recommendation"] as? String {
-                    self.currentRecommendation = rec
-                } else if info.keys.contains("recommendation") {
-                    self.currentRecommendation = nil
-                }
+                self.applyProgress(info)
             }
             .store(in: &cancellables)
     }
@@ -90,6 +81,7 @@ final class ActiveWorkoutState: ObservableObject {
         if let restRemaining { blob["restRemaining"] = restRemaining }
         if let restEndAtMs { blob["restEndAtMs"] = restEndAtMs }
         if let sessionId { blob["sessionId"] = sessionId }
+        if lastProgressRevision > 0 { blob["lastProgressRevision"] = lastProgressRevision }
         if let lastLoggedWeight { blob["lastLoggedWeight"] = lastLoggedWeight }
         if let lastLoggedReps { blob["lastLoggedReps"] = lastLoggedReps }
         if let currentRecommendation { blob["currentRecommendation"] = currentRecommendation }
@@ -104,6 +96,7 @@ final class ActiveWorkoutState: ObservableObject {
         if let v = blob["restRemaining"] as? Int { restRemaining = v }
         if let v = blob["restEndAtMs"] as? Double { restEndAtMs = v }
         if let v = blob["sessionId"] as? String { sessionId = v }
+        if let v = Self.flexibleDouble(blob["lastProgressRevision"]) { lastProgressRevision = v }
         if let v = blob["paused"] as? Bool { paused = v }
         if let v = blob["pendingWeight"] as? Double { pendingWeight = v }
         if let v = blob["pendingReps"] as? Int { pendingReps = v }
@@ -127,6 +120,9 @@ final class ActiveWorkoutState: ObservableObject {
 
     func attach(to workout: WatchWorkout) {
         let nextSessionId = workout.sessionId ?? "\(workout.dateISO)|\(workout.focus)"
+        if paused {
+            paused = false
+        }
         if let sessionId, sessionId != nextSessionId {
             resetForSession(nextSessionId)
         } else if sessionId == nil {
@@ -157,6 +153,51 @@ final class ActiveWorkoutState: ObservableObject {
         || lastLoggedWeight != nil
         || lastLoggedReps != nil
         || currentRecommendation != nil
+    }
+
+    private func acceptProgress(_ info: [AnyHashable: Any]) -> Bool {
+        if let incomingSessionId = info["sessionId"] as? String,
+           !incomingSessionId.isEmpty {
+            if let currentSessionId = sessionId, !currentSessionId.isEmpty {
+                if incomingSessionId != currentSessionId {
+                    HeartRateStore.saveDiag("progress stale session rejected")
+                    return false
+                }
+            } else {
+                sessionId = incomingSessionId
+            }
+        }
+        guard let revision = Self.flexibleDouble(info["progressRevision"]) else {
+            return true
+        }
+        if revision <= lastProgressRevision {
+            HeartRateStore.saveDiag("progress stale rejected rev=\(Int(revision)) last=\(Int(lastProgressRevision))")
+            return false
+        }
+        lastProgressRevision = revision
+        return true
+    }
+
+    private func applyProgress(_ info: [AnyHashable: Any]) {
+        guard acceptProgress(info) else { return }
+        if let idx = info["exerciseIndex"] as? Int {
+            if idx != exerciseIndex {
+                currentRecommendation = nil
+            }
+            exerciseIndex = idx
+        }
+        if let setN = Self.flexibleInt(info["setNumber"]) { setNumber = setN }
+        if let rest = Self.flexibleInt(info["restRemainingSec"]) {
+            let endAt = Self.flexibleDouble(info["restEndsAtMs"])
+            setRest(seconds: rest, endAtMs: endAt)
+        } else if info.keys.contains("restRemainingSec") {
+            clearRest()
+        }
+        if let rec = info["recommendation"] as? String {
+            currentRecommendation = rec
+        } else if info.keys.contains("recommendation") {
+            currentRecommendation = nil
+        }
     }
 
     private func resetForSession(_ nextSessionId: String) {
@@ -951,15 +992,6 @@ private struct ExerciseTab: View {
                 .foregroundColor(theme.textSecondary)
 
             HStack(spacing: 6) {
-                Button(action: togglePause) {
-                    Image(systemName: state.paused ? "play.fill" : "pause.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.plain)
-                .padding(.vertical, 8)
-                .background(theme.surfaceRaised)
-                .foregroundColor(theme.textSecondary)
-                .cornerRadius(8)
                 Button(action: skipRest) {
                     Text("Skip rest")
                         .frame(maxWidth: .infinity)
@@ -1114,6 +1146,10 @@ private struct ExerciseTab: View {
     private func skipRest() {
         state.clearRest()
         WKInterfaceDevice.current().play(.click)
+        conn.sendCommand("skip_rest", payload: [
+            "exerciseIndex": state.exerciseIndex,
+            "setNumber": state.setNumber,
+        ])
     }
 
     private func plannedDurationSeconds(for ex: WatchExercise) -> Int? {
@@ -1133,11 +1169,6 @@ private struct ExerciseTab: View {
         let unitIsMinutes = reps.range(of: "m(in|inutes?)?\\b", options: .regularExpression) != nil
             || name.range(of: "treadmill|bike|row|elliptical|stair|run|jog|cycling|swim|cardio|walk|yoga|mobility|stretch", options: .regularExpression) != nil
         return max(1, Int((unitIsMinutes ? planned * 60 : planned).rounded()))
-    }
-
-    private func togglePause() {
-        state.paused.toggle()
-        WKInterfaceDevice.current().play(.click)
     }
 
     private func formatTime(_ s: Int) -> String {

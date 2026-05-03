@@ -1,5 +1,5 @@
-.PHONY: start tunnel stop reset-db wait-backend test dev \
-        deploy deploy-backend deploy-ios deploy-ios-clean smoke-prod smoke-mobile
+.PHONY: start tunnel stop reset-db wait-backend test dev seed-e2e \
+        deploy deploy-backend deploy-ios deploy-ios-clean smoke-prod smoke-mobile smoke-mobile-seeded
 
 # ── AWS / deploy config ──────────────────────────────────────────────────────
 AWS_ACCOUNT_ID  := 225629394823
@@ -119,6 +119,12 @@ test:
 	@echo ""
 	@docker exec thallo-backend python -m tests.run_all
 
+seed-e2e:
+	@echo ""
+	@echo "Seeding deterministic E2E personas..."
+	@echo ""
+	@docker exec thallo-backend python seed_e2e.py
+
 # ── Deploy: backend (ECR + App Runner auto-deploys) ──────────────────────────
 deploy-backend:
 	@echo ""
@@ -187,6 +193,14 @@ smoke-mobile:
 	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
 	  exit 1; }
 	@maestro test .maestro/flows/signup-and-regen.yaml
+
+smoke-mobile-seeded: seed-e2e
+	@echo "Running Maestro seeded returning-user flow (requires backend + Metro running)..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@maestro test .maestro/flows/seeded-returning-user.yaml
 
 # ── Smoke-test the prod backend ──────────────────────────────────────────────
 smoke-prod:

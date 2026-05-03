@@ -350,6 +350,49 @@ function stampGoalStart(profile: UserProfile, previous: UserProfile | null): Use
   return profile;
 }
 
+function planChangeProfileSnapshot(
+  profile: UserProfile,
+  scope: 'goal' | 'workout' | 'mealplan',
+): Partial<UserProfile> {
+  if (scope === 'goal') {
+    return {
+      goal: profile.goal,
+      goalSelection: profile.goalSelection,
+      goalDetails: profile.goalDetails,
+      secondaryGoal: profile.secondaryGoal,
+      focusedMuscleGroup: profile.focusedMuscleGroup,
+    };
+  }
+  if (scope === 'workout') {
+    return {
+      priorityRegion: profile.priorityRegion,
+      daysPerWeek: profile.daysPerWeek,
+      trainingDays: profile.trainingDays,
+      workoutDurationMinutes: profile.workoutDurationMinutes,
+      equipment: profile.equipment,
+      equipmentSettings: profile.equipmentSettings,
+      injuries: profile.injuries,
+      injuryEntries: profile.injuryEntries,
+      experienceLevel: profile.experienceLevel,
+      preferredSplit: profile.preferredSplit,
+      dislikedExercises: profile.dislikedExercises,
+    };
+  }
+  return {
+    foodsAvailable: profile.foodsAvailable,
+    customFoods: profile.customFoods,
+    cookingSkill: profile.cookingSkill,
+    prepTimeMinutes: profile.prepTimeMinutes,
+    dietaryPreference: profile.dietaryPreference,
+    mealVariety: profile.mealVariety,
+    mealsPerDay: profile.mealsPerDay,
+    savedMeals: profile.savedMeals,
+    mealRoutine: profile.mealRoutine,
+    customMacros: profile.customMacros,
+    allergies: profile.allergies,
+  };
+}
+
 /** Guarded JSON.parse for AsyncStorage reads — returns fallback on any
  *  malformed payload. Used by the user-log and profile hydration paths
  *  so a single corrupted row never cascades into "can't sign in". */
@@ -1511,6 +1554,31 @@ export default function Index() {
     await appendUserLog({ type: 'weight_updated', summary: `Weight updated to ${weightLbs} lbs` });
   };
 
+  const handleCancelScheduledPlanChange = async (restoredProfile: UserProfile) => {
+    const goalRestored =
+      !!userProfile &&
+      (
+        userProfile.goal !== restoredProfile.goal ||
+        userProfile.goalDetails?.pace !== restoredProfile.goalDetails?.pace
+      );
+    if (goalRestored) {
+      await recordGoalChange(
+        restoredProfile.goal,
+        restoredProfile.goalDetails.pace,
+        restoredProfile.physicalStats.weightLbs,
+      );
+    }
+    await AsyncStorage.setItem('userProfile', JSON.stringify(restoredProfile));
+    setUserProfile(restoredProfile);
+    if (authToken) {
+      await syncOnboarding(authToken, restoredProfile).catch((e) =>
+        console.warn('[cancelPlanChange] profile sync failed (non-fatal)', e?.message ?? e),
+      );
+      await pushUserStateToBackend(authToken).catch(() => null);
+    }
+    setPlanRefreshKey(k => k + 1);
+  };
+
   if (isLoading) return <SplashLoadingScreen />;
   if (!authToken) return <AuthScreen onAuthenticated={handleAuthenticated} />;
   if (!userProfile) return (
@@ -1591,6 +1659,7 @@ export default function Index() {
         }}
         onSaveProfile={(updated, mode) => handleSaveProfile(updated, mode)}
         onActivePlanWeekEndChange={setActivePlanWeekEnd}
+        onCancelScheduledPlanChange={handleCancelScheduledPlanChange}
         onSwitchDayRegen={handleSwitchDayRegen}
         onBackendSync={async () => {
           // Called by the trainer chat Apply flow after a plan is
@@ -1758,20 +1827,21 @@ export default function Index() {
           themeName={userProfile.themePreference}
           authToken={authToken}
           onClose={() => setShowSettings(false)}
-          onProfileUpdate={(changes, skipRegen) => {
+          onProfileUpdate={async (changes, skipRegen) => {
             // Reuse the existing profile-update path so unit + theme
             // changes follow the same persistence rules as everything
             // else (no plan regen on display-only fields).
             const updated = { ...userProfile, ...changes };
             setUserProfile(updated);
-            AsyncStorage.setItem('userProfile', JSON.stringify(updated)).catch(() => {});
+            await AsyncStorage.setItem('userProfile', JSON.stringify(updated)).catch(() => {});
             if (authToken) {
               syncOnboarding(authToken, updated).catch(() => null);
             }
             if (changes.themePreference) {
-              import('../src/utils/watchSync')
-                .then(({ pushThemeToWatch }) => pushThemeToWatch(updated.themePreference))
-                .catch(() => null);
+              try {
+                const { pushThemeToWatch } = await import('../src/utils/watchSync');
+                await pushThemeToWatch(updated.themePreference);
+              } catch {}
             }
           }}
         />
@@ -1842,6 +1912,7 @@ export default function Index() {
             themeName={userProfile.themePreference}
             onBack={() => setShowProgress(false)}
             onUpdateWeight={handleUpdateWeight}
+            onCancelScheduledPlanChange={handleCancelScheduledPlanChange}
           />
         )}
       </Modal>
@@ -1963,24 +2034,38 @@ export default function Index() {
                 </View>
                 <TouchableOpacity
                   style={{ backgroundColor: tc.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
+                  testID="pending-save-confirm"
+                  accessibilityLabel="pending-save-confirm"
                   onPress={async () => {
                     const saved = pendingSave;
+                    const previousProfile = userProfile;
+                    const nextProfile = previousProfile
+                      ? stampGoalStart(saved.profile, previousProfile)
+                      : saved.profile;
                     setPendingSave(null);
                     try {
                       await _doSaveProfile(saved.profile, saved.mode as any);
+                      let nextProfileForChange = nextProfile;
+                      try {
+                        const storedProfileRaw = await AsyncStorage.getItem('userProfile');
+                        if (storedProfileRaw) nextProfileForChange = JSON.parse(storedProfileRaw);
+                      } catch { /* keep fallback snapshot */ }
                       // Record this change so the user can see it in
                       // Progress → Change History alongside coach
                       // changes. Fire-and-forget — failure here mustn't
                       // block the actual save.
                       try {
+                        const scope = saved.mode as 'goal' | 'workout' | 'mealplan';
                         await savePlanChange({
                           id: `user-${Date.now()}`,
                           changedAt: new Date().toISOString(),
                           changedBy: 'user',
-                          scope: saved.mode as 'goal' | 'workout' | 'mealplan',
+                          scope,
                           summary: summaryText,
                           question: '',
                           effectiveDate,
+                          previousProfile: previousProfile ? planChangeProfileSnapshot(previousProfile, scope) : undefined,
+                          nextProfile: planChangeProfileSnapshot(nextProfileForChange, scope),
                         });
                       } catch { /* non-critical */ }
                     } catch (err: any) {

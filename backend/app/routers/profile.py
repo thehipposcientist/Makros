@@ -141,6 +141,20 @@ def _active_goal(session: Session, user_id: int) -> UserGoal | None:
     ).first()
 
 
+def _field_value(value):
+    return value.value if hasattr(value, "value") else value
+
+
+def _goal_matches(goal: UserGoal, incoming: GoalUpsert) -> bool:
+    return (
+        _field_value(goal.goal_type) == _field_value(incoming.goal_type)
+        and goal.goal_track == incoming.goal_track
+        and _field_value(goal.pace) == _field_value(incoming.pace)
+        and goal.target_weight_lbs == incoming.target_weight_lbs
+        and goal.timeline_weeks == incoming.timeline_weeks
+    )
+
+
 def _coaching_state(session: Session, user_id: int) -> UserCoachingState:
     state = session.exec(select(UserCoachingState).where(UserCoachingState.user_id == user_id)).first()
     if state:
@@ -161,7 +175,11 @@ def sync_onboarding(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
-    """Called once at end of onboarding to save all data in one request."""
+    """Save the user's profile, goal, and preferences in one request.
+
+    Clients also reuse this for profile sync. Keep goal writes idempotent so
+    repeated syncs do not turn unchanged goals into fake history rows.
+    """
     now = datetime.now(timezone.utc)
 
     # Upsert physical profile
@@ -199,16 +217,20 @@ def sync_onboarding(
         )
     session.add(profile)
 
-    # Deactivate previous goals, insert new one
+    # Only create a new history row when the actual goal payload changes.
     prev_goals = session.exec(
         select(UserGoal).where(UserGoal.user_id == current_user.id, UserGoal.is_active == True)
     ).all()
-    for g in prev_goals:
-        g.is_active = False
-        session.add(g)
+    active_goal = prev_goals[0] if prev_goals else None
+    if not active_goal or not _goal_matches(active_goal, body.goal):
+        for g in prev_goals:
+            g.is_active = False
+            session.add(g)
+        if prev_goals:
+            session.flush()
 
-    new_goal = UserGoal(user_id=current_user.id, **body.goal.model_dump())
-    session.add(new_goal)
+        new_goal = UserGoal(user_id=current_user.id, **body.goal.model_dump())
+        session.add(new_goal)
 
     # Upsert preferences
     prefs = session.exec(
@@ -879,9 +901,7 @@ def adaptive_macros(
     )
     from app.services.nutrition.targets import resolve_targets_for_user
 
-    goal = session.exec(
-        select(UserGoal).where(UserGoal.user_id == current_user.id)
-    ).first()
+    goal = _active_goal(session, current_user.id)
     profile = session.exec(
         select(UserProfile).where(UserProfile.user_id == current_user.id)
     ).first()

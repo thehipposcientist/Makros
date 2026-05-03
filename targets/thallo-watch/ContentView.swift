@@ -3,6 +3,7 @@
 // Top-level TabView (page style) has two primary pages:
 //   • Today's workout (Start / Skip / Active-handoff) — default page
 //   • Today's meals   (check-off list with macros) — swipe right
+//   • Hydration       (quick water logging)
 // Third page only while a workout is active — the rich
 // ActiveWorkoutView with exercise, rest timer, and HR.
 //
@@ -131,6 +132,7 @@ struct ContentView: View {
                         conn.sendCommand("skip_workout")
                     })
                     MealsView(meals: conn.meals)
+                    HydrationView()
                     SupplementsView()
                     SleepView()
                     ReadinessView()
@@ -843,6 +845,200 @@ private struct MealsView: View {
             .foregroundColor(theme.textMuted)
             .multilineTextAlignment(.center)
             .padding(.vertical, 24)
+    }
+}
+
+// ─── Hydration ──────────────────────────────────────────────────────
+
+private struct HydrationView: View {
+    @EnvironmentObject var theme: ThemeStore
+    @EnvironmentObject var conn: ConnectivityStore
+    @State private var pendingOunces: Double = 0
+    @State private var seeded: Bool = false
+
+    private var dateISO: String {
+        conn.hydration?.dateISO ?? localDateISO()
+    }
+
+    private var ounces: Double {
+        conn.hydration?.ounces ?? 0
+    }
+
+    private var target: Double {
+        max(1, conn.hydration?.targetOunces ?? 64)
+    }
+
+    private var percent: Int {
+        min(999, max(0, Int(((ounces / target) * 100).rounded())))
+    }
+
+    private var fillRatio: Double {
+        min(1, max(0, ounces / target))
+    }
+
+    var body: some View {
+        ZStack {
+            theme.background.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "drop.fill")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(theme.primary)
+                        Text("HYDRATION")
+                            .font(.system(size: 10, weight: .heavy))
+                            .tracking(1.1)
+                            .foregroundColor(theme.primary)
+                        Spacer()
+                        Text("\(percent)%")
+                            .font(.system(size: 10, weight: .heavy))
+                            .foregroundColor(percent >= 100 ? theme.success : theme.textMuted)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .lastTextBaseline, spacing: 4) {
+                            Text(formatOz(ounces))
+                                .font(.system(size: 34, weight: .black, design: .rounded))
+                                .foregroundColor(theme.textPrimary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                            Text("/ \(formatOz(target)) oz")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(theme.textMuted)
+                        }
+                        GeometryReader { proxy in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(theme.surfaceRaised)
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(theme.primary)
+                                    .frame(width: max(5, proxy.size.width * CGFloat(fillRatio)))
+                            }
+                        }
+                        .frame(height: 8)
+                    }
+                    .padding(10)
+                    .background(theme.surface)
+                    .cornerRadius(10)
+
+                    HStack(spacing: 6) {
+                        quickButton(8)
+                        quickButton(16)
+                        quickButton(24)
+                    }
+
+                    Button {
+                        logTotal(max(0, ounces - 8))
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "minus.circle.fill")
+                                .font(.system(size: 11))
+                            Text("8 oz")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .foregroundColor(theme.textSecondary)
+                        .background(theme.surfaceRaised)
+                        .cornerRadius(9)
+                    }
+                    .buttonStyle(.plain)
+
+                    Text("SET TOTAL")
+                        .font(.system(size: 8, weight: .heavy))
+                        .tracking(0.7)
+                        .foregroundColor(theme.textMuted)
+                        .padding(.top, 4)
+
+                    ZStack {
+                        Capsule()
+                            .fill(theme.surface)
+                            .overlay(
+                                Capsule().stroke(theme.primary.opacity(0.45), lineWidth: 1.5),
+                            )
+                        Text("\(formatOz(pendingOunces)) oz")
+                            .font(.system(size: 22, weight: .black, design: .rounded))
+                            .foregroundColor(theme.textPrimary)
+                    }
+                    .frame(height: 44)
+                    .focusable(true)
+                    .digitalCrownRotation(
+                        $pendingOunces,
+                        from: 0,
+                        through: 300,
+                        by: 1,
+                        sensitivity: .low,
+                        isContinuous: false,
+                        isHapticFeedbackEnabled: true,
+                    )
+
+                    Button {
+                        logTotal(pendingOunces)
+                    } label: {
+                        Text("Set")
+                            .font(.system(size: 13, weight: .bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(theme.primary)
+                            .foregroundColor(theme.background)
+                            .cornerRadius(9)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(10)
+            }
+        }
+        .onAppear { seedPendingIfNeeded() }
+        .onChange(of: conn.hydration?.ounces ?? -1) { _, _ in
+            pendingOunces = ounces
+            seeded = true
+        }
+    }
+
+    private func quickButton(_ oz: Double) -> some View {
+        Button {
+            logTotal(ounces + oz)
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 12, weight: .bold))
+                Text("\(Int(oz)) oz")
+                    .font(.system(size: 11, weight: .heavy))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .foregroundColor(theme.background)
+            .background(theme.primary)
+            .cornerRadius(9)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func logTotal(_ rawOunces: Double) {
+        let next = max(0, (rawOunces * 10).rounded() / 10)
+        WKInterfaceDevice.current().play(.success)
+        conn.setHydrationLocal(ounces: next, dateISO: dateISO)
+        pendingOunces = next
+        conn.sendCommand("log_hydration", payload: [
+            "dateISO": dateISO,
+            "ounces": next,
+        ])
+    }
+
+    private func seedPendingIfNeeded() {
+        guard !seeded else { return }
+        pendingOunces = ounces
+        seeded = true
+    }
+
+    private func localDateISO(_ date: Date = Date()) -> String {
+        let comps = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", comps.year ?? 1970, comps.month ?? 1, comps.day ?? 1)
+    }
+
+    private func formatOz(_ value: Double) -> String {
+        let rounded = value.rounded()
+        return abs(value - rounded) < 0.05 ? "\(Int(rounded))" : String(format: "%.1f", value)
     }
 }
 // ─── Swipe hint pill ────────────────────────────────────────────────

@@ -33,19 +33,88 @@ tags:
     when:
       visible: "Sign Up"
     commands:
-      # AuthScreen default mode is login — no toggle needed.
-      - assertVisible: "Login"
-
-      # Inputs matched by placeholder on both iOS and Android.
-      - tapOn: "Email"
+      # AuthScreen default mode is login. Use stable testIDs so copy changes
+      # like "Login" vs "Log In" do not break returning-user flows.
+      - tapOn:
+          id: "auth-email-input"
       - inputText: ${TEST_EMAIL}
+      - pressKey: enter
+
+      - runFlow:
+          when:
+            visible: "Speed up your typing"
+          commands:
+            - tapOn: "Continue"
 
       - tapOn:
-          text: "^Password$"
+          id: "auth-password-toggle"
+      - tapOn:
+          id: "auth-password-input"
       - inputText: ${TEST_PASSWORD}
 
-      - tapOn: "Login"
+      - runFlow:
+          when:
+            visible: "Speed up your typing"
+          commands:
+            - tapOn: "Continue"
+
+      - tapOn: "Personalized training, nutrition, and AI coaching."
+      - tapOn:
+          id: "auth-submit"
+
+- waitForAnimationToEnd:
+    timeout: 5000
+
+- runFlow:
+    when:
+      visible: "Save Password?"
+    commands:
+      - tapOn: "Not Now"
+
+- waitForAnimationToEnd:
+    timeout: 2000
+
+- runFlow:
+    when:
+      visible: "Save Password?"
+    commands:
+      - tapOn: "Not Now"
+
+- runFlow:
+    when:
+      visible: "Legal And Safety"
+    commands:
+      - scrollUntilVisible:
+          element:
+            text: "I Agree"
+          direction: DOWN
+          timeout: 15000
+          visibilityPercentage: 50
+      - tapOn: "I Agree"
+
+- runFlow:
+    when:
+      visible: "Welcome to Thallo Pro"
+    commands:
+      - tapOn:
+          id: "tutorial-skip"
+
+- waitForAnimationToEnd:
+    timeout: 3000
+
+- runFlow:
+    when:
+      visible: "Save Password?"
+    commands:
+      - tapOn: "Not Now"
+
+- runFlow:
+    when:
+      visible: "Welcome to Thallo Pro"
+    commands:
+      - tapOn:
+          id: "tutorial-skip"
 
 - extendedWaitUntil:
-    visible: "Plan"
+    visible: "Plan tab"
     timeout: 30000

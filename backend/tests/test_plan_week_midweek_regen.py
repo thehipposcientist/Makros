@@ -181,13 +181,14 @@ def test_regen_skips_past_unlocked_days():
     with _patch_get_week_days(days):
         fresh = [{"focus": "NEW1"}] * 5
         week_manager.regenerate_remaining_days(
-            FakeSession(), pw, fresh, training_day_pattern=[0, 1, 2, 3, 4],
+            FakeSession(), pw, fresh, training_day_pattern=list(range(7)),
         )
     # First 3 days are in the past — workout_json must not change
     assert days[0].workout_json["focus"] == "Push"
     assert days[1].workout_json["focus"] == "Pull"
     assert days[2].workout_json["focus"] == "Legs"
-    # Today (day 3) onwards CAN change
+    # Today (day 3) onwards CAN change; use all weekdays above so this
+    # assertion is stable whether the test runs on a weekday or weekend.
     assert days[3].workout_json["focus"] == "NEW1" or days[3].workout_json["focus"] in {"Push"}
 
 

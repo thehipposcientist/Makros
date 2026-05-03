@@ -23,7 +23,7 @@ from .utils import (
     SCHEMA_WORKOUT,
 )
 from .prompts import build_workout_prompt
-from app.services.nutrition.meal_assembler import assemble_nutrition_response
+from app.services.nutrition.meal_assembler import assemble_nutrition_response, default_foods_for_generation
 from app.services.workout.planner import (
     PlannerInputs, generate_workout_plan as planner_generate_workout_plan,
 )
@@ -2320,8 +2320,9 @@ async def run_full_plan_generation(
     # note LLM call so the two AI round-trips overlap instead of
     # serializing.
     async def _run_nutrition() -> dict:
+        foods_for_enrichment = default_foods_for_generation(req, req.foodsAvailable)
         enriched_local = await asyncio.to_thread(
-            enrich_foods_with_macros, client, req.foodsAvailable, req.mealRoutine
+            enrich_foods_with_macros, client, foods_for_enrichment, req.mealRoutine
         )
         # db/user_id threaded in so the skeleton prompt sees the user's
         # real meal-history (rolling averages, common meals from the
@@ -2934,8 +2935,9 @@ async def run_nutrition_only_generation(
     client = OpenAI(api_key=api_key)
     _m = model_plan_update()
     print(f"[plan-gen nutrition] goal={plan_req.goal}, foods={len(plan_req.foodsAvailable)}")
+    foods_for_enrichment = default_foods_for_generation(plan_req, plan_req.foodsAvailable)
     enriched = await asyncio.to_thread(
-        enrich_foods_with_macros, client, plan_req.foodsAvailable, plan_req.mealRoutine
+        enrich_foods_with_macros, client, foods_for_enrichment, plan_req.mealRoutine
     )
     # Target macros for drift verification (see `_call_nutrition_ai`).
     targets_for_check = compute_tdee_and_targets(plan_req, db=db, user_id=user_id)

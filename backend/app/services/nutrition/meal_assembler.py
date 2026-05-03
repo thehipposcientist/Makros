@@ -115,6 +115,57 @@ MICRONUTRIENT_FIELDS: tuple[str, ...] = (
     "zinc", "selenium", "copper", "manganese",
 )
 
+DEFAULT_NUTRITION_PANTRY: tuple[str, ...] = (
+    "chicken breast",
+    "salmon",
+    "eggs",
+    "greek yogurt",
+    "cottage cheese",
+    "tofu",
+    "tempeh",
+    "lentils",
+    "chickpeas",
+    "black beans",
+    "brown rice",
+    "quinoa",
+    "oats",
+    "sweet potato",
+    "broccoli",
+    "spinach",
+    "kale",
+    "olive oil",
+    "avocado",
+    "almonds",
+    "peanut butter",
+    "banana",
+    "berries",
+)
+
+
+def default_foods_for_generation(req: "PlanRequest", allowed_foods: list[str] | None) -> list[str]:
+    """Return the pantry the nutrition generator should use.
+
+    An empty food list means the user skipped the optional foods step, not
+    that they want zero meals. Keep selected-food validation strict, but give
+    skipped-food users a broad default pantry that still respects diet and
+    allergy filters.
+    """
+    explicit = [str(f).strip() for f in (allowed_foods or []) if str(f).strip()]
+    if explicit:
+        return explicit
+
+    pantry = list(DEFAULT_NUTRITION_PANTRY)
+    try:
+        from .deterministic_skeleton import _filter_pantry
+        pantry = _filter_pantry(
+            pantry,
+            getattr(req, "dietaryPreference", None),
+            getattr(req, "allergies", None) or [],
+        )
+    except Exception:
+        pass
+    return pantry
+
 
 @dataclass
 class FoodMacros:
@@ -1308,7 +1359,17 @@ def assemble_nutrition_response(
     meals_per_day = _clamp_meals_per_day(req.mealsPerDay)
     generate_count = max(0, meals_per_day - routine_count)
     nutrition_warnings: list[dict] = []
-    generation_foods = list(allowed_foods or [])
+    selected_foods = [str(f).strip() for f in (allowed_foods or []) if str(f).strip()]
+    used_default_pantry = not selected_foods
+    generation_foods = default_foods_for_generation(req, selected_foods)
+    if used_default_pantry and generation_foods:
+        nutrition_warnings.append({
+            "severity": "info",
+            "code": "default_pantry_used",
+            "message": "No foods were selected during onboarding, so default meal suggestions were used.",
+            "allowed_foods_count": 0,
+            "compatible_foods_count": len(generation_foods),
+        })
     try:
         from .deterministic_skeleton import _filter_pantry
         generation_foods = _filter_pantry(
@@ -1322,7 +1383,7 @@ def assemble_nutrition_response(
             "code": "pre_generation_food_filter_failed",
             "message": f"Could not pre-filter foods for diet/allergy constraints: {exc}",
         })
-    if allowed_foods and not generation_foods:
+    if selected_foods and not generation_foods:
         nutrition_warnings.append({
             "severity": "error",
             "code": "no_compatible_foods",
@@ -1330,14 +1391,14 @@ def assemble_nutrition_response(
                 "All selected foods conflict with the current diet or allergy "
                 "settings. Add compatible foods before external testing this plan."
             ),
-            "allowed_foods_count": len(allowed_foods),
+            "allowed_foods_count": len(selected_foods),
         })
-    elif len(generation_foods) < len(allowed_foods or []):
+    elif len(generation_foods) < len(selected_foods):
         nutrition_warnings.append({
             "severity": "info",
             "code": "incompatible_foods_filtered",
             "message": "Some selected foods were removed before meal generation because of diet or allergy settings.",
-            "allowed_foods_count": len(allowed_foods or []),
+            "allowed_foods_count": len(selected_foods),
             "compatible_foods_count": len(generation_foods),
         })
 
@@ -1383,7 +1444,7 @@ def assemble_nutrition_response(
             "nutrition_validation": {
                 "ok": not any(w.get("severity") == "error" for w in nutrition_warnings),
                 "warnings": list(nutrition_warnings),
-                "allowed_foods_count": len(allowed_foods or []),
+                "allowed_foods_count": len(selected_foods),
                 "compatible_foods_count": len(generation_foods),
             },
         } for _ in range(max(1, variety_n))]
@@ -1406,7 +1467,7 @@ def assemble_nutrition_response(
         print(
             f"[meal_assembler] deterministic variety=1 path — skipping skeleton AI, "
             f"building {generate_count} balanced meals from {len(generation_foods)} "
-            f"compatible foods ({len(allowed_foods or [])} selected)"
+            f"compatible foods ({len(selected_foods)} selected)"
         )
         templates = [_build_deterministic_template(generation_foods, generate_count)]
         note = ""
@@ -1442,7 +1503,7 @@ def assemble_nutrition_response(
         print(
             f"[meal_assembler] deterministic skeleton path — variety_n={variety_n}, "
             f"generate_count={generate_count}, pantry={len(generation_foods)} "
-            f"compatible foods ({len(allowed_foods or [])} selected)"
+            f"compatible foods ({len(selected_foods)} selected)"
         )
     else:
         # Temporarily override mealsPerDay on the request so the AI prompt +
@@ -1553,7 +1614,7 @@ def assemble_nutrition_response(
         tpl_out["nutrition_validation"] = {
             "ok": not any(w.get("severity") == "error" for w in template_warnings),
             "warnings": template_warnings,
-            "allowed_foods_count": len(allowed_foods or []),
+            "allowed_foods_count": len(selected_foods),
             "compatible_foods_count": len(generation_foods),
             "meals_expected": generate_count,
             "meals_actual": actual,
@@ -1564,7 +1625,7 @@ def assemble_nutrition_response(
     print(
         f"[meal_assembler] assembled {len(plans_list)} template(s) "
         f"(variety_n={variety_n}, foods={len(food_lookup)}, "
-        f"allowed={len(allowed_foods)}, routine_count={routine_count})"
+        f"allowed={len(selected_foods)}, routine_count={routine_count})"
     )
 
     return {

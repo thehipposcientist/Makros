@@ -165,8 +165,14 @@ def create_meal(
     db.add(meal)
     db.flush()
 
+    from app.food_service import touch_recent_food
+
+    seen_food_ids: set[int] = set()
     for item_body in body.items:
         db.add(MealItem(meal_id=meal.id, **item_body.model_dump()))
+        if item_body.food_id and item_body.food_id not in seen_food_ids:
+            touch_recent_food(db, current_user.id, item_body.food_id, commit=False)
+            seen_food_ids.add(item_body.food_id)
 
     db.commit()
     db.refresh(meal)
@@ -418,6 +424,7 @@ def gut_health_signals(
         # query of the day is the only AI cost.
         today_row = compute_daily_metrics(db, user_id=current_user.id, metric_date=today, allow_ai=True)
     except Exception:
+        db.rollback()
         today_row = None
 
     rollup = compute_weekly_rollup(db, user_id=current_user.id, end_date=today, days=days, allow_ai=True)
@@ -899,80 +906,6 @@ def recovery_flags_endpoint(
     return payload
 
 
-# ─── Get one ──────────────────────────────────────────────────────────────────
-
-@router.get("/{meal_id}")
-def get_meal(
-    meal_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_session),
-):
-    meal = db.get(Meal, meal_id)
-    if not meal or meal.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Meal not found")
-    return _build_meal_response(meal, db)
-
-
-# ─── Daily summary ────────────────────────────────────────────────────────────
-
-@router.get("/summary/{summary_date}")
-def daily_summary(
-    summary_date: date,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_session),
-):
-    """Total macros consumed across all meals for a given day."""
-    from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
-
-    meals = db.exec(
-        select(Meal).where(Meal.user_id == current_user.id, Meal.meal_date == summary_date)
-    ).all()
-
-    # Batch-load items
-    meal_ids = [m.id for m in meals]
-    all_items = db.exec(select(MealItem).where(MealItem.meal_id.in_(meal_ids))).all() if meal_ids else []
-    items_by_meal: dict[int, list] = defaultdict(list)
-    for item in all_items:
-        items_by_meal[item.meal_id].append(item)
-    meals = dedupe_meals_for_aggregation(meals, items_by_meal)
-
-    totals = {"calories": 0.0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 0.0}
-    meal_data = []
-    for meal in meals:
-        items = items_by_meal.get(meal.id, [])
-        for item in items:
-            totals["calories"]  += item.calories
-            totals["protein_g"] += item.protein_g
-            totals["carbs_g"]   += item.carbs_g
-            totals["fat_g"]     += item.fat_g
-        meal_data.append({**meal.model_dump(), "items": [i.model_dump() for i in items]})
-
-    return {
-        "date": summary_date,
-        "totals": {k: round(v, 1) for k, v in totals.items()},
-        "meals": meal_data,
-    }
-
-
-# ─── Delete ───────────────────────────────────────────────────────────────────
-
-@router.delete("/{meal_id}", status_code=204)
-def delete_meal(
-    meal_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_session),
-):
-    meal = db.get(Meal, meal_id)
-    if not meal or meal.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Meal not found")
-    affected_date = meal.meal_date
-    for item in db.exec(select(MealItem).where(MealItem.meal_id == meal_id)).all():
-        db.delete(item)
-    db.delete(meal)
-    db.commit()
-    _refresh_daily_metrics(db, current_user.id, affected_date, force=True)
-
-
 # ─── Weekly calorie smoothing ─────────────────────────────────────────────────
 
 
@@ -1067,3 +1000,77 @@ def adjusted_daily_target(
         "week_start":           week_start.isoformat(),
         "date":                 today.isoformat(),
     }
+
+
+# ─── Daily summary ────────────────────────────────────────────────────────────
+
+@router.get("/summary/{summary_date}")
+def daily_summary(
+    summary_date: date,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    """Total macros consumed across all meals for a given day."""
+    from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
+
+    meals = db.exec(
+        select(Meal).where(Meal.user_id == current_user.id, Meal.meal_date == summary_date)
+    ).all()
+
+    # Batch-load items
+    meal_ids = [m.id for m in meals]
+    all_items = db.exec(select(MealItem).where(MealItem.meal_id.in_(meal_ids))).all() if meal_ids else []
+    items_by_meal: dict[int, list] = defaultdict(list)
+    for item in all_items:
+        items_by_meal[item.meal_id].append(item)
+    meals = dedupe_meals_for_aggregation(meals, items_by_meal)
+
+    totals = {"calories": 0.0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 0.0}
+    meal_data = []
+    for meal in meals:
+        items = items_by_meal.get(meal.id, [])
+        for item in items:
+            totals["calories"]  += item.calories
+            totals["protein_g"] += item.protein_g
+            totals["carbs_g"]   += item.carbs_g
+            totals["fat_g"]     += item.fat_g
+        meal_data.append({**meal.model_dump(), "items": [i.model_dump() for i in items]})
+
+    return {
+        "date": summary_date,
+        "totals": {k: round(v, 1) for k, v in totals.items()},
+        "meals": meal_data,
+    }
+
+
+# ─── Get one ──────────────────────────────────────────────────────────────────
+
+@router.get("/{meal_id}")
+def get_meal(
+    meal_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    meal = db.get(Meal, meal_id)
+    if not meal or meal.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Meal not found")
+    return _build_meal_response(meal, db)
+
+
+# ─── Delete ───────────────────────────────────────────────────────────────────
+
+@router.delete("/{meal_id}", status_code=204)
+def delete_meal(
+    meal_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    meal = db.get(Meal, meal_id)
+    if not meal or meal.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Meal not found")
+    affected_date = meal.meal_date
+    for item in db.exec(select(MealItem).where(MealItem.meal_id == meal_id)).all():
+        db.delete(item)
+    db.delete(meal)
+    db.commit()
+    _refresh_daily_metrics(db, current_user.id, affected_date, force=True)

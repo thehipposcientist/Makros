@@ -2262,8 +2262,9 @@ def list_completions(
 ):
     """Paginated workout-completion list. Used by the mobile app as a
     fallback when local `workoutHistory` is missing (fresh install, state
-    wipe). Completions carry date/focus/duration but NOT per-set detail —
-    that only lives in `WorkoutSession` rows when the client sent exercises."""
+    wipe). Completions carry date/focus/duration and summary health metrics
+    but NOT per-set detail — that only lives in `WorkoutSession` rows when
+    the client sent exercises."""
     query = (
         select(WorkoutCompletion)
         .where(WorkoutCompletion.user_id == current_user.id)
@@ -2291,6 +2292,7 @@ def list_completions(
             "cardio_style": r.cardio_style,
             "distance_miles": r.distance_miles,
             "calories_burned": r.calories_burned,
+            "hr_summary": r.hr_summary,
         }
         for r in rows
     ]

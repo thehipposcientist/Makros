@@ -55,6 +55,7 @@ const WORKOUT_KEY_PATTERNS: ReadonlyArray<string> = Object.freeze([
   'freshDayGenerated_',
   'workoutDayState_',
   'trainerNote',
+  'manualWorkoutOverrides',
   'readinessScore',
   'routineOverlayShown_',
   'activeWorkoutSession',     // in-progress workout state

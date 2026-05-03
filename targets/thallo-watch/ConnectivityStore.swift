@@ -5,7 +5,9 @@
 //   { kind: "workoutEnvelope", payload: <WatchWorkoutEnvelope JSON> }
 //   { kind: "workout",         payload: <WatchWorkout JSON> } // legacy
 //   { kind: "theme",    payload: <WatchPalette JSON> }
+//   { kind: "hydration", payload: <WatchHydrationDay JSON> }
 //   { kind: "progress", set: Int, restRemainingSec: Int?,
+//                       progressRevision: Double?, sessionId: String?,
 //                       heartRate: Int?, recommendation: String? }
 //
 // We also respond to the phone's `sendMessage` requests when the watch
@@ -21,11 +23,13 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
 
     @Published var workout: WatchWorkout?
     @Published var meals: WatchMealsDay?
+    @Published var hydration: WatchHydrationDay?
     @Published var supplements: WatchSupplementsDay?
     @Published var sleep: WatchSleepSnapshot?
     @Published var readiness: WatchReadinessSnapshot?
     @Published var weight: WatchWeightSnapshot?
     @Published var theme: WatchPalette = .midnight
+    @Published var latestProgress: [String: Any]?
     @Published var isReachable: Bool = false
     @Published var lastError: String?
     /// AI-parsed meal items awaiting user review on the watch speech-to-meal flow.
@@ -37,7 +41,10 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     private static let userIdKey = "thallo.watchUserId"
     private static let lastWorkoutRevisionKey = "thallo.lastWorkoutRevision"
     private static let storedThemeKey = "thallo.storedTheme"
+    private static let lastThemeSyncedAtMsKey = "thallo.lastThemeSyncedAtMs"
     private static let storedSleepKey = "thallo.storedSleep"
+    private static let storedHydrationKey = "thallo.storedHydration"
+    private static let storedProgressKey = "thallo.latestWorkoutProgress"
     private var queuedCommands: [[String: Any]] = []
 
     private override init() {
@@ -49,6 +56,10 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         if let storedSleep = Self.loadStored(WatchSleepSnapshot.self, key: Self.storedSleepKey) {
             self.sleep = storedSleep
         }
+        if let storedHydration = Self.loadStored(WatchHydrationDay.self, key: Self.storedHydrationKey) {
+            self.hydration = storedHydration
+        }
+        self.latestProgress = UserDefaults.standard.dictionary(forKey: Self.storedProgressKey)
         session?.delegate = self
         session?.activate()
     }
@@ -102,11 +113,13 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     private func wipeUserState() {
         workout = nil
         meals = nil
+        hydration = nil
         supplements = nil
         sleep = nil
         readiness = nil
         weight = nil
         pendingMealItems = nil
+        latestProgress = nil
         theme = .midnight
         // Clear persisted watch state so stale flags from a previous
         // account can't auto-start HealthKit on the next app open.
@@ -119,7 +132,10 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         UserDefaults.standard.removeObject(forKey: "thallo.lastClearWorkoutMs")
         UserDefaults.standard.removeObject(forKey: Self.lastWorkoutRevisionKey)
         UserDefaults.standard.removeObject(forKey: Self.storedThemeKey)
+        UserDefaults.standard.removeObject(forKey: Self.lastThemeSyncedAtMsKey)
         UserDefaults.standard.removeObject(forKey: Self.storedSleepKey)
+        UserDefaults.standard.removeObject(forKey: Self.storedHydrationKey)
+        UserDefaults.standard.removeObject(forKey: Self.storedProgressKey)
     }
 
     // ─── WCSessionDelegate ──────────────────────────────────────────
@@ -206,6 +222,12 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         if !envelopeHandled {
             absorbLegacyWorkout(ctx)
         }
+        if var progress = ctx["progress"] as? [String: Any] {
+            if progress["userId"] == nil, let uid = ctx["userId"] {
+                progress["userId"] = uid
+            }
+            absorbProgress(progress)
+        }
         if let m = ctx["meals"] as? [String: Any] {
             if let data = try? JSONSerialization.data(withJSONObject: m),
                let decoded = try? JSONDecoder().decode(WatchMealsDay.self, from: data) {
@@ -214,12 +236,16 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                 }
             }
         }
-        if let t = ctx["theme"] as? [String: Any],
-           let data = try? JSONSerialization.data(withJSONObject: t),
-           let decoded = try? JSONDecoder().decode(WatchPalette.self, from: data) {
-            self.theme = decoded
-            Self.saveStored(decoded, key: Self.storedThemeKey)
+        if let h = ctx["hydration"] as? [String: Any] {
+            if let data = try? JSONSerialization.data(withJSONObject: h),
+               let decoded = try? JSONDecoder().decode(WatchHydrationDay.self, from: data) {
+                if hydration == nil || decoded.syncedAtMs >= (hydration?.syncedAtMs ?? 0) {
+                    self.hydration = decoded
+                    Self.saveStored(decoded, key: Self.storedHydrationKey)
+                }
+            }
         }
+        absorbTheme(ctx["theme"])
         if let s = ctx["supplements"] as? [String: Any] {
             if let data = try? JSONSerialization.data(withJSONObject: s),
                let decoded = try? JSONDecoder().decode(WatchSupplementsDay.self, from: data) {
@@ -253,6 +279,50 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                 }
             }
         }
+    }
+
+    private func absorbTheme(_ raw: Any?) {
+        guard let raw = raw else { return }
+        guard let dict = raw as? [String: Any] else {
+            HeartRateStore.saveDiag("theme key present but not a dict")
+            return
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: dict),
+              let decoded = try? JSONDecoder().decode(WatchPalette.self, from: data) else {
+            HeartRateStore.saveDiag("theme decode FAIL keys=[\(dict.keys.sorted().joined(separator: ","))]")
+            return
+        }
+        if let incomingMs = decoded.syncedAtMs {
+            let lastMs = UserDefaults.standard.double(forKey: Self.lastThemeSyncedAtMsKey)
+            if incomingMs < lastMs {
+                HeartRateStore.saveDiag("theme stale rejected theme=\(decoded.themeName ?? "unknown")")
+                return
+            }
+            UserDefaults.standard.set(incomingMs, forKey: Self.lastThemeSyncedAtMsKey)
+        }
+        self.theme = decoded
+        Self.saveStored(decoded, key: Self.storedThemeKey)
+        HeartRateStore.saveDiag("theme accepted theme=\(decoded.themeName ?? "unknown")")
+    }
+
+    private func absorbProgress(_ raw: [String: Any]) {
+        var msg = raw
+        if msg["kind"] == nil {
+            msg["kind"] = "progress"
+        }
+        if msg.keys.contains("userId") {
+            handleUserSwitch(msg["userId"] as? String)
+        }
+        if let incomingRevision = flexibleDouble(msg["progressRevision"]),
+           let previous = latestProgress,
+           let previousRevision = flexibleDouble(previous["progressRevision"]),
+           incomingRevision <= previousRevision {
+            HeartRateStore.saveDiag("progress cache stale rejected rev=\(Int(incomingRevision)) last=\(Int(previousRevision))")
+            return
+        }
+        latestProgress = msg
+        UserDefaults.standard.set(msg, forKey: Self.storedProgressKey)
+        NotificationCenter.default.post(name: .watchProgressUpdate, object: nil, userInfo: msg)
     }
 
     private func absorbWorkoutEnvelope(_ raw: Any?) -> Bool {
@@ -414,15 +484,24 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             if let payload = msg["payload"] as? [String: Any] {
                 absorbContext(ctxWith("meals", payload))
             }
+        case "hydration":
+            if let payload = msg["payload"] as? [String: Any] {
+                absorbContext(ctxWith("hydration", payload))
+            }
         case "theme":
             if let payload = msg["payload"] as? [String: Any] {
                 absorbContext(ctxWith("theme", payload))
             }
         case "progress":
-            // Live updates (current set, rest remaining, HR) handled by
-            // ActiveWorkoutStore — nothing to persist on ConnectivityStore.
-            if let uid = userId { handleUserSwitch(uid as? String) }
-            NotificationCenter.default.post(name: .watchProgressUpdate, object: nil, userInfo: msg)
+            if var payload = msg["payload"] as? [String: Any] {
+                payload["kind"] = "progress"
+                if payload["userId"] == nil, let uid = userId {
+                    payload["userId"] = uid
+                }
+                absorbProgress(payload)
+            } else {
+                absorbProgress(msg)
+            }
         case "mealParsePreview":
             // Phone pushed AI-parsed meal items after processing the watch's
             // speech transcription. Set pendingMealItems so SpeechMealView can
@@ -442,6 +521,35 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     }
 
     // ─── Local optimistic mutations ─────────────────────────────────
+
+    private func localDateISO(_ date: Date = Date()) -> String {
+        let comps = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        let y = comps.year ?? 1970
+        let m = comps.month ?? 1
+        let d = comps.day ?? 1
+        return String(format: "%04d-%02d-%02d", y, m, d)
+    }
+
+    private func updateHydrationLocal(to ounces: Double, dateISO: String? = nil) {
+        let next = max(0, (ounces * 10).rounded() / 10)
+        let previous = hydration
+        let updated = WatchHydrationDay(
+            dateISO: dateISO ?? previous?.dateISO ?? localDateISO(),
+            ounces: next,
+            targetOunces: previous?.targetOunces ?? 64,
+            syncedAtMs: Date().timeIntervalSince1970 * 1000,
+        )
+        hydration = updated
+        Self.saveStored(updated, key: Self.storedHydrationKey)
+    }
+
+    func addHydrationLocal(deltaOz: Double) {
+        updateHydrationLocal(to: (hydration?.ounces ?? 0) + deltaOz)
+    }
+
+    func setHydrationLocal(ounces: Double, dateISO: String? = nil) {
+        updateHydrationLocal(to: ounces, dateISO: dateISO)
+    }
 
     /// Flip a meal's `checked` flag locally and recompute the `actual`
     /// macro totals so the UI updates the instant a tap happens. The
