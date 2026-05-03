@@ -73,6 +73,8 @@ _TEST_MODULES = (
     "tests.test_plan_week_goal_change",
     # Auth: DEV_EMAIL_TOKENS gating — dev tokens must not leak in prod.
     "tests.test_auth_dev_token_isolation",
+    # Native account sign-in: Apple identity links and account creation.
+    "tests.test_auth_apple",
     # PlanWeekCheckin: status, gate, idempotency, skip, recap.
     "tests.test_plan_week_checkin",
     # plan_cadence_anchor: pure helper that locks the user's sign-up

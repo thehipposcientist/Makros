@@ -37,6 +37,7 @@ class User(SQLModel, table=True):
     password_reset_expires_at: datetime | None = Field(default=None)
     account_deleted_at: datetime | None = Field(default=None)
     subscription_tier: str = Field(default="free", index=True)
+    apple_sub: str | None = Field(default=None, unique=True, index=True)
     # Bumped on logout, password change, and password reset. Encoded as
     # `tv` in JWTs; `get_current_user` rejects tokens whose `tv` is below
     # the user's current value. Lets us invalidate every existing token

@@ -192,6 +192,35 @@ export async function login(email: string, password: string): Promise<{ access_t
   return result;
 }
 
+export async function loginWithApple(
+  identityToken: string,
+  opts?: {
+    firstName?: string | null;
+    lastName?: string | null;
+    legalVersion?: string;
+    acceptedTerms?: boolean;
+    acceptedPrivacy?: boolean;
+    acceptedHealthDisclaimer?: boolean;
+    acceptedAiDisclaimer?: boolean;
+  },
+): Promise<{ access_token: string; is_new_user: boolean }> {
+  const result = await request<{ access_token: string; is_new_user: boolean }>('/auth/apple', {
+    method: 'POST',
+    body: JSON.stringify({
+      identity_token: identityToken,
+      first_name: opts?.firstName ?? undefined,
+      last_name: opts?.lastName ?? undefined,
+      legal_version: opts?.legalVersion,
+      accepted_terms: opts?.acceptedTerms ?? true,
+      accepted_privacy: opts?.acceptedPrivacy ?? true,
+      accepted_health_disclaimer: opts?.acceptedHealthDisclaimer ?? true,
+      accepted_ai_disclaimer: opts?.acceptedAiDisclaimer ?? true,
+    }),
+  });
+  recordTelemetryEvent('apple_login_completed', { is_new_user: result.is_new_user }, result.access_token);
+  return result;
+}
+
 /** Authenticated password change. Backend bumps `token_version` so every
  *  other existing JWT for this account is invalidated. The new token in
  *  the response is the only one that will continue to authenticate. */
@@ -2723,6 +2752,17 @@ export async function unlogMealChecked(
 
 export async function getMealHistory(token: string, days = 30, limit = 100): Promise<{ meals: MealHistoryEntry[] }> {
   return request(`/meals/history?days=${days}&limit=${limit}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+/** Hard-delete a logged meal by its backend Meal id. The matching MealItem
+ *  rows are cascaded; daily nutrition metrics are recomputed for that
+ *  date so the score / averages reflect the deletion immediately. Used
+ *  by the History tab's per-meal trash button. */
+export async function deleteLoggedMeal(token: string, mealId: number): Promise<void> {
+  await request(`/meals/${mealId}`, {
+    method: 'DELETE',
     headers: { Authorization: `Bearer ${token}` },
   });
 }

@@ -7,7 +7,8 @@ Invariants verified:
   4. skip marks the check-in as skipped.
   5. day-8 auto-renew proceeds while the prior week remains promptable.
   6. after the prompt window, the prior check-in becomes a saved recap/skip.
-  7. Recap (GET /week/{id}/checkin) returns saved data without re-calling AI.
+  7. day-7 check-in becomes available after the final scheduled workout.
+  8. Recap (GET /week/{id}/checkin) returns saved data without re-calling AI.
 """
 from __future__ import annotations
 
@@ -64,6 +65,21 @@ class FakePlanWeekCheckin:
     commitments_json: Optional[list] = None
     plan_goal: Optional[str] = "body_recomp"
     created_at: datetime = dc_field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class FakePlanDay:
+    is_rest: bool = False
+    status: str = "planned"
+    locked: bool = False
+    lock_reason: Optional[str] = None
+    workout_json: dict = dc_field(default_factory=lambda: {"focus": "Push"})
+
+
+@dataclass
+class FakeWorkoutCompletion:
+    focus_label: str = "Push"
+    duration_seconds: int = 1800
 
 
 class FakeDB:
@@ -216,6 +232,48 @@ def test_auto_renew_proceeds_after_skip():
     assert not checkin_required
 
 
+def test_day7_checkin_available_after_final_workout():
+    """Current week can prompt after the final scheduled end-date workout."""
+    from app.routers.plan_weeks import _plan_day_allows_week_end_checkin
+
+    plan_day = FakePlanDay(status="completed", locked=True, lock_reason="completed")
+    assert _plan_day_allows_week_end_checkin(plan_day)
+
+
+def test_day7_checkin_waits_until_final_workout_done():
+    """Current week does not prompt while the end-date workout is still planned."""
+    from app.routers.plan_weeks import _plan_day_allows_week_end_checkin
+
+    plan_day = FakePlanDay(status="planned", locked=False, lock_reason=None)
+    assert not _plan_day_allows_week_end_checkin(plan_day)
+
+
+def test_day7_checkin_ignores_rest_day():
+    """A rest day on the week end still waits for the normal day-8 flow."""
+    from app.routers.plan_weeks import _plan_day_allows_week_end_checkin
+
+    plan_day = FakePlanDay(is_rest=True, status="completed", locked=True, lock_reason="completed")
+    assert not _plan_day_allows_week_end_checkin(plan_day)
+
+
+def test_day7_checkin_accepts_real_matching_completion_for_locked_edit():
+    """A real completion unlocks review even if PlanDay was locked by edit."""
+    from app.routers.plan_weeks import _plan_day_allows_week_end_checkin
+
+    plan_day = FakePlanDay(status="edited", locked=True, lock_reason="manual_edit")
+    completion = FakeWorkoutCompletion(focus_label="Push", duration_seconds=1800)
+    assert _plan_day_allows_week_end_checkin(plan_day, [completion])
+
+
+def test_day7_checkin_ignores_started_marker_without_duration():
+    """The /workouts/start marker cannot unlock the weekly review by itself."""
+    from app.routers.plan_weeks import _plan_day_allows_week_end_checkin
+
+    plan_day = FakePlanDay(status="planned", locked=False)
+    started_marker = FakeWorkoutCompletion(focus_label="Push", duration_seconds=0)
+    assert not _plan_day_allows_week_end_checkin(plan_day, [started_marker])
+
+
 def test_idempotency_guard_blocks_second_submit():
     """Second submit is blocked — simulated by existing row with submitted_at."""
     existing = FakePlanWeekCheckin(submitted_at=datetime.now(timezone.utc))
@@ -311,6 +369,11 @@ if __name__ == "__main__":
         test_checkin_prompt_expires_after_window,
         test_auto_renew_proceeds_after_submit,
         test_auto_renew_proceeds_after_skip,
+        test_day7_checkin_available_after_final_workout,
+        test_day7_checkin_waits_until_final_workout_done,
+        test_day7_checkin_ignores_rest_day,
+        test_day7_checkin_accepts_real_matching_completion_for_locked_edit,
+        test_day7_checkin_ignores_started_marker_without_duration,
         test_idempotency_guard_blocks_second_submit,
         test_skip_clears_submitted_at,
         test_checkin_record_stores_ratings,

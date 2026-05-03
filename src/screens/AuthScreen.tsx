@@ -1,10 +1,11 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
   Platform, Image, Dimensions,
 } from 'react-native';
-import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestion } from '../services/api';
+import * as AppleAuthentication from 'expo-apple-authentication';
+import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestion, loginWithApple } from '../services/api';
 import { colors, radius } from '../constants/theme';
 import FadeInView from '../components/FadeInView';
 import LegalDisclosureModal from '../components/LegalDisclosureModal';
@@ -41,11 +42,13 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const [showLegal, setShowLegal] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [appleAvailable, setAppleAvailable] = useState(false);
 
   const emailTouched = email.length > 0;
   const emailValid = EMAIL_RE.test(email.trim());
   const signupDisabled = mode === 'signup' && emailTouched && !emailValid;
   const maestroTestAccount = __DEV__ && email.trim().endsWith('@test.thallo');
+  const showAppleSignIn = Platform.OS === 'ios' && appleAvailable && (mode === 'login' || mode === 'signup');
 
   const firstNameRef       = useRef<TextInput>(null);
   const lastNameRef        = useRef<TextInput>(null);
@@ -56,6 +59,15 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const answerRef          = useRef<TextInput>(null);
   const scrollRef          = useRef<ScrollView>(null);
 
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return;
+    let mounted = true;
+    AppleAuthentication.isAvailableAsync()
+      .then(v => { if (mounted) setAppleAvailable(v); })
+      .catch(() => { if (mounted) setAppleAvailable(false); });
+    return () => { mounted = false; };
+  }, []);
+
   const switchMode = (next: 'login' | 'signup' | 'reset_email' | 'reset_answer') => {
     setMode(next);
     setError('');
@@ -65,6 +77,39 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     if (next !== 'reset_answer') setRecoveryQuestionText('');
     setShowPassword(false);
     setShowConfirmPassword(false);
+  };
+
+  const handleAppleSignIn = async () => {
+    if (loading) return;
+    setError('');
+    setLoading(true);
+    try {
+      const credential = await AppleAuthentication.signInAsync({
+        requestedScopes: [
+          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+          AppleAuthentication.AppleAuthenticationScope.EMAIL,
+        ],
+      });
+      if (!credential.identityToken) {
+        throw new Error('Apple did not return an identity token');
+      }
+      const { access_token, is_new_user } = await loginWithApple(credential.identityToken, {
+        firstName: credential.fullName?.givenName ?? undefined,
+        lastName: credential.fullName?.familyName ?? undefined,
+        legalVersion: LEGAL_VERSION,
+        acceptedTerms: true,
+        acceptedPrivacy: true,
+        acceptedHealthDisclaimer: true,
+        acceptedAiDisclaimer: true,
+      });
+      onAuthenticated(access_token, is_new_user);
+    } catch (e: any) {
+      if (e?.code !== 'ERR_REQUEST_CANCELED') {
+        setError(e?.message ?? 'Unable to continue with Apple');
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSubmit = async () => {
@@ -205,6 +250,32 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               <Text style={[styles.toggleText, mode === 'signup' && styles.toggleTextActive]}>Sign Up</Text>
             </TouchableOpacity>
           </View>
+
+          {showAppleSignIn && (
+            <View style={styles.socialBlock}>
+              <AppleAuthentication.AppleAuthenticationButton
+                buttonType={
+                  mode === 'signup'
+                    ? AppleAuthentication.AppleAuthenticationButtonType.SIGN_UP
+                    : AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN
+                }
+                buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.WHITE}
+                cornerRadius={8}
+                style={styles.appleButton}
+                onPress={handleAppleSignIn}
+              />
+              <TouchableOpacity onPress={() => setShowLegal(true)} activeOpacity={0.75}>
+                <Text style={styles.socialLegalText}>
+                  By continuing with Apple, you accept Thallo's Terms, Privacy Policy, Health Disclaimer, and AI Disclosure.
+                </Text>
+              </TouchableOpacity>
+              <View style={styles.orRow}>
+                <View style={styles.orLine} />
+                <Text style={styles.orText}>or</Text>
+                <View style={styles.orLine} />
+              </View>
+            </View>
+          )}
 
           {mode === 'signup' && (
             <View style={{ flexDirection: 'row', gap: 10 }}>
@@ -493,6 +564,17 @@ const styles = StyleSheet.create({
   divider: { height: 1, backgroundColor: colors.border, marginBottom: 24 },
 
   formCard: { gap: 12 },
+  socialBlock: { gap: 10, marginBottom: 2 },
+  appleButton: { width: '100%', height: 48 },
+  socialLegalText: {
+    fontSize: 11,
+    color: colors.textMuted,
+    lineHeight: 15,
+    textAlign: 'center',
+  },
+  orRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 2 },
+  orLine: { flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: colors.border },
+  orText: { fontSize: 11, color: colors.textMuted, fontWeight: '700', textTransform: 'uppercase' },
 
   toggle: {
     flexDirection: 'row',

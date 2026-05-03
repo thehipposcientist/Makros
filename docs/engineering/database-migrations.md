@@ -1,6 +1,6 @@
 # Database Migrations
 
-Last updated: 2026-05-02
+Last updated: 2026-05-03
 
 ## Pattern
 
@@ -16,6 +16,7 @@ SQLModel `create_all` creates tables but does NOT ALTER existing columns. Idempo
 | `_ensure_food_nutrition_extras_column` | `FoodNutrition.extra_nutrients` JSONB. |
 | `_ensure_user_recovery_columns` | `recovery_question` + `recovery_answer_hash`. |
 | `_ensure_user_subscription_tier_column` | `User.subscription_tier` plus one-shot existing-user Pro backfill marker in `app_migrations`. |
+| `_ensure_user_oauth_columns` | `User.apple_sub` plus a unique non-null index for Sign in with Apple account links. |
 | `_ensure_workout_completion_stimulus_column` | Stimulus tracking on completions. |
 | `_ensure_workout_completion_health_columns` | Health signals on completions. |
 | `_ensure_workout_history_source_columns` | Completion source metadata plus custom exercise muscle/slug snapshots for history rollups. |

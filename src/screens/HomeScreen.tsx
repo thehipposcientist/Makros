@@ -38,7 +38,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
 import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, getMealHistory, updateMeal } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, getMealHistory, updateMeal, deleteLoggedMeal } from '../services/api';
 import type { ApplyActionResult, MealHistoryEntry } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
@@ -6549,11 +6549,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <StreakConsistencyWidget authToken={authToken} themeName={userProfile.themePreference} displayName={userProfile.firstName || username || undefined} />
             )}
 
-            {/* End-of-week coach review. The next PlanWeek is already generated;
-                this card handles the one-day review/regenerate window and recap. */}
+            {/* End-of-week coach review. Surfaces after the final day-7 workout
+                or during the day-8 review window; renewal stays separate. */}
             {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (
               <WeeklyCheckinCard
-                key={`weekly-checkin-${planWeek?.id ?? 'none'}-${planWeek?.end_date ?? 'none'}`}
+                key={`weekly-checkin-${planWeek?.id ?? 'none'}-${planWeek?.end_date ?? 'none'}-${planRefreshKey}`}
                 authToken={authToken}
                 themeName={userProfile.themePreference}
                 onCheckinCompleted={() => {
@@ -7918,6 +7918,53 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                       <Ionicons name="create-outline" size={18} color={mealPalette.strong} />
                                     </TouchableOpacity>
                                   )}
+                                  {/* Delete from history. For backend-logged meals
+                                      (have a historyMealId) we hard-delete via
+                                      DELETE /meals/{id} which cascades MealItem
+                                      rows + recomputes the daily metrics. For
+                                      plan-checked meals without a backend row,
+                                      uncheck them (effectively removes them from
+                                      this day's logged set). */}
+                                  <TouchableOpacity
+                                    onPress={() => {
+                                      Alert.alert(
+                                        'Delete meal?',
+                                        hasBackendMeals && historyMealId
+                                          ? `Remove "${m.meal}" from this day's history? This recalculates calories, macros, and your nutrition score for ${label}.`
+                                          : `Remove "${m.meal}" from this day's log? You can re-check it from the Plan tab anytime.`,
+                                        [
+                                          { text: 'Cancel', style: 'cancel' },
+                                          {
+                                            text: 'Delete',
+                                            style: 'destructive',
+                                            onPress: async () => {
+                                              if (hasBackendMeals && historyMealId && authToken) {
+                                                try {
+                                                  await deleteLoggedMeal(authToken, historyMealId);
+                                                  // Optimistic local strip + bump the
+                                                  // refresh key so getMealHistory
+                                                  // re-fires and any cards / score
+                                                  // tiles re-render.
+                                                  setBackendMealHistory(prev => prev?.filter(e => e.id !== historyMealId) ?? null);
+                                                  setMealLogRefreshKey(k => k + 1);
+                                                } catch (err: any) {
+                                                  Alert.alert('Could not delete', err?.message ?? 'Try again.');
+                                                }
+                                              } else {
+                                                // Plan-check path — uncheck so the
+                                                // day no longer counts this meal as
+                                                // logged. Same handler the row's
+                                                // checkbox uses.
+                                                handleToggleMeal(d, mealType);
+                                              }
+                                            },
+                                          },
+                                        ],
+                                      );
+                                    }}
+                                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                                    <Ionicons name="trash-outline" size={18} color={themeColors.textMuted} />
+                                  </TouchableOpacity>
                                 </View>
                               );
                             })}

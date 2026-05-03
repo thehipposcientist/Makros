@@ -1,9 +1,14 @@
+import json
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
+from typing import Any
+from urllib.request import urlopen
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from jose import JWTError, jwt
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -18,6 +23,10 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 logger = get_logger("app.auth")
 LEGAL_VERSION = "2026-04-29"
 TOKEN_TTL_MINUTES = 30
+APPLE_ISSUER = "https://appleid.apple.com"
+APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys"
+APPLE_JWKS_TTL_SECONDS = 6 * 60 * 60
+_apple_jwks_cache: dict[str, Any] | None = None
 
 
 def _user_read(user: User) -> UserRead:
@@ -115,6 +124,110 @@ def _is_expired(ts: datetime | None) -> bool:
     return ts < datetime.now(timezone.utc)
 
 
+def _apple_audiences() -> list[str]:
+    values = [
+        os.getenv("APPLE_CLIENT_IDS"),
+        os.getenv("APPLE_CLIENT_ID"),
+        os.getenv("APPLE_BUNDLE_ID"),
+        os.getenv("IOS_BUNDLE_IDENTIFIER"),
+        "com.thallo.app",
+    ]
+    audiences: list[str] = []
+    for raw in values:
+        for item in (raw or "").split(","):
+            audience = item.strip()
+            if audience and audience not in audiences:
+                audiences.append(audience)
+    return audiences
+
+
+def _apple_jwks(force_refresh: bool = False) -> list[dict[str, Any]]:
+    global _apple_jwks_cache
+    now = time.time()
+    if (
+        not force_refresh
+        and _apple_jwks_cache
+        and _apple_jwks_cache.get("expires_at", 0) > now
+    ):
+        return list(_apple_jwks_cache.get("keys", []))
+    try:
+        with urlopen(APPLE_JWKS_URL, timeout=5) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("auth_apple_jwks_failed", extra={"error": str(e)})
+        raise HTTPException(status_code=503, detail="Unable to verify Apple sign-in right now")
+    keys = payload.get("keys") or []
+    if not keys:
+        raise HTTPException(status_code=503, detail="Unable to verify Apple sign-in right now")
+    _apple_jwks_cache = {"keys": keys, "expires_at": now + APPLE_JWKS_TTL_SECONDS}
+    return keys
+
+
+def _verify_apple_identity_token(identity_token: str) -> dict[str, Any]:
+    token = (identity_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=422, detail="Apple identity token is required")
+    try:
+        header = jwt.get_unverified_header(token)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Apple sign-in token is invalid")
+    kid = header.get("kid")
+    if not kid:
+        raise HTTPException(status_code=401, detail="Apple sign-in token is invalid")
+
+    key = next((k for k in _apple_jwks() if k.get("kid") == kid), None)
+    if key is None:
+        key = next((k for k in _apple_jwks(force_refresh=True) if k.get("kid") == kid), None)
+    if key is None:
+        raise HTTPException(status_code=401, detail="Apple sign-in token is invalid")
+
+    last_error: Exception | None = None
+    for audience in _apple_audiences():
+        try:
+            claims = jwt.decode(
+                token,
+                key,
+                algorithms=["RS256"],
+                audience=audience,
+                issuer=APPLE_ISSUER,
+            )
+            if claims.get("sub"):
+                return claims
+        except JWTError as e:
+            last_error = e
+    logger.warning("auth_apple_token_failed", extra={"error": str(last_error or "missing_sub")})
+    raise HTTPException(status_code=401, detail="Apple sign-in token is invalid")
+
+
+def _apple_email_verified(claims: dict[str, Any]) -> bool:
+    value = claims.get("email_verified")
+    return value is True or str(value).lower() == "true"
+
+
+def _clean_optional_name(value: str | None) -> str | None:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return None
+    return cleaned[:80]
+
+
+def _oauth_username_seed(email: str) -> str:
+    local = email.split("@", 1)[0]
+    seed = re.sub(r"[^a-zA-Z0-9_]+", "", local).lower()
+    return (seed or "apple")[:24]
+
+
+def _unique_oauth_username(session: Session, email: str) -> str:
+    base = _oauth_username_seed(email)
+    candidate = base
+    suffix = 1
+    while session.exec(select(User).where(User.username == candidate)).first():
+        tail = f"_{suffix}"
+        candidate = f"{base[: max(1, 32 - len(tail))]}{tail}"
+        suffix += 1
+    return candidate
+
+
 @router.post("/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 @limiter.limit("30/hour;100/day")
 def register(body: UserCreate, request: Request, session: Session = Depends(get_session)):
@@ -191,6 +304,120 @@ def login(body: LoginRequest, request: Request, session: Session = Depends(get_s
     set_request_context(user_id=user.id)
     logger.info("auth_login_ok", extra={"user_id": user.id, "email": body.email, "ip": ip})
     return Token(access_token=token)
+
+
+class AppleAuthRequest(BaseModel):
+    identity_token: str
+    first_name: str | None = None
+    last_name: str | None = None
+    legal_version: str | None = None
+    accepted_terms: bool = True
+    accepted_privacy: bool = True
+    accepted_health_disclaimer: bool = True
+    accepted_ai_disclaimer: bool = True
+
+
+class OAuthToken(Token):
+    is_new_user: bool = False
+
+
+def _require_apple_legal_acceptance(body: AppleAuthRequest) -> None:
+    if not (
+        body.accepted_terms
+        and body.accepted_privacy
+        and body.accepted_health_disclaimer
+        and body.accepted_ai_disclaimer
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Terms, Privacy Policy, health disclaimer, and AI disclaimer must be accepted",
+        )
+
+
+@router.post("/apple", response_model=OAuthToken)
+@limiter.limit("10/minute;100/hour")
+def login_with_apple(
+    body: AppleAuthRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    ip = _client_ip(request)
+    claims = _verify_apple_identity_token(body.identity_token)
+    apple_sub = str(claims.get("sub") or "").strip()
+    if not apple_sub:
+        raise HTTPException(status_code=401, detail="Apple sign-in token is invalid")
+
+    user = session.exec(select(User).where(User.apple_sub == apple_sub)).first()
+    if user:
+        if not user.is_active:
+            logger.warning("auth_apple_disabled", extra={"user_id": user.id, "ip": ip})
+            raise HTTPException(status_code=403, detail="Account disabled")
+        token = create_access_token(user.id, token_version=user.token_version)
+        set_request_context(user_id=user.id)
+        logger.info("auth_apple_ok", extra={"user_id": user.id, "ip": ip, "is_new": False})
+        return OAuthToken(access_token=token, is_new_user=False)
+
+    email = str(claims.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(
+            status_code=422,
+            detail="Apple did not provide an email address. Try again after sharing your email with Thallo.",
+        )
+    _validate_email(email)
+    if not _apple_email_verified(claims):
+        raise HTTPException(status_code=401, detail="Apple email is not verified")
+
+    now = datetime.now(timezone.utc)
+    first_name = _clean_optional_name(body.first_name)
+    last_name = _clean_optional_name(body.last_name)
+    existing = session.exec(select(User).where(User.email == email)).first()
+    if existing:
+        if not existing.is_active:
+            logger.warning("auth_apple_disabled", extra={"user_id": existing.id, "email": email, "ip": ip})
+            raise HTTPException(status_code=403, detail="Account disabled")
+        if existing.apple_sub and existing.apple_sub != apple_sub:
+            raise HTTPException(status_code=409, detail="This email is already linked to a different Apple account")
+        existing.apple_sub = apple_sub
+        existing.email_verified_at = existing.email_verified_at or now
+        if first_name and not existing.first_name:
+            existing.first_name = first_name
+        if last_name and not existing.last_name:
+            existing.last_name = last_name
+        session.add(existing)
+        session.commit()
+        session.refresh(existing)
+        token = create_access_token(existing.id, token_version=existing.token_version)
+        set_request_context(user_id=existing.id)
+        logger.info("auth_apple_linked", extra={"user_id": existing.id, "email": email, "ip": ip})
+        return OAuthToken(access_token=token, is_new_user=False)
+
+    _require_apple_legal_acceptance(body)
+    legal_version = (body.legal_version or LEGAL_VERSION).strip() or LEGAL_VERSION
+    user = User(
+        email=email,
+        username=_unique_oauth_username(session, email),
+        hashed_password=hash_password(secrets.token_urlsafe(32)),
+        first_name=first_name,
+        last_name=last_name,
+        apple_sub=apple_sub,
+        terms_accepted_at=now,
+        terms_version=legal_version,
+        privacy_accepted_at=now,
+        privacy_version=legal_version,
+        health_disclaimer_accepted_at=now,
+        health_disclaimer_version=legal_version,
+        ai_disclaimer_accepted_at=now,
+        ai_disclaimer_version=legal_version,
+        email_verified_at=now,
+        subscription_tier="pro",
+    )
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    token = create_access_token(user.id, token_version=user.token_version)
+    set_request_context(user_id=user.id)
+    logger.info("auth_apple_created", extra={"user_id": user.id, "email": email, "ip": ip})
+    return OAuthToken(access_token=token, is_new_user=True)
 
 
 @router.get("/me", response_model=UserRead)

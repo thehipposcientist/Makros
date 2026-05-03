@@ -1310,6 +1310,21 @@ def _ensure_user_token_version_column() -> None:
         print(f"[migration] user token_version column failed (non-fatal): {e}")
 
 
+def _ensure_user_oauth_columns() -> None:
+    """Add provider identity links for native account sign-in."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text('ALTER TABLE "user" ADD COLUMN IF NOT EXISTS apple_sub VARCHAR'))
+            conn.execute(text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS ix_user_apple_sub '
+                'ON "user"(apple_sub) WHERE apple_sub IS NOT NULL'
+            ))
+    except Exception as e:
+        print(f"[migration] user oauth columns failed (non-fatal): {e}")
+
+
 def _ensure_user_trust_account_columns() -> None:
     """Add launch-readiness account/legal columns to the user table.
 
@@ -1479,6 +1494,7 @@ def create_db_and_tables():
     _ensure_gear_items_usage_columns()
     _ensure_user_name_columns()
     _ensure_user_trust_account_columns()
+    _ensure_user_oauth_columns()
     _ensure_user_token_version_column()
     _ensure_user_reports_table()
     _ensure_plan_week_tables()

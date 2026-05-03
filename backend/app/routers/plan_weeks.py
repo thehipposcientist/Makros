@@ -39,9 +39,11 @@ from app.services.workout.goals import effective_goal_id
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/plans", tags=["plan-weeks"])
 
-# Day 8 generates immediately. The expired week stays promptable for one day
-# so the user can review coach feedback and save durable changes for future
-# generated weeks; after that it becomes a saved recap.
+# Day 8 generates immediately. The week can become promptable on day 7 once
+# the final scheduled workout is complete; otherwise the expired week stays
+# promptable for one day after the end date so the user can review coach
+# feedback and save durable changes for future generated weeks. After that it
+# becomes a saved recap.
 CHECKIN_PROMPT_DAYS_AFTER_END = 1
 CHECKIN_RECAP_DAYS_AFTER_END = 7
 
@@ -202,6 +204,63 @@ def _checkin_prompt_active_for_dates(week_end: date, *, today: date | None = Non
 def _checkin_recap_active_for_dates(week_end: date, *, today: date | None = None) -> bool:
     today = today or date.today()
     return today <= week_end + timedelta(days=CHECKIN_RECAP_DAYS_AFTER_END)
+
+
+def _plan_day_allows_week_end_checkin(
+    plan_day: PlanDay | None,
+    completions: list | None = None,
+) -> bool:
+    if not plan_day or plan_day.is_rest:
+        return False
+    if plan_day.status == "completed" or (
+        bool(plan_day.locked) and plan_day.lock_reason == "completed"
+    ):
+        return True
+    real_completions = [
+        c for c in (completions or [])
+        if (getattr(c, "duration_seconds", 0) or 0) > 30
+    ]
+    if not real_completions:
+        return False
+    try:
+        from app.services.workout.week_manager import _completion_matches_plan_day
+        return any(
+            _completion_matches_plan_day(plan_day, getattr(c, "focus_label", "") or "")
+            for c in real_completions
+        )
+    except Exception:
+        return False
+
+
+def _week_end_workout_checkin_available(
+    db: Session,
+    pw: PlanWeek,
+    *,
+    today: date | None = None,
+) -> bool:
+    """True on day 7 after the week's final scheduled workout is complete."""
+    today = today or date.today()
+    if pw.end_date != today:
+        return False
+    plan_day = db.exec(
+        select(PlanDay).where(
+            PlanDay.plan_week_id == pw.id,
+            PlanDay.day_date == pw.end_date,
+        )
+    ).first()
+    if _plan_day_allows_week_end_checkin(plan_day):
+        return True
+
+    from app.models import WorkoutCompletion
+    completions = list(
+        db.exec(
+            select(WorkoutCompletion).where(
+                WorkoutCompletion.user_id == pw.user_id,
+                WorkoutCompletion.workout_date == pw.end_date,
+            )
+        ).all()
+    )
+    return _plan_day_allows_week_end_checkin(plan_day, completions)
 
 
 def _review_snapshot_from_review(review, *, history_context: dict | None = None) -> dict:
@@ -734,7 +793,8 @@ def get_checkin_status(
     """Return whether a coaching check-in is pending, completed, or not due.
 
     status:
-      "pending"   — prior expired week is inside its one-day prompt window
+      "pending"   — prior expired week is inside its one-day prompt window, or
+                    the active week ended today and the final workout is done
       "completed" — check-in was submitted for this week
       "skipped"   — user explicitly skipped
       "none"      — no prompt or recent recap to show
@@ -745,7 +805,10 @@ def get_checkin_status(
     pw = get_active_week(db, current_user.id)
     checkin = None
 
-    if pw and week_needs_renewal(pw):
+    if pw and (
+        week_needs_renewal(pw)
+        or _week_end_workout_checkin_available(db, pw, today=today)
+    ):
         checkin = _ensure_plan_week_checkin_pending(db, current_user.id, pw)
     if not checkin:
         checkin = db.exec(

@@ -16,6 +16,7 @@
     "plugins": [
       "expo-notifications",
       "expo-secure-store",
+      "expo-apple-authentication",
       [
         "expo-camera",
         {
@@ -28,6 +29,7 @@
       "bundleIdentifier": "com.thallo.app",
       "appleTeamId": "2K37DX38H2",
       "supportsTablet": false,
+      "usesAppleSignIn": true,
       "infoPlist": {
         "NSCameraUsageDescription": "Thallo uses the camera to scan food barcodes, take food photos for nutrition tracking, and capture photos of your gear (running shoes, bikes) for AI mileage estimates.",
         "NSPhotoLibraryUsageDescription": "Thallo accesses your photo library to attach gear photos for AI mileage tracking and to add food photos to logged meals.",
