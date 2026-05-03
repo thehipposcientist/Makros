@@ -8422,8 +8422,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         <ErrorBoundary>
         <FadeInView key={viewingFriend ? `friend-${viewingFriend.user_id}` : 'social-home'} duration={280} slideDistance={10} style={{ flex: 1 }}>
           {viewingFriend ? (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 136 }}>
+            <ScrollView testID="social-friend-detail-screen" style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 136 }}>
               <TouchableOpacity
+                testID="social-friend-detail-back"
+                accessibilityLabel="social-friend-detail-back"
                 onPress={() => setViewingFriend(null)}
                 style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 16 }}
                 activeOpacity={0.7}
@@ -8433,10 +8435,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </TouchableOpacity>
 
               {/* Friend profile card */}
-              <View style={{
-                backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
-                borderRadius: 14, padding: 20, alignItems: 'center', marginBottom: 16,
-              }}>
+              <View
+                testID="social-friend-profile-card"
+                style={{
+                  backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
+                  borderRadius: 14, padding: 20, alignItems: 'center', marginBottom: 16,
+                }}>
                 <View style={{
                   width: 56, height: 56, borderRadius: 28,
                   backgroundColor: themeColors.primary + '22',
@@ -8466,10 +8470,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
 
               {/* This week stats */}
-              <View style={{
-                backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
-                borderRadius: 14, padding: 16, marginBottom: 16,
-              }}>
+              <View
+                testID="social-friend-stats-card"
+                style={{
+                  backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
+                  borderRadius: 14, padding: 16, marginBottom: 16,
+                }}>
                 <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginBottom: 12 }}>
                   THIS WEEK
                 </Text>
@@ -8537,7 +8543,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       </Text>
                     </View>
                   )}
-                  {!friendFeedLoading && friendFeedItems.map(item => {
+                  {!friendFeedLoading && friendFeedItems.map((item, index) => {
                     const p = item.payload;
                     const isExpanded = expandedFeedItemId === item.id;
                     const mins = p.duration_seconds ? Math.round(p.duration_seconds / 60) : null;
@@ -8545,6 +8551,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     return (
                       <TouchableOpacity
                         key={item.id}
+                        testID={`social-friend-feed-row-${index}`}
+                        accessibilityLabel={`social-friend-feed-row-${index}`}
                         activeOpacity={0.85}
                         onPress={() => {
                           LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -11585,6 +11593,7 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
   label: string;
   onSelect: (key: string) => void;
 }) {
+  const testPrefix = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   const selected = items.find(item => item.key === selectedKey) ?? items[0];
   const statusLabel = (state: WeekStripState) => {
     if (state === 'done') return 'Done';
@@ -11603,7 +11612,7 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
   const currentDayKey = todayKey();
 
   return (
-    <View style={styles.weekStripWrap}>
+    <View testID={`${testPrefix}-strip`} style={styles.weekStripWrap}>
       <View style={styles.weekStripHeader}>
         <Text style={[styles.weekStripLabel, { color: tc.textMuted }]}>{label}</Text>
         {selected ? (
@@ -11613,7 +11622,7 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
         ) : null}
       </View>
       <View style={styles.weekStripDays}>
-        {items.map(item => {
+        {items.map((item, index) => {
           const active = item.key === selectedKey;
           const isToday = item.key === currentDayKey;
           const color = stateColor(item.state);
@@ -11626,6 +11635,7 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
           return (
             <TouchableOpacity
               key={item.key}
+              testID={`${testPrefix}-day-chip-${index}`}
               onPress={() => onSelect(item.key)}
               activeOpacity={0.82}
               accessibilityRole="button"

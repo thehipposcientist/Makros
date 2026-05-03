@@ -213,9 +213,11 @@ export default function SocialFeedView({
 
     return (
       <FadeInView delay={Math.min(index * 45, 260)} duration={280} slideDistance={10}>
-      <View style={styles.card}>
+      <View testID={`social-feed-row-${index}`} style={styles.card}>
         <View style={styles.cardHeader}>
           <TouchableOpacity
+            testID={`social-feed-author-${index}`}
+            accessibilityLabel={`social-feed-author-${index}`}
             onPress={() => onViewAuthor?.(item.user_id, author)}
             hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
             style={styles.authorRow}
@@ -322,6 +324,8 @@ export default function SocialFeedView({
 
         <View style={styles.actionRow}>
           <TouchableOpacity
+            testID={`social-feed-like-${index}`}
+            accessibilityLabel={`social-feed-like-${index}`}
             onPress={() => handleLike(item)}
             disabled={!!pendingLikes[item.id]}
             style={styles.likeBtn}
@@ -417,6 +421,7 @@ export default function SocialFeedView({
 
   return (
     <FlatList
+      testID="social-feed-list"
       data={displayItems}
       keyExtractor={keyExtractor}
       renderItem={renderItem}

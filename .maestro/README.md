@@ -95,6 +95,19 @@ Or:
 make smoke-mobile-state
 ```
 
+Seeded social graph, digest, and sharing-off privacy branch:
+
+```bash
+make seed-e2e
+maestro test .maestro/flows/social-digest.yaml
+```
+
+Or:
+
+```bash
+make smoke-mobile-social
+```
+
 Free-vs-Pro gates need beta full-access disabled for the running JS bundle:
 
 ```bash
@@ -158,6 +171,10 @@ maestro test \
   `extendedWaitUntil` in `signup-and-regen.yaml` to `180000` or higher.
 - **Expo Go bundle id differs.** See section above — default is the release
   `com.thallo.app`.
+- **Dev-client native module drift.** If a run black-screens and Metro reports
+  `Cannot find native module 'ExpoWebBrowser'` or similar, rebuild/reinstall the
+  dev client (`npx expo run:ios` or the matching Android command) before
+  re-running Maestro.
 - **Light vs dark theme copy.** Flows match on user-visible text. Current copy
   is theme-invariant, but if a future theme overrides labels (e.g. "Get Started"
   → "Start"), the flow will need updating.
@@ -201,6 +218,8 @@ maestro test \
 - `flows/meal-history-facts-alignment.yaml` — verifies Meal History, Nutrition
   Trend, and Nutrition & Gut Facts read the same seeded backend meal-history
   totals
+- `flows/social-digest.yaml` — verifies seeded Activity feed, friend list,
+  friend detail workout rows, and sharing-off privacy messaging
 - `flows/free-vs-pro-gates.yaml` — true free tier vs pro gate assertions
   (requires `EXPO_PUBLIC_DISABLE_FREE_BETA_FULL_ACCESS=1`)
 - `flows/login.yaml` — helper flow for logging in an existing user

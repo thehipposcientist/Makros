@@ -1,0 +1,124 @@
+# Seeded social digest E2E coverage.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: social-digest
+tags:
+  - e2e
+  - seeded
+  - social
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-social"
+
+# Activity should load the bounded feed plus the privacy boundary copy. The
+# seeded graph has one sharing friend and one sharing-off friend.
+- extendedWaitUntil:
+    visible:
+      id: "social-feed-list"
+    timeout: 30000
+- assertVisible:
+    text: ".*Friends only see workouts.*"
+- extendedWaitUntil:
+    visible:
+      id: "social-feed-row-0"
+    timeout: 30000
+
+# Friends tab should render both seeded friends and route into the detail view.
+- tapOn:
+    id: "social-tab-friends"
+- extendedWaitUntil:
+    visible:
+      id: "social-friends-list"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "social-friend-row-e2e_social_a"
+    timeout: 30000
+- assertVisible: "Casey Shares"
+- assertVisible: "Morgan Friend"
+
+- tapOn:
+    id: "social-friend-row-e2e_social_a"
+- extendedWaitUntil:
+    visible:
+      id: "social-friend-detail-screen"
+    timeout: 30000
+- assertVisible: "Casey Shares"
+- assertVisible: "@e2e_social_a"
+- extendedWaitUntil:
+    visible:
+      id: "social-friend-feed-row-0"
+    timeout: 30000
+- tapOn:
+    id: "social-friend-feed-row-0"
+- extendedWaitUntil:
+    visible: "Dumbbell Bench Press"
+    timeout: 15000
+
+# Sharing-off friends should show the privacy branch instead of feed rows.
+- tapOn:
+    id: "social-friend-detail-back"
+- extendedWaitUntil:
+    visible:
+      id: "social-tab-friends"
+    timeout: 15000
+- tapOn:
+    id: "social-tab-friends"
+- extendedWaitUntil:
+    visible:
+      id: "social-friend-row-e2e_social_b"
+    timeout: 30000
+- tapOn:
+    id: "social-friend-row-e2e_social_b"
+- extendedWaitUntil:
+    visible:
+      id: "social-friend-detail-screen"
+    timeout: 30000
+- assertVisible: "Morgan Friend"
+- extendedWaitUntil:
+    visible: "This friend has activity sharing turned off."
+    timeout: 15000

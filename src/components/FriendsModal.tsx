@@ -57,6 +57,14 @@ const goalLabel = (g: string | null | undefined): string => {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 };
 
+function e2eId(value: string | number | null | undefined): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 export default function FriendsModal({ visible, authToken, onClose, themeName, inline, onViewFriend }: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
@@ -370,6 +378,8 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
       <View style={styles.tabStrip}>
         {SOCIAL_ACTIVITY_FEED_ENABLED ? (
           <TouchableOpacity
+            testID="social-tab-activity"
+            accessibilityLabel="social-tab-activity"
             style={[styles.tab, activeTab === 'activity' && styles.tabActive]}
             onPress={() => setActiveTab('activity')}
           >
@@ -379,6 +389,8 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
           </TouchableOpacity>
         ) : null}
         <TouchableOpacity
+          testID="social-tab-friends"
+          accessibilityLabel="social-tab-friends"
           style={[styles.tab, activeTab === 'friends' && styles.tabActive]}
           onPress={() => setActiveTab('friends')}
         >
@@ -418,7 +430,10 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
               <ActivityIndicator color={colors.primary} />
             </View>
           ) : (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 8, paddingBottom: inline ? 128 : 24 }}>
+            <ScrollView
+              testID="social-friends-list"
+              style={{ flex: 1 }}
+              contentContainerStyle={{ paddingTop: 8, paddingBottom: inline ? 128 : 24 }}>
               {/* This week card */}
               <View style={styles.card}>
                 <Text style={styles.cardLabel}>THIS WEEK</Text>
@@ -507,6 +522,8 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                   friends.map((f) => (
                     <TouchableOpacity
                       key={f.user_id}
+                      testID={`social-friend-row-${e2eId(f.username)}`}
+                      accessibilityLabel={`social-friend-row-${e2eId(f.username)}`}
                       style={styles.friendRow}
                       activeOpacity={0.7}
                       onPress={() => {

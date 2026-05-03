@@ -369,8 +369,14 @@ tags:
     timeout: 120000
 
 # ── Start Workout → ActiveWorkoutScreen ───────────────────────────────────────
+- scrollUntilVisible:
+    element:
+      id: "start-workout-cta"
+    direction: UP
+    timeout: 15000
+    visibilityPercentage: 50
 - tapOn:
-    point: "36%,55%"
+    id: "start-workout-cta"
 
 # ActiveWorkoutScreen shows a warmup acknowledgement "Start Workout" button too.
 # Confirm we actually navigated (exercise list, rest timer, or warmup copy visible).

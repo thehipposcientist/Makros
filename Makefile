@@ -1,6 +1,6 @@
 .PHONY: start tunnel stop reset-db wait-backend test dev seed-e2e \
         deploy deploy-backend deploy-ios deploy-ios-clean smoke-prod smoke-mobile smoke-mobile-seeded \
-        smoke-mobile-workouts smoke-mobile-state smoke-mobile-free-gates
+        smoke-mobile-workouts smoke-mobile-state smoke-mobile-social smoke-mobile-free-gates
 
 # ── AWS / deploy config ──────────────────────────────────────────────────────
 AWS_ACCOUNT_ID  := 225629394823
@@ -222,6 +222,14 @@ smoke-mobile-state: seed-e2e
 	@maestro test .maestro/flows/active-workout-completion.yaml
 	@maestro test .maestro/flows/meals-supplements-state.yaml
 	@maestro test .maestro/flows/meal-history-facts-alignment.yaml
+
+smoke-mobile-social: seed-e2e
+	@echo "Running Maestro social digest flow (requires backend + Metro running)..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@maestro test .maestro/flows/social-digest.yaml
 
 smoke-mobile-free-gates: seed-e2e
 	@echo "Running Maestro free/pro gate flow."

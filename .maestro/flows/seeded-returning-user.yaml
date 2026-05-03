@@ -59,37 +59,40 @@ tags:
     text: ".*Upper.*"
 
 # Walk the full persisted 7-day PlanWeek. This catches stale cache fallbacks,
-# missing PlanDay rows, and date-strip regressions before we hand testers a build.
+# missing PlanDay rows, and date-strip regressions before we hand testers a
+# build. Use indexed week-chip IDs because seed-e2e anchors PlanWeek at the
+# day the seed command runs; absolute day labels go stale daily.
 - extendedWaitUntil:
-    visible: "Workout week"
+    visible:
+      id: "workout-week-day-chip-0"
     timeout: 30000
 - tapOn:
-    text: "Today, Sat 2, .*"
+    id: "workout-week-day-chip-0"
 - assertVisible:
     text: ".*Upper.*"
 - tapOn:
-    text: "Sun 3, .*"
+    id: "workout-week-day-chip-1"
 - assertVisible:
     text: ".*Lower.*"
 - tapOn:
-    text: "Mon 4, Rest day"
+    id: "workout-week-day-chip-2"
 - assertVisible: "Rest Day"
 - tapOn:
-    text: "Tue 5, .*"
+    id: "workout-week-day-chip-3"
 - assertVisible:
     text: ".*Upper.*"
 - tapOn:
-    text: "Wed 6, .*"
+    id: "workout-week-day-chip-4"
 - assertVisible:
     text: ".*Lower.*"
 - tapOn:
-    text: "Thu 7, Rest day"
+    id: "workout-week-day-chip-5"
 - assertVisible: "Rest Day"
 - tapOn:
-    text: "Fri 8, Rest day"
+    id: "workout-week-day-chip-6"
 - assertVisible: "Rest Day"
 - tapOn:
-    text: "Today, Sat 2, .*"
+    id: "workout-week-day-chip-0"
 
 # Weekly digest is time-gated by the app (Sunday or after 6pm local). When it
 # is eligible, assert the seeded summary card has real session/adherence/set data.

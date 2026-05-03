@@ -1105,12 +1105,40 @@ def delete_meal(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
+    """Hard-delete a meal + its items. The post-commit metrics refresh is
+    isolated — if anything in `_refresh_daily_metrics` (gut-health
+    classifier, readiness cache invalidation, etc.) raises, we still
+    return 204 because the deletion itself succeeded. Older builds let a
+    metrics-side hiccup surface as a misleading 500 to the client even
+    though the row was already gone."""
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     meal = db.get(Meal, meal_id)
     if not meal or meal.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Meal not found")
     affected_date = meal.meal_date
-    for item in db.exec(select(MealItem).where(MealItem.meal_id == meal_id)).all():
-        db.delete(item)
-    db.delete(meal)
-    db.commit()
-    _refresh_daily_metrics(db, current_user.id, affected_date, force=True)
+
+    try:
+        for item in db.exec(select(MealItem).where(MealItem.meal_id == meal_id)).all():
+            db.delete(item)
+        db.delete(meal)
+        db.commit()
+    except Exception as e:
+        # Roll back so the session isn't left in a bad state for the next
+        # request handled by this connection.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _log.exception("[meals/delete] commit failed for meal_id=%s user=%s: %s", meal_id, current_user.id, e)
+        # Re-raise as a typed HTTPException so the client gets a clear
+        # error instead of a generic 500.
+        raise HTTPException(status_code=500, detail=f"Could not delete meal: {e!s}")
+
+    # Metrics refresh — best-effort. The deletion already committed; any
+    # failure here is a server-side observability concern, not a user one.
+    try:
+        _refresh_daily_metrics(db, current_user.id, affected_date, force=True)
+    except Exception as e:
+        _log.warning("[meals/delete] metrics refresh failed (non-fatal) meal_id=%s: %s", meal_id, e)
