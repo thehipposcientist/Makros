@@ -170,8 +170,9 @@ struct ContentView: View {
                     onEndWorkout: {
                         active = false
                         heartRate.discard()
-                        conn.sendCommand("end_workout")
-                        if let sid = conn.workout?.sessionId, !sid.isEmpty {
+                        let sid = conn.workout?.sessionId ?? ""
+                        conn.sendCommand("end_workout", payload: ["sessionId": sid])
+                        if !sid.isEmpty {
                             UserDefaults.standard.set(sid, forKey: "thallo.lastEndedSessionId")
                         }
                         UserDefaults.standard.set(false, forKey: "thallo.pendingWorkoutLaunch")
@@ -179,8 +180,9 @@ struct ContentView: View {
                     onCancelWorkout: {
                         active = false
                         heartRate.discard()
-                        conn.sendCommand("cancel_workout")
-                        if let sid = conn.workout?.sessionId, !sid.isEmpty {
+                        let sid = conn.workout?.sessionId ?? ""
+                        conn.sendCommand("cancel_workout", payload: ["sessionId": sid])
+                        if !sid.isEmpty {
                             UserDefaults.standard.set(sid, forKey: "thallo.lastEndedSessionId")
                         }
                         UserDefaults.standard.set(false, forKey: "thallo.pendingWorkoutLaunch")
@@ -1178,11 +1180,9 @@ private struct SleepView: View {
                             .font(.system(size: 9))
                             .foregroundColor(theme.textMuted)
                     }
-                    // Show whatever sleep data we have. Earlier this required
-                    // a score OR hours, but RHR / HRV alone (which arrive even
-                    // when sleep wasn't tracked overnight) deserve to render
-                    // — empty-state was hiding useful vitals.
-                    if let s = conn.sleep, s.score != nil || s.hoursLastNight != nil || s.restingHr != nil || s.hrvMs != nil {
+                    // Show whatever sleep data we have, including an explicit
+                    // unavailable note when last night was not recorded.
+                    if let s = conn.sleep, s.score != nil || s.hoursLastNight != nil || s.restingHr != nil || s.hrvMs != nil || s.label != nil || s.summary != nil {
                         // Score dial — same visual language as the
                         // readiness chip on Today.
                         HStack(alignment: .center, spacing: 12) {

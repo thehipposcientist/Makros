@@ -3723,6 +3723,18 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {/* Sleep Score */}
+          {isProTier && healthEnabled && isHealthKitAvailable() && healthSummary && !healthSummary.sleepScore && (
+            <View style={[styles.vitalsCard, { marginTop: 0 }]}>
+              <View style={[styles.vitalsHeader, { marginBottom: 8 }]}>
+                <Ionicons name="moon-outline" size={16} color={tc.textMuted} />
+                <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Sleep Score</Text>
+                <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.6 }}>UNAVAILABLE</Text>
+              </View>
+              <Text {...dynamicTextProps} style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 18 }}>
+                No sleep stages were recorded for last night. Wear your Apple Watch overnight, then open Thallo after Apple Health syncs.
+              </Text>
+            </View>
+          )}
           {isProTier && healthSummary?.sleepScore && (() => {
             const ss = healthSummary.sleepScore;
             const scoreColor = ss.score >= 80 ? tc.success : ss.score >= 60 ? tc.warning : tc.error;

@@ -71,6 +71,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
     let equipment: String?
     let plannedTargetWeightLbs: Double?
     let recommendation: String?
+    let isGuide: Bool?
     /// "warmup" | "primary" | "secondary" | "isolation" | "core" | "cooldown"
     /// — shown as a badge on the active card so the user knows to
     /// dial intensity up or down for that slot. Optional for back-compat.
@@ -81,7 +82,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
     let swapOptions: [WatchSwapOption]
 
     enum CodingKeys: String, CodingKey {
-        case name, sets, reps, restSeconds, equipment, plannedTargetWeightLbs, recommendation, slotRole, swapOptions
+        case name, sets, reps, restSeconds, equipment, plannedTargetWeightLbs, recommendation, isGuide, slotRole, swapOptions
     }
 
     init(
@@ -92,6 +93,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         equipment: String?,
         plannedTargetWeightLbs: Double?,
         recommendation: String?,
+        isGuide: Bool?,
         slotRole: String?,
         swapOptions: [WatchSwapOption] = []
     ) {
@@ -102,6 +104,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         self.equipment = equipment
         self.plannedTargetWeightLbs = plannedTargetWeightLbs
         self.recommendation = recommendation
+        self.isGuide = isGuide
         self.slotRole = slotRole
         self.swapOptions = swapOptions
     }
@@ -115,6 +118,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         self.equipment = c.decodeFlexibleStringIfPresent(forKey: .equipment)
         self.plannedTargetWeightLbs = c.decodeFlexibleDoubleIfPresent(forKey: .plannedTargetWeightLbs)
         self.recommendation = c.decodeFlexibleStringIfPresent(forKey: .recommendation)
+        self.isGuide = try? c.decodeIfPresent(Bool.self, forKey: .isGuide)
         self.slotRole = c.decodeFlexibleStringIfPresent(forKey: .slotRole)
         self.swapOptions = (try? c.decodeIfPresent([WatchSwapOption].self, forKey: .swapOptions)) ?? []
     }

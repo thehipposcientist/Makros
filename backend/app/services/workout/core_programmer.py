@@ -344,7 +344,7 @@ def core_slot_accepts_exercise(slot: Slot, exercise: dict) -> bool:
         return movement == "anti_rotation"
 
     if category == CAT_LATERAL_STABILITY:
-        return slug in {"side_plank", "copenhagen_plank"}
+        return slug == "copenhagen_plank" or slug.startswith("side_plank")
 
     if category == CAT_FLEXION:
         return movement == "flexion"
@@ -372,7 +372,7 @@ def core_slot_score_bonus(slot: Slot, exercise: dict) -> float:
     if category == CAT_ANTI_ROTATION:
         if "pallof" in name:
             return 2.5
-        if "shoulder tap" in name:
+        if "shoulder tap" in name or "plank reach" in name:
             return 1.5
         if tracking == "time":
             return 1.0
@@ -381,12 +381,14 @@ def core_slot_score_bonus(slot: Slot, exercise: dict) -> float:
     if category == CAT_LATERAL_STABILITY:
         if slug == "side_plank":
             return 3.0
+        if slug.startswith("side_plank"):
+            return 2.75
         if slug == "copenhagen_plank":
             return 2.5
         return 0.0
 
     if category == CAT_FLEXION:
-        if any(term in name for term in ("leg raise", "knee raise", "reverse crunch", "sit-up", "v-up", "toes-to-bar")):
+        if any(term in name for term in ("leg raise", "knee raise", "reverse crunch", "sit-up", "v-up", "toes-to-bar", "crunch", "flutter", "scissor")):
             return 2.5
         return 1.0
 

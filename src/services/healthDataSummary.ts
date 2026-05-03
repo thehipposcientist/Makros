@@ -78,9 +78,13 @@ const STALE_AFTER_MS = 30 * 60 * 1000;   // 30 min
 
 let _inflight: Promise<HealthDataSummary | null> | null = null;
 
+function localDateISO(date: Date = new Date()): string {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
 function emptySummary(): HealthDataSummary {
   return {
-    dateISO: new Date().toISOString().slice(0, 10),
+    dateISO: localDateISO(),
     computedAtMs: Date.now(),
     hkAvailable: false,
     steps: null, sleepMinutes: null, restingHeartRate: null, hrv: null,
@@ -253,7 +257,7 @@ async function compute(opts: { age?: number | null }): Promise<HealthDataSummary
   // already does this for adaptive_macros). Keeping this aggregator
   // focused on Apple Health-native fields.
   return {
-    dateISO: new Date().toISOString().slice(0, 10),
+    dateISO: localDateISO(),
     computedAtMs: Date.now(),
     hkAvailable: true,
     steps: (raw as any).stepsToday ?? null,
@@ -287,9 +291,10 @@ export async function getHealthDataSummary(
   opts: { age?: number | null; onCached?: (s: HealthDataSummary) => void } = {},
 ): Promise<HealthDataSummary | null> {
   const cached = await getCachedHealthDataSummary();
-  if (cached && opts.onCached) opts.onCached(cached);
-  // Refresh if stale OR no cache at all.
-  if (!cached || (Date.now() - cached.computedAtMs) > STALE_AFTER_MS) {
+  const cachedIsForToday = cached?.dateISO === localDateISO();
+  if (cached && cachedIsForToday && opts.onCached) opts.onCached(cached);
+  // Refresh if stale, from another local day, OR no cache at all.
+  if (!cached || !cachedIsForToday || (Date.now() - cached.computedAtMs) > STALE_AFTER_MS) {
     return refreshHealthDataSummary({ age: opts.age ?? null });
   }
   return cached;

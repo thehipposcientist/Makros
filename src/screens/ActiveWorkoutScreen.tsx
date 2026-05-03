@@ -30,6 +30,7 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
 })();
 const SOCIAL_WORKOUT_POSTS_ENABLED = true;
 const SHARE_WORKOUT_MODAL_OPEN_DELAY_MS = 360;
+const WATCH_COMMAND_START_GRACE_MS = 5000;
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
@@ -62,7 +63,7 @@ import { setActiveWatchSessionId } from '../utils/activeWatchSession';
 import { WatchBridge } from '../../modules/thallo-watch-bridge';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
-import { shouldHideWeight, shouldHideReps, formatDurationTarget } from '../utils/exerciseDisplay';
+import { shouldHideWeight, shouldHideReps, formatDurationTarget, isGuideExercise } from '../utils/exerciseDisplay';
 import { startRestActivity, updateRestActivity, getRestActivityState, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
 import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, scoreSwapCandidate } from '../utils/swapScoring';
 import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate, tierOf } from '../utils/subscription';
@@ -391,6 +392,7 @@ const TIMED_REPS_RE = /^\d+\s*-?\s*\d*\s*s(ec|econds?)?$/i;
 // string. Old regex removed with the function.
 
 function isTimedExercise(name: string, targetReps?: string | number): boolean {
+  if (isGuideExercise({ name, reps: targetReps, targetReps })) return true;
   if (TIMED_EXERCISE_RE.test(name)) return true;
   // Detect time-based rep schemes like "30s", "30-60s", "45 sec", "60 seconds",
   // "25 min", "20-30 min". Coerce to string — AI plans occasionally return
@@ -429,6 +431,7 @@ function isLongCardioExercise(name: string, targetReps?: string | number, opts?:
 }
 
 function getTimedExerciseTip(name: string, targetReps?: string | number, loggedSets?: any[]): string | null {
+  if (isGuideExercise({ name, reps: targetReps, targetReps })) return null;
   const n = (name || '').toLowerCase();
   const setNum = (loggedSets?.length ?? 0) + 1;
 
@@ -636,6 +639,20 @@ function parseDurationInput(text: string, preferMinutes: boolean): number {
     return Math.round(preferMinutes ? n * 60 : n);
   }
   return NaN;
+}
+
+function parseDurationTargetSeconds(targetReps: unknown, preferMinutes: boolean): number {
+  const t = String(targetReps ?? '').trim().toLowerCase();
+  if (!t) return NaN;
+  const range = t.match(/(\d+(?:\.\d+)?)\s*(?:[-–—]\s*(\d+(?:\.\d+)?))?\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes)?/);
+  if (!range) return NaN;
+  const first = parseFloat(range[1]);
+  const second = range[2] ? parseFloat(range[2]) : first;
+  if (!Number.isFinite(first) || !Number.isFinite(second)) return NaN;
+  const planned = (first + second) / 2;
+  const unit = range[3] ?? '';
+  const minutes = /^m/.test(unit) || (!unit && preferMinutes);
+  return Math.max(0, Math.round(minutes ? planned * 60 : planned));
 }
 
 /** Format a duration in seconds for display in an input field. Short
@@ -908,17 +925,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           .catch(() => {});
         // Initial push on mount.
         pushActive();
-        // If the watch is paired but not reachable right now, the
-        // Thallo watch app isn't open — show the nudge. Suppress if
-        // there's no watch at all (isPaired=false) so users without
-        // an Apple Watch never see this modal.
+        // If the watch is paired but not reachable right now, keep
+        // that as passive status only. Starting a workout on the
+        // phone should never be blocked by a watch-open prompt.
         try {
           const paired = WatchBridge.isPaired();
           const reachable = isWatchReachable();
           setWatchStatus({ paired, reachable });
-          if (paired && !reachable) {
-            setShowOpenWatchPrompt(true);
-          }
+          if (!reachable) setShowOpenWatchPrompt(false);
         } catch { /* bridge optional */ }
         // Re-push whenever the watch becomes reachable. Idempotent.
         const unsub = onWatchReachabilityChange((info) => {
@@ -987,6 +1001,29 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     (async () => {
       try {
         const { onWatchCommand } = await import('../utils/watchSync');
+        const activeWorkoutCommands = new Set([
+          'log_set',
+          'skip_rest',
+          'swap_exercise',
+          'end_workout',
+          'cancel_workout',
+        ]);
+        const commandMatchesCurrentSession = (command: string, payload: Record<string, any>): boolean => {
+          if (!activeWorkoutCommands.has(command)) return true;
+          const incomingSessionId = typeof payload?.sessionId === 'string' && payload.sessionId.trim().length > 0
+            ? payload.sessionId.trim()
+            : null;
+          if (incomingSessionId && incomingSessionId !== watchSessionId.current) {
+            console.log(`[watch] ignored stale ${command} for session=${incomingSessionId.slice(0, 8)} current=${watchSessionId.current.slice(0, 8)}`);
+            return false;
+          }
+          const tsMs = Number(payload?.tsMs);
+          if (Number.isFinite(tsMs) && tsMs + WATCH_COMMAND_START_GRACE_MS < startTime.current) {
+            console.log(`[watch] ignored stale ${command}; command was before current phone workout start`);
+            return false;
+          }
+          return true;
+        };
         const unsub = onWatchCommand((command, payload) => {
           if (command === 'pull_state') {
             // Watch asked for a refresh while we're mid-workout —
@@ -1007,6 +1044,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             })();
             return;
           }
+          if (!commandMatchesCurrentSession(command, payload)) return;
           if (command === 'log_set') {
             const exIdx = Number(payload?.exerciseIndex ?? -1);
             const weight = payload?.weightLbs;
@@ -1381,6 +1419,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   useEffect(() => {
     const ex = exercises[activeExIdx];
     if (!ex || !authToken) return;
+    if (isGuideExercise(ex, workout)) {
+      setPreSetHints(prev => {
+        if (!prev[activeExIdx]) return prev;
+        const next = { ...prev };
+        delete next[activeExIdx];
+        return next;
+      });
+      return;
+    }
     if (ex.sets.length > 0) return;
     if (preSetHints[activeExIdx]) return;
     let cancelled = false;
@@ -1423,7 +1470,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
     })();
     return () => { cancelled = true; };
-  }, [activeExIdx, exercises, authToken, goal, weightLbs]);
+  }, [activeExIdx, exercises, authToken, goal, weightLbs, workout.focus, workout.stimulus]);
 
   // Inline set inputs: keyed by "exIdx-setSlot" (0-based slot index)
   const [setInputs, setSetInputs] = useState<Record<string, { weight: string; reps: string; duration: string }>>({});
@@ -2022,20 +2069,22 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   ): any => ({
     ...workout,
     exercises: sourceExercises.map((ex, index) => {
+      const guide = isGuideExercise(ex, workout);
       const hint = index === opts?.skipHintIndex ? undefined : preSetHints[index];
-      const recommendedWeight = hint?.recommendedWeight ?? ex.targetWeightLbs ?? null;
-      const recommendation = hint?.recommendedWeight != null
+      const recommendedWeight = guide ? null : hint?.recommendedWeight ?? ex.targetWeightLbs ?? null;
+      const recommendation = guide ? null : hint?.recommendedWeight != null
         ? `Try ${Math.round(hint.recommendedWeight)} lbs${hint.recommendedReps ? ` x ${hint.recommendedReps}` : ''}`
         : ex.aiRecommendation;
       return {
         name: ex.name,
         sets: getTargetSetCount(ex.targetSets),
         reps: ex.targetReps,
-        restSeconds: ex.targetRestSeconds,
+        restSeconds: guide ? 0 : ex.targetRestSeconds,
         equipment: ex.equipment,
         targetWeightLbs: recommendedWeight,
         recommendedWeightLbs: recommendedWeight,
         recommendation,
+        isGuide: guide,
         slot_role: (ex as any).slotRole ?? (ex as any).slot_role ?? null,
         prescriptionType: (ex as any).prescriptionType ?? (ex as any).prescription_type ?? null,
         swapOptions: swapCandidatesForExercise(ex).map(option => ({
@@ -2266,6 +2315,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const ex = exercises[exIdx];
       const existingSet = ex?.sets[setIdx];
       if (!existingSet) { setEditingSetKey(null); setEditDraft({}); return; }
+      const guide = isGuideExercise(ex, workout);
       const newWeight = !isNaN(w) && w >= 0 ? w : existingSet.weightLbs;
       const newReps = !isNaN(r) && r > 0 ? r : existingSet.reps;
       if (newWeight === existingSet.weightLbs && newReps === existingSet.reps) {
@@ -2276,7 +2326,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const updatedSets = ex.sets.map((s, si) =>
         si === setIdx ? { ...s, weightLbs: newWeight, reps: newReps } : s
       );
-      if (setIdx === updatedSets.length - 1 && shouldPromptRir(newReps, ex.targetReps) && updatedSets[setIdx]?.rir == null) {
+      if (!guide && setIdx === updatedSets.length - 1 && shouldPromptRir(newReps, ex.targetReps) && updatedSets[setIdx]?.rir == null) {
         setPendingRir({ exIdx, setIdx });
       } else if (pendingRir?.exIdx === exIdx && pendingRir.setIdx === setIdx) {
         setPendingRir(null);
@@ -2287,11 +2337,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setEditingSetKey(null);
       setEditDraft({});
       clearLiveRecommendationState(exIdx, { preserveNextTarget: true });
-      if (!shouldPromptRir(newReps, ex.targetReps)) {
+      if (!guide && !shouldPromptRir(newReps, ex.targetReps)) {
         maybeRefreshRecommendationForExerciseRef.current?.(exIdx, updatedSets);
       }
     }, 800);
-  }, [clearLiveRecommendationState, editDraft, exercises, pendingRir]);
+  }, [clearLiveRecommendationState, editDraft, exercises, pendingRir, workout.focus, workout.stimulus]);
 
   const handleSaveEditedSet = useCallback(() => {
     const w = parseFloat(editSetWeight);
@@ -2306,7 +2356,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const updatedSets = ex?.sets.map((s, si) =>
       si === editSetIdx ? { ...s, weightLbs: w, reps: r } : s
     ) ?? [];
-    if (ex && editSetIdx === updatedSets.length - 1 && shouldPromptRir(r, ex.targetReps) && updatedSets[editSetIdx]?.rir == null) {
+    const guide = isGuideExercise(ex, workout);
+    if (ex && !guide && editSetIdx === updatedSets.length - 1 && shouldPromptRir(r, ex.targetReps) && updatedSets[editSetIdx]?.rir == null) {
       setPendingRir({ exIdx: editSetExIdx, setIdx: editSetIdx });
     } else if (pendingRir?.exIdx === editSetExIdx && pendingRir.setIdx === editSetIdx) {
       setPendingRir(null);
@@ -2317,10 +2368,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }));
     setEditSetVisible(false);
     clearLiveRecommendationState(editSetExIdx, { preserveNextTarget: true });
-    if (!shouldPromptRir(r, ex?.targetReps)) {
+    if (!guide && !shouldPromptRir(r, ex?.targetReps)) {
       maybeRefreshRecommendationForExerciseRef.current?.(editSetExIdx, updatedSets);
     }
-  }, [clearLiveRecommendationState, editSetExIdx, editSetIdx, editSetWeight, editSetReps, exercises, pendingRir]);
+  }, [clearLiveRecommendationState, editSetExIdx, editSetIdx, editSetWeight, editSetReps, exercises, pendingRir, workout.focus, workout.stimulus]);
 
   // Log a specific set slot inline (no modal).
   // `overrideDuration` bypasses the state read for timed exercises —
@@ -2341,6 +2392,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const ex = currentExercises[exIdx];
     if (!ex) return;
     const timed = isTimedExercise(ex?.name ?? '', ex?.targetReps);
+    const guide = isGuideExercise(ex, workout);
 
     // Watch-originated logs pass weight / reps directly as overrides
     // so we don't have to round-trip through React state first. Phone
@@ -2352,15 +2404,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
     if (timed) {
       const durText = overrideDuration?.trim() || input?.duration?.trim() || '';
-      if (!durText) {
+      const preferMinutes = isLongCardioExercise(ex?.name ?? '', ex?.targetReps, { primaryMuscle: ex?.primaryMuscle });
+      const plannedDurationSeconds = guide ? parseDurationTargetSeconds(ex?.targetReps, preferMinutes) : NaN;
+      if (!durText && !guide && !Number.isFinite(plannedDurationSeconds)) {
         if (!silent) Alert.alert('Enter duration', 'Fill in the duration before logging this set.');
         return;
       }
       // Plain numbers default to minutes for long cardio (treadmill,
       // bike, etc.) and seconds for short holds (plank, dead hang).
-      const preferMinutes = isLongCardioExercise(ex?.name ?? '', ex?.targetReps, { primaryMuscle: ex?.primaryMuscle });
-      const durationSeconds = parseDurationInput(durText, preferMinutes);
-      if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+      const durationSeconds = durText
+        ? parseDurationInput(durText, preferMinutes)
+        : Number.isFinite(plannedDurationSeconds)
+          ? plannedDurationSeconds
+          : 0;
+      if (!Number.isFinite(durationSeconds) || (!guide && durationSeconds <= 0)) {
         if (!silent) Alert.alert('Enter duration', 'Enter a valid duration like "25:00", "25 min", or "45s".');
         return;
       }
@@ -2374,6 +2431,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const exMeta = {
         name: ex?.name, equipment: (ex as any)?.equipment,
         reps: ex?.targetReps,
+        primaryMuscle: ex?.primaryMuscle,
         primary_muscle: (ex as any)?.primary_muscle,
         _primary_muscle: (ex as any)?._primary_muscle,
         _archetype: (ex as any)?._archetype,
@@ -2458,9 +2516,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Mirror the phone's set-only state when no rest is about to start.
     // Rest pushes below carry the same exercise/set fields, so sending both
     // can make WCSession deliver the older timer after a newer set-only packet.
-    if (cleanSets.length >= effectiveTotal) {
+    if (cleanSets.length >= effectiveTotal || guide) {
       const progressSetNumber = nextExIdx === exIdx
-        ? Math.min(cleanSets.length, effectiveTotal)
+        ? guide && cleanSets.length < effectiveTotal
+          ? cleanSets.length + 1
+          : Math.min(cleanSets.length, effectiveTotal)
         : 1;
       (async () => {
         try {
@@ -2469,13 +2529,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             exerciseIndex: nextExIdx,
             setNumber: progressSetNumber,
             restRemainingSec: 0,
+            recommendation: null,
           });
         } catch { /* watch bridge optional */ }
       })();
     }
 
     // Start rest timer automatically if more sets remain
-    if (cleanSets.length < effectiveTotal) {
+    if (!guide && cleanSets.length < effectiveTotal) {
       const restSeconds = Math.max(15, ex.targetRestSeconds || 60);
       const restStartedAtMs = sourceActionAtMs && Number.isFinite(sourceActionAtMs) && sourceActionAtMs > 0
         ? sourceActionAtMs
@@ -2528,7 +2589,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
 
     const setsLogged = cleanSets.length;
-    if (!timed && setsLogged < effectiveTotal) {
+    if (!timed && !guide && setsLogged < effectiveTotal) {
       if (shouldPromptRir(newSet.reps, ex.targetReps)) {
         setPendingRir({ exIdx, setIdx: cleanSets.length - 1 });
       } else if (pendingRir?.exIdx === exIdx) {
@@ -3075,6 +3136,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Capture synchronously before any state updates
     const exIdx = logExIdx;
     const ex    = exercises[exIdx];
+    const guide = isGuideExercise(ex, workout);
     const targetSetCount = getEffectiveTargetSetCount(exIdx, ex, ex.sets.length + 1);
     console.log('[LOG_SET] Processing set for exercise:', ex.name, 'current sets:', ex.sets.length, 'target sets:', targetSetCount);
 
@@ -3092,14 +3154,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     console.log('[LOG_SET] Cleared AI error index');
 
     // Only ask for RIR when the user clearly overshoots the target range.
-    if (shouldPromptRir(repsNum, ex.targetReps)) {
+    if (!guide && shouldPromptRir(repsNum, ex.targetReps)) {
       setPendingRir({ exIdx, setIdx: updatedSets.length - 1 });
     } else {
       setPendingRir(null);
     }
 
     // Start rest timer automatically if more sets remain for this exercise.
-    if (updatedSets.length < targetSetCount) {
+    if (!guide && updatedSets.length < targetSetCount) {
       const restSeconds = Math.max(15, ex.targetRestSeconds || 60);
       const nextSetLabel = `Set ${updatedSets.length + 1}: ${weightNum} lbs x ${ex.targetReps}`;
       restDurationSeconds.current = restSeconds;
@@ -3136,8 +3198,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           const { pushProgressToWatch } = await import('../utils/watchSync');
           await pushProgressToWatch({
             exerciseIndex: exIdx,
-            setNumber: Math.min(updatedSets.length, targetSetCount),
+            setNumber: guide && updatedSets.length < targetSetCount
+              ? updatedSets.length + 1
+              : Math.min(updatedSets.length, targetSetCount),
             restRemainingSec: 0,
+            recommendation: null,
           });
         } catch { /* watch bridge optional */ }
       })();
@@ -3149,7 +3214,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: undefined } : e));
     setRestCue(null);
     const setsLogged = updatedSets.length;
-    if (setsLogged >= targetSetCount) {
+    if (guide || setsLogged >= targetSetCount) {
       console.log('[AI] Skipping recommendation - all sets completed for this exercise');
     } else if (shouldPromptRir(repsNum, ex.targetReps)) {
       console.log('[AI] Recommendation deferred until significant-overage RIR is logged.');
@@ -3190,6 +3255,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const ex = exercises[exIdx];
     const targetSetCount = ex ? getEffectiveTargetSetCount(exIdx, ex, setsForExercise.length) : 3;
     if (!ex || setsForExercise.length >= targetSetCount || !authToken) return;
+    if (isGuideExercise(ex, workout)) {
+      clearLiveRecommendationState(exIdx);
+      return;
+    }
     if (isTimedExercise(ex.name, ex.targetReps)) {
       const tip = getTimedExerciseTip(ex.name, ex.targetReps, setsForExercise);
       if (tip) {
@@ -3296,7 +3365,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } finally {
       setAiLoadingIdx(null);
     }
-  }, [authToken, cachedProfileIsPro, exercises, getEffectiveTargetSetCount, goal, rescheduleRestNotifications, restForExercise, restRemaining, theme.colors.primary]);
+  }, [authToken, cachedProfileIsPro, clearLiveRecommendationState, exercises, getEffectiveTargetSetCount, goal, rescheduleRestNotifications, restForExercise, restRemaining, theme.colors.primary, workout.focus, workout.stimulus]);
 
   const maybeRefreshRecommendationForExercise = useCallback(async (
     exIdx: number,
@@ -4431,6 +4500,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           const rawTotal        = targetSetCount + (extraSetCounts[i] ?? 0) - (removedSetCounts[i] ?? 0);
           const totalSetCount   = Math.max(ex.sets.length, rawTotal);
           const timed           = isTimedExercise(ex.name, ex.targetReps);
+          const guide           = isGuideExercise(ex, workout);
           const isDone          = ex.sets.length >= totalSetCount;
           // Fire the big check-stamp once on the false→true transition.
           // Ref flag per-index prevents replays on every re-render.
@@ -4453,7 +4523,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 return currentScore > bestScore ? current : best;
               }, null)
             : null;
-          const restLabel       = `${Math.max(15, ex.targetRestSeconds || 60)}s rest`;
+          const restLabel       = guide ? 'guided' : `${Math.max(15, ex.targetRestSeconds || 60)}s rest`;
           const circuitRun = coreCircuitRunAt(exercises, i);
           const isCircuitItem = circuitRun.length >= 2;
           const circuitPosition = isCircuitItem ? circuitRun.indexOf(i) : -1;
@@ -4558,7 +4628,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     {isCircuitItem ? `${targetSetCount} rounds · ${ex.targetReps}` : `${targetSetCount} × ${ex.targetReps}`}  ·  {restLabel}
                     {formatEquipmentLabel(ex.equipment) ? `  ·  ${formatEquipmentLabel(ex.equipment)}` : ''}
                   </Text>
-                  {timed && hrZones.length > 0 && (() => {
+                  {timed && !guide && hrZones.length > 0 && (() => {
                     const n = (ex.name || '').toLowerCase();
                     const isInterval = /interval|hiit|sprint|tabata/.test(n);
                     const isEasy = /walk|jog|easy|zone.?2|recovery/.test(n);
@@ -4702,7 +4772,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   {/* ── Pre-set coach hint (first set only, before
                        anything is logged). Clean label + weight; no
                        rationale text so it can't truncate. */}
-                  {ex.sets.length === 0 && preSetHints[i] && preSetHints[i].recommendedWeight != null && (
+                  {!guide && ex.sets.length === 0 && preSetHints[i] && preSetHints[i].recommendedWeight != null && (
                     <View style={{
                       borderLeftWidth: 3,
                       borderLeftColor: workoutPalette.strong,
@@ -4733,7 +4803,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   </TouchableOpacity>
 
                   {/* ── RIR prompt — shown after an over-target set ── */}
-                  {pendingRir && pendingRir.exIdx === i && (
+                  {!guide && pendingRir && pendingRir.exIdx === i && (
                     <View style={[styles.aiBubble, { backgroundColor: workoutPalette.strong + '15', borderColor: workoutPalette.strong + '55', borderWidth: 1, flexDirection: 'column', alignItems: 'stretch', gap: 6 }]}>
                       <Text style={{ fontSize: 12, fontWeight: '800', color: workoutPalette.text }}>
                         Nice — how many more reps could you have done?
@@ -4940,7 +5010,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   {ex.sets.map((s, si) => (
                                     <View key={si} style={{ backgroundColor: themeColors.primary + '22', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 }}>
                                       <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary }}>
-                                        R{si + 1}: {s.durationSeconds != null ? `${Math.floor(s.durationSeconds / 60)}:${(s.durationSeconds % 60).toString().padStart(2, '0')}` : `${s.reps} reps`}
+                                        R{si + 1}: {guide && (s.durationSeconds ?? 0) <= 0
+                                          ? 'Done'
+                                          : s.durationSeconds != null
+                                            ? `${Math.floor(s.durationSeconds / 60)}:${(s.durationSeconds % 60).toString().padStart(2, '0')}`
+                                            : `${s.reps} reps`}
                                       </Text>
                                     </View>
                                   ))}
@@ -5015,6 +5089,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           const hideWeight = shouldHideWeight({
                             name: ex.name, equipment: ex.equipment,
                             reps: ex.targetReps,
+                            primaryMuscle: ex.primaryMuscle,
                             primary_muscle: (ex as any).primary_muscle,
                             _primary_muscle: (ex as any)._primary_muscle,
                             _archetype: (ex as any)._archetype,
@@ -5023,6 +5098,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           const hideReps = shouldHideReps({
                             name: ex.name, equipment: ex.equipment,
                             reps: ex.targetReps,
+                            primaryMuscle: ex.primaryMuscle,
                             primary_muscle: (ex as any).primary_muscle,
                             _primary_muscle: (ex as any)._primary_muscle,
                             _archetype: (ex as any)._archetype,
@@ -5292,7 +5368,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
                   {(() => {
                     const timedInterval = isTimedExercise(ex.name, ex.targetReps) && totalSetCount >= 2;
-                    const unitLabel = timedInterval ? 'Interval' : 'Set';
+                    const unitLabel = guide ? 'Step' : timedInterval ? 'Interval' : 'Set';
                     const extras = extraSetCounts[i] ?? 0;
                     return (
                       <>

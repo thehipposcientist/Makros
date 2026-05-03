@@ -1206,6 +1206,61 @@ function savedMealToSuggestion(saved: { id?: number; name: string; items?: any[]
   } as MealSuggestion;
 }
 
+function mealHistoryEntryToSuggestion(entry: MealHistoryEntry): MealSuggestion {
+  const mappedItems = (entry.items || []).map((it) => {
+    const qty = Number(it.quantity || 1);
+    const cal = Number(it.calories || 0);
+    const pro = Number(it.protein_g || 0);
+    const carbs = Number(it.carbs_g || 0);
+    const fat = Number(it.fat_g || 0);
+    return {
+      name: String(it.food_name || 'Item'),
+      quantity: qty,
+      unit: String(it.unit || 'serving'),
+      calories: cal,
+      protein: pro,
+      carbs,
+      fat,
+      baseQuantity: qty > 0 ? qty : 1,
+      baseCalories: cal,
+      baseProtein: pro,
+      baseCarbs: carbs,
+      baseFat: fat,
+    };
+  });
+  const itemTotals = mappedItems.reduce(
+    (acc, it) => ({
+      calories: acc.calories + Number(it.calories || 0),
+      protein: acc.protein + Number(it.protein || 0),
+      carbs: acc.carbs + Number(it.carbs || 0),
+      fat: acc.fat + Number(it.fat || 0),
+    }),
+    { calories: 0, protein: 0, carbs: 0, fat: 0 },
+  );
+  const totals = {
+    calories: Number(entry.totals?.calories ?? 0),
+    protein: Number(entry.totals?.protein_g ?? 0),
+    carbs: Number(entry.totals?.carbs_g ?? 0),
+    fat: Number(entry.totals?.fat_g ?? 0),
+  };
+  const hasHistoryTotals = totals.calories > 0 || totals.protein > 0 || totals.carbs > 0 || totals.fat > 0;
+  const resolvedTotals = hasHistoryTotals ? totals : itemTotals;
+  return {
+    meal: entry.name || 'Logged meal',
+    name: entry.name || 'Logged meal',
+    items: mappedItems as any,
+    foods: mappedItems.map(it => it.name),
+    amounts: mappedItems.map(it => `${it.quantity} ${it.unit}`),
+    calories: resolvedTotals.calories,
+    protein: resolvedTotals.protein,
+    carbs: resolvedTotals.carbs,
+    fat: resolvedTotals.fat,
+    _localId: `history_${entry.id}`,
+    _consumedAt: entry.consumed_at ?? entry.created_at ?? undefined,
+    _loggedMealId: entry.id,
+  } as MealSuggestion;
+}
+
 /** Build the front-page schedule directly from a persisted PlanWeek's
  *  dated days. Each PlanDay already carries its own date + workout JSON,
  *  so we surface them in chronological order — yesterday's completed
@@ -1844,6 +1899,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     for (const row of backendMealDailyRows) byDate.set(row.date, row);
     return byDate;
   }, [backendMealDailyRows]);
+  const backendMealSuggestionsByDate = useMemo(() => {
+    const byDate = new Map<string, MealSuggestion[]>();
+    for (const entry of backendMealHistory ?? []) {
+      if (!entry.meal_date) continue;
+      const existing = byDate.get(entry.meal_date) ?? [];
+      existing.push(mealHistoryEntryToSuggestion(entry));
+      byDate.set(entry.meal_date, existing);
+    }
+    return byDate;
+  }, [backendMealHistory]);
 
   // Meal-side day list mirrors the workout PlanWeek: 7 fixed dated days
   // (Mon-Sun anchor). Past days, today, and forward days are rendered
@@ -7478,10 +7543,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
             )}
 
-            {/* History — past 14 days of meal plans. Each day card expands
-                to show its meals; tapping a meal opens MealEditModal
-                pointed at that historical date. Edits persist via the same
-                handleMealSave path as the Plan tab. */}
+            {/* History — past 14 days. Backend meal history wins when it
+                exists; local plan/check snapshots are only the offline
+                fallback. */}
             {mealsSubTab === 'history' && (() => {
               // Build a date-ordered list of days that have either plan data
               // or meal-check data. Limited to the last 14 days.
@@ -7519,15 +7583,23 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const dt = new Date(Date.now() - i * 86400000);
                 const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
                 const p = nutritionPlansByDate[key];
+                const backendMeals = backendMealSuggestionsByDate.get(key) ?? [];
+                const scorePlan = backendMeals.length > 0
+                  ? {
+                      ...(p ?? { targets: { calories: 0, protein: 0, carbs: 0, fat: 0 } }),
+                      meals: backendMeals,
+                    } as DailyNutritionPlan
+                  : p;
                 const checks = checkedMealsByDate[key] ?? {};
                 const anyChecked = Object.values(checks).some(Boolean);
                 const isPast = key < todayStr;
                 let sc: number | null = null;
                 // Past days: only show a score when at least one meal was logged.
                 // Today: show the planned score regardless.
-                if (p && p.meals && p.meals.length > 0 && (!isPast || anyChecked)) {
+                const hasScoreTargets = (scorePlan?.targets?.calories ?? 0) > 0;
+                if (hasScoreTargets && scorePlan?.meals && scorePlan.meals.length > 0 && (!isPast || anyChecked || backendMeals.length > 0)) {
                   try {
-                    const ds = computeNutritionScore(p, userProfile?.goal ?? 'body_recomp');
+                    const ds = computeNutritionScore(scorePlan, userProfile?.goal ?? 'body_recomp');
                     sc = ds && ds.score > 0 ? ds.score : null;
                   } catch { sc = null; }
                 }
@@ -7564,6 +7636,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         // plan matching exactly). Removed meals are
                         // always excluded from the all-checked criterion.
                         const planDay = nutritionPlansByDate[c.date];
+                        const backendMeals = backendMealSuggestionsByDate.get(c.date) ?? [];
                         const checks = checkedMealsByDate[c.date] ?? {};
                         const removedSetHist = new Set((planDay?.removedMealIds ?? []) as string[]);
                         const activeKeys = (planDay?.meals ?? [])
@@ -7571,7 +7644,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           .filter(k => !removedSetHist.has(k));
                         const checkedCount = Object.values(checks).filter(Boolean).length;
                         const allPlanChecked = activeKeys.length > 0 && activeKeys.every(k => !!checks[k]);
-                        const fullyLogged = allPlanChecked || checkedCount >= 3;
+                        const fullyLogged = backendMeals.length >= 3 || allPlanChecked || checkedCount >= 3;
                         return (
                           <TouchableOpacity
                             key={c.date}
@@ -7635,11 +7708,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </View>
                   {sorted.map(d => {
                     const plan = nutritionPlansByDate[d];
-                    const meals = plan?.meals ?? [];
+                    const planMeals = plan?.meals ?? [];
+                    const backendMeals = backendMealSuggestionsByDate.get(d) ?? [];
+                    // When the backend has logged Meal rows, they are the
+                    // historical source of truth. Use them for both the
+                    // card total and expanded rows so the user can add up
+                    // what they see and land on the same number.
+                    const meals = backendMeals.length > 0 ? backendMeals : planMeals;
                     const checks = checkedMealsByDate[d] ?? {};
                     const backendRow = backendMealDailyByDate.get(d);
-                    const checkedCount = meals.reduce((n, _m, i) => n + (checks[`meal_${i}`] ? 1 : 0), 0);
-                    const totals = meals.reduce((acc, m, i) => {
+                    const hasBackendMeals = backendMeals.length > 0;
+                    const checkedCount = planMeals.reduce((n, _m, i) => n + (checks[`meal_${i}`] ? 1 : 0), 0);
+                    const loggedPlanTotals = planMeals.reduce((acc, m, i) => {
                       if (!checks[`meal_${i}`]) return acc;
                       return {
                         cal: acc.cal + (m.calories ?? 0),
@@ -7648,6 +7728,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         fat: acc.fat + (m.fat ?? 0),
                       };
                     }, { cal: 0, pro: 0, carb: 0, fat: 0 });
+                    const backendMealTotals = backendMeals.reduce((acc, m) => ({
+                      cal: acc.cal + (m.calories ?? 0),
+                      pro: acc.pro + (m.protein ?? 0),
+                      carb: acc.carb + (m.carbs ?? 0),
+                      fat: acc.fat + (m.fat ?? 0),
+                    }), { cal: 0, pro: 0, carb: 0, fat: 0 });
                     const displayTotals = backendRow
                       ? {
                           cal: backendRow.calories,
@@ -7655,7 +7741,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           carb: backendRow.carbs_g,
                           fat: backendRow.fat_g,
                         }
-                      : totals;
+                      : hasBackendMeals
+                        ? backendMealTotals
+                        : loggedPlanTotals;
                     const targets = plan?.targets;
                     const isExpanded = expandedHistoryDate === d;
                     const dateObj = new Date(d + 'T12:00:00');
@@ -7666,10 +7754,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     // meal is checked OR at least 3 meals are checked
                     // (covers manual loggers whose day didn't match the
                     // plan meal-count exactly).
-                    const _historyActiveKeys = meals.map((_, i) => `meal_${i}`);
+                    const _historyActiveKeys = planMeals.map((_, i) => `meal_${i}`);
                     const _historyAllChecked = _historyActiveKeys.length > 0 && _historyActiveKeys.every(k => !!checks[k]);
-                    const displayLoggedCount = backendRow?.meal_count ?? checkedCount;
-                    const cardFullyLogged = _historyAllChecked || displayLoggedCount >= 3;
+                    const displayLoggedCount = backendRow?.meal_count ?? (hasBackendMeals ? backendMeals.length : checkedCount);
+                    const cardFullyLogged = hasBackendMeals ? displayLoggedCount >= 3 : (_historyAllChecked || displayLoggedCount >= 3);
                     return (
                       <View key={d} style={{
                         backgroundColor: cardFullyLogged ? themeColors.success + '12' : themeColors.surface,
@@ -7699,7 +7787,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             </View>
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                               <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
-                                {backendRow ? `${displayLoggedCount} logged` : `${checkedCount}/${meals.length || '–'} logged`}
+                                {hasBackendMeals ? `${displayLoggedCount} logged` : `${checkedCount}/${meals.length || '–'} logged`}
                               </Text>
                               <Ionicons name={isExpanded ? 'chevron-down' : 'chevron-forward'} size={14} color={themeColors.textMuted} />
                             </View>
@@ -7715,10 +7803,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           <View style={{ borderTopWidth: 1, borderTopColor: themeColors.border, padding: 12, gap: 8 }}>
                             {meals.map((m, i) => {
                               const mealType = `meal_${i}`;
-                              const ate = !!checks[mealType];
+                              const ate = hasBackendMeals ? true : !!checks[mealType];
                               return (
-                                <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                                <View key={(m as any)._localId ?? `${d}-${i}`} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                                   <TouchableOpacity
+                                    disabled={hasBackendMeals}
                                     onPress={() => handleToggleMeal(d, mealType)}
                                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                                     style={{
@@ -7732,17 +7821,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                   </TouchableOpacity>
                                   <TouchableOpacity
                                     style={{ flex: 1 }}
+                                    disabled={hasBackendMeals}
                                     onPress={() => setEditingMeal({ dateKey: d, type: mealType, meal: m })}>
                                     <Text style={{ fontSize: 13, fontWeight: '600', color: themeColors.textPrimary }} numberOfLines={1}>{m.meal}</Text>
                                     <Text style={{ fontSize: 10, color: themeColors.textMuted, marginTop: 1 }}>
-                                      {Math.round(m.calories ?? 0)} cal · {Math.round(m.protein ?? 0)}g P
+                                      {Math.round(m.calories ?? 0)} cal · {Math.round(m.protein ?? 0)}g P · {Math.round(m.carbs ?? 0)}g C · {Math.round(m.fat ?? 0)}g F
                                     </Text>
                                   </TouchableOpacity>
-                                  <TouchableOpacity
-                                    onPress={() => setEditingMeal({ dateKey: d, type: mealType, meal: m })}
-                                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                                    <Ionicons name="create-outline" size={18} color={mealPalette.strong} />
-                                  </TouchableOpacity>
+                                  {!hasBackendMeals && (
+                                    <TouchableOpacity
+                                      onPress={() => setEditingMeal({ dateKey: d, type: mealType, meal: m })}
+                                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                                      <Ionicons name="create-outline" size={18} color={mealPalette.strong} />
+                                    </TouchableOpacity>
+                                  )}
                                 </View>
                               );
                             })}

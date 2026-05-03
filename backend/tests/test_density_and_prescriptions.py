@@ -495,6 +495,12 @@ def test_core_slot_accepts_lateral_only_side_plank_family():
         "primary_muscle": "core",
         "movement_pattern": "anti_extension",
     })
+    assert core_slot_accepts_exercise(slot, {
+        "slug": "side_plank_reach_through",
+        "name": "Side Plank Reach-Through",
+        "primary_muscle": "core",
+        "movement_pattern": "anti_extension",
+    })
     assert not core_slot_accepts_exercise(slot, {
         "slug": "dead_bug",
         "name": "Dead Bug",
@@ -534,6 +540,37 @@ def test_core_slot_accepts_flexion_family_only():
         "movement_pattern": "isolation",
     })
     _ok("lower-ab slot stays on core flexion exercises")
+
+
+def test_bodyweight_floor_core_candidates_survive_planner_filter():
+    """No-equipment floor core should be available in each core category."""
+    print("\n[test] core: floor bodyweight candidates survive planner filter")
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.services.workout.planner import filter_candidates
+
+    expected_by_category = {
+        CAT_ANTI_EXTENSION: {"dead_bug_heel_tap", "long_lever_plank", "bear_plank_hold", "hollow_rocks"},
+        CAT_ANTI_ROTATION: {"plank_reach"},
+        CAT_LATERAL_STABILITY: {"side_plank_hip_dip", "side_plank_reach_through"},
+        CAT_FLEXION: {"floor_crunch", "lying_leg_raise", "flutter_kicks", "scissor_kicks", "bicycle_crunch"},
+    }
+    for category, expected_slugs in expected_by_category.items():
+        slot = build_core_slot(category)
+        candidates = filter_candidates(
+            SEED_EXERCISES,
+            slot,
+            {"bodyweight"},
+            set(),
+            day_focus_family="full_body",
+        )
+        slugs = {ex["slug"] for ex in candidates}
+        missing = expected_slugs - slugs
+        assert not missing, f"{category} missing floor candidates: {sorted(missing)}"
+        for ex in candidates:
+            if ex["slug"] in expected_slugs:
+                assert ex["equipment_bucket"] == "bodyweight", ex
+                assert ex.get("equipment") == [], ex
+    _ok("floor core candidates cover anti-extension, anti-rotation, lateral, and flexion")
 
 
 def test_program_core_across_week_budget_honored():
@@ -633,6 +670,7 @@ cases = [
     test_core_slot_accepts_only_true_anti_extension_exercises,
     test_core_slot_accepts_lateral_only_side_plank_family,
     test_core_slot_accepts_flexion_family_only,
+    test_bodyweight_floor_core_candidates_survive_planner_filter,
     test_program_core_across_week_budget_honored,
     test_program_core_across_week_does_not_duplicate_carry_slots,
 ]

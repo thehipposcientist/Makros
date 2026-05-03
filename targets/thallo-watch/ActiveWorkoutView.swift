@@ -266,7 +266,7 @@ final class ActiveWorkoutState: ObservableObject {
     /// Called when advancing to a new exercise so the user doesn't
     /// have to dial from zero.
     func seed(for ex: WatchExercise) {
-        if pendingWeight == 0, let w = ex.plannedTargetWeightLbs {
+        if pendingWeight == 0, ex.isGuide != true, let w = ex.plannedTargetWeightLbs {
             pendingWeight = w
         }
         if pendingReps == 0 {
@@ -552,6 +552,17 @@ private struct ExerciseTab: View {
         min(max(1, state.setNumber), max(1, ex.sets))
     }
 
+    private func isGuideExercise(_ ex: WatchExercise) -> Bool {
+        if ex.isGuide == true { return true }
+        let name = ex.name.lowercased()
+        let role = (ex.slotRole ?? "").lowercased()
+        if ["mobility", "recovery", "stretch", "cooldown"].contains(role) { return true }
+        return name.range(
+            of: "stretch|foam.?roll|cat.?cow|pigeon|child.?s pose|spinal.?twist|world.?s greatest|90.?90|thoracic|downward.?dog|cobra|butterfly|savasana|yoga|vinyasa|yin|flow|mobility|pose\\b|breathwork|breathing|meditation",
+            options: .regularExpression
+        ) != nil
+    }
+
     var isLastExercise: Bool {
         state.exerciseIndex >= workout.exercises.count - 1
     }
@@ -777,13 +788,13 @@ private struct ExerciseTab: View {
                         .cornerRadius(4)
                 }
             }
-            if let rec = (state.currentRecommendation ?? ex.recommendation) {
+            if !isGuideExercise(ex), let rec = (state.currentRecommendation ?? ex.recommendation) {
                 Text(rec)
                     .font(.system(size: 11))
                     .foregroundColor(theme.primary)
                     .lineLimit(2)
             }
-            if let lw = state.lastLoggedWeight, let lr = state.lastLoggedReps {
+            if !isGuideExercise(ex), let lw = state.lastLoggedWeight, let lr = state.lastLoggedReps {
                 Text("Last: \(Int(lw)) lb × \(lr)")
                     .font(.system(size: 10))
                     .foregroundColor(theme.textMuted)
@@ -799,75 +810,131 @@ private struct ExerciseTab: View {
 
     // ─── Log-set card (Crown → weight or reps) ─────────────────────
 
+    @ViewBuilder
     private func logSetCard(_ ex: WatchExercise) -> some View {
+        if isGuideExercise(ex) {
+            guideSetCard(ex)
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                recommendedWeightRow(ex)
+                // Weight row — pill + stepper buttons. Stepper gives the
+                // user an obvious way to change the number without having
+                // to know the Digital Crown is the input device. Crown
+                // still works when the pill is focused.
+                HStack(spacing: 4) {
+                    Button {
+                        state.pendingWeight = max(0, state.pendingWeight - 5)
+                        WKInterfaceDevice.current().play(.click)
+                    } label: {
+                        Text("−").font(.system(size: 22, weight: .black))
+                            .frame(width: 34, height: 34)
+                            .background(theme.surfaceRaised)
+                            .cornerRadius(8)
+                            .foregroundColor(theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    crownPill("Weight", value: "\(Int(state.pendingWeight)) lb", active: crownTarget == .weight) {
+                        crownTarget = .weight
+                    }
+                    Button {
+                        state.pendingWeight = state.pendingWeight + 5
+                        WKInterfaceDevice.current().play(.click)
+                    } label: {
+                        Text("+").font(.system(size: 22, weight: .black))
+                            .frame(width: 34, height: 34)
+                            .background(theme.surfaceRaised)
+                            .cornerRadius(8)
+                            .foregroundColor(theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                HStack(spacing: 4) {
+                    Button {
+                        state.pendingReps = max(0, state.pendingReps - 1)
+                        WKInterfaceDevice.current().play(.click)
+                    } label: {
+                        Text("−").font(.system(size: 22, weight: .black))
+                            .frame(width: 34, height: 34)
+                            .background(theme.surfaceRaised)
+                            .cornerRadius(8)
+                            .foregroundColor(theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    crownPill("Reps", value: "\(state.pendingReps)", active: crownTarget == .reps) {
+                        crownTarget = .reps
+                    }
+                    Button {
+                        state.pendingReps = state.pendingReps + 1
+                        WKInterfaceDevice.current().play(.click)
+                    } label: {
+                        Text("+").font(.system(size: 22, weight: .black))
+                            .frame(width: 34, height: 34)
+                            .background(theme.surfaceRaised)
+                            .cornerRadius(8)
+                            .foregroundColor(theme.textPrimary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text("Tap a field then turn the Digital Crown, or use −/+")
+                    .font(.system(size: 9))
+                    .foregroundColor(theme.textMuted)
+                    .lineLimit(2)
+                Button(action: logSet) {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                        Text(isLastSet ? "Log & next exercise" : "Log set")
+                            .fontWeight(.bold)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, 9)
+                .background(theme.primary)
+                .foregroundColor(theme.background)
+                .cornerRadius(10)
+            }
+            .padding(10)
+            .background(theme.surface)
+            .cornerRadius(12)
+            // Bind Crown to whichever input is active. Weight moves in
+            // 2.5 lb increments (dumbbell granularity); reps in 1.
+            .focusable(true)
+            .digitalCrownRotation(
+                crownTarget == .weight
+                  ? Binding(get: { state.pendingWeight }, set: { state.pendingWeight = max(0, $0) })
+                  : Binding(get: { Double(state.pendingReps) },
+                            set: { state.pendingReps = max(0, Int($0.rounded())) }),
+                from: 0,
+                through: crownTarget == .weight ? 1000 : 50,
+                by: crownTarget == .weight ? 2.5 : 1,
+                sensitivity: .low,
+                isContinuous: false,
+                isHapticFeedbackEnabled: true
+            )
+        }
+    }
+
+    private func guideSetCard(_ ex: WatchExercise) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            recommendedWeightRow(ex)
-            // Weight row — pill + stepper buttons. Stepper gives the
-            // user an obvious way to change the number without having
-            // to know the Digital Crown is the input device. Crown
-            // still works when the pill is focused.
-            HStack(spacing: 4) {
-                Button {
-                    state.pendingWeight = max(0, state.pendingWeight - 5)
-                    WKInterfaceDevice.current().play(.click)
-                } label: {
-                    Text("−").font(.system(size: 22, weight: .black))
-                        .frame(width: 34, height: 34)
-                        .background(theme.surfaceRaised)
-                        .cornerRadius(8)
-                        .foregroundColor(theme.textPrimary)
+            HStack(spacing: 8) {
+                Image(systemName: "figure.cooldown")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(theme.primary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("GUIDE")
+                        .font(.system(size: 9, weight: .heavy))
+                        .tracking(0.8)
+                        .foregroundColor(theme.primary)
+                    Text(ex.reps.isEmpty ? "Move by feel" : ex.reps)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(theme.textSecondary)
+                        .lineLimit(2)
                 }
-                .buttonStyle(.plain)
-                crownPill("Weight", value: "\(Int(state.pendingWeight)) lb", active: crownTarget == .weight) {
-                    crownTarget = .weight
-                }
-                Button {
-                    state.pendingWeight = state.pendingWeight + 5
-                    WKInterfaceDevice.current().play(.click)
-                } label: {
-                    Text("+").font(.system(size: 22, weight: .black))
-                        .frame(width: 34, height: 34)
-                        .background(theme.surfaceRaised)
-                        .cornerRadius(8)
-                        .foregroundColor(theme.textPrimary)
-                }
-                .buttonStyle(.plain)
             }
-            HStack(spacing: 4) {
-                Button {
-                    state.pendingReps = max(0, state.pendingReps - 1)
-                    WKInterfaceDevice.current().play(.click)
-                } label: {
-                    Text("−").font(.system(size: 22, weight: .black))
-                        .frame(width: 34, height: 34)
-                        .background(theme.surfaceRaised)
-                        .cornerRadius(8)
-                        .foregroundColor(theme.textPrimary)
-                }
-                .buttonStyle(.plain)
-                crownPill("Reps", value: "\(state.pendingReps)", active: crownTarget == .reps) {
-                    crownTarget = .reps
-                }
-                Button {
-                    state.pendingReps = state.pendingReps + 1
-                    WKInterfaceDevice.current().play(.click)
-                } label: {
-                    Text("+").font(.system(size: 22, weight: .black))
-                        .frame(width: 34, height: 34)
-                        .background(theme.surfaceRaised)
-                        .cornerRadius(8)
-                        .foregroundColor(theme.textPrimary)
-                }
-                .buttonStyle(.plain)
-            }
-            Text("Tap a field then turn the Digital Crown, or use −/+")
-                .font(.system(size: 9))
-                .foregroundColor(theme.textMuted)
-                .lineLimit(2)
             Button(action: logSet) {
                 HStack {
                     Image(systemName: "checkmark.circle.fill")
-                    Text(isLastSet ? "Log & next exercise" : "Log set")
+                    Text(isLastSet ? "Done" : "Mark step")
                         .fontWeight(.bold)
                 }
                 .frame(maxWidth: .infinity)
@@ -881,26 +948,11 @@ private struct ExerciseTab: View {
         .padding(10)
         .background(theme.surface)
         .cornerRadius(12)
-        // Bind Crown to whichever input is active. Weight moves in
-        // 2.5 lb increments (dumbbell granularity); reps in 1.
-        .focusable(true)
-        .digitalCrownRotation(
-            crownTarget == .weight
-              ? Binding(get: { state.pendingWeight }, set: { state.pendingWeight = max(0, $0) })
-              : Binding(get: { Double(state.pendingReps) },
-                        set: { state.pendingReps = max(0, Int($0.rounded())) }),
-            from: 0,
-            through: crownTarget == .weight ? 1000 : 50,
-            by: crownTarget == .weight ? 2.5 : 1,
-            sensitivity: .low,
-            isContinuous: false,
-            isHapticFeedbackEnabled: true
-        )
     }
 
     @ViewBuilder
     private func recommendedWeightRow(_ ex: WatchExercise) -> some View {
-        if let recommended = ex.plannedTargetWeightLbs, recommended > 0 {
+        if !isGuideExercise(ex), let recommended = ex.plannedTargetWeightLbs, recommended > 0 {
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("RECOMMENDED")
@@ -1078,6 +1130,7 @@ private struct ExerciseTab: View {
 
     private func logSet() {
         guard let ex = currentExercise else { return }
+        let guide = isGuideExercise(ex)
         // Haptic click — different from the rest-end notification so
         // the two are distinguishable by feel.
         WKInterfaceDevice.current().play(.click)
@@ -1087,10 +1140,11 @@ private struct ExerciseTab: View {
         // weight-rec engine for the next set.
         let setNumber = displaySetNumber(for: ex)
         var payload: [String: Any] = [
+            "sessionId": workout.sessionId ?? "",
             "exerciseIndex": state.exerciseIndex,
             "setNumber": setNumber,
-            "weightLbs": state.pendingWeight,
-            "reps": state.pendingReps,
+            "weightLbs": guide ? 0 : state.pendingWeight,
+            "reps": guide ? 0 : state.pendingReps,
             "exerciseName": ex.name,
         ]
         if let durationSeconds = plannedDurationSeconds(for: ex) {
@@ -1104,9 +1158,13 @@ private struct ExerciseTab: View {
             // Last set of this exercise → advance to next exercise.
             advanceExercise()
         } else {
-            // Next set of same exercise → start rest.
+            // Next set of same exercise.
             state.setNumber += 1
-            state.setRest(seconds: ex.restSeconds)
+            if guide {
+                state.clearRest()
+            } else {
+                state.setRest(seconds: ex.restSeconds)
+            }
         }
     }
 
@@ -1116,6 +1174,7 @@ private struct ExerciseTab: View {
         state.clearRest()
         WKInterfaceDevice.current().play(.click)
         conn.sendCommand("swap_exercise", payload: [
+            "sessionId": workout.sessionId ?? "",
             "exerciseIndex": state.exerciseIndex,
             "fromExerciseName": currentExercise?.name ?? "",
             "toExerciseName": option.name,
@@ -1147,6 +1206,7 @@ private struct ExerciseTab: View {
         state.clearRest()
         WKInterfaceDevice.current().play(.click)
         conn.sendCommand("skip_rest", payload: [
+            "sessionId": workout.sessionId ?? "",
             "exerciseIndex": state.exerciseIndex,
             "setNumber": state.setNumber,
         ])

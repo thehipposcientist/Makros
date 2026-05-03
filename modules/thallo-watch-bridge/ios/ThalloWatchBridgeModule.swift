@@ -9,6 +9,7 @@ import HealthKit
 import os.log
 
 private let wcLog = OSLog(subsystem: "com.thallo.app.watchbridge", category: "WC")
+private let staleWorkoutCommandWindowMs: Double = 10 * 60 * 1000
 
 public class ThalloWatchBridgeModule: Module {
     private let sessionHolder = _SessionHolder()
@@ -490,6 +491,9 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             os_log("[wc-bridge] dispatchCommand: not a command (kind=%{public}@)", log: wcLog, type: .default, (msg["kind"] as? String) ?? "<nil>")
             return
         }
+        if shouldDropStaleWorkoutCommand(cmd, msg) {
+            return
+        }
         if let commandId = msg["commandId"] as? String, !commandId.isEmpty {
             if recentCommandIdSet.contains(commandId) {
                 os_log("[wc-bridge] duplicate command ignored=%{public}@", log: wcLog, type: .default, cmd)
@@ -518,6 +522,46 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
                 os_log("[wc-bridge] queued command=%{public}@ until JS listener attaches", log: wcLog, type: .default, cmd)
             }
         }
+    }
+
+    private func shouldDropStaleWorkoutCommand(_ command: String, _ msg: [String: Any]) -> Bool {
+        let workoutCommands: Set<String> = [
+            "start_workout",
+            "start_custom_workout",
+            "skip_workout",
+            "log_set",
+            "swap_exercise",
+            "skip_rest",
+            "end_workout",
+            "cancel_workout",
+        ]
+        guard workoutCommands.contains(command),
+              let tsMs = numericMs(msg["tsMs"])
+        else { return false }
+
+        let ageMs = Date().timeIntervalSince1970 * 1000 - tsMs
+        guard ageMs > staleWorkoutCommandWindowMs else { return false }
+        os_log("[wc-bridge] stale workout command ignored=%{public}@ ageMs=%.0f", log: wcLog, type: .default, command, ageMs)
+        logDiag("dispatchCommand.staleDropped", [
+            "command": command,
+            "ageMs": ageMs,
+        ])
+        return true
+    }
+
+    private func numericMs(_ value: Any?) -> Double? {
+        if let d = value as? Double, d.isFinite { return d }
+        if let i = value as? Int { return Double(i) }
+        if let n = value as? NSNumber {
+            let d = n.doubleValue
+            return d.isFinite ? d : nil
+        }
+        if let s = value as? String,
+           let d = Double(s.trimmingCharacters(in: .whitespacesAndNewlines)),
+           d.isFinite {
+            return d
+        }
+        return nil
     }
 
     private func rememberCommandId(_ commandId: String) {

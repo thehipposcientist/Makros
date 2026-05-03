@@ -706,7 +706,13 @@ export async function saveHealthSummary(summary: import('../types').HealthSummar
 export async function loadHealthSummary(): Promise<import('../types').HealthSummary | null> {
   try {
     const raw = await AsyncStorage.getItem(HEALTH_SUMMARY_KEY);
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    const parsed: import('../types').HealthSummary = JSON.parse(raw);
+    const fetchedAt = parsed?.fetchedAt ? new Date(parsed.fetchedAt) : null;
+    if (!fetchedAt || Number.isNaN(fetchedAt.getTime()) || dateKey(fetchedAt) !== todayKey()) {
+      return null;
+    }
+    return parsed;
   } catch { return null; }
 }
 

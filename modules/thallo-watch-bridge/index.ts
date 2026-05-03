@@ -27,6 +27,7 @@ export type WatchExercise = {
   plannedTargetWeightLbs?: number | null;
   recommendation?: string | null;
   slotRole?: string | null;
+  isGuide?: boolean;
   swapOptions?: WatchSwapOption[];
 };
 

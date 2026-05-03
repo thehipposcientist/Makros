@@ -114,12 +114,16 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
   const now = new Date();
   const sevenDaysAgo = new Date(now.getTime() - 7 * 86400000);
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 86400000);
-  // Use 36h lookback for last-night data so we catch sleep that ended this morning
-  const lastNightStart = new Date(now.getTime() - 36 * 3600000);
+  const lastNightStart = new Date(now);
+  lastNightStart.setDate(lastNightStart.getDate() - 1);
+  lastNightStart.setHours(18, 0, 0, 0);
+  const lastNightEnd = new Date(now);
+  lastNightEnd.setHours(12, 0, 0, 0);
   const startMs = sevenDaysAgo.getTime();
   const historyStartMs = thirtyDaysAgo.getTime();
   const endMs = now.getTime();
   const lastNightMs = lastNightStart.getTime();
+  const lastNightEndMs = Math.min(endMs, lastNightEnd.getTime());
 
   const [
     restingHR, steps, sleepSamples, energySamples,
@@ -142,11 +146,11 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     mod.getStandingHours(startMs, endMs).catch(() => null),
     mod.getMindfulMinutes(startMs, endMs).catch(() => []),
     mod.getBasalEnergyBurned(startMs, endMs).catch(() => []),
-    mod.getSleepSamples(lastNightMs, endMs).catch(() => []),
-    mod.getHRV(lastNightMs, endMs, 30).catch(() => []),
-    mod.getRestingHeartRate(lastNightMs, endMs, 10).catch(() => []),
-    mod.getRespiratoryRate(lastNightMs, endMs, 20).catch(() => []),
-    mod.getOxygenSaturation(lastNightMs, endMs, 20).catch(() => []),
+    mod.getSleepSamples(lastNightMs, lastNightEndMs).catch(() => []),
+    mod.getHRV(lastNightMs, lastNightEndMs, 30).catch(() => []),
+    mod.getRestingHeartRate(lastNightMs, lastNightEndMs, 10).catch(() => []),
+    mod.getRespiratoryRate(lastNightMs, lastNightEndMs, 20).catch(() => []),
+    mod.getOxygenSaturation(lastNightMs, lastNightEndMs, 20).catch(() => []),
     mod.getSleepSamples(historyStartMs, endMs).catch(() => []),
     mod.getHRV(historyStartMs, endMs, 300).catch(() => []),
     mod.getRestingHeartRate(historyStartMs, endMs, 100).catch(() => []),
@@ -221,7 +225,7 @@ export async function readHealthSummary(opts: ReadHealthOptions = {}): Promise<H
     avgSteps7d: avgValue(steps),
     workouts7d: null,
     avgSleepHours7d: calcAvgSleep(sleepSamples),
-    lastNightSleepHours: calcLastNightSleep(sleepSamples),
+    lastNightSleepHours: calcLastNightSleep(lastNightSleep as SleepSample[]),
     activeEnergy7d: avgActiveEnergy,
     hrvAvg: avgValue(hrvSamples),
     vo2Max: vo2Samples?.[0]?.value ?? null,

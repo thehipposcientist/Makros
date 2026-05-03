@@ -31,6 +31,7 @@ import { WorkoutDay, AppThemeName, DailyNutritionPlan } from '../types';
 import { getTheme, resolveThemeName } from '../constants/theme';
 import { recordTelemetryEvent } from '../services/api';
 import { getActiveWatchSessionId } from './activeWatchSession';
+import { isGuideExercise } from './exerciseDisplay';
 
 export { WatchBridge };
 
@@ -144,6 +145,7 @@ export type WatchExerciseClient = {
   plannedTargetWeightLbs?: number | null;
   recommendation?: string | null;
   slotRole?: string | null;
+  isGuide?: boolean;
   swapOptions?: Array<{
     name: string;
     equipment?: string | null;
@@ -195,6 +197,7 @@ export function buildWatchWorkoutPayload(
   // active-workout view treats warmup as its own sequence step and
   // badges it so users know to dial intensity down).
   const exercises: WatchExerciseClient[] = (day.exercises ?? []).map((e: any) => {
+    const guide = isGuideExercise(e, day);
     const swapOptions = Array.isArray(e.swapOptions)
       ? e.swapOptions
         .map((option: any) => ({
@@ -210,16 +213,17 @@ export function buildWatchWorkoutPayload(
       name: String(e.name || 'Exercise'),
       sets: positiveInt(e.sets, 3),
       reps: String(e.reps ?? ''),
-      restSeconds: positiveInt(e.restSeconds ?? e.rest_seconds, 60),
+      restSeconds: guide ? 0 : positiveInt(e.restSeconds ?? e.rest_seconds, 60),
       equipment: nullableString(e.equipment),
-      plannedTargetWeightLbs: finiteNumber(
+      plannedTargetWeightLbs: guide ? null : finiteNumber(
         e.plannedTargetWeightLbs
           ?? e.targetWeightLbs
           ?? e.recommendedWeightLbs
           ?? e.weight,
       ),
-      recommendation: nullableString(e.recommendation),
+      recommendation: guide ? null : nullableString(e.recommendation),
       slotRole: nullableString(e.slot_role ?? e.slotRole),
+      isGuide: guide,
       ...(swapOptions.length > 0 ? { swapOptions } : {}),
     };
   });
@@ -317,6 +321,7 @@ export type WatchSleepInput = {
 };
 
 type SleepSummaryLike = {
+  hkAvailable?: boolean | null;
   sleepMinutes?: number | null;
   restingHeartRate?: number | null;
   hrv?: number | null;
@@ -325,14 +330,6 @@ type SleepSummaryLike = {
   hrvAvg?: number | null;
   sleepScore?: any | null;
 };
-
-function sleepFallback(hours: number | null): Pick<WatchSleepInput, 'score' | 'label' | 'summary'> {
-  if (hours == null || hours <= 0) return { score: null, label: null, summary: null };
-  if (hours >= 8) return { score: 90, label: 'Excellent', summary: `${hours.toFixed(1)}h - fully recovered.` };
-  if (hours >= 7) return { score: 75, label: 'Good', summary: `${hours.toFixed(1)}h - solid night.` };
-  if (hours >= 6) return { score: 55, label: 'Fair', summary: `${hours.toFixed(1)}h - a touch short.` };
-  return { score: 30, label: 'Poor', summary: `${hours.toFixed(1)}h - dial intensity back today.` };
-}
 
 /** Convert the canonical HealthDataSummary / HealthSummary shape into
  *  the compact watch sleep payload. Every watch-open path should use
@@ -343,29 +340,34 @@ export function buildWatchSleepPayloadFromSummary(summary: SleepSummaryLike | nu
   const sleepMinutes = finiteNumber(summary?.sleepMinutes);
   const hours = sleepMinutes != null
     ? sleepMinutes / 60
-    : finiteNumber(raw?.lastNightSleepHours);
+    : finiteNumber(raw?.lastNightSleepHours) ?? finiteNumber(raw?.sleepScore?.duration);
   const scoreData = raw?.sleepScore ?? null;
   const score = finiteNumber(scoreData?.score);
   const label = nullableString(scoreData?.rating);
-  const fallback = sleepFallback(hours);
   const stages = scoreData?.stages ?? {};
   const remHours = finiteNumber(stages.rem);
   const deepHours = finiteNumber(stages.deep);
   const asleepMin = sleepMinutes
     ?? (hours != null ? Math.round(hours * 60) : null);
+  const canReportUnavailable = !!summary && summary.hkAvailable !== false;
+  const unavailableSummary = canReportUnavailable
+    ? (hours != null
+      ? `${hours.toFixed(1)}h logged - sleep score unavailable.`
+      : 'Sleep score unavailable - no overnight sleep was recorded.')
+    : null;
 
   return {
-    score: score ?? fallback.score ?? null,
+    score: score ?? null,
     hoursLastNight: hours,
     asleepMin,
     remMin: remHours != null ? Math.round(remHours * 60) : null,
     deepMin: deepHours != null ? Math.round(deepHours * 60) : null,
     restingHr: finiteNumber(summary?.restingHeartRate) ?? finiteNumber(raw?.restingHeartRate),
     hrvMs: finiteNumber(summary?.hrv) ?? finiteNumber(raw?.hrvAvg),
-    label: label ?? fallback.label ?? null,
+    label: label ?? (canReportUnavailable ? 'Unavailable' : null),
     summary: score != null && hours != null
       ? `${hours.toFixed(1)}h slept - ${label ?? 'Sleep score'}`
-      : fallback.summary ?? null,
+      : unavailableSummary,
   };
 }
 

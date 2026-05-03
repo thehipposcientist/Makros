@@ -26,6 +26,9 @@
 const BODYWEIGHT_NAME_RE =
   /stretch|foam roll|cat.?cow|pigeon.?pose|child.?s pose|spinal twist|world.?s greatest|hip 90|thoracic|shoulder dislocate|downward dog|cobra|bird.?dog|dead bug|superman|glute bridge|clamshell|band pull.?apart|face pull|wall slide|butterfly|savasana|couch stretch|dead hang|hamstring stretch|calf stretch|quad stretch|forward fold|straddle|yoga|vinyasa|flow|mobility|pose\b/i;
 
+const GUIDE_NAME_RE =
+  /stretch|foam roll|cat.?cow|pigeon|child.?s pose|spinal twist|world.?s greatest|90.?90|hip 90|thoracic|shoulder dislocate|downward dog|cobra|butterfly|savasana|couch stretch|hamstring|calf|quad|forward fold|straddle|yoga|vinyasa|yin|flow|mobility|pose\b|breathwork|breathing|meditation/i;
+
 /** Cardio modalities — treadmill, bike, rower, swimming, etc. No weight,
  *  reps are really a duration. */
 const CARDIO_NAME_RE =
@@ -71,6 +74,17 @@ const TIME_TRAINING_TYPES = new Set([
   'mobility', 'stretch', 'recovery', 'flow', 'conditioning', 'cardio',
 ]);
 
+const GUIDE_TRAINING_TYPES = new Set([
+  'mobility', 'stretch', 'recovery', 'flow',
+]);
+
+const GUIDE_ARCHETYPES = new Set([
+  'mobility_flow',
+  'stretch_block',
+  'recovery_easy',
+  'stress_relief_easy',
+]);
+
 /** Equipment strings that mean "bodyweight only". The planner emits
  *  comma-separated equipment slugs ("barbell, flat_bench") so we
  *  parse the first token. */
@@ -89,6 +103,35 @@ export function isTimeBasedReps(reps: unknown): boolean {
   const s = String(reps).trim();
   if (!s) return false;
   return TIMED_REPS_RE.test(s);
+}
+
+export function isGuideExercise(ex: any, workout?: any): boolean {
+  if (!ex) return false;
+  const name = String(ex.name ?? '').toLowerCase();
+  const reps = String(ex.reps ?? ex.targetReps ?? '').toLowerCase();
+  const primaryMuscle = String(ex.primaryMuscle ?? ex.primary_muscle ?? ex._primary_muscle ?? '').toLowerCase();
+  if (primaryMuscle === 'mobility' || primaryMuscle === 'recovery') return true;
+
+  const slotRole = String(ex.slotRole ?? ex.slot_role ?? ex._role ?? '').toLowerCase();
+  if (slotRole === 'mobility' || slotRole === 'recovery' || slotRole === 'stretch' || slotRole === 'cooldown') return true;
+
+  const prescriptionType = String(ex.prescriptionType ?? ex.prescription_type ?? ex._prescription_type ?? '').toLowerCase();
+  if (/mobility|stretch|recovery|cooldown|flow/.test(prescriptionType)) return true;
+
+  const trainingType = String(ex.trainingType ?? ex.training_type ?? ex._training_type ?? ex.stimulus ?? '').toLowerCase();
+  if (GUIDE_TRAINING_TYPES.has(trainingType)) return true;
+
+  const archetype = String(ex.archetype ?? ex._archetype ?? '').toLowerCase();
+  if (GUIDE_ARCHETYPES.has(archetype) || /mobility|stretch|recovery|stress.?relief/.test(archetype)) return true;
+
+  if (GUIDE_NAME_RE.test(name)) return true;
+
+  const workoutText = String(`${workout?.stimulus ?? ''} ${workout?.focus ?? ''}`).toLowerCase();
+  if (/mobility|recovery|stretch|restore|yoga|flow/.test(workoutText) && GUIDE_NAME_RE.test(`${name} ${reps}`)) {
+    return true;
+  }
+
+  return false;
 }
 
 /** Predicate: should the UI hide the weight input for this exercise?
@@ -110,11 +153,11 @@ export function shouldHideWeight(ex: any): boolean {
   if (/farmer|suitcase carry|loaded carry/.test(name)) return false;
 
   // ── Structured-field fast path (avoids regex when planner data is present) ──
-  const primaryMuscle = String(ex.primary_muscle ?? ex._primary_muscle ?? '').toLowerCase();
+  const primaryMuscle = String(ex.primaryMuscle ?? ex.primary_muscle ?? ex._primary_muscle ?? '').toLowerCase();
   if (primaryMuscle === 'cardio') return true;
   if (primaryMuscle === 'mobility') return true;
 
-  const trainingType = String(ex._training_type ?? ex.training_type ?? ex.stimulus ?? '').toLowerCase();
+  const trainingType = String(ex.trainingType ?? ex._training_type ?? ex.training_type ?? ex.stimulus ?? '').toLowerCase();
   if (trainingType && BODYWEIGHT_TRAINING_TYPES.has(trainingType)) return true;
   if (trainingType === 'cardio' || trainingType === 'conditioning') return true;
 
@@ -144,11 +187,11 @@ export function shouldHideReps(ex: any): boolean {
   const name = String(ex.name ?? '').toLowerCase();
 
   // ── Structured-field fast path ──
-  const primaryMuscle = String(ex.primary_muscle ?? ex._primary_muscle ?? '').toLowerCase();
+  const primaryMuscle = String(ex.primaryMuscle ?? ex.primary_muscle ?? ex._primary_muscle ?? '').toLowerCase();
   if (primaryMuscle === 'cardio') return true;
   if (primaryMuscle === 'mobility') return true;
 
-  const trainingType = String(ex._training_type ?? ex.training_type ?? ex.stimulus ?? '').toLowerCase();
+  const trainingType = String(ex.trainingType ?? ex._training_type ?? ex.training_type ?? ex.stimulus ?? '').toLowerCase();
   if (trainingType && TIME_TRAINING_TYPES.has(trainingType)) return true;
 
   const archetype = String(ex._archetype ?? ex.archetype ?? '').toLowerCase();
