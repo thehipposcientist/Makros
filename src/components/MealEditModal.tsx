@@ -4,7 +4,7 @@ import MealTimeSelector, { parseMealDateTime } from './MealTimeSelector';
 import {
   View, Text, ScrollView, Modal, TouchableOpacity,
   StyleSheet, TextInput, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
-  LayoutAnimation, UIManager,
+  LayoutAnimation, UIManager, Keyboard,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -36,7 +36,16 @@ interface Props {
   dateKey?: string;           // e.g. '2026-04-18' — enables immediate AsyncStorage persist
   onSave: (updated: MealSuggestion) => void;
   onClose: () => void;
-  onAddCustomFood?: (item: { name: string; unit: string; calories: number; protein: number; carbs: number; fat: number }) => void;
+  onAddCustomFood?: (item: {
+    name: string;
+    unit: string;
+    calories: number;
+    protein: number;
+    carbs: number;
+    fat: number;
+    micronutrients?: Record<string, number>;
+    verificationStatus?: 'ai_estimated' | 'ai_validated' | 'user_corrected' | 'seed_verified' | 'insufficient_data';
+  }) => void;
   onToggleRoutine?: () => void;
   /** Save the current meal's items as a reusable Saved Meal (distinct
    *  from Routine — Routine = scheduled recurring, Saved = one-tap log
@@ -320,6 +329,9 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const [barcodeFallback, setBarcodeFallback] = useState<string | null>(null);
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
   const [aiResults, setAiResults] = useState<FoodSearchResult[]>([]);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const [foodSearchFocused, setFoodSearchFocused] = useState(false);
+  const scrollRef = useRef<ScrollView | null>(null);
   // Track which item is currently showing the unit picker popover.
   const [unitPickerIdx, setUnitPickerIdx] = useState<number | null>(null);
   // In-progress text for each row's quantity input. Lets the user type
@@ -353,6 +365,8 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       userEdited.current = false;
       setSearch('');
       setAiResults([]);
+      setFoodSearchFocused(false);
+      setKeyboardHeight(0);
       setUnitPickerIdx(null);
       setInstructions(meal.instructions ?? null);
       setShowInstructions(false);
@@ -361,6 +375,65 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       setMealTimeExpanded(false);
     }
   }, [visible, meal, dateKey]);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const showSub = Keyboard.addListener(showEvent, event => {
+      setKeyboardHeight(event.endCoordinates?.height ?? 0);
+    });
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setKeyboardHeight(0);
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  const foodSearchActive = foodSearchFocused || search.trim().length > 0 || aiSearchLoading || aiResults.length > 0;
+
+  const kitchenSearchResults = (): FoodSearchResult[] => {
+    const q = search.trim().toLowerCase();
+    if (q.length < 2) return [];
+    const tokens = q.split(/\s+/).filter(Boolean);
+    const results: FoodSearchResult[] = [];
+    const seen = new Set<string>();
+    for (const category of foodCategories) {
+      for (const food of category.foods ?? []) {
+        const name = String(food.name || '').trim();
+        const key = name.toLowerCase();
+        if (!name || seen.has(key)) continue;
+        const haystack = `${name} ${food.unit ?? ''} ${category.label ?? ''}`.toLowerCase();
+        if (!haystack.includes(q) && !tokens.every(t => haystack.includes(t))) continue;
+        seen.add(key);
+        results.push({
+          name,
+          serving: food.unit ?? '1 serving',
+          calories: Number(food.calories || 0),
+          protein: Number(food.protein || 0),
+          carbs: Number(food.carbs || 0),
+          fat: Number(food.fat || 0),
+          source: category.key === 'custom' ? 'user' : 'seed',
+          food_id: food.id ?? null,
+          serving_id: null,
+          serving_grams: null,
+          is_verified: category.key !== 'custom',
+          is_preferred: true,
+          ...((food as any).micronutrients ? { micronutrients: (food as any).micronutrients } : {}),
+        });
+      }
+    }
+    return results.slice(0, 12);
+  };
+
+  useEffect(() => {
+    if (!foodSearchActive) return;
+    const timer = setTimeout(() => {
+      scrollRef.current?.scrollToEnd({ animated: true });
+    }, Platform.OS === 'ios' ? 120 : 180);
+    return () => clearTimeout(timer);
+  }, [foodSearchActive, aiResults.length, aiSearchLoading]);
 
   const requireStoredPro = async (feature: ProFeature): Promise<boolean> => {
     try {
@@ -759,7 +832,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   };
 
   const handleAiSearch = async (opts?: { forceAi?: boolean; append?: boolean }) => {
-    if (!authToken || !search.trim()) return;
+    if (!search.trim()) return;
     // Pro gate — only the AI-forced search route hits OpenAI. Plain
     // searches against the seed/USDA library stay free; the `forceAi`
     // call below is the one that incurs cost + needs gating. The
@@ -768,6 +841,14 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     if (opts?.forceAi) {
       if (!(await requireStoredPro('ai_food_enrichment'))) return;
     }
+    if (!opts?.forceAi) {
+      const kitchenResults = kitchenSearchResults();
+      if (kitchenResults.length > 0) {
+        setAiResults(kitchenResults);
+        return;
+      }
+    }
+    if (!authToken) return;
     setAiSearchLoading(true);
     try {
       const res = await searchFoodNutrition(authToken, search.trim(), { forceAi: opts?.forceAi });
@@ -814,6 +895,11 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
         food_id: aiItem.food_id ?? null,
         serving_id: aiItem.serving_id ?? null,
         serving_grams: aiItem.serving_grams ?? null,
+        source: aiItem.source,
+        fdc_id: aiItem.fdc_id ?? aiItem.external_id ?? null,
+        external_id: aiItem.external_id ?? aiItem.fdc_id ?? null,
+        brand: aiItem.brand ?? null,
+        is_verified: aiItem.is_verified,
         ...(aiItem.micronutrients ? { micronutrients: aiItem.micronutrients } : {}),
       };
       setItems(prev => {
@@ -830,6 +916,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       protein: Math.round(aiItem.protein),
       carbs: Math.round(aiItem.carbs),
       fat: Math.round(aiItem.fat),
+      verificationStatus: aiItem.source === 'ai' ? 'ai_estimated' : aiItem.is_verified ? 'seed_verified' : undefined,
       ...(aiItem.micronutrients ? { micronutrients: aiItem.micronutrients } : {}),
     });
     setAiResults(prev => prev.filter(r => r.name !== aiItem.name));
@@ -1214,8 +1301,15 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           style={{ flex: 1 }}
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
           <ScrollView
+            ref={scrollRef}
             style={s.scroll}
-            contentContainerStyle={s.scrollContent}
+            contentContainerStyle={[
+              s.scrollContent,
+              foodSearchActive && {
+                paddingBottom: Math.min(280, Math.max(200, keyboardHeight + 80)),
+              },
+            ]}
+            keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
             keyboardShouldPersistTaps="handled">
 
             {/* Current foods — structured editable rows */}
@@ -1454,6 +1548,8 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                 placeholder="Search foods..."
                 placeholderTextColor={colors.textMuted}
                 returnKeyType="search"
+                onFocus={() => setFoodSearchFocused(true)}
+                onBlur={() => setFoodSearchFocused(false)}
                 onSubmitEditing={authToken && search.length > 1 ? () => handleAiSearch() : undefined}
               />
               {search.length > 0 && (

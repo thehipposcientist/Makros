@@ -98,6 +98,7 @@ def _onboarding_body(
     goal_track: str = "body_recomp",
     pace: GoalPace = GoalPace.MODERATE,
     weight_lbs: float = 180.0,
+    injuries: list[str] | None = None,
 ) -> OnboardingSync:
     return OnboardingSync(
         profile=ProfileUpsert(
@@ -119,6 +120,7 @@ def _onboarding_body(
             workout_duration_minutes=60,
             equipment=["Dumbbells"],
             foods_available=["chicken breast"],
+            injuries=injuries or [],
         ),
     )
 
@@ -188,6 +190,25 @@ def test_onboarding_sync_records_goal_history_only_on_change():
         assert active_goals[0].goal_track == "fat_loss"
         assert any(not g.is_active and g.goal_type == GoalType.BODY_RECOMP for g in goals)
     _ok("changed sync deactivates old goal and inserts exactly one new active goal")
+
+
+def test_onboarding_sync_updates_preferences_injuries():
+    """Profile saves must persist injuries where the planner reads them."""
+    print("\n[test] profile/onboarding: injuries sync into preferences")
+    eng = _make_engine()
+    with Session(eng) as session:
+        user = _seed_user_profile(session, user_id=17, weight_lbs=180.0)
+
+        profile_router.sync_onboarding(
+            _onboarding_body(injuries=["knee pain", "shoulder impingement"]),
+            current_user=user,
+            session=session,
+        )
+        prefs = session.exec(select(UserPreferences).where(UserPreferences.user_id == 17)).first()
+
+        assert prefs is not None
+        assert prefs.injuries == ["knee pain", "shoulder impingement"]
+    _ok("onboarding sync persists planner-visible injuries")
 
 
 def test_measurement_checkin_does_not_update_profile_weight_when_flag_false():
@@ -271,6 +292,7 @@ cases = [
     test_profile_me_returns_dumped_profile_payload,
     test_onboarding_sync_keeps_unchanged_goal_idempotent,
     test_onboarding_sync_records_goal_history_only_on_change,
+    test_onboarding_sync_updates_preferences_injuries,
     test_measurement_checkin_does_not_update_profile_weight_when_flag_false,
     test_checkin_defaults_to_updating_profile_weight,
     test_checkin_rejects_non_positive_weight,

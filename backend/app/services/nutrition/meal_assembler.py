@@ -167,6 +167,34 @@ def default_foods_for_generation(req: "PlanRequest", allowed_foods: list[str] | 
     return pantry
 
 
+def _unique_food_names(*groups: Iterable[str] | None) -> list[str]:
+    """Merge food-name lists case-insensitively while preserving first spelling."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for raw in group or []:
+            name = str(raw).strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(name)
+    return out
+
+
+def selected_food_names_for_generation(req: "PlanRequest", allowed_foods: list[str] | None) -> list[str]:
+    """Foods the user explicitly selected or created for meal planning."""
+    return _unique_food_names(allowed_foods, getattr(req, "customFoodNames", None) or [])
+
+
+def food_names_for_generation(req: "PlanRequest", allowed_foods: list[str] | None) -> list[str]:
+    """Full pantry for enrichment/skeleton generation, including custom foods."""
+    base = default_foods_for_generation(req, allowed_foods)
+    return _unique_food_names(base, getattr(req, "customFoodNames", None) or [])
+
+
 @dataclass
 class FoodMacros:
     """Per-serving macros + micronutrients for one food.
@@ -1359,9 +1387,10 @@ def assemble_nutrition_response(
     meals_per_day = _clamp_meals_per_day(req.mealsPerDay)
     generate_count = max(0, meals_per_day - routine_count)
     nutrition_warnings: list[dict] = []
-    selected_foods = [str(f).strip() for f in (allowed_foods or []) if str(f).strip()]
-    used_default_pantry = not selected_foods
-    generation_foods = default_foods_for_generation(req, selected_foods)
+    raw_selected_foods = [str(f).strip() for f in (allowed_foods or []) if str(f).strip()]
+    selected_foods = selected_food_names_for_generation(req, raw_selected_foods)
+    used_default_pantry = not raw_selected_foods
+    generation_foods = food_names_for_generation(req, raw_selected_foods)
     if used_default_pantry and generation_foods:
         nutrition_warnings.append({
             "severity": "info",

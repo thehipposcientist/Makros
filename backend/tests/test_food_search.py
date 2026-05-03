@@ -78,25 +78,18 @@ def _food(session: Session, *, name: str, source, owner_user_id: int | None = No
     return food
 
 
-def test_food_search_merges_local_before_usda_and_marks_preferred() -> None:
-    print("\n[test] food search: local/preferred before USDA")
+def test_food_search_prefers_kitchen_local_and_skips_usda() -> None:
+    print("\n[test] food search: kitchen local before USDA")
     from app.enums import FoodSource
     from app.models import UserPreferences
     from app.routers import foods as food_router
 
     engine = make_seed_test_engine()
     original_usda = food_router._search_usda
-    food_router._search_usda = lambda query, max_results: [
-        {
-            "name": "Chicken Breast",
-            "serving": "100 g",
-            "calories": 120,
-            "protein": 25,
-            "carbs": 0,
-            "fat": 2,
-            "source": "usda",
-        },
-        {
+    calls: list[str] = []
+    def fake_usda(query: str, max_results: int) -> list[dict]:
+        calls.append(query)
+        return [{
             "name": "Turkey Breast",
             "serving": "100 g",
             "calories": 135,
@@ -104,8 +97,8 @@ def test_food_search_merges_local_before_usda_and_marks_preferred() -> None:
             "carbs": 0,
             "fat": 2,
             "source": "usda",
-        },
-    ]
+        }]
+    food_router._search_usda = fake_usda
     try:
         with Session(engine) as session:
             u = _user(session)
@@ -123,14 +116,15 @@ def test_food_search_merges_local_before_usda_and_marks_preferred() -> None:
             )
 
             results = response["results"]
-            assert [r["name"] for r in results] == ["Chicken Breast", "Turkey Breast"], results
+            assert calls == [], f"USDA should not fill when kitchen has a match: {calls}"
+            assert response["sources"]["usda"] == 0, response
+            assert [r["name"] for r in results] == ["Chicken Breast"], results
             assert results[0]["source"] == "seed", results[0]
             assert results[0]["food_id"] is not None, results[0]
             assert results[0]["is_preferred"] is True, results[0]
-            assert results[1]["source"] == "usda", results[1]
     finally:
         food_router._search_usda = original_usda
-    _ok("local preferred foods win de-dupes and USDA fills gaps")
+    _ok("kitchen-local foods win and skip remote USDA")
 
 
 def test_food_search_force_ai_returns_ai_only() -> None:
@@ -233,11 +227,242 @@ def test_logged_search_food_id_is_preserved_and_marked_recent() -> None:
     _ok("search-selected food IDs survive meal logging and become recent")
 
 
+def test_selected_usda_result_imports_verified_catalog_food() -> None:
+    print("\n[test] food search: selected USDA result imports catalog food")
+    from app.enums import FoodSource
+    from app.models import Food, MealItem, UserRecentFood
+    from app.services.nutrition.meal_history import log_meal_from_plan
+
+    engine = make_seed_test_engine()
+    with Session(engine) as session:
+        u = _user(session, email="usda-import@example.com")
+
+        log_meal_from_plan(
+            u.id,
+            date(2026, 5, 2),
+            "meal_0",
+            {
+                "meal": "Breakfast",
+                "items": [{
+                    "name": "Greek Yogurt Plain Nonfat",
+                    "source": "usda",
+                    "fdc_id": "170885",
+                    "external_id": "170885",
+                    "serving": "170 g",
+                    "serving_grams": 170,
+                    "quantity": 1,
+                    "unit": "serving",
+                    "calories": 100,
+                    "protein": 17,
+                    "carbs": 6,
+                    "fat": 0,
+                    "micronutrients": {"calcium": 187, "sodium": 61, "sugar": 6},
+                }],
+            },
+            source="manual_add",
+            db=session,
+        )
+
+        food = session.exec(select(Food).where(Food.external_id == "170885")).first()
+        assert food is not None, "USDA food was not imported"
+        item = session.exec(select(MealItem)).first()
+        recent = session.exec(
+            select(UserRecentFood).where(
+                UserRecentFood.user_id == u.id,
+                UserRecentFood.food_id == food.id,
+            )
+        ).first()
+        assert food.source == FoodSource.USDA, food
+        assert food.owner_user_id is None, food
+        assert food.is_verified is True, food
+        assert item is not None and item.food_id == food.id, item
+        assert recent is not None, recent
+    _ok("selected USDA rows become verified global foods and user recents")
+
+
+def test_selected_ai_result_imports_private_user_food() -> None:
+    print("\n[test] food search: selected AI result imports private user food")
+    from app.enums import FoodSource
+    from app.models import Food, MealItem, UserRecentFood
+    from app.routers import foods as food_router
+    from app.services.nutrition.meal_history import log_meal_from_plan
+
+    engine = make_seed_test_engine()
+    with Session(engine) as session:
+        owner = _user(session, email="ai-import-owner@example.com")
+        other = _user(session, email="ai-import-other@example.com")
+
+        log_meal_from_plan(
+            owner.id,
+            date(2026, 5, 2),
+            "meal_0",
+            {
+                "meal": "Snack",
+                "items": [{
+                    "name": "Sawyer's Protein Pudding",
+                    "source": "ai",
+                    "serving": "1 bowl",
+                    "quantity": 1,
+                    "unit": "bowl",
+                    "calories": 260,
+                    "protein": 34,
+                    "carbs": 22,
+                    "fat": 5,
+                    "micronutrients": {"fiber": 3, "sodium": 220},
+                }],
+            },
+            source="manual_add",
+            db=session,
+        )
+
+        food = session.exec(select(Food).where(Food.name == "Sawyer's Protein Pudding")).first()
+        assert food is not None, "AI food was not imported"
+        item = session.exec(select(MealItem)).first()
+        recent = session.exec(
+            select(UserRecentFood).where(
+                UserRecentFood.user_id == owner.id,
+                UserRecentFood.food_id == food.id,
+            )
+        ).first()
+        assert food.source == FoodSource.AI, food
+        assert food.owner_user_id == owner.id, food
+        assert food.is_verified is False, food
+        assert food.is_custom is True, food
+        assert item is not None and item.food_id == food.id, item
+        assert recent is not None, recent
+
+        owner_response = food_router.search_food_catalog(
+            q="protein pudding",
+            limit=10,
+            include_remote=False,
+            force_ai=False,
+            current_user=owner,
+            db=session,
+        )
+        other_response = food_router.search_food_catalog(
+            q="protein pudding",
+            limit=10,
+            include_remote=False,
+            force_ai=False,
+            current_user=other,
+            db=session,
+        )
+        assert [r["name"] for r in owner_response["results"]] == ["Sawyer's Protein Pudding"], owner_response
+        assert other_response["results"] == [], other_response
+    _ok("selected AI rows become private user foods and recents")
+
+
+def test_kitchen_custom_food_searches_thallo_without_remote() -> None:
+    print("\n[test] food search: kitchen custom food returns local Thallo result")
+    from app.models import UserPreferences, UserState
+    from app.routers import foods as food_router
+
+    engine = make_seed_test_engine()
+    old_usda = food_router._search_usda
+    calls: list[str] = []
+
+    def fake_usda(query: str, max_results: int) -> list[dict]:
+        calls.append(query)
+        return [{
+            "name": "Remote Protein Pudding",
+            "serving": "100 g",
+            "calories": 99,
+            "protein": 9,
+            "carbs": 9,
+            "fat": 1,
+            "source": "usda",
+        }]
+
+    food_router._search_usda = fake_usda
+    try:
+        with Session(engine) as session:
+            u = _user(session, email="kitchen-custom@example.com")
+            session.add(UserPreferences(
+                user_id=u.id,
+                foods_available=["Sawyer's Protein Pudding"],
+            ))
+            session.add(UserState(
+                user_id=u.id,
+                state_json={
+                    "userProfile": {
+                        "customFoods": [{
+                            "name": "Sawyer's Protein Pudding",
+                            "unit": "1 bowl",
+                            "calories": 260,
+                            "protein": 34,
+                            "carbs": 22,
+                            "fat": 5,
+                            "micronutrients": {"fiber": 3},
+                            "verificationStatus": "ai_estimated",
+                        }],
+                    },
+                },
+            ))
+            session.commit()
+
+            response = food_router.search_food_catalog(
+                q="protein pudding",
+                limit=10,
+                include_remote=True,
+                force_ai=False,
+                current_user=u,
+                db=session,
+            )
+            assert calls == [], f"USDA should not be called for a kitchen hit: {calls}"
+            assert response["sources"]["usda"] == 0, response
+            assert len(response["results"]) == 1, response
+            result = response["results"][0]
+            assert result["name"] == "Sawyer's Protein Pudding", result
+            assert result["source"] == "user", result
+            assert result["is_preferred"] is True, result
+            assert result["calories"] == 260, result
+    finally:
+        food_router._search_usda = old_usda
+    _ok("kitchen custom foods search locally and skip remote USDA")
+
+
+def test_food_search_does_not_leak_other_users_private_foods() -> None:
+    print("\n[test] food search: private food rows are user-scoped")
+    from app.enums import FoodSource
+    from app.routers import foods as food_router
+
+    engine = make_seed_test_engine()
+    with Session(engine) as session:
+        owner = _user(session, email="private-owner@example.com")
+        other = _user(session, email="private-other@example.com")
+        _food(session, name="Secret Protein Pancake", source=FoodSource.AI, owner_user_id=owner.id)
+
+        owner_response = food_router.search_food_catalog(
+            q="secret",
+            limit=10,
+            include_remote=False,
+            force_ai=False,
+            current_user=owner,
+            db=session,
+        )
+        other_response = food_router.search_food_catalog(
+            q="secret",
+            limit=10,
+            include_remote=False,
+            force_ai=False,
+            current_user=other,
+            db=session,
+        )
+
+        assert [r["name"] for r in owner_response["results"]] == ["Secret Protein Pancake"], owner_response
+        assert other_response["results"] == [], other_response
+    _ok("user-owned foods only appear for their owner")
+
+
 cases = [
-    test_food_search_merges_local_before_usda_and_marks_preferred,
+    test_food_search_prefers_kitchen_local_and_skips_usda,
     test_food_search_force_ai_returns_ai_only,
     test_preferred_food_upsert_normalizes_names,
     test_logged_search_food_id_is_preserved_and_marked_recent,
+    test_selected_usda_result_imports_verified_catalog_food,
+    test_selected_ai_result_imports_private_user_food,
+    test_kitchen_custom_food_searches_thallo_without_remote,
+    test_food_search_does_not_leak_other_users_private_foods,
 ]
 
 

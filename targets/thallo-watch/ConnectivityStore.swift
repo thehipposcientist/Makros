@@ -289,7 +289,8 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         ThalloComplicationSync.update(
             workout: workout,
             hydration: hydration,
-            readiness: readiness
+            readiness: readiness,
+            sleep: sleep
         )
     }
 
@@ -721,9 +722,6 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                     self?.lastError = err.localizedDescription
                     HeartRateStore.saveDiag("→ \(command) ERR: \(err.localizedDescription.prefix(40))")
                 }
-            }
-            if command == "log_hydration" {
-                session.transferUserInfo(body)
             }
         } else {
             // Queue for later delivery via transferUserInfo when phone

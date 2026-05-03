@@ -33,13 +33,14 @@ import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 import CollapsibleSection from '../components/CollapsibleSection';
 
 const { width: SCREEN_W } = Dimensions.get('window');
+const WATCH_WORKOUT_COMMAND_TTL_MS = 4 * 60 * 60_000;
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
 import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
 import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, getMealHistory, updateMeal, deleteLoggedMeal } from '../services/api';
-import type { ApplyActionResult, MealHistoryEntry } from '../services/api';
+import type { ApplyActionResult, HydrationStatus, MealHistoryEntry } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
@@ -55,8 +56,10 @@ import {
 import { workoutFromTemplateForToday } from '../utils/workoutTemplates';
 import { workoutSessionToLoggedPayload } from '../utils/workoutLogPayload';
 import { HYDRATION_QUICK_ADD_OUNCES, formatHydrationQuickAddLabel } from '../utils/hydration';
+import { enqueueActiveWatchCommand, hasActiveWatchCommandConsumer, isActiveWorkoutWatchCommand } from '../utils/watchCommandBacklog';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
+import { setMealCheckedInChecksByDate, upsertMealInPlansByDate } from '../utils/mealPlanState';
 import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan } from '../utils/mealItems';
 import { cleanAiText } from '../utils/aiText';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -109,6 +112,17 @@ import {
   canCreateSavedMeal,
   tierOf,
 } from '../utils/subscription';
+import {
+  INJURY_CHECKIN_STORAGE_KEY,
+  activeInjuryEntries,
+  applyInjuryCheckinResponse,
+  findDueInjuryCheckins,
+  markInjuryCheckinsAnswered,
+  markInjuryCheckinsPrompted,
+  parseInjuryCheckinState,
+  type InjuryCheckinResponse,
+  type InjuryCheckinState,
+} from '../utils/injuryCheckins';
 
 interface HomeScreenProps {
   authToken: string;
@@ -178,11 +192,7 @@ interface WeekStripItem {
   state: WeekStripState;
 }
 
-type HydrationSummary = {
-  date: string;
-  ounces: number;
-  target_ounces: number;
-};
+type HydrationSummary = HydrationStatus;
 
 interface TrainerChatMessage {
   role: 'user' | 'assistant';
@@ -219,6 +229,14 @@ function summarizeApplyFields(fields: Record<string, any> | undefined): string[]
     if (value == null) return [];
     return [`${label}: ${String(value)}`];
   }).slice(0, 4);
+}
+
+function e2eId(value: string | number | null | undefined): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
 }
 
 interface AvailabilityItem {
@@ -1271,12 +1289,18 @@ function mealSuggestionToHistoryItems(meal: MealSuggestion): import('../services
     food_id: it.food_id ?? null,
     serving_id: it.serving_id ?? null,
     serving_grams: it.serving_grams ?? null,
+    source: it.source ?? null,
+    fdc_id: it.fdc_id ?? it.external_id ?? null,
+    external_id: it.external_id ?? it.fdc_id ?? null,
+    brand: it.brand ?? null,
+    is_verified: it.is_verified ?? null,
     quantity: Number(it.quantity || 1),
     unit: String(it.unit || 'serving'),
     calories: Number(it.calories || 0),
     protein_g: Number(it.protein_g ?? it.protein ?? 0),
     carbs_g: Number(it.carbs_g ?? it.carbs ?? 0),
     fat_g: Number(it.fat_g ?? it.fat ?? 0),
+    micronutrients: it.micronutrients ?? null,
   }));
 }
 
@@ -1466,6 +1490,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         protein: cf.protein ?? 0,
         carbs: cf.carbs ?? 0,
         fat: cf.fat ?? 0,
+        ...(cf.micronutrients ? { micronutrients: cf.micronutrients } : {}),
       })),
     } as (typeof filteredSeed)[number];
     return [customCat, ...filteredSeed];
@@ -1495,6 +1520,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [planWeek?.end_date]);
   const [nutritionPlansByDate, setNutritionPlansByDate] = useState<Record<string, DailyNutritionPlan>>({});
+  const nutritionPlansByDateRef = useRef<Record<string, DailyNutritionPlan>>({});
+  useEffect(() => {
+    nutritionPlansByDateRef.current = nutritionPlansByDate;
+  }, [nutritionPlansByDate]);
   // Bottom-tab navigation. All five tabs render inline content within
   // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
   // and never disappears no matter which tab is active.
@@ -1572,6 +1601,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [newEmail, setNewEmail] = useState('');
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailError, setEmailError] = useState('');
+  const [injuryCheckinState, setInjuryCheckinState] = useState<InjuryCheckinState>({});
+  const [showInjuryCheckin, setShowInjuryCheckin] = useState(false);
+  const [injuryCheckinSaving, setInjuryCheckinSaving] = useState(false);
+  const activeProfileInjuries = useMemo(
+    () => activeInjuryEntries(userProfile?.injuryEntries),
+    [userProfile?.injuryEntries],
+  );
+  const dueInjuryCheckins = useMemo(
+    () => findDueInjuryCheckins(userProfile?.injuryEntries, injuryCheckinState),
+    [userProfile?.injuryEntries, injuryCheckinState],
+  );
+  const injuryCheckinTargets = dueInjuryCheckins.length > 0 ? dueInjuryCheckins : activeProfileInjuries;
   useEffect(() => {
     if (!authToken) return;
     let cancelled = false;
@@ -1594,6 +1635,59 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setShowEmailBanner(false);
     try { await AsyncStorage.setItem(EMAIL_BANNER_DISMISS_KEY, String(Date.now())); } catch {}
   }, []);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(INJURY_CHECKIN_STORAGE_KEY);
+        if (!cancelled) setInjuryCheckinState(parseInjuryCheckinState(raw));
+      } catch {
+        if (!cancelled) setInjuryCheckinState({});
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  const persistInjuryCheckinState = useCallback(async (next: InjuryCheckinState) => {
+    setInjuryCheckinState(next);
+    try { await AsyncStorage.setItem(INJURY_CHECKIN_STORAGE_KEY, JSON.stringify(next)); } catch {}
+  }, []);
+  const handleInjuryCheckinDismiss = useCallback(async () => {
+    if (injuryCheckinTargets.length > 0) {
+      await persistInjuryCheckinState(markInjuryCheckinsPrompted(injuryCheckinState, injuryCheckinTargets));
+    }
+    setShowInjuryCheckin(false);
+  }, [injuryCheckinState, injuryCheckinTargets, persistInjuryCheckinState]);
+  const handleInjuryCheckinResponse = useCallback(async (response: InjuryCheckinResponse) => {
+    if (!userProfile || injuryCheckinTargets.length === 0) {
+      setShowInjuryCheckin(false);
+      return;
+    }
+    setInjuryCheckinSaving(true);
+    try {
+      await persistInjuryCheckinState(markInjuryCheckinsAnswered(injuryCheckinState, injuryCheckinTargets));
+      setShowInjuryCheckin(false);
+      if (response === 'keep_protected') return;
+
+      const nextEntries = applyInjuryCheckinResponse(
+        userProfile.injuryEntries,
+        injuryCheckinTargets.map(inj => inj.id),
+        response,
+      );
+      const updatedProfile: UserProfile = { ...userProfile, injuryEntries: nextEntries };
+      if (response === 'resolved' && onSaveProfile) {
+        onSaveProfile(updatedProfile, 'workout');
+      } else if (onProfileUpdate) {
+        onProfileUpdate({ injuryEntries: nextEntries }, true);
+      } else {
+        await AsyncStorage.setItem('userProfile', JSON.stringify(updatedProfile));
+      }
+    } catch (e) {
+      console.error('[injury checkin] failed:', e);
+      Alert.alert('Could not save', 'Try again in a moment.');
+    } finally {
+      setInjuryCheckinSaving(false);
+    }
+  }, [injuryCheckinState, injuryCheckinTargets, onProfileUpdate, onSaveProfile, persistInjuryCheckinState, userProfile]);
 
   // First-mount tutorial gate. Runs once when the user lands on
   // Tutorial auto-show was lifted to app/index.tsx so the Account
@@ -1895,6 +1989,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   // Meal tracking
   const [checkedMealsByDate, setCheckedMealsByDate] = useState<Record<string, MealChecks>>({});
+  const checkedMealsByDateRef = useRef<Record<string, MealChecks>>({});
+  useEffect(() => {
+    checkedMealsByDateRef.current = checkedMealsByDate;
+  }, [checkedMealsByDate]);
   const [mealLogRefreshKey, setMealLogRefreshKey] = useState(0);
   const [backendMealHistory, setBackendMealHistory] = useState<MealHistoryEntry[] | null>(null);
   const [editingMeal, setEditingMeal] = useState<{ dateKey: string; type: string; meal: MealSuggestion; historyMealId?: number } | null>(null);
@@ -2026,14 +2124,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       ?? (dateISO === todayKey() ? hydration : null);
     if (!row && authToken) {
       const result = await getHydration(authToken, dateISO);
-      const loaded: HydrationSummary = {
-        date: result.date,
-        ounces: result.ounces,
-        target_ounces: result.target_ounces,
-      };
-      row = loaded;
-      setHydrationByDate(prev => ({ ...prev, [result.date]: loaded }));
-      if (result.date === todayKey()) setHydration(loaded);
+      row = result;
+      setHydrationByDate(prev => ({ ...prev, [result.date]: result }));
+      if (result.date === todayKey()) setHydration(result);
     }
     const snapshot = row ?? { date: dateISO, ounces: 0, target_ounces: 64 };
     const { pushHydrationToWatch } = await import('../utils/watchSync');
@@ -2059,7 +2152,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const result = await logHydration(authToken, next, dateISO);
       const fresh = await getHydration(authToken, result.date).catch(() => null);
       const saved = fresh
-        ? { date: fresh.date, ounces: fresh.ounces, target_ounces: fresh.target_ounces }
+        ? fresh
         : {
           date: result.date,
           ounces: result.ounces,
@@ -2101,7 +2194,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const result = await logHydration(authToken, next, dateISO);
       const fresh = await getHydration(authToken, result.date).catch(() => null);
       const saved = fresh
-        ? { date: fresh.date, ounces: fresh.ounces, target_ounces: fresh.target_ounces }
+        ? fresh
         : {
           date: result.date,
           ounces: result.ounces,
@@ -3172,15 +3265,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const today = todayScheduleItem?.workout ?? refState.workoutPlan?.days?.[0];
             console.log('[watch cmd] start_workout — todayFocus=', today?.focus);
             if (today) {
+              const nowMs = Date.now();
+              const commandTsMs = Number(payload?.tsMs);
+              const startedAtMs = Number.isFinite(commandTsMs)
+                && commandTsMs > 0
+                && nowMs - commandTsMs <= WATCH_WORKOUT_COMMAND_TTL_MS
+                ? commandTsMs
+                : nowMs;
               // Immediately stamp active state so pull_state/reachability
               // handlers see isWorkoutInProgress = true and so the watch
               // gets an authoritative active echo before ActiveWorkoutScreen
               // has a chance to mount (which was the race causing the watch
               // to stay idle while the phone started).
-              const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+              const sessionId = `${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
               setActiveWatchSessionId(sessionId);
               AsyncStorage.setItem('activeWatchSessionId', sessionId).catch(() => {});
-              AsyncStorage.setItem('activeWorkoutStartTime', String(Date.now())).catch(() => {});
+              AsyncStorage.setItem('activeWorkoutStartTime', String(startedAtMs)).catch(() => {});
               // Push active status immediately — don't wait for ActiveWorkoutScreen to mount.
               (async () => {
                 try {
@@ -3259,7 +3359,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const result = await logHydration(authToken, next, dateISO);
                 const fresh = await getHydration(authToken, result.date).catch(() => null);
                 const saved: HydrationSummary = fresh
-                  ? { date: fresh.date, ounces: fresh.ounces, target_ounces: fresh.target_ounces }
+                  ? fresh
                   : {
                     date: result.date,
                     ounces: result.ounces,
@@ -3278,7 +3378,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 });
               } catch {
                 const restored = rollbackRow ?? await getHydration(authToken, rollbackDateISO)
-                  .then(row => ({ date: row.date, ounces: row.ounces, target_ounces: row.target_ounces }))
+                  .then(row => row)
                   .catch(() => null);
                 if (restored) {
                   setHydrationByDate(prev => ({ ...prev, [restored.date]: restored }));
@@ -3462,9 +3562,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 ).catch(() => {});
               } catch { /* non-fatal */ }
             })();
+          } else if (isActiveWorkoutWatchCommand(command)) {
+            if (!hasActiveWatchCommandConsumer()) {
+              enqueueActiveWatchCommand(command, payload).catch(() => undefined);
+            }
           }
-          // Rest / set / end commands only fire inside an active
-          // workout; ActiveWorkoutScreen owns those handlers.
         });
         if (token.cancelled) { try { unsub(); } catch {} }
         else { token.unsub = unsub; }
@@ -3584,6 +3686,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } catch {}
 
     setSkippedDates(skipped);
+    checkedMealsByDateRef.current = checkMap;
     setCheckedMealsByDate(checkMap);
 
     // Load skip reasons, completed dates, summaries, and preserved
@@ -4167,6 +4270,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       }
     } catch {}
 
+    nutritionPlansByDateRef.current = raw;
     setNutritionPlansByDate(raw);
 
     // ── Background enrichment for routine/custom meals missing micros ──
@@ -4993,9 +5097,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   const handleToggleMeal = useCallback(async (date: string, mealType: string) => {
     import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
-    const current = checkedMealsByDate[date] ?? {};
+    const current = checkedMealsByDateRef.current[date] ?? {};
     const wasChecked = !!current[mealType];
     const next = { ...current, [mealType]: !wasChecked };
+    checkedMealsByDateRef.current = { ...checkedMealsByDateRef.current, [date]: next };
     setCheckedMealsByDate(prev => ({ ...prev, [date]: next }));
     await saveMealChecks(date, next);
     await persistDayState(date, { meal_checks: next });
@@ -5005,7 +5110,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // everything. `maybeCancelTodayReminder` no-ops if reminder is off.
     try {
       if (date === todayKey()) {
-        const todayPlan = nutritionPlansByDate[date];
+        const todayPlan = nutritionPlansByDateRef.current[date];
         const allMealsChecked = !!todayPlan?.meals?.length
           && todayPlan.meals.every((_, idx) => !!next[`meal_${idx}`]);
         if (allMealsChecked) {
@@ -5016,7 +5121,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     } catch {}
     // Snapshot the meal on check, clear on uncheck. Preserved meals survive
     // plan regeneration — loadPlans overlays them after picking a template.
-    const plan = nutritionPlansByDate[date];
+    const plan = nutritionPlansByDateRef.current[date];
     if (!plan) return;
 
     // Every meal lives in plan.meals[idx]. mealType is "meal_<idx>".
@@ -5067,7 +5172,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           .catch(err => console.log('[unlogMealChecked] background delete failed:', err.message));
       }
     }
-  }, [checkedMealsByDate, persistDayState, nutritionPlansByDate, authToken]);
+  }, [persistDayState, authToken]);
 
   const handleMealSave = useCallback(async (date: string, mealType: string, updated: MealSuggestion, opts?: { routineScope?: 'today' | 'all'; userInitiated?: boolean }) => {
     // userInitiated defaults to true — every existing call site is a
@@ -5087,32 +5192,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       } as MealSuggestion;
       console.log('[handleMealSave] detached routine instance — _localId stamped');
     }
-    let nextPlan: DailyNutritionPlan | null = null;
-    let savedMealType: string = mealType;
-    let savedIdx = -1;
-    setNutritionPlansByDate(prev => {
-      const current = prev[date];
-      if (!current) { console.log(`[handleMealSave] no current plan for ${date}`); return prev; }
-      const meals = [...(current.meals ?? [])];
-      if (mealType === 'new_meal' || mealType === 'new_extra') {
-        meals.push(updated);
-        savedIdx = meals.length - 1;
-        savedMealType = `meal_${savedIdx}`;
-      } else if (mealType.startsWith('meal_')) {
-        const idx = parseInt(mealType.slice(5), 10);
-        if (idx >= 0 && idx < meals.length) {
-          meals[idx] = updated;
-          savedIdx = idx;
-        } else {
-          meals.push(updated);
-          savedIdx = meals.length - 1;
-          savedMealType = `meal_${savedIdx}`;
-        }
-      }
-      nextPlan = { ...current, meals };
-      console.log(`[handleMealSave] built nextPlan with ${meals.length} meals, stamp=${(nextPlan as any)?._templatesVersion ?? 'NONE'}`);
-      return { ...prev, [date]: nextPlan as DailyNutritionPlan };
-    });
+    const isNewMeal = mealType === 'new_meal' || mealType === 'new_extra';
+    const mutation = upsertMealInPlansByDate(
+      nutritionPlansByDateRef.current,
+      date,
+      mealType,
+      updated,
+      {
+        makeLocalId: () => `manual_meal_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      },
+    );
+    const nextPlan = mutation.plan;
+    const savedMealType = mutation.mealType;
+    const savedIdx = mutation.mealIndex;
+    updated = mutation.meal;
+    if (nextPlan) {
+      nutritionPlansByDateRef.current = mutation.plansByDate;
+      setNutritionPlansByDate(mutation.plansByDate);
+      console.log(`[handleMealSave] built nextPlan with ${(nextPlan.meals ?? []).length} meals, stamp=${(nextPlan as any)?._templatesVersion ?? 'NONE'}`);
+    } else {
+      console.log(`[handleMealSave] no current plan for ${date}`);
+    }
     if (nextPlan) {
       await saveNutritionPlan(date, nextPlan);
       console.log(`[handleMealSave] saved to AsyncStorage`);
@@ -5127,8 +5227,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // Metrics recompute (which feeds the Health Score daily average).
     // Editing an already-checked meal re-logs so the updated totals
     // replace the old history row on the next sync.
-    const isNewMeal = mealType === 'new_meal' || mealType === 'new_extra';
-    const wasAlreadyChecked = !!(checkedMealsByDate[date] ?? {})[savedMealType];
+    const wasAlreadyChecked = !!(checkedMealsByDateRef.current[date] ?? {})[savedMealType];
     // Auto-check + auto-log are reserved for user-initiated saves only.
     // Hydration paths (routine application, plan migration) call this
     // with `userInitiated=false` and must NOT silently mark meals
@@ -5137,11 +5236,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     if (shouldLog && authToken && savedIdx >= 0) {
       if (isNewMeal) {
         // Auto-check: persist the check state + snapshot the preserved meal.
-        const currentChecks = checkedMealsByDate[date] ?? {};
-        const nextChecks = { ...currentChecks, [savedMealType]: true };
-        setCheckedMealsByDate(prev => ({ ...prev, [date]: nextChecks }));
-        await saveMealChecks(date, nextChecks);
-        await persistDayState(date, { meal_checks: nextChecks });
+        const checkMutation = setMealCheckedInChecksByDate(checkedMealsByDateRef.current, date, savedMealType, true);
+        checkedMealsByDateRef.current = checkMutation.checksByDate as Record<string, MealChecks>;
+        setCheckedMealsByDate(checkMutation.checksByDate as Record<string, MealChecks>);
+        await saveMealChecks(date, checkMutation.dateChecks);
+        await persistDayState(date, { meal_checks: checkMutation.dateChecks });
         try { await savePreservedMeal(date, savedMealType, updated); } catch {}
       }
       // Fire-and-forget to backend; failures don't block save.
@@ -5204,7 +5303,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         setNutritionPlansByDate(prev => applyRoutinesToAll(prev, nextRoutines));
       }
     }
-  }, [persistDayState, authToken, checkedMealsByDate]);
+  }, [persistDayState, authToken]);
 
   const handleHistoryMealSave = useCallback(async (date: string, mealType: string, mealId: number, updated: MealSuggestion) => {
     if (!authToken) return;
@@ -5865,26 +5964,33 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     consumedAt?: string,
   ) => {
     const loggedMeal = savedMealToSuggestion(saved, consumedAt, mealId);
-    const currentPlan = nutritionPlansByDate[date] ?? {
+    const fallbackPlan = {
       meals: [],
       targets: { calories: 0, protein: 0, carbs: 0, fat: 0 },
     } as DailyNutritionPlan;
+    const currentPlan = nutritionPlansByDateRef.current[date] ?? fallbackPlan;
     const existingIdx = (currentPlan.meals ?? []).findIndex(m => (m as any)._loggedMealId === mealId);
-    const nextMeals = existingIdx >= 0
-      ? (currentPlan.meals ?? []).map((m, idx) => idx === existingIdx ? loggedMeal : m)
-      : [...(currentPlan.meals ?? []), loggedMeal];
-    const mealType = `meal_${existingIdx >= 0 ? existingIdx : nextMeals.length - 1}`;
-    const nextPlan: DailyNutritionPlan = { ...currentPlan, meals: nextMeals };
-    const nextChecks = { ...(checkedMealsByDate[date] ?? {}), [mealType]: true };
+    const mutation = upsertMealInPlansByDate(
+      { ...nutritionPlansByDateRef.current, [date]: currentPlan },
+      date,
+      existingIdx >= 0 ? `meal_${existingIdx}` : 'new_meal',
+      loggedMeal,
+    );
+    if (!mutation.plan) return;
+    const mealType = mutation.mealType;
+    const nextPlan = mutation.plan;
+    const checkMutation = setMealCheckedInChecksByDate(checkedMealsByDateRef.current, date, mealType, true);
 
-    setNutritionPlansByDate(prev => ({ ...prev, [date]: nextPlan }));
-    setCheckedMealsByDate(prev => ({ ...prev, [date]: { ...(prev[date] ?? {}), [mealType]: true } }));
+    nutritionPlansByDateRef.current = mutation.plansByDate;
+    checkedMealsByDateRef.current = checkMutation.checksByDate as Record<string, MealChecks>;
+    setNutritionPlansByDate(mutation.plansByDate);
+    setCheckedMealsByDate(checkMutation.checksByDate as Record<string, MealChecks>);
     await saveNutritionPlan(date, nextPlan);
-    await saveMealChecks(date, nextChecks);
+    await saveMealChecks(date, checkMutation.dateChecks);
     await savePreservedMeal(date, mealType, loggedMeal).catch(() => {});
-    await persistDayState(date, { nutrition_plan: nextPlan, meal_checks: nextChecks });
+    await persistDayState(date, { nutrition_plan: nextPlan, meal_checks: checkMutation.dateChecks });
     setMealLogRefreshKey(k => k + 1);
-  }, [checkedMealsByDate, nutritionPlansByDate, persistDayState]);
+  }, [persistDayState]);
 
   // Template-mode meal editor target. When set, we render a
   // MealEditModal hydrated from the saved meal's items and route save
@@ -6669,7 +6775,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             {/* Active injuries banner */}
             {renderedWorkoutSubTab === 'plan' && (() => {
-              const active = (userProfile.injuryEntries ?? []).filter(i => i.status === 'active' || i.status === 'recovering');
+              const active = activeProfileInjuries;
               if (active.length === 0) return null;
               return (
                 <View style={{ marginBottom: 8, backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: '#F59E0B44' }}>
@@ -6693,6 +6799,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   <Text style={{ fontSize: 9, color: themeColors.textMuted, marginTop: 4 }}>
                     Your plan automatically avoids movements that stress injured areas
                   </Text>
+                  {dueInjuryCheckins.length > 0 && (
+                    <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: themeColors.border }}>
+                      <Text style={{ fontSize: 11, fontWeight: '800', color: themeColors.textPrimary }}>
+                        Injury check-in due
+                      </Text>
+                      <Text style={{ fontSize: 10, color: themeColors.textSecondary, lineHeight: 14, marginTop: 2 }}>
+                        Confirm whether {dueInjuryCheckins.length === 1 ? 'this limitation still needs' : 'these limitations still need'} injury-aware planning.
+                      </Text>
+                      <TouchableOpacity
+                        onPress={() => setShowInjuryCheckin(true)}
+                        style={{ alignSelf: 'flex-start', marginTop: 8, paddingVertical: 7, paddingHorizontal: 12, borderRadius: 8, backgroundColor: '#F59E0B' }}
+                        activeOpacity={0.8}>
+                        <Text style={{ fontSize: 11, fontWeight: '800', color: '#111827' }}>Review Injury</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
                 </View>
               );
             })()}
@@ -8316,6 +8438,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       ounces={hydrationOunces}
                       target={hydrationTarget}
                       pct={hydrationPct}
+                      guidance={hydrationForDay?.guidance}
                       loading={hydrationLoading}
                       colors={themeColors}
                       onDelta={(oz) => handleHydrationDelta(oz, d.key)}
@@ -8848,6 +8971,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             </View>
             <TouchableOpacity
               onPress={openSettingsHub}
+              testID="profile-settings-open"
+              accessibilityLabel="profile-settings-open"
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               style={{ padding: 4 }}
             >
@@ -8891,6 +9016,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <TouchableOpacity
               style={styles.profileMenuItem}
               onPress={() => setShowGoalEditor(true)}
+              testID="profile-goal-open"
+              accessibilityLabel="profile-goal-open"
               activeOpacity={0.85}
             >
               <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
@@ -8903,7 +9030,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
             {/* Body & Stats */}
-            <TouchableOpacity style={styles.profileMenuItem} onPress={onEditBody}>
+            <TouchableOpacity
+              style={styles.profileMenuItem}
+              onPress={onEditBody}
+              testID="profile-body-open"
+              accessibilityLabel="profile-body-open">
               <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
                 <Ionicons name="person-outline" size={18} color={themeColors.primary} />
               </View>
@@ -8914,7 +9045,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
             {/* Settings & reminders */}
-            <TouchableOpacity style={styles.profileMenuItem} onPress={openSettingsHub}>
+            <TouchableOpacity
+              style={styles.profileMenuItem}
+              onPress={openSettingsHub}
+              testID="profile-settings-row"
+              accessibilityLabel="profile-settings-row">
               <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
                 <Ionicons name="notifications-outline" size={18} color={themeColors.primary} />
               </View>
@@ -8925,7 +9060,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
             {/* Account */}
-            <TouchableOpacity style={styles.profileMenuItem} onPress={onViewAccount}>
+            <TouchableOpacity
+              style={styles.profileMenuItem}
+              onPress={onViewAccount}
+              testID="profile-account-open"
+              accessibilityLabel="profile-account-open">
               <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
                 <Ionicons name="id-card-outline" size={18} color={themeColors.primary} />
               </View>
@@ -8936,7 +9075,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
             {/* Gear */}
-            <TouchableOpacity style={styles.profileMenuItem} onPress={() => setShowGearScreen(true)}>
+            <TouchableOpacity
+              style={styles.profileMenuItem}
+              onPress={() => setShowGearScreen(true)}
+              testID="profile-gear-open"
+              accessibilityLabel="profile-gear-open">
               <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
                 <Ionicons name="walk-outline" size={18} color={themeColors.primary} />
               </View>
@@ -9872,6 +10015,70 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </View>
       )}
 
+      <Modal visible={showInjuryCheckin} transparent animationType="slide" onRequestClose={handleInjuryCheckinDismiss}>
+        <View style={styles.noteModalBackdrop}>
+          <View style={[styles.noteModalSheet, { backgroundColor: themeColors.surface, borderTopColor: '#F59E0B66' }]}>
+            <View style={styles.noteModalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Ionicons name="bandage-outline" size={22} color="#F59E0B" />
+                <View>
+                  <Text style={[styles.noteModalTitle, { color: themeColors.textPrimary }]}>Injury check-in</Text>
+                  <Text style={[styles.noteModalSubtitle, { color: themeColors.textMuted }]}>
+                    {injuryCheckinTargets.length} active limitation{injuryCheckinTargets.length === 1 ? '' : 's'}
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={handleInjuryCheckinDismiss} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={22} color={themeColors.textSecondary} />
+              </TouchableOpacity>
+            </View>
+            <View style={{ paddingHorizontal: 16, paddingBottom: 18 }}>
+              <Text style={{ fontSize: 13, color: themeColors.textSecondary, lineHeight: 19, marginBottom: 12 }}>
+                Should your plan keep protecting {injuryCheckinTargets.length === 1 ? 'this area' : 'these areas'}?
+              </Text>
+              {injuryCheckinTargets.map(inj => (
+                <View
+                  key={inj.id}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: themeColors.border }}>
+                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: inj.status === 'active' ? '#EF4444' : '#F59E0B' }} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: themeColors.textPrimary }} numberOfLines={1}>
+                      {inj.bodyPart || inj.description}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 1 }} numberOfLines={1}>
+                      {inj.severity ? `${inj.severity} · ` : ''}{inj.estimatedRecoveryDate ? `est. ${inj.estimatedRecoveryDate}` : inj.status}
+                    </Text>
+                  </View>
+                </View>
+              ))}
+              <View style={{ gap: 10, marginTop: 16 }}>
+                <TouchableOpacity
+                  disabled={injuryCheckinSaving}
+                  onPress={() => handleInjuryCheckinResponse('keep_protected')}
+                  style={{ backgroundColor: '#F59E0B', borderRadius: 12, paddingVertical: 13, alignItems: 'center', opacity: injuryCheckinSaving ? 0.6 : 1 }}
+                  activeOpacity={0.85}>
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: '#111827' }}>Still hurts, keep protecting</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  disabled={injuryCheckinSaving}
+                  onPress={() => handleInjuryCheckinResponse('improving')}
+                  style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 12, paddingVertical: 13, alignItems: 'center', borderWidth: 1, borderColor: themeColors.border, opacity: injuryCheckinSaving ? 0.6 : 1 }}
+                  activeOpacity={0.85}>
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.textPrimary }}>Improving, still protect it</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  disabled={injuryCheckinSaving}
+                  onPress={() => handleInjuryCheckinResponse('resolved')}
+                  style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 12, paddingVertical: 13, alignItems: 'center', borderWidth: 1, borderColor: themeColors.border, opacity: injuryCheckinSaving ? 0.6 : 1 }}
+                  activeOpacity={0.85}>
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.textPrimary }}>Resolved, stop protecting</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       <Modal visible={showTrainerModal} animationType="slide" transparent onRequestClose={() => setShowTrainerModal(false)}>
         <KeyboardAvoidingView
           style={styles.trainerFullScreen}
@@ -10126,15 +10333,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     </Text>
                   ))}
                   <Text style={{ fontSize: 10, color: themeColors.textMuted }}>
-                    Future generated plans will avoid the injured area. For this week, use Workout {'>'} Plan {'>'} Change Focus or exercise swaps and stop anything painful.
+                    Current and future plans can stay injury-aware; stop anything painful.
                   </Text>
                   <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
                     <TouchableOpacity
                       onPress={async () => {
                         try {
                           const profileRaw = await AsyncStorage.getItem('userProfile');
-                          if (profileRaw) {
-                            const storedProfile: UserProfile = JSON.parse(profileRaw);
+                          const storedProfile: UserProfile | null = profileRaw
+                            ? JSON.parse(profileRaw)
+                            : userProfile;
+                          if (storedProfile) {
                             const existing = storedProfile.injuryEntries ?? [];
                             const merged = [...existing];
                             for (const entry of pendingInjuries) {
@@ -10143,12 +10352,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               else merged.push(entry);
                             }
                             const updatedProfile = { ...storedProfile, injuryEntries: merged };
-                            await AsyncStorage.setItem('userProfile', JSON.stringify(updatedProfile));
-                            onProfileUpdate?.(updatedProfile, false);
+                            if (onSaveProfile) {
+                              onSaveProfile(updatedProfile, 'workout');
+                            } else {
+                              await AsyncStorage.setItem('userProfile', JSON.stringify(updatedProfile));
+                              onProfileUpdate?.({ injuryEntries: merged }, true);
+                            }
                           }
                         } catch (e) { console.error('[injury apply] failed:', e); }
                         setPendingInjuries(null);
-                        setWorkoutChat(prev => [...prev, { role: 'assistant', content: 'Injury logged. Future plans will avoid it; adjust this week with Workout > Plan > Change Focus or swaps.' }]);
+                        setWorkoutChat(prev => [...prev, { role: 'assistant', content: 'Injury logged. Review the save confirmation to update the current week or keep it for the next plan.' }]);
                         setTimeout(() => {
                           setShowTrainerModal(false);
                           setWorkoutChat([]); setWorkoutChat([]);
@@ -10705,10 +10918,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           const lightThemes = visibleThemes.filter(t => t.mode === 'light');
           const currentTheme = resolveThemeName(userProfile.themePreference);
           return (
-            <View style={{ flex: 1, backgroundColor: themeColors.background }}>
+            <View testID="settings-screen" style={{ flex: 1, backgroundColor: themeColors.background }}>
               {/* Header */}
               <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingTop: insets.top + 12, paddingBottom: 12, borderBottomWidth: 1, borderBottomColor: themeColors.border }}>
-                <TouchableOpacity onPress={() => setShowSettings(false)} style={{ marginRight: 12 }}>
+                <TouchableOpacity
+                  onPress={() => setShowSettings(false)}
+                  testID="settings-back"
+                  accessibilityLabel="settings-back"
+                  style={{ marginRight: 12 }}>
                   <Ionicons name="chevron-back" size={24} color={themeColors.textPrimary} />
                 </TouchableOpacity>
                 <Text style={{ fontSize: 20, fontWeight: '700', color: themeColors.textPrimary, flex: 1 }}>Settings</Text>
@@ -10737,6 +10954,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         return (
                           <TouchableOpacity
                             key={t.key}
+                            testID={`settings-theme-${e2eId(t.key)}`}
+                            accessibilityLabel={`settings-theme-${e2eId(t.key)}`}
                             style={[
                               styles.profileThemeTile,
                               { backgroundColor: themeColors.surface, borderColor: isActive ? t.swatch : themeColors.border, borderWidth: isActive ? 2 : 1 },
@@ -10777,6 +10996,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Local notification at your set time</Text>
                     </View>
                     <Switch
+                      testID="settings-workout-reminders-toggle"
                       value={workoutReminder.enabled}
                       onValueChange={async (v) => {
                         const next = { ...workoutReminder, enabled: v };
@@ -10794,6 +11014,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         <Text style={{ fontSize: 13, color: themeColors.textSecondary }}>Remind me at</Text>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                           <TouchableOpacity
+                            testID="settings-workout-reminder-time-minus"
+                            accessibilityLabel="settings-workout-reminder-time-minus"
                             onPress={async () => {
                               const m = workoutReminder.minute - 15;
                               const next = m < 0
@@ -10810,6 +11032,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             {`${((workoutReminder.hour + 11) % 12 + 1)}:${String(workoutReminder.minute).padStart(2, '0')} ${workoutReminder.hour < 12 ? 'AM' : 'PM'}`}
                           </Text>
                           <TouchableOpacity
+                            testID="settings-workout-reminder-time-plus"
+                            accessibilityLabel="settings-workout-reminder-time-plus"
                             onPress={async () => {
                               const m = workoutReminder.minute + 15;
                               const next = m >= 60
@@ -10838,6 +11062,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             return (
                               <TouchableOpacity
                                 key={opt.key}
+                                testID={`settings-workout-reminder-schedule-${e2eId(opt.key)}`}
+                                accessibilityLabel={`settings-workout-reminder-schedule-${e2eId(opt.key)}`}
                                 onPress={async () => {
                                   const next = { ...workoutReminder, scheduleType: opt.key };
                                   setWorkoutReminder(next);
@@ -10894,6 +11120,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           </Text>
                         </View>
                         <Switch
+                          testID="settings-workout-skip-completed-toggle"
                           value={workoutReminder.skipIfCompleted !== false}
                           onValueChange={async (v) => {
                             const next = { ...workoutReminder, skipIfCompleted: v };
@@ -10918,6 +11145,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Evening nudge to check off the day's meals</Text>
                     </View>
                     <Switch
+                      testID="settings-meal-reminder-toggle"
                       value={mealReminder.enabled}
                       onValueChange={async (v) => {
                         const next = { ...mealReminder, enabled: v };
@@ -10935,6 +11163,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         <Text style={{ fontSize: 13, color: themeColors.textSecondary }}>Remind me at</Text>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                           <TouchableOpacity
+                            testID="settings-meal-reminder-time-minus"
+                            accessibilityLabel="settings-meal-reminder-time-minus"
                             onPress={async () => {
                               const m = mealReminder.minute - 15;
                               const next = m < 0
@@ -10951,6 +11181,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             {`${((mealReminder.hour + 11) % 12 + 1)}:${String(mealReminder.minute).padStart(2, '0')} ${mealReminder.hour < 12 ? 'AM' : 'PM'}`}
                           </Text>
                           <TouchableOpacity
+                            testID="settings-meal-reminder-time-plus"
+                            accessibilityLabel="settings-meal-reminder-time-plus"
                             onPress={async () => {
                               const m = mealReminder.minute + 15;
                               const next = m >= 60
@@ -10978,6 +11210,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             return (
                               <TouchableOpacity
                                 key={opt.key}
+                                testID={`settings-meal-reminder-schedule-${e2eId(opt.key)}`}
+                                accessibilityLabel={`settings-meal-reminder-schedule-${e2eId(opt.key)}`}
                                 onPress={async () => {
                                   const next = { ...mealReminder, scheduleType: opt.key };
                                   setMealReminder(next);
@@ -11034,6 +11268,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           </Text>
                         </View>
                         <Switch
+                          testID="settings-meal-skip-logged-toggle"
                           value={mealReminder.skipIfAllLogged !== false}
                           onValueChange={async (v) => {
                             const next = { ...mealReminder, skipIfAllLogged: v };
@@ -11064,6 +11299,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         <Text style={{ fontSize: 11, color: themeColors.textMuted, lineHeight: 15 }}>{opt.desc}</Text>
                       </View>
                       <Switch
+                        testID={`settings-feedback-${e2eId(opt.key)}`}
                         value={feedbackSettings[opt.key]}
                         onValueChange={async (v) => {
                           const { saveSettings } = await import('../utils/feedback');
@@ -11092,6 +11328,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         return (
                           <TouchableOpacity
                             key={snd}
+                            testID={`settings-rest-sound-${e2eId(snd)}`}
+                            accessibilityLabel={`settings-rest-sound-${e2eId(snd)}`}
                             activeOpacity={0.75}
                             onPress={async () => {
                               const { saveSettings, playRestTimerDone } = await import('../utils/feedback');
@@ -11138,7 +11376,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {/* Account + Sign out */}
                 <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 18 }]}>ACCOUNT</Text>
                 <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-                  <TouchableOpacity style={styles.profileMenuItem} onPress={() => {
+                  <TouchableOpacity
+                    style={styles.profileMenuItem}
+                    testID="settings-account-details"
+                    accessibilityLabel="settings-account-details"
+                    onPress={() => {
                     // Close Settings FIRST — iOS can't stack two modals,
                     // so opening Account Details while Settings is still
                     // visible renders the AccountInfoModal behind it
@@ -11153,6 +11395,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </View>
 
                 <TouchableOpacity
+                  testID="settings-sign-out"
+                  accessibilityLabel="settings-sign-out"
                   style={[styles.profileSignOutBtn, { backgroundColor: themeColors.surface, borderColor: themeColors.error + '55' }]}
                   onPress={() => {
                     Alert.alert(
@@ -11782,6 +12026,7 @@ function HydrationTodayPanel({
   ounces,
   target,
   pct,
+  guidance,
   loading,
   colors,
   onDelta,
@@ -11790,6 +12035,7 @@ function HydrationTodayPanel({
   ounces: number;
   target: number;
   pct: number;
+  guidance?: HydrationSummary['guidance'];
   loading: boolean;
   colors: ReturnType<typeof getTheme>['colors'];
   onDelta: (deltaOz: number) => void;
@@ -11873,6 +12119,12 @@ function HydrationTodayPanel({
     if (!Number.isFinite(parsed)) return;
     onSet(parsed);
   };
+  const guidanceMessage = guidance?.electrolytes?.message
+    ?? guidance?.notes?.find(note => note.key === 'high_sodium')?.message
+    ?? null;
+  const guidanceTone = guidance?.electrolytes?.status === 'covered' || guidance?.electrolytes?.status === 'planned'
+    ? colors.success
+    : colors.warning;
 
   return (
     <View testID="hydration-panel" style={[
@@ -11928,6 +12180,25 @@ function HydrationTodayPanel({
           <Animated.View style={{ width: fillWidth, height: '100%', backgroundColor: MEALS_ACCENT }} />
         </View>
       </View>
+      {guidanceMessage ? (
+        <View style={{
+          marginTop: 10,
+          flexDirection: 'row',
+          alignItems: 'flex-start',
+          gap: 6,
+          paddingVertical: 7,
+          paddingHorizontal: 8,
+          borderRadius: 8,
+          backgroundColor: guidanceTone + '12',
+          borderWidth: 1,
+          borderColor: guidanceTone + '2E',
+        }}>
+          <Ionicons name="information-circle-outline" size={13} color={guidanceTone} style={{ marginTop: 1 }} />
+          <Text style={{ flex: 1, fontSize: 10.5, lineHeight: 15, color: colors.textSecondary, fontWeight: '600' }}>
+            {guidanceMessage}
+          </Text>
+        </View>
+      ) : null}
       <View style={{ gap: 8, marginTop: 10 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
           <View style={{
@@ -12438,11 +12709,24 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
                 </TouchableOpacity>
                 {onDeleteTemplate ? (
                   <TouchableOpacity
+                    testID={`workout-template-delete-${idx}`}
+                    accessibilityLabel={`workout-template-delete-${idx}`}
                     style={styles.todayTemplateIconBtn}
                     onPress={() => onDeleteTemplate(template)}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                     activeOpacity={0.72}>
                     <Ionicons name="trash-outline" size={18} color={tc.textMuted} />
+                  </TouchableOpacity>
+                ) : null}
+                {onEditTemplate ? (
+                  <TouchableOpacity
+                    testID={`workout-template-edit-${idx}`}
+                    accessibilityLabel={`workout-template-edit-${idx}`}
+                    style={styles.todayTemplateIconBtn}
+                    onPress={() => onEditTemplate(template)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    activeOpacity={0.72}>
+                    <Ionicons name="create-outline" size={18} color={tc.textMuted} />
                   </TouchableOpacity>
                 ) : null}
                 <TouchableOpacity
@@ -12966,6 +13250,8 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                 <View style={{ marginBottom: 12 }}>
                   {!showSwitchOptions ? (
                     <TouchableOpacity
+                      testID="change-focus-toggle"
+                      accessibilityLabel="change-focus-toggle"
                       style={{
                         flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
                         paddingVertical: 10, borderRadius: 10, borderWidth: 1.5,
@@ -12979,7 +13265,11 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                     <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: tc.border }}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
                         <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>Change focus to:</Text>
-                        <TouchableOpacity onPress={onToggleSwitch} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                        <TouchableOpacity
+                          onPress={onToggleSwitch}
+                          testID="change-focus-close"
+                          accessibilityLabel="change-focus-close"
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                           <Ionicons name="close-circle" size={20} color={tc.textMuted} />
                         </TouchableOpacity>
                       </View>
@@ -13041,6 +13331,8 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                           return (
                             <TouchableOpacity
                               key={focus}
+                              testID={`change-focus-option-${e2eId(focus)}`}
+                              accessibilityLabel={`change-focus-option-${e2eId(focus)}`}
                               activeOpacity={0.75}
                               style={{
                                 width: '31%',

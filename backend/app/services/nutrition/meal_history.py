@@ -177,49 +177,15 @@ def dedupe_meals_for_aggregation(
     *,
     logged_retry_window_seconds: int = 120,
 ) -> list:
-    """Collapse generated duplicates plus obvious logged-meal retries.
+    """Collapse generated duplicates only.
 
-    Manual/saved meals can be intentionally repeated, so logged rows are
-    only collapsed when the same date/type/name/items land within a short
-    retry window.
+    Manual/saved meals can be intentionally repeated, including the same
+    meal twice in a row, so logged rows must pass through untouched. Retry
+    idempotency belongs at the write endpoint where caller intent is still
+    available; history aggregation should never hide a real logged row.
     """
-    deduped = dedupe_generated_plan_meals(meals, items_by_meal)
-    if not items_by_meal or logged_retry_window_seconds <= 0:
-        return deduped
-
-    passthrough_ids: set[int] = set()
-    logged_groups: dict[tuple, list] = defaultdict(list)
-    for meal in deduped:
-        meal_id = int(getattr(meal, "id", 0) or 0)
-        if _meal_source_name(meal) != "logged":
-            passthrough_ids.add(meal_id)
-            continue
-        name_key = _normalize_meal_text(getattr(meal, "name", ""))
-        meal_date = getattr(meal, "meal_date", None)
-        type_key = _meal_type_name(meal)
-        signature = _meal_items_signature(items_by_meal.get(meal_id, []))
-        if not name_key or meal_date is None or not signature:
-            passthrough_ids.add(meal_id)
-            continue
-        logged_groups[(meal_date, type_key, name_key, signature)].append(meal)
-
-    kept_logged_ids: set[int] = set()
-    for rows in logged_groups.values():
-        kept_times: list[float] = []
-        for meal in sorted(rows, key=_meal_recency_key, reverse=True):
-            meal_id = int(getattr(meal, "id", 0) or 0)
-            ts = _meal_timestamp(meal)
-            if ts is not None and any(abs(ts - kept) <= logged_retry_window_seconds for kept in kept_times):
-                continue
-            kept_logged_ids.add(meal_id)
-            if ts is not None:
-                kept_times.append(ts)
-
-    kept_ids = passthrough_ids | kept_logged_ids
-    return [
-        meal for meal in deduped
-        if int(getattr(meal, "id", 0) or 0) in kept_ids
-    ]
+    del logged_retry_window_seconds
+    return dedupe_generated_plan_meals(meals, items_by_meal)
 
 
 def _delete_meal_with_items(db: Session, meal: object) -> None:
@@ -295,7 +261,7 @@ def log_meal_from_plan(
     if source != "plan_check":
         existing_query = existing_query.where(Meal.meal_type == resolved_type)
     existing_meals = db.exec(existing_query).all()
-    if existing_meals:
+    if source == "plan_check" and existing_meals:
         existing_items = db.exec(
             select(MealItem).where(col(MealItem.meal_id).in_([m.id for m in existing_meals]))
         ).all()
@@ -400,7 +366,7 @@ def log_meal_from_plan(
     # library. Without this link, downstream code (gut_health metrics,
     # micronutrient aggregation) can't pull fiber/sodium/added_sugar
     # from FoodNutrition and everything reports zero.
-    from app.food_service import touch_recent_food
+    from app.food_service import touch_recent_food, upsert_catalog_food_from_search_item
     from app.models import Food
     import re as _re
 
@@ -471,7 +437,11 @@ def log_meal_from_plan(
         nm = it.get("name") or ""
         if nm and nm not in match_cache:
             incoming = _food_from_incoming_id(it.get("food_id"))
-            match_cache[nm] = incoming if incoming[0] is not None else _match_food(nm)
+            if incoming[0] is not None:
+                match_cache[nm] = incoming
+            else:
+                imported = upsert_catalog_food_from_search_item(db, it, user_id=user_id)
+                match_cache[nm] = (imported.id, imported.serving_grams) if imported and imported.id is not None else _match_food(nm)
     all_food_ids = [fid for fid, _ in match_cache.values() if fid is not None]
     nut_by_food: dict[int, FoodNutrition] = {}
     if all_food_ids:

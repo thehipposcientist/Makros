@@ -131,33 +131,11 @@ struct ContentView: View {
             startOrRejoinWorkout()
         } else if route.contains("hydration") {
             selectedPage = 2
-            if route.contains("add") {
-                addHydrationFromShortcut(oz: queryDouble("oz", in: url) ?? 8)
-            }
+            conn.requestPull()
         } else {
             selectedPage = 0
             conn.requestPull()
         }
-    }
-
-    private func addHydrationFromShortcut(oz: Double) {
-        let safeOz = max(1, min(64, oz))
-        let dateISO = conn.hydration?.dateISO ?? localDateISO()
-        let next = max(0, (((conn.hydration?.ounces ?? 0) + safeOz) * 10).rounded() / 10)
-        WKInterfaceDevice.current().play(.success)
-        conn.setHydrationLocal(ounces: next, dateISO: dateISO)
-        conn.sendCommand("log_hydration", payload: [
-            "dateISO": dateISO,
-            "ounces": next,
-        ])
-    }
-
-    private func queryDouble(_ name: String, in url: URL) -> Double? {
-        URLComponents(url: url, resolvingAgainstBaseURL: false)?
-            .queryItems?
-            .first(where: { $0.name == name })?
-            .value
-            .flatMap(Double.init)
     }
 
     private func localDateISO(_ date: Date = Date()) -> String {

@@ -69,6 +69,13 @@ class FakePlanDay:
     updated_at: datetime = dc_field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+@dataclass
+class FakeDayState:
+    nutrition_plan: Any = None
+    meal_checks: dict = dc_field(default_factory=dict)
+    macro_overrides: Any = None
+
+
 class FakeSession:
     """No-op session — `db.add` records the object, `db.commit` / `db.flush`
     / `db.refresh` no-op. Tests that need data from `get_week_days` patch
@@ -408,6 +415,152 @@ def test_patch_nutrition_unlocked_succeeds():
     pd = FakePlanDay(locked=False, nutrition_json={"meals": [{"meal": "old"}]})
     week_manager.patch_day_nutrition(FakeSession(), pd, {"meals": [{"meal": "new"}]})
     assert pd.nutrition_json["meals"][0]["meal"] == "new"
+
+
+# ─── Section 3b: Explicit remaining-week nutrition refresh ──────────────────
+
+
+def _nutrition_templates() -> list[dict]:
+    return [
+        {"meals": [{"meal": "template-0"}], "targets": {"calories": 2000, "protein": 150, "carbs": 210, "fat": 60}},
+        {"meals": [{"meal": "template-1"}], "targets": {"calories": 2100, "protein": 150, "carbs": 235, "fat": 58}},
+        {"meals": [{"meal": "template-2"}], "targets": {"calories": 2200, "protein": 150, "carbs": 260, "fat": 56}},
+    ]
+
+
+def test_remaining_nutrition_refresh_skips_today_and_updates_future_by_day_index():
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 4, 29)
+
+    pw, days = _build_week(date(2026, 4, 29))
+    original_today = days[0].nutrition_json
+    with patch.object(week_manager, "date", FixedDate), _patch_get_week_days(days):
+        updated, skipped = week_manager.refresh_remaining_week_nutrition(
+            FakeSession(), pw, _nutrition_templates(),
+        )
+
+    assert days[0].nutrition_json == original_today
+    assert [d.day_index for d in updated] == [1, 2, 3, 4, 5, 6]
+    # Day 1 maps to template index 1, not template 0, so the calendar
+    # rotation stays aligned when today is intentionally skipped.
+    assert days[1].nutrition_json["meals"][0]["meal"] == "template-1"
+    assert skipped[0] == {"date": "2026-04-29", "reason": "today_or_past"}
+
+
+def test_remaining_nutrition_refresh_preserves_locked_future_days():
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 4, 29)
+
+    pw, days = _build_week(date(2026, 4, 29), locked_indexes=(2,))
+    locked_plan = days[2].nutrition_json
+    with patch.object(week_manager, "date", FixedDate), _patch_get_week_days(days):
+        updated, skipped = week_manager.refresh_remaining_week_nutrition(
+            FakeSession(), pw, _nutrition_templates(),
+        )
+
+    assert days[2].nutrition_json == locked_plan
+    assert 2 not in [d.day_index for d in updated]
+    assert {"date": "2026-05-01", "reason": "completed"} in skipped
+
+
+def test_remaining_nutrition_skip_reason_preserves_day_state_overrides():
+    tomorrow = date.today() + timedelta(days=1)
+    pd = FakePlanDay(day_date=tomorrow, locked=False, status="planned")
+
+    assert week_manager._remaining_nutrition_skip_reason(
+        pd,
+        FakeDayState(nutrition_plan={"meals": [{"meal": "custom"}]}),
+        today=date.today(),
+    ) == "day_nutrition_override"
+    assert week_manager._remaining_nutrition_skip_reason(
+        pd,
+        FakeDayState(meal_checks={"meal_0": True}),
+        today=date.today(),
+    ) == "meal_checks"
+    assert week_manager._remaining_nutrition_skip_reason(
+        pd,
+        FakeDayState(macro_overrides={"calories": 2600}),
+        today=date.today(),
+    ) == "macro_override"
+
+
+# ─── Section 3c: Immediate injury repair ─────────────────────────────────────
+
+
+def test_injury_repair_updates_today_and_future_unlocked_workouts():
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 4, 29)
+
+    pw, days = _build_week(
+        date(2026, 4, 29),
+        focuses=["Push", "Pull", "Legs", "Upper", "Lower", "Rest", "Rest"],
+        rest_indexes=(5, 6),
+    )
+    fresh = [
+        {"focus": "Push", "exercises": [{"name": "Neutral-Grip DB Press"}]},
+        {"focus": "Pull", "exercises": [{"name": "Chest-Supported Row"}]},
+        {"focus": "Legs", "exercises": [{"name": "Hip Thrust"}]},
+        {"focus": "Upper", "exercises": [{"name": "Cable Row"}]},
+        {"focus": "Lower", "exercises": [{"name": "Hamstring Curl"}]},
+    ]
+
+    with patch.object(week_manager, "date", FixedDate), _patch_get_week_days(days):
+        updated = week_manager.repair_remaining_workouts_for_injuries(FakeSession(), pw, fresh)
+
+    assert [d.day_index for d in updated] == [0, 1, 2, 3, 4]
+    assert days[0].workout_json["focus"] == "Push"
+    assert days[0].workout_json["exercises"][0]["name"] == "Neutral-Grip DB Press"
+    assert days[4].workout_json["exercises"][0]["name"] == "Hamstring Curl"
+    assert days[0].generation_source == "injury_repair"
+
+
+def test_injury_repair_preserves_locked_and_rest_days():
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 4, 29)
+
+    pw, days = _build_week(
+        date(2026, 4, 29),
+        locked_indexes=(1,),
+        rest_indexes=(5, 6),
+    )
+    locked_workout = days[1].workout_json
+    rest_workout = days[5].workout_json
+    fresh = [{"focus": "Push", "exercises": [{"name": "Safe"}]}] * 5
+
+    with patch.object(week_manager, "date", FixedDate), _patch_get_week_days(days):
+        week_manager.repair_remaining_workouts_for_injuries(FakeSession(), pw, fresh)
+
+    assert days[1].workout_json == locked_workout
+    assert days[1].generation_source == "initial"
+    assert days[5].workout_json == rest_workout
+
+
+def test_injury_repair_prefers_same_focus_family_candidate():
+    class FixedDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 4, 29)
+
+    pw, days = _build_week(date(2026, 4, 29), focuses=["Legs", "Push", "Pull", "Upper", "Lower", "Rest", "Rest"])
+    fresh = [
+        {"focus": "Push", "exercises": [{"name": "Safe Push"}]},
+        {"focus": "Legs", "exercises": [{"name": "Safe Legs"}]},
+        {"focus": "Pull", "exercises": [{"name": "Safe Pull"}]},
+    ]
+
+    with patch.object(week_manager, "date", FixedDate), _patch_get_week_days(days):
+        week_manager.repair_remaining_workouts_for_injuries(FakeSession(), pw, fresh)
+
+    assert days[0].workout_json["focus"] == "Legs"
+    assert days[0].workout_json["exercises"][0]["name"] == "Safe Legs"
 
 
 # ─── Section 4: Split change mid-week (PPL → PPLUL, etc.) ───────────────────

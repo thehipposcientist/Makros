@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 from app.services.workout.week_manager import (
     default_training_pattern,
+    _preferred_split_for_next_week,
     week_needs_renewal,
 )
 from app.models import PlanWeek, PlanDay
@@ -226,6 +227,22 @@ def test_week_needs_renewal_boundary():
     pw = _make_plan_week(date.today() - timedelta(days=7))
     assert pw.end_date == date.today() - timedelta(days=1)
     assert week_needs_renewal(pw) is True
+
+
+# ─── Auto-renew split source ─────────────────────────────────────────────────
+
+def test_next_week_split_prefers_durable_preference():
+    prefs = type("Prefs", (), {"preferred_split": "ppl"})()
+    profile = type("Profile", (), {"preferred_split": "upper_lower"})()
+    expiring = _make_plan_week(date.today() - timedelta(days=7), preferred_split="bro")
+
+    assert _preferred_split_for_next_week(prefs, profile, expiring) == "ppl"
+
+
+def test_next_week_split_falls_back_to_expiring_plan_week():
+    expiring = _make_plan_week(date.today() - timedelta(days=7), preferred_split="ppl")
+
+    assert _preferred_split_for_next_week(object(), object(), expiring) == "ppl"
 
 
 # ─── Run ──────────────────────────────────────────────────────────────────────

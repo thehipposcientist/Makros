@@ -25,6 +25,9 @@ export default function RootLayout() {
 
   useEffect(() => {
     configureWorkoutNotifications().catch(() => undefined);
+    import('../modules/thallo-watch-bridge')
+      .then(({ WatchBridge }) => { WatchBridge.isAvailable(); })
+      .catch(() => undefined);
   }, []);
 
   // Foreground hook: every time the app becomes active, kick off a

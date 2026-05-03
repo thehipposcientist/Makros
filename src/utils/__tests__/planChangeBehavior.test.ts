@@ -8,7 +8,9 @@
 //      (sign-up cadence) — NOT a hard-coded Monday and NOT today.
 //   3. Goal/workout/mealplan changes detect "willRegen" only when
 //      meaningful fields have actually changed.
-//   4. The fallback when no PlanWeek exists is today + 7, not today +
+//   4. Injury edits are the one workout-setting exception that may repair
+//      the current week immediately.
+//   5. The fallback when no PlanWeek exists is today + 7, not today +
 //      "days until Monday".
 //
 // Pure helpers + plain JSON profile shapes — no React, no AsyncStorage.
@@ -38,6 +40,36 @@ function willRegen(
   }
   // workout: any save in this mode counts as a regen-trigger
   return true;
+}
+
+function normalizedInjuryToken(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function activeInjurySignature(profile: any): string {
+  const tokens: string[] = [];
+  const legacy = normalizedInjuryToken(profile?.injuries);
+  if (legacy) tokens.push(`legacy:${legacy}`);
+
+  for (const entry of profile?.injuryEntries ?? []) {
+    const status = normalizedInjuryToken(entry.status || 'active');
+    if (status === 'resolved') continue;
+    const muscles = [...(entry.muscleGroups ?? [])].map(normalizedInjuryToken).filter(Boolean).sort().join(',');
+    const token = [
+      normalizedInjuryToken(entry.bodyPart),
+      normalizedInjuryToken(entry.description),
+      status || 'active',
+      normalizedInjuryToken(entry.severity),
+      muscles,
+    ].filter(Boolean).join(':');
+    if (token) tokens.push(`entry:${token}`);
+  }
+
+  return JSON.stringify([...new Set(tokens)].sort());
+}
+
+function activeInjuriesChanged(before: any, after: any): boolean {
+  return activeInjurySignature(before) !== activeInjurySignature(after);
 }
 
 const baseProfile = {
@@ -103,6 +135,35 @@ describe('willRegen predicate', () => {
     it('always fires (any workout-tab save is treated as a regen trigger)', () => {
       expect(willRegen('workout', baseProfile, baseProfile)).toBe(true);
     });
+
+    it('detects active injury changes for immediate current-week repair', () => {
+      const after = {
+        ...baseProfile,
+        injuryEntries: [{
+          id: 'inj-1',
+          bodyPart: 'Knee',
+          description: 'Knee pain on squats',
+          status: 'active',
+          muscleGroups: ['quads'],
+        }],
+      };
+
+      expect(activeInjuriesChanged(baseProfile, after)).toBe(true);
+    });
+
+    it('ignores resolved injuries when deciding current-week repair', () => {
+      const resolvedOnly = {
+        ...baseProfile,
+        injuryEntries: [{
+          id: 'inj-2',
+          bodyPart: 'Shoulder',
+          description: 'Old shoulder tweak',
+          status: 'resolved',
+        }],
+      };
+
+      expect(activeInjuriesChanged(baseProfile, resolvedOnly)).toBe(false);
+    });
   });
 
   describe('other modes', () => {
@@ -151,15 +212,19 @@ describe('"applies on" date math', () => {
 });
 
 describe('regen behavior contract', () => {
-  it('regenWorkout is always false on save (active week stays stable)', () => {
+  it('regenWorkout is always false and regenNutrition is opt-in on save', () => {
     // Hard-coded contract — the actual `_doSaveProfile` sets these to
-    // false unconditionally. This test is a tripwire so a future
-    // refactor that re-introduces eager regen has to update the test
-    // (which forces a conscious decision).
+    // false by default. Mealplan saves may opt into a nutrition-only
+    // remaining-week refresh. Workout saves stay fixed until renewal unless
+    // the user opts into the injury-specific repair path.
     const regenWorkout = false;
-    const regenNutrition = false;
+    const regenNutritionByDefault = false;
+    const regenNutritionWhenUserOptsIn = true;
+    const repairInjuryConflictsWhenUserOptsIn = true;
     expect(regenWorkout).toBe(false);
-    expect(regenNutrition).toBe(false);
+    expect(regenNutritionByDefault).toBe(false);
+    expect(regenNutritionWhenUserOptsIn).toBe(true);
+    expect(repairInjuryConflictsWhenUserOptsIn).toBe(true);
   });
 
   it('willRegen=true triggers the confirmation modal, not an immediate plan rebuild', () => {
@@ -174,6 +239,7 @@ describe('regen behavior contract', () => {
     expect(wantsConfirm).toBe(true);
     // Confirmation flow does NOT regenerate the active week — it only
     // persists settings. The active PlanWeek keeps its current shape
-    // until auto_renew_week fires at the natural week boundary.
+    // until auto_renew_week fires at the natural week boundary, except
+    // for injury repair which only updates today/future unlocked workouts.
   });
 });

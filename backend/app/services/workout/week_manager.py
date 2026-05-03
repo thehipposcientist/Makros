@@ -6,6 +6,7 @@ in one place: locked days are NEVER overwritten by adapt/regenerate.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -81,6 +82,18 @@ def next_plan_week_start(anchor: date, today: date | None = None) -> date:
     days_since = (today - anchor).days
     weeks_since = days_since // 7
     return anchor + timedelta(days=weeks_since * 7)
+
+
+def _preferred_split_for_next_week(
+    prefs: object | None,
+    profile: object | None,
+    expiring_week: object | None,
+) -> str | None:
+    return (
+        getattr(prefs, "preferred_split", None)
+        or getattr(profile, "preferred_split", None)
+        or getattr(expiring_week, "preferred_split", None)
+    )
 
 
 def create_plan_week(
@@ -318,6 +331,184 @@ def patch_day_nutrition(
     db.commit()
     db.refresh(plan_day)
     return plan_day
+
+
+def _has_checked_meals(meal_checks: object) -> bool:
+    if not isinstance(meal_checks, dict):
+        return False
+    return any(bool(v) for v in meal_checks.values())
+
+
+def _remaining_nutrition_skip_reason(
+    plan_day: PlanDay,
+    day_state: object | None,
+    *,
+    today: date,
+) -> str | None:
+    if plan_day.day_date <= today:
+        return "today_or_past"
+    if plan_day.locked or plan_day.status in {"started", "completed", "skipped", "edited"}:
+        return plan_day.lock_reason or plan_day.status or "locked"
+    if day_state is not None:
+        if getattr(day_state, "nutrition_plan", None):
+            return "day_nutrition_override"
+        if getattr(day_state, "macro_overrides", None):
+            return "macro_override"
+        if _has_checked_meals(getattr(day_state, "meal_checks", None)):
+            return "meal_checks"
+    return None
+
+
+def refresh_remaining_week_nutrition(
+    db: Session,
+    plan_week: PlanWeek,
+    nutrition_templates: list[dict],
+) -> tuple[list[PlanDay], list[dict]]:
+    """Apply fresh nutrition templates to future eligible days only.
+
+    This is the meal-plan counterpart to the workout-week immutability rule:
+    workouts never regenerate mid-week, while nutrition can be explicitly
+    refreshed for future days that have no locks, checks, or day-level edits.
+    """
+    if not nutrition_templates:
+        return [], []
+
+    from app.models import UserDayState
+
+    today = date.today()
+    days = get_week_days(db, plan_week.id)
+    day_keys = [d.day_date for d in days]
+    states_by_date = {}
+    if day_keys:
+        states = db.exec(
+            select(UserDayState).where(
+                UserDayState.user_id == plan_week.user_id,
+                UserDayState.day_key.in_(day_keys),
+            )
+        ).all()
+        states_by_date = {s.day_key: s for s in states}
+
+    updated: list[PlanDay] = []
+    skipped: list[dict] = []
+    now = datetime.now(timezone.utc)
+
+    for plan_day in days:
+        state = states_by_date.get(plan_day.day_date)
+        reason = _remaining_nutrition_skip_reason(plan_day, state, today=today)
+        if reason:
+            skipped.append({"date": plan_day.day_date.isoformat(), "reason": reason})
+            continue
+
+        template = nutrition_templates[plan_day.day_index % len(nutrition_templates)]
+        plan_day.nutrition_json = _nutrition_payload_for_day(
+            template,
+            workout_payload=plan_day.workout_json,
+            goal=plan_week.goal,
+        )
+        plan_day.updated_at = now
+        db.add(plan_day)
+        updated.append(plan_day)
+
+    db.commit()
+    for plan_day in updated:
+        db.refresh(plan_day)
+    return updated, skipped
+
+
+def _normalized_focus(value: object) -> str:
+    return " ".join(str(value or "").lower().replace("_", " ").split())
+
+
+def _focus_family_for_day_payload(payload: dict | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    try:
+        from app.services.workout.focus_normalize import normalize_focus_to_family
+        return normalize_focus_to_family(str(payload.get("focus") or ""))
+    except Exception:
+        return None
+
+
+def _pick_repair_candidate(
+    original: dict | None,
+    fresh_workout_days: list[dict],
+    used_indexes: set[int],
+) -> tuple[int | None, dict | None]:
+    if not isinstance(original, dict) or not fresh_workout_days:
+        return None, None
+
+    original_focus = _normalized_focus(original.get("focus"))
+    original_family = _focus_family_for_day_payload(original)
+
+    for idx, candidate in enumerate(fresh_workout_days):
+        if idx in used_indexes:
+            continue
+        if _normalized_focus(candidate.get("focus") if isinstance(candidate, dict) else None) == original_focus:
+            return idx, candidate
+
+    if original_family:
+        for idx, candidate in enumerate(fresh_workout_days):
+            if idx in used_indexes:
+                continue
+            if _focus_family_for_day_payload(candidate) == original_family:
+                return idx, candidate
+
+    for idx, candidate in enumerate(fresh_workout_days):
+        if idx not in used_indexes:
+            return idx, candidate
+
+    return None, None
+
+
+def repair_remaining_workouts_for_injuries(
+    db: Session,
+    plan_week: PlanWeek,
+    fresh_workout_days: list[dict],
+) -> list[PlanDay]:
+    """Replace today/future unlocked workouts with injury-aware exercises.
+
+    The week structure stays intact: rest days stay rest, locked days stay
+    untouched, and each repaired workout keeps its original displayed focus.
+    """
+    if not fresh_workout_days:
+        return []
+
+    today = date.today()
+    days = get_week_days(db, plan_week.id)
+    now = datetime.now(timezone.utc)
+    used_indexes: set[int] = set()
+    updated: list[PlanDay] = []
+
+    for plan_day in days:
+        if plan_day.locked or plan_day.day_date < today or plan_day.is_rest:
+            continue
+        original = plan_day.workout_json
+        if not isinstance(original, dict) or not original.get("exercises"):
+            continue
+
+        picked_idx, candidate = _pick_repair_candidate(original, fresh_workout_days, used_indexes)
+        if picked_idx is not None:
+            used_indexes.add(picked_idx)
+        if not isinstance(candidate, dict) or not candidate.get("exercises"):
+            continue
+
+        repaired = deepcopy(candidate)
+        if original.get("day"):
+            repaired["day"] = original.get("day")
+        if original.get("focus"):
+            repaired["focus"] = original.get("focus")
+
+        plan_day.workout_json = repaired
+        plan_day.generation_source = "injury_repair"
+        plan_day.status = "planned"
+        plan_day.updated_at = now
+        db.add(plan_day)
+        updated.append(plan_day)
+
+    db.commit()
+    for plan_day in updated:
+        db.refresh(plan_day)
+    return updated
 
 
 def adapt_remaining_days(
@@ -620,7 +811,7 @@ def auto_renew_week(
     goal_pace = active_goal.pace.value if active_goal and active_goal.pace else None
     days_per_week = int(getattr(prefs, "days_per_week", None) or getattr(profile, "days_per_week", 4) or 4)
     session_minutes = int(getattr(prefs, "workout_duration_minutes", None) or getattr(profile, "workout_duration_minutes", 45) or 45)
-    preferred_split = getattr(prefs, "preferred_split", None) or getattr(profile, "preferred_split", None)
+    preferred_split = _preferred_split_for_next_week(prefs, profile, expiring_pw)
 
     planner_ctx = build_planweek_planner_context(
         db,

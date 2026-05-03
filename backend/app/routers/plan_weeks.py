@@ -29,6 +29,7 @@ from app.services.workout.week_manager import (
     patch_day_nutrition,
     adapt_remaining_days,
     regenerate_remaining_days,
+    repair_remaining_workouts_for_injuries,
     lock_day_on_complete,
     week_needs_renewal,
     default_training_pattern,
@@ -1589,6 +1590,70 @@ def adapt_remaining(
     fresh_days = plan.get("workout_plan", {}).get("days", [])
 
     adapt_remaining_days(db, pw, fresh_days)
+    days = get_week_days(db, pw.id)
+    return _plan_week_to_response(pw, days)
+
+
+@router.post("/week/repair-injury-conflicts")
+def repair_injury_conflicts(
+    current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
+    db: Session = Depends(get_session),
+) -> PlanWeekResponse:
+    """Immediately make unlocked current-week workouts injury-aware.
+
+    This is a safety exception to the normal "settings apply next week"
+    rule. It preserves the active week's structure and only rewrites
+    today/future unlocked workout exercise lists using the user's active
+    injury flags.
+    """
+    from app.services.workout.planner import generate_workout_plan
+    from app.services.workout.planner_context import build_planweek_planner_context
+    from app.seed_exercises_data import SEED_EXERCISES
+    from app.models import UserProfile, UserPreferences, UserGoal
+
+    pw = get_active_week(db, current_user.id)
+    if not pw:
+        raise HTTPException(status_code=404, detail="No active plan week")
+
+    profile = db.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+    prefs = db.exec(
+        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=400, detail="No profile found")
+
+    active_goal = db.exec(
+        select(UserGoal).where(
+            UserGoal.user_id == current_user.id,
+            UserGoal.is_active == True,
+        )
+    ).first()
+    current_goal = effective_goal_id(active_goal, fallback=pw.goal)
+
+    planner_ctx = build_planweek_planner_context(
+        db,
+        current_user.id,
+        profile,
+        prefs,
+        goal=current_goal,
+        days_per_week=pw.days_per_week,
+        session_minutes=(
+            int(getattr(prefs, "workout_duration_minutes", None) or 0)
+            or getattr(pw, "session_minutes", None)
+            or 45
+        ),
+        preferred_split=pw.preferred_split,
+    )
+
+    plan = generate_workout_plan(
+        planner_ctx.inputs, SEED_EXERCISES,
+        history_familiarity=planner_ctx.history_familiarity,
+        recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
+    )
+    fresh_days = plan.get("workout_plan", {}).get("days", [])
+    repair_remaining_workouts_for_injuries(db, pw, fresh_days)
     days = get_week_days(db, pw.id)
     return _plan_week_to_response(pw, days)
 

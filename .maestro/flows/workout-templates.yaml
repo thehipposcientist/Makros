@@ -103,9 +103,24 @@ tags:
     id: "workout-template-save"
 
 # The newest template is inserted first; launching it should enter the normal
-# ActiveWorkoutScreen with the template exercise intact.
+# ActiveWorkoutScreen with the template exercise intact. First reopen it in
+# edit mode; this catches the saved-template edit affordance and persisted
+# draft hydration.
 - extendedWaitUntil:
-    visible: "E2E Template"
+    visible:
+      id: "workout-template-edit-0"
+    timeout: 15000
+- tapOn:
+    id: "workout-template-edit-0"
+- extendedWaitUntil:
+    visible: "Edit Template"
+    timeout: 15000
+- assertVisible: "Push-ups"
+- tapOn:
+    id: "workout-template-save"
+- extendedWaitUntil:
+    visible:
+      id: "workout-template-start-0"
     timeout: 15000
 - tapOn:
     id: "workout-template-start-0"
@@ -117,4 +132,5 @@ tags:
     visible:
       id: "exercise-card-0"
     timeout: 30000
-- assertVisible: "Push-ups"
+- assertVisible:
+    id: "active-exercise-name-0"

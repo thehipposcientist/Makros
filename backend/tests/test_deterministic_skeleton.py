@@ -35,6 +35,7 @@ from app.services.nutrition.meal_assembler import (
     FoodMacros,
     assemble_nutrition_response,
     assemble_template,
+    food_names_for_generation,
     validate_and_repair_skeletons,
 )
 
@@ -483,6 +484,51 @@ def test_assembler_uses_default_pantry_when_foods_are_skipped() -> None:
     _ok("skipped foods emits full meal templates from defaults")
 
 
+def test_assembler_merges_custom_foods_into_generation_pantry() -> None:
+    """Custom foods should be eligible for generated plans even when they
+    live in the user's custom library instead of the seed foods picker."""
+    print("\n[test] assembler merges custom foods into generation pantry")
+    custom_name = "Kirkland Whey Protein"
+    req = _make_plan_request(
+        goal="muscle_gain",
+        mealsPerDay=3,
+        mealVariety=2,
+        foodsAvailable=[],
+        customFoodNames=[custom_name],
+    )
+    generation_foods = food_names_for_generation(req, req.foodsAvailable)
+    assert custom_name in generation_foods, generation_foods
+
+    enriched = _enriched_payload_for(list(DEFAULT_NUTRITION_PANTRY))
+    enriched["foods"].append({
+        "name": custom_name,
+        "serving": "1 scoop",
+        "calories": 130,
+        "protein": 25,
+        "carbs": 3,
+        "fat": 2,
+        "fiber": 1,
+        "sugar": 1,
+        "sodium": 120,
+    })
+    out = assemble_nutrition_response(
+        None,
+        req,
+        (2600, 180, 290, 80),
+        2,
+        req.foodsAvailable,
+        enriched,
+    )
+    item_names = [
+        str(item.get("name") or "")
+        for plan in (out.get("nutrition_plans") or [])
+        for meal in (plan.get("meals") or [])
+        for item in (meal.get("items") or [])
+    ]
+    assert custom_name in item_names, item_names
+    _ok("custom food names are eligible and selected in generated meals")
+
+
 # ─── 7. mealsPerDay in {5, 7} ───────────────────────────────────────────────
 
 
@@ -557,6 +603,7 @@ cases = [
     test_incompatible_pantry_does_not_fall_back_to_blocked_foods,
     test_assembler_surfaces_no_compatible_foods_validation,
     test_assembler_uses_default_pantry_when_foods_are_skipped,
+    test_assembler_merges_custom_foods_into_generation_pantry,
     test_meals_per_day_5,
     test_meals_per_day_7,
     test_determinism_identical_inputs_produce_identical_output,

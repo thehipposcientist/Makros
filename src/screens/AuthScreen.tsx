@@ -674,17 +674,29 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
           </TouchableOpacity>
 
           {mode === 'login' && (
-            <TouchableOpacity onPress={() => switchMode('reset_email')} style={styles.forgotBtn}>
+            <TouchableOpacity
+              testID="auth-forgot-password"
+              accessibilityLabel="auth-forgot-password"
+              onPress={() => switchMode('reset_email')}
+              style={styles.forgotBtn}>
               <Text style={styles.forgotText}>Forgot password?</Text>
             </TouchableOpacity>
           )}
           {mode === 'signup' && (
-            <TouchableOpacity onPress={() => switchMode('login')} style={styles.forgotBtn}>
+            <TouchableOpacity
+              testID="auth-back-to-login"
+              accessibilityLabel="auth-back-to-login"
+              onPress={() => switchMode('login')}
+              style={styles.forgotBtn}>
               <Text style={styles.forgotText}>Already have an account? Log in</Text>
             </TouchableOpacity>
           )}
           {(mode === 'reset_email' || mode === 'reset_answer') && (
-            <TouchableOpacity onPress={() => switchMode('login')} style={styles.forgotBtn}>
+            <TouchableOpacity
+              testID="auth-back-to-login"
+              accessibilityLabel="auth-back-to-login"
+              onPress={() => switchMode('login')}
+              style={styles.forgotBtn}>
               <Text style={styles.forgotText}>Back to log in</Text>
             </TouchableOpacity>
           )}

@@ -1,0 +1,81 @@
+# Password recovery E2E coverage.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: auth-recovery
+tags:
+  - e2e
+  - seeded
+  - auth
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- extendedWaitUntil:
+    visible: "Sign Up"
+    timeout: 120000
+
+- tapOn:
+    id: "auth-forgot-password"
+- extendedWaitUntil:
+    visible:
+      id: "auth-email-input"
+    timeout: 15000
+- tapOn:
+    id: "auth-email-input"
+- inputText: "e2e_returning@test.thallo"
+- tapOn:
+    id: "auth-submit"
+
+- extendedWaitUntil:
+    visible: "What is your favorite color?"
+    timeout: 30000
+- tapOn:
+    id: "auth-recovery-answer-input"
+- inputText: "blue"
+- pressKey: Enter
+- inputText: "SeedTest1234"
+- pressKey: Enter
+- inputText: "SeedTest1234"
+- pressKey: Enter
+
+- runFlow:
+    when:
+      visible: "Save Password?"
+    commands:
+      - tapOn: "Not Now"
+
+- runFlow:
+    when:
+      visible: "Welcome to Thallo Pro"
+    commands:
+      - tapOn:
+          id: "tutorial-skip"
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000

@@ -1,0 +1,179 @@
+# Account + settings E2E coverage.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: account-settings-state
+tags:
+  - e2e
+  - seeded
+  - account
+  - settings
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-you"
+- extendedWaitUntil:
+    visible:
+      id: "you-tab-screen"
+    timeout: 30000
+- assertVisible: "Riley"
+- assertVisible:
+    text: ".*goal 168 lb.*"
+
+# Settings should open from the profile menu and expose the mounted settings
+# hub's stable controls for preflight checks.
+- scrollUntilVisible:
+    element:
+      id: "profile-settings-row"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "profile-settings-row"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 15000
+- assertVisible: "APPEARANCE"
+- scrollUntilVisible:
+    element:
+      id: "settings-workout-reminders-toggle"
+    direction: DOWN
+    timeout: 20000
+    visibilityPercentage: 50
+- assertVisible:
+    id: "settings-workout-reminders-toggle"
+- scrollUntilVisible:
+    element:
+      id: "settings-meal-reminder-toggle"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- assertVisible:
+    id: "settings-meal-reminder-toggle"
+- scrollUntilVisible:
+    element:
+      text: "UNITS"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- assertVisible:
+    id: "settings-weight-unit-lbs"
+- assertVisible:
+    id: "settings-distance-unit-mi"
+- tapOn:
+    id: "settings-back"
+- extendedWaitUntil:
+    visible:
+      id: "you-tab-screen"
+    timeout: 15000
+
+# Account opens from the profile menu and exposes identity, legal, support,
+# tutorial replay, and destructive-account controls.
+- scrollUntilVisible:
+    element:
+      id: "profile-account-open"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "profile-account-open"
+- extendedWaitUntil:
+    visible:
+      id: "account-modal"
+    timeout: 30000
+- assertVisible:
+    id: "account-email-row"
+- assertVisible:
+    id: "account-username-row"
+- assertVisible:
+    id: "account-legal-version-row"
+- assertVisible:
+    id: "account-recovery-question"
+
+# Legal review should open and close without dismissing Account.
+- swipe:
+    start: 50%,80%
+    end: 50%,48%
+    duration: 500
+- extendedWaitUntil:
+    visible:
+      id: "account-legal-safety"
+    timeout: 15000
+- tapOn:
+    id: "account-legal-safety"
+- extendedWaitUntil:
+    visible:
+      id: "legal-disclosure-modal"
+    timeout: 15000
+- assertVisible: "Legal And Safety"
+- tapOn:
+    id: "legal-done"
+- extendedWaitUntil:
+    visible:
+      id: "account-modal"
+    timeout: 15000
+
+# Tutorial replay should close Account first, paint the overlay, and return to
+# the profile tab after skipping.
+- scrollUntilVisible:
+    element:
+      id: "account-show-tutorial"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+    centerElement: true
+- tapOn:
+    id: "account-show-tutorial"
+- extendedWaitUntil:
+    visible:
+      id: "tutorial-skip"
+    timeout: 15000
+- tapOn:
+    id: "tutorial-skip"
+- extendedWaitUntil:
+    visible:
+      id: "you-tab-screen"
+    timeout: 15000

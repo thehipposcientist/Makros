@@ -186,8 +186,8 @@ def test_planner_with_bro_split_contains_all_five_focuses_at_5d():
 # ── prev_focuses preservation across days ──────────────────────────
 
 def test_planner_with_recent_push_pull_pushes_legs_first():
-    """User did Push then Pull yesterday/two days ago. Day 0 of new
-    week should prefer Legs (the freshest family)."""
+    """User most recently hit Push and Pull. Day 0 of a new PPL week
+    should prefer Legs, the least-recently trained PPL family."""
     days = generate_workout_plan(
         _inputs(
             recent_focus_families=("push", "pull"),
@@ -195,13 +195,8 @@ def test_planner_with_recent_push_pull_pushes_legs_first():
         ),
         SEED_EXERCISES,
     )["workout_plan"]["days"]
-    f0 = (days[0].get("focus") or "").lower()
-    # Day 0 should not be push or pull (recently done)
-    is_push = "push" in f0
-    is_pull = "pull" in f0
-    is_legs = "legs" in f0
-    assert is_legs or not (is_push and is_pull), \
-        f"day 0 = {f0} after recent push+pull; expected legs"
+    f0 = normalize_focus_to_family(days[0].get("focus") or "")
+    assert f0 == "legs", f"day 0 = {f0!r} after recent push+pull; expected legs"
 
 
 # ── focus_override matching exists in recipe ───────────────────────

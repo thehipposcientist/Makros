@@ -39,7 +39,7 @@ Prereqs:
 Then:
 
 ```bash
-maestro test .maestro/flows/signup-and-regen.yaml
+MAESTRO_DRIVER_STARTUP_TIMEOUT=120000 maestro test .maestro/flows/signup-and-regen.yaml
 ```
 
 Or via the Makefile shortcut:
@@ -47,6 +47,9 @@ Or via the Makefile shortcut:
 ```bash
 make smoke-mobile
 ```
+
+The Makefile smoke targets set `MAESTRO_DRIVER_STARTUP_TIMEOUT=120000` by
+default because Maestro 2.5.x can be slow to bring up the iOS XCTest driver.
 
 ## Seeded returning-user flow
 
@@ -106,6 +109,22 @@ Or:
 
 ```bash
 make smoke-mobile-social
+```
+
+Account, settings, auth recovery, and active PlanWeek immutability checks:
+
+```bash
+make seed-e2e
+maestro test .maestro/flows/plan-settings-immutability.yaml
+maestro test .maestro/flows/account-settings-state.yaml
+maestro test .maestro/flows/auth-recovery.yaml
+```
+
+Or run the main seeded preflight pack with fresh seed data between mutating
+flows:
+
+```bash
+make smoke-mobile-preflight
 ```
 
 Free-vs-Pro gates need beta full-access disabled for the running JS bundle:
@@ -175,6 +194,9 @@ maestro test \
   `Cannot find native module 'ExpoWebBrowser'` or similar, rebuild/reinstall the
   dev client (`npx expo run:ios` or the matching Android command) before
   re-running Maestro.
+- **iOS driver startup flake.** If Maestro exits before a flow starts with
+  `iOS driver not ready in time`, rerun through the Makefile target or export
+  `MAESTRO_DRIVER_STARTUP_TIMEOUT=120000`.
 - **Light vs dark theme copy.** Flows match on user-visible text. Current copy
   is theme-invariant, but if a future theme overrides labels (e.g. "Get Started"
   → "Start"), the flow will need updating.
@@ -220,6 +242,12 @@ maestro test \
   totals
 - `flows/social-digest.yaml` — verifies seeded Activity feed, friend list,
   friend detail workout rows, and sharing-off privacy messaging
+- `flows/plan-settings-immutability.yaml` — verifies future workout settings
+  saves do not mutate the fixed active 7-day PlanWeek
+- `flows/account-settings-state.yaml` — verifies Profile → Settings → Account,
+  legal review, and tutorial replay modal routing
+- `flows/auth-recovery.yaml` — verifies recovery-question password reset for
+  seeded users and the post-reset login path
 - `flows/free-vs-pro-gates.yaml` — true free tier vs pro gate assertions
   (requires `EXPO_PUBLIC_DISABLE_FREE_BETA_FULL_ACCESS=1`)
 - `flows/login.yaml` — helper flow for logging in an existing user

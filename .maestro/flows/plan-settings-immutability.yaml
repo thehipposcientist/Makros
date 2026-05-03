@@ -1,0 +1,113 @@
+# Plan settings immutability E2E coverage.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: plan-settings-immutability
+tags:
+  - e2e
+  - seeded
+  - workouts
+  - persistence
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+# Baseline the seeded active PlanWeek before editing future settings.
+- extendedWaitUntil:
+    visible:
+      id: "workout-week-day-chip-0"
+    timeout: 30000
+- tapOn:
+    id: "workout-week-day-chip-0"
+- assertVisible:
+    text: ".*Upper.*"
+- tapOn:
+    id: "workout-week-day-chip-1"
+- assertVisible:
+    text: ".*Lower.*"
+- tapOn:
+    id: "workout-week-day-chip-2"
+- assertVisible: "Rest Day"
+
+# Saving workout settings should schedule next-week changes only. It must not
+# regenerate or mutate the fixed 7-day active PlanWeek.
+- tapOn:
+    id: "workout-subtab-settings"
+- tapOn:
+    id: "edit-workout-duration-75"
+- scrollUntilVisible:
+    element:
+      id: "edit-profile-save"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "edit-profile-save"
+
+- extendedWaitUntil:
+    visible: "Save Workout Settings?"
+    timeout: 15000
+- assertVisible:
+    text: ".*current week stays unchanged.*"
+- tapOn:
+    id: "pending-save-confirm"
+
+- extendedWaitUntil:
+    visible:
+      id: "workout-week-day-chip-0"
+    timeout: 30000
+- assertNotVisible: "Building your new plan"
+
+- tapOn:
+    id: "workout-subtab-plan"
+- tapOn:
+    id: "workout-week-day-chip-0"
+- assertVisible:
+    text: ".*Upper.*"
+- tapOn:
+    id: "workout-week-day-chip-1"
+- assertVisible:
+    text: ".*Lower.*"
+- tapOn:
+    id: "workout-week-day-chip-2"
+- assertVisible: "Rest Day"

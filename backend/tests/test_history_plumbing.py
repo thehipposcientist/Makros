@@ -470,6 +470,68 @@ def test_log_meal_from_plan_collapses_existing_generated_duplicates() -> None:
     _ok("existing generated duplicates are collapsed to one updated row")
 
 
+def test_manual_add_same_meal_twice_creates_two_history_rows() -> None:
+    """Manual meal adds are user intent, not plan-check retries. Logging
+    the same payload twice should keep both rows in history and rollups."""
+    print("\n[test] manual_add same meal twice creates two history rows")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.enums import MealSource, MealType
+    from app.models import User, Meal  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import get_meal_history, log_meal_from_plan
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date.today()
+    payload = {
+        "meal": "Protein Shake",
+        "items": [
+            {"name": "Whey", "quantity": 1, "unit": "scoop", "calories": 120, "protein": 24, "carbs": 3, "fat": 2},
+        ],
+    }
+    with Session(engine) as s:
+        u = User(email="manual-repeat@example.com", username="manualrepeat", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        first = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_3",
+            meal_data=payload,
+            source="manual_add",
+            consumed_at=datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc),
+            db=s,
+        )
+        second = log_meal_from_plan(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type="meal_3",
+            meal_data=payload,
+            source="manual_add",
+            consumed_at=datetime(2026, 5, 3, 12, 1, tzinfo=timezone.utc),
+            db=s,
+        )
+
+        assert first["id"] != second["id"], (first, second)
+        rows = s.exec(
+            select(Meal)
+            .where(Meal.user_id == u.id)
+            .where(Meal.meal_date == meal_date)
+            .where(Meal.meal_type == MealType.SNACK)
+            .where(Meal.source == MealSource.LOGGED)
+        ).all()
+        assert len(rows) == 2, rows
+        history = get_meal_history(u.id, days=1, limit=10, db=s)
+        assert len(history) == 2, history
+    _ok("manual repeated meals are preserved as separate logs")
+
+
 def test_rolling_averages_ignore_duplicate_generated_plan_rows() -> None:
     """Rolling averages should not multiply calories from repeated plan
     check-off rows with the same generated meal name."""
@@ -1142,6 +1204,71 @@ def test_hydration_get_reads_requested_date() -> None:
     _ok("requested date returns its own hydration row")
 
 
+def test_hydration_guidance_flags_low_sodium_long_session() -> None:
+    """Sodium should produce guidance for long/sweaty sessions, not a hidden
+    water-ounce bonus."""
+    print("\n[test] hydration guidance flags low sodium on long sessions")
+    from app.routers.meals import _build_hydration_guidance
+
+    guidance = _build_hydration_guidance(
+        workout_minutes_today=75,
+        sodium_mg_today=900,
+        supplement_flags={
+            "electrolytes_in_stack": False,
+            "electrolytes_logged": False,
+            "creatine_in_stack": False,
+            "creatine_logged": False,
+            "caffeine_in_stack": False,
+            "caffeine_logged": False,
+        },
+    )
+
+    assert guidance["electrolytes"]["status"] == "consider", guidance
+    assert "900 mg" in guidance["electrolytes"]["message"], guidance
+    assert guidance["sodium_mg"] == 900, guidance
+    _ok("long low-sodium session asks for electrolytes instead of more water")
+
+
+def test_hydration_guidance_recognizes_logged_electrolytes_and_creatine() -> None:
+    """Logged electrolytes cover the long-session sodium note. Creatine is a
+    note only; it must not be treated as an automatic water-target bump."""
+    print("\n[test] hydration guidance recognizes electrolytes and creatine")
+    from app.routers.meals import _build_hydration_guidance, _compute_hydration_target_oz
+
+    target_before, breakdown_before = _compute_hydration_target_oz(
+        weight_lbs=180,
+        gender=None,
+        workout_minutes_today=75,
+        protein_g_today=0,
+        alcohol_servings_today=0,
+    )
+    target_after, breakdown_after = _compute_hydration_target_oz(
+        weight_lbs=180,
+        gender=None,
+        workout_minutes_today=75,
+        protein_g_today=0,
+        alcohol_servings_today=0,
+    )
+    guidance = _build_hydration_guidance(
+        workout_minutes_today=75,
+        sodium_mg_today=900,
+        supplement_flags={
+            "electrolytes_in_stack": True,
+            "electrolytes_logged": True,
+            "creatine_in_stack": True,
+            "creatine_logged": False,
+            "caffeine_in_stack": False,
+            "caffeine_logged": False,
+        },
+    )
+
+    assert target_before == target_after, (target_before, target_after)
+    assert breakdown_before == breakdown_after, (breakdown_before, breakdown_after)
+    assert guidance["electrolytes"]["status"] == "covered", guidance
+    assert any(note["key"] == "creatine" for note in guidance["notes"]), guidance
+    _ok("electrolytes/creatine surface as guidance without changing ounces")
+
+
 # ── Part 4: workout completion feedback patches ─────────────────────
 
 
@@ -1367,6 +1494,7 @@ cases = [
     test_log_meal_from_plan_replaces_edited_meal_items,
     test_unlog_meal_from_plan_removes_checked_row_from_rollups,
     test_log_meal_from_plan_collapses_existing_generated_duplicates,
+    test_manual_add_same_meal_twice_creates_two_history_rows,
     test_rolling_averages_ignore_duplicate_generated_plan_rows,
     test_rolling_averages_preserve_distinct_generic_meals,
     test_meal_history_limits_after_deduping_generated_rows,
@@ -1378,6 +1506,8 @@ cases = [
     test_gut_rollup_uses_logged_days_not_empty_metric_placeholders,
     test_compute_daily_metrics_recovers_from_duplicate_insert_race,
     test_hydration_get_reads_requested_date,
+    test_hydration_guidance_flags_low_sodium_long_session,
+    test_hydration_guidance_recognizes_logged_electrolytes_and_creatine,
     test_feedback_patch_preserves_exercise_based_fatigue_same_focus,
     test_feedback_patch_targets_focus_corrected_completion,
     test_custom_exercise_muscles_feed_completion_fatigue,

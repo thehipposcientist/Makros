@@ -243,6 +243,7 @@ def sync_onboarding(
         prefs.equipment        = body.preferences.equipment
         prefs.equipment_settings = body.preferences.equipment_settings
         prefs.foods_available  = body.preferences.foods_available
+        prefs.injuries         = body.preferences.injuries
         prefs.updated_at       = now
     else:
         prefs = UserPreferences(user_id=current_user.id, **body.preferences.model_dump())

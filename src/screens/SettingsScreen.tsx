@@ -48,6 +48,14 @@ function formatTime(hour: number, minute: number): string {
   return `${h12}:${pad2(minute)} ${am ? 'AM' : 'PM'}`;
 }
 
+function e2eId(value: string | number | null | undefined): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 async function openDeviceSettings() {
   try {
     if (Platform.OS === 'ios') {
@@ -160,10 +168,17 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
   };
 
   return (
-    <View style={[styles.root, { backgroundColor: tc.background, bottom: bottomNavClearance }]}>
+    <View
+      testID="settings-screen"
+      accessibilityLabel="settings-screen"
+      style={[styles.root, { backgroundColor: tc.background, bottom: bottomNavClearance }]}>
       {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + 12, borderBottomColor: tc.border }]}>
-        <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+        <TouchableOpacity
+          testID="settings-back"
+          accessibilityLabel="settings-back"
+          onPress={onClose}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="chevron-back" size={26} color={tc.textPrimary} />
         </TouchableOpacity>
         <Text style={[styles.headerTitle, { color: tc.textPrimary }]}>Settings</Text>
@@ -182,6 +197,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
               return (
                 <TouchableOpacity
                   key={key}
+                  testID={`settings-theme-${e2eId(key)}`}
+                  accessibilityLabel={`settings-theme-${e2eId(key)}`}
                   onPress={() => onProfileUpdate({ themePreference: key } as Partial<UserProfile>, true)}
                   activeOpacity={0.8}
                   style={[
@@ -227,6 +244,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
               </Text>
             </View>
             <Switch
+              testID="settings-workout-reminders-toggle"
               value={workoutReminder.enabled}
               onValueChange={(v) => updateWorkoutReminder({ ...workoutReminder, enabled: v })}
               disabled={loading}
@@ -238,6 +256,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
               <Text style={[styles.rowSub, { color: tc.textSecondary }]}>Remind me at</Text>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <TouchableOpacity
+                  testID="settings-workout-reminder-time-minus"
+                  accessibilityLabel="settings-workout-reminder-time-minus"
                   onPress={() => {
                     const { hour, minute } = stepTime(workoutReminder.hour, workoutReminder.minute, -15);
                     updateWorkoutReminder({ ...workoutReminder, hour, minute });
@@ -249,6 +269,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                   {formatTime(workoutReminder.hour, workoutReminder.minute)}
                 </Text>
                 <TouchableOpacity
+                  testID="settings-workout-reminder-time-plus"
+                  accessibilityLabel="settings-workout-reminder-time-plus"
                   onPress={() => {
                     const { hour, minute } = stepTime(workoutReminder.hour, workoutReminder.minute, 15);
                     updateWorkoutReminder({ ...workoutReminder, hour, minute });
@@ -269,6 +291,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
               </Text>
             </View>
             <Switch
+              testID="settings-meal-reminder-toggle"
               value={mealReminder.enabled}
               onValueChange={(v) => updateMealReminder({ ...mealReminder, enabled: v })}
               disabled={loading}
@@ -280,6 +303,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
               <Text style={[styles.rowSub, { color: tc.textSecondary }]}>Remind me at</Text>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <TouchableOpacity
+                  testID="settings-meal-reminder-time-minus"
+                  accessibilityLabel="settings-meal-reminder-time-minus"
                   onPress={() => {
                     const { hour, minute } = stepTime(mealReminder.hour, mealReminder.minute, -15);
                     updateMealReminder({ ...mealReminder, hour, minute });
@@ -291,6 +316,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                   {formatTime(mealReminder.hour, mealReminder.minute)}
                 </Text>
                 <TouchableOpacity
+                  testID="settings-meal-reminder-time-plus"
+                  accessibilityLabel="settings-meal-reminder-time-plus"
                   onPress={() => {
                     const { hour, minute } = stepTime(mealReminder.hour, mealReminder.minute, 15);
                     updateMealReminder({ ...mealReminder, hour, minute });
@@ -314,6 +341,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
               </Text>
             </View>
             <Switch
+              testID="settings-quiet-hours-toggle"
               value={quietHours.enabled}
               onValueChange={(v) => updateQuietHours({ ...quietHours, enabled: v })}
               disabled={loading}
@@ -326,6 +354,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 <Text style={[styles.rowSub, { color: tc.textSecondary }]}>Start (quiet from)</Text>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <TouchableOpacity
+                    testID="settings-quiet-start-minus"
+                    accessibilityLabel="settings-quiet-start-minus"
                     onPress={() => updateQuietHours({ ...quietHours, startHour: (quietHours.startHour + 23) % 24 })}
                     style={[styles.timeBtn, { borderColor: tc.border }]}>
                     <Ionicons name="remove" size={16} color={tc.textSecondary} />
@@ -334,6 +364,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                     {formatTime(quietHours.startHour, 0)}
                   </Text>
                   <TouchableOpacity
+                    testID="settings-quiet-start-plus"
+                    accessibilityLabel="settings-quiet-start-plus"
                     onPress={() => updateQuietHours({ ...quietHours, startHour: (quietHours.startHour + 1) % 24 })}
                     style={[styles.timeBtn, { borderColor: tc.border }]}>
                     <Ionicons name="add" size={16} color={tc.textSecondary} />
@@ -344,6 +376,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 <Text style={[styles.rowSub, { color: tc.textSecondary }]}>End (quiet until)</Text>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <TouchableOpacity
+                    testID="settings-quiet-end-minus"
+                    accessibilityLabel="settings-quiet-end-minus"
                     onPress={() => updateQuietHours({ ...quietHours, endHour: (quietHours.endHour + 23) % 24 })}
                     style={[styles.timeBtn, { borderColor: tc.border }]}>
                     <Ionicons name="remove" size={16} color={tc.textSecondary} />
@@ -352,6 +386,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                     {formatTime(quietHours.endHour, 0)}
                   </Text>
                   <TouchableOpacity
+                    testID="settings-quiet-end-plus"
+                    accessibilityLabel="settings-quiet-end-plus"
                     onPress={() => updateQuietHours({ ...quietHours, endHour: (quietHours.endHour + 1) % 24 })}
                     style={[styles.timeBtn, { borderColor: tc.border }]}>
                     <Ionicons name="add" size={16} color={tc.textSecondary} />
@@ -378,6 +414,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 return (
                   <TouchableOpacity
                     key={u}
+                    testID={`settings-weight-unit-${u}`}
+                    accessibilityLabel={`settings-weight-unit-${u}`}
                     onPress={() => onProfileUpdate({ weightUnit: u } as Partial<UserProfile>, true)}
                     style={[
                       styles.toggleOpt,
@@ -406,6 +444,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 return (
                   <TouchableOpacity
                     key={u}
+                    testID={`settings-distance-unit-${u}`}
+                    accessibilityLabel={`settings-distance-unit-${u}`}
                     onPress={() => onProfileUpdate({ distanceUnit: u } as Partial<UserProfile>, true)}
                     style={[
                       styles.toggleOpt,
@@ -443,6 +483,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                   </Text>
                 </View>
                 <TouchableOpacity
+                  testID="settings-plan-pause"
+                  accessibilityLabel="settings-plan-pause"
                   disabled={loading}
                   onPress={async () => {
                     setLoading(true);
@@ -496,6 +538,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
         <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>PERMISSIONS</Text>
         <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
           <TouchableOpacity
+            testID="settings-open-device-settings"
+            accessibilityLabel="settings-open-device-settings"
             style={styles.row}
             onPress={openDeviceSettings}>
             <View style={{ flex: 1 }}>

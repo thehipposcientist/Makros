@@ -201,6 +201,10 @@ def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
             "protein": round(nutrients.get("protein", 0)),
             "carbs": round(nutrients.get("carbs", 0)),
             "fat": round(nutrients.get("fat", 0)),
+            "fdc_id": str(food.get("fdcId") or ""),
+            "external_id": str(food.get("fdcId") or ""),
+            "serving_grams": serving_grams,
+            "brand": food.get("brandOwner") or food.get("brandName"),
             "source": "usda",
         }
 

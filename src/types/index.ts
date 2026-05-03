@@ -481,6 +481,11 @@ export interface MealItem {
   food_id?: number | null;
   serving_id?: number | null;
   serving_grams?: number | null;
+  source?: 'seed' | 'user' | 'usda' | 'barcode' | 'ai' | string;
+  fdc_id?: string | null;
+  external_id?: string | null;
+  brand?: string | null;
+  is_verified?: boolean;
   // Baseline rate used by the edit UI to scale macros proportionally when
   // the user changes `quantity`. Captured at add-time so zero → N edits
   // still work (scaling off `current` breaks when current hits 0).

@@ -20,6 +20,8 @@ Active workout exercise rows can include `plannedTargetWeightLbs` and up to five
 
 Watch commands carry a `commandId`; the phone bridge de-dupes recent IDs so `sendMessage` fallback to `transferUserInfo` cannot double-apply a set log or end command.
 
+When the native phone bridge receives a mutating watch command before JS listeners are attached, it stores the command in a durable `UserDefaults` queue (bounded + TTL-filtered). Home drains general commands on mount; active-workout commands that arrive during the Home → ActiveWorkout handoff are also stashed in a small AsyncStorage backlog and replayed by `ActiveWorkoutScreen` so queued set logs do not disappear during navigation.
+
 **Pull-on-wake handshake:**
 Watch fires `pull_state` on `WCSession.activate` + `sessionReachabilityDidChange(reachable=true)` + SwiftUI `scenePhase == .active`. Phone responds with fresh full snapshot.
 If a phone rest timer is currently active, the phone also sends a fresh `pushProgressToWatch` after the snapshot so the watch receives an absolute `restEndsAtMs` even when it joins mid-rest.
@@ -54,11 +56,11 @@ TabView: **Today** (workout) / **Meals** / **Hydration** / **Supps** / **Sleep**
 
 ## Watch Complication + Smart Stack (#110 — IMPLEMENTED)
 
-`targets/thallo-watch-complication/` — watchOS WidgetKit extension embedded in `ThalloWatch.app`. Surfaces today's focus, readiness, hydration progress, and workout duration across accessoryCircular / accessoryRectangular / accessoryInline.
+`targets/thallo-watch-complication/` — watchOS WidgetKit extension embedded in `ThalloWatch.app`. Ships separate static complication choices for Daily Summary, Workout, Readiness, Sleep, and Water across accessoryCircular / accessoryRectangular / accessoryInline. The existing `ThalloWatchComplication` kind remains the Daily Summary option so installed watch faces keep working after updates.
 
-**Data path:** `targets/thallo-watch/ConnectivityStore.swift` mirrors the latest workout / hydration / readiness snapshot into SharedDefaults `group.com.thallo.app` via `ThalloComplicationSync`, then calls `WidgetCenter.shared.reloadAllTimelines()`.
+**Data path:** `targets/thallo-watch/ConnectivityStore.swift` mirrors the latest workout / hydration / readiness / sleep snapshot into SharedDefaults `group.com.thallo.app` via `ThalloComplicationSync`, then calls `WidgetCenter.shared.reloadAllTimelines()`.
 
-**Actions:** widget links open the watch app through the `thallowatch://` URL scheme. `thallowatch://start-workout` starts or rejoins today's workout through the existing watch `start_workout` command path; `thallowatch://hydration/add?oz=8` switches to Hydration, optimistically adds water locally, and sends the existing `log_hydration` command to the phone. Phone/backend remain authoritative.
+**Actions:** widget links open the watch app through the `thallowatch://` URL scheme. `thallowatch://start-workout` starts or rejoins today's workout through the existing watch `start_workout` command path. Hydration widget links open the Hydration page only; water is logged only from explicit controls inside the watch or phone app. Phone/backend remain authoritative.
 
 **Signing requirement:** the App Group `group.com.thallo.app` must be enabled for both `com.thallo.app.watch` and `com.thallo.app.watch.widget` in Apple Developer before device/TestFlight signing.
 

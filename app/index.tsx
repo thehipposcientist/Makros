@@ -25,7 +25,7 @@ function releasePlanGenAwake(): void {
  *  generation. Cleared on success OR explicit failure. */
 const PLAN_GEN_MARKER_KEY = 'plan_gen_pending';
 type PlanGenMarker = {
-  kind: 'full' | 'workout' | 'nutrition';
+  kind: 'full' | 'workout' | 'nutrition' | 'nutrition_remaining';
   startedAt: number;  // epoch ms — used to skip stale markers
   attempts: number;
 };
@@ -311,8 +311,8 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
   }
 }
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName } from '../src/services/api';
-import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday } from '../src/utils/mealTracker';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, getAIRemainingWeekNutritionPlan, repairPlanWeekInjuryConflicts, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName } from '../src/services/api';
+import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday, clearSavedNutritionPlansForDates, clearPreservedMealsForDates, clearMealChecksForDates } from '../src/utils/mealTracker';
 import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
 import { encodePulledStateValueForStorage } from '../src/utils/profileCache';
 import AuthScreen from '../src/screens/AuthScreen';
@@ -393,6 +393,39 @@ function planChangeProfileSnapshot(
   };
 }
 
+function normalizedInjuryToken(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function activeInjurySignature(profile: UserProfile | null | undefined): string {
+  const tokens: string[] = [];
+  const legacy = normalizedInjuryToken(profile?.injuries);
+  if (legacy) tokens.push(`legacy:${legacy}`);
+
+  for (const entry of profile?.injuryEntries ?? []) {
+    const status = normalizedInjuryToken(entry.status || 'active');
+    if (status === 'resolved') continue;
+    const muscles = [...(entry.muscleGroups ?? [])].map(normalizedInjuryToken).filter(Boolean).sort().join(',');
+    const token = [
+      normalizedInjuryToken(entry.bodyPart),
+      normalizedInjuryToken(entry.description),
+      status || 'active',
+      normalizedInjuryToken(entry.severity),
+      muscles,
+    ].filter(Boolean).join(':');
+    if (token) tokens.push(`entry:${token}`);
+  }
+
+  return JSON.stringify([...new Set(tokens)].sort());
+}
+
+function activeInjuriesChanged(
+  before: UserProfile | null | undefined,
+  after: UserProfile | null | undefined,
+): boolean {
+  return activeInjurySignature(before) !== activeInjurySignature(after);
+}
+
 /** Guarded JSON.parse for AsyncStorage reads — returns fallback on any
  *  malformed payload. Used by the user-log and profile hydration paths
  *  so a single corrupted row never cascades into "can't sign in". */
@@ -423,7 +456,7 @@ export default function Index() {
   const [userProfile, setUserProfile]     = useState<UserProfile | null>(null);
   const [isEditing, setIsEditing]         = useState(false);
   const [editMode, setEditMode]           = useState<'goal' | 'workout' | 'mealplan' | 'theme' | 'body'>('goal');
-  const [pendingSave, setPendingSave]     = useState<{ profile: UserProfile; mode: string } | null>(null);
+  const [pendingSave, setPendingSave]     = useState<{ profile: UserProfile; mode: string; repairInjuryConflicts?: boolean } | null>(null);
   // Optional sub-tab to pre-select when opening the EditProfileScreen in
   // 'mealplan' mode. Lets HomeScreen jump straight into Foods/Supplements/Macros.
   const [editInitialMealTab, setEditInitialMealTab] = useState<'foods' | 'supplements' | 'macros' | undefined>(undefined);
@@ -836,6 +869,41 @@ export default function Index() {
     setPlanRefreshKey(k => k + 1);
   };
 
+  const applyRemainingWeekNutritionResult = async (aiPlans: any): Promise<void> => {
+    const plansList: any[] = Array.isArray(aiPlans?.nutrition_plans)
+      ? aiPlans.nutrition_plans
+      : [aiPlans?.nutrition_plan_a, aiPlans?.nutrition_plan_b, aiPlans?.nutrition_plan_c].filter(Boolean);
+    const updatedDates: string[] = Array.isArray(aiPlans?.remaining_week_nutrition?.updated_dates)
+      ? aiPlans.remaining_week_nutrition.updated_dates
+      : [];
+
+    if (plansList.length > 0) {
+      for (const p of plansList) {
+        if (p && typeof p === 'object') delete (p as any)._templatesVersion;
+      }
+      await clearSavedNutritionPlansForDates(updatedDates);
+      await clearPreservedMealsForDates(updatedDates);
+      await clearMealChecksForDates(updatedDates);
+      await AsyncStorage.setItem('aiNutritionPlans', JSON.stringify(plansList));
+      await AsyncStorage.setItem('aiNutritionPlanA', JSON.stringify(plansList[0]));
+      await AsyncStorage.setItem('aiNutritionPlan', JSON.stringify(plansList[0]));
+      if (plansList[1]) await AsyncStorage.setItem('aiNutritionPlanB', JSON.stringify(plansList[1]));
+      else await AsyncStorage.removeItem('aiNutritionPlanB');
+      if (plansList[2]) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(plansList[2]));
+      else await AsyncStorage.removeItem('aiNutritionPlanC');
+    }
+    if (aiPlans?.nutritionistNote) {
+      await AsyncStorage.setItem('nutritionistNote', aiPlans.nutritionistNote);
+      setNutritionistNote(aiPlans.nutritionistNote);
+    }
+    if (aiPlans?.supplementStack?.length) {
+      await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
+      setSupplementStack(aiPlans.supplementStack);
+    }
+    if (aiPlans?.custom_foods?.length) await _mergeCustomFoods(aiPlans.custom_foods);
+    setPlanRefreshKey(k => k + 1);
+  };
+
   /** Resume polling an in-flight plan job if one was persisted. Called from
    *  `initApp` (cold start) and the AppState 'active' listener. The server
    *  is holding the job so this survives any amount of app kill / network
@@ -852,7 +920,7 @@ export default function Index() {
       // Also check the local marker — if it has a startedAt, compare age
       const localMarker = await readPlanGenMarker();
       const age = localMarker?.startedAt ? Date.now() - localMarker.startedAt : Infinity;
-      if (age > 5 * 60 * 1000) {
+      if (localMarker?.kind === 'full' && age > 5 * 60 * 1000) {
         console.log(`[plan-gen] stale marker (plan exists, marker ${Math.round(age / 60000)}min old) — clearing`);
         await clearPlanGenMarker();
         return;
@@ -872,7 +940,7 @@ export default function Index() {
     const hasExistingPlan = !!(await AsyncStorage.getItem('aiWorkoutPlan').catch(() => null));
     if (!hasExistingPlan) {
       if (marker.kind === 'workout' || marker.kind === 'full') setIsWorkoutUpdating(true);
-      if (marker.kind === 'nutrition' || marker.kind === 'full') setIsNutritionUpdating(true);
+      if (marker.kind === 'nutrition' || marker.kind === 'nutrition_remaining' || marker.kind === 'full') setIsNutritionUpdating(true);
     }
     holdPlanGenAwake();
     try {
@@ -1360,14 +1428,22 @@ export default function Index() {
             || JSON.stringify(userProfile?.allergies ?? []) !== JSON.stringify(updated.allergies ?? []))
         : true;  // workout settings always regen
       if (willRegen) {
-        setPendingSave({ profile: updated, mode: effectiveMode });
+        setPendingSave({
+          profile: updated,
+          mode: effectiveMode,
+          repairInjuryConflicts: effectiveMode === 'workout' && activeInjuriesChanged(userProfile, updated),
+        });
         return;
       }
     }
     await _doSaveProfile(updated, modeOverride);
   };
 
-  const _doSaveProfile = async (updated: UserProfile, modeOverride?: typeof editMode) => {
+  const _doSaveProfile = async (
+    updated: UserProfile,
+    modeOverride?: typeof editMode,
+    options?: { updateRemainingWeekNutrition?: boolean; repairInjuryConflicts?: boolean },
+  ) => {
     const effectiveMode = modeOverride ?? editMode;
     const stamped = stampGoalStart(updated, userProfile);
     // Record goal history only when the user actually used the GOAL
@@ -1407,11 +1483,14 @@ export default function Index() {
       await pushUserStateToBackend(authToken).catch(() => null);
       await syncOnboarding(authToken, stamped).catch(() => null);
 
-      // CRITICAL: never regenerate the active plan from a profile-save.
-      // The user's in-flight week (workouts AND meals) must stay stable;
-      // their new settings only take effect at the NEXT plan-week boundary
-      // via `auto_renew_week`. Previously this path eagerly regenerated
-      // nutrition on goal/mealplan edits, which:
+      // CRITICAL: profile saves do not rebuild the active workout week.
+      // Injury changes are the safety exception: they run a deterministic
+      // repair that preserves the week structure and only rewrites today/future
+      // unlocked workouts. Meal plan saves also default to next-week-only, but
+      // the confirmation modal can opt into a scoped nutrition refresh for
+      // future eligible days.
+      // Previously this path eagerly regenerated nutrition on goal/mealplan
+      // edits, which:
       //   1. Wiped today's planned meals out from under the user
       //   2. Made goal changes apply to meals but NOT workouts
       //      (regenWorkout was already false), creating a confusing
@@ -1419,9 +1498,12 @@ export default function Index() {
       //   3. Disagreed with the modal copy that promised changes wouldn't
       //      take effect until the next plan week
       // syncOnboarding above already persists the new settings; the next
-      // auto-renew at week boundary picks them up on its own.
+      // auto-renew at week boundary picks them up on its own unless the user
+      // explicitly asks to update remaining meals now.
       const regenWorkout = false;
-      const regenNutrition = false;
+      const repairInjuryConflicts = effectiveMode === 'workout' && options?.repairInjuryConflicts === true;
+      const refreshRemainingNutrition = effectiveMode === 'mealplan' && options?.updateRemainingWeekNutrition === true;
+      const regenNutrition = refreshRemainingNutrition;
 
       if (goalChanged) {
         await appendUserLog({
@@ -1430,9 +1512,27 @@ export default function Index() {
         });
       }
 
-      if (regenWorkout || regenNutrition) {
+      if (repairInjuryConflicts) {
+        setIsWorkoutUpdating(true);
+        repairPlanWeekInjuryConflicts(authToken)
+          .then(async () => {
+            await appendUserLog({
+              type: 'plan_generated',
+              summary: 'Current week repaired for active injuries.',
+            });
+            setPlanRefreshKey(k => k + 1);
+          })
+          .catch((err: any) => {
+            const msg = err?.message ?? '';
+            console.error('[repairPlanWeekInjuryConflicts] failed:', msg || err);
+            Alert.alert('Injury update failed', msg || 'Your injury settings were saved, but the current week could not be repaired. Try again from workout settings.');
+          })
+          .finally(() => {
+            setIsWorkoutUpdating(false);
+          });
+      } else if (regenWorkout || regenNutrition) {
         // Preserve today's logged meals when regenerating nutrition
-        if (regenNutrition) {
+        if (regenNutrition && !refreshRemainingNutrition) {
           const today = todayKey();
           const rawEdits = await AsyncStorage.getItem('mealEdits');
           if (rawEdits) {
@@ -1472,6 +1572,16 @@ export default function Index() {
         if (regenWorkout) setIsWorkoutUpdating(true);
         if (regenNutrition) setIsNutritionUpdating(true);
         if (regenWorkout || regenNutrition) holdPlanGenAwake();
+        if (regenWorkout || regenNutrition) {
+          const markerKind: PlanGenMarker['kind'] = refreshRemainingNutrition
+            ? 'nutrition_remaining'
+            : (regenWorkout && regenNutrition)
+              ? 'full'
+              : regenWorkout
+                ? 'workout'
+                : 'nutrition';
+          setPlanGenMarker(markerKind).catch(() => null);
+        }
 
         const opts = { userLog, extraContext };
 
@@ -1481,13 +1591,16 @@ export default function Index() {
           ? getAIPlans(authToken, stamped, opts)
           : regenWorkout
             ? getAIWorkoutPlan(authToken, stamped, opts)
-            : getAINutritionPlan(authToken, stamped, opts);
+            : refreshRemainingNutrition
+              ? getAIRemainingWeekNutritionPlan(authToken, stamped, opts)
+              : getAINutritionPlan(authToken, stamped, opts);
 
         planCall
           .then(async (aiPlans: any) => {
             // Centralized handler — see applyPlanResult for what it does
             // (storage writes, templates version stamp, per-day saves wipe).
-            await applyPlanResult(aiPlans);
+            if (refreshRemainingNutrition) await applyRemainingWeekNutritionResult(aiPlans);
+            else await applyPlanResult(aiPlans);
             // Only reset week timer on full regens, not single-side edits.
             if (aiPlans.nutrition_plans?.length && regenWorkout && regenNutrition) {
               await AsyncStorage.setItem('weekStartDate', new Date().toISOString());
@@ -1495,7 +1608,7 @@ export default function Index() {
             // Push the freshly-rotated plan onto the next 3 days of remote
             // day-state so cross-device reads don't briefly show the old
             // plan before HomeScreen catches up.
-            if (aiPlans.nutrition_plans?.length) {
+            if (aiPlans.nutrition_plans?.length && !refreshRemainingNutrition) {
               const todayDate = new Date();
               const tok = authToken;
               for (let i = 0; i < 3; i++) {
@@ -1505,7 +1618,9 @@ export default function Index() {
                 upsertDayState(tok, key, { nutrition_plan: null }).catch(() => null);
               }
             }
-            const what = (regenWorkout && regenNutrition) ? 'full plan' : regenWorkout ? 'workout plan' : 'nutrition plan';
+            const what = refreshRemainingNutrition
+              ? 'remaining meal plan'
+              : (regenWorkout && regenNutrition) ? 'full plan' : regenWorkout ? 'workout plan' : 'nutrition plan';
             await appendUserLog({ type: 'plan_generated', summary: `${what} updated for goal: ${stamped.goal.replace(/_/g, ' ')}` });
             setPlanRefreshKey(k => k + 1);
           })
@@ -1519,6 +1634,7 @@ export default function Index() {
           .finally(() => {
             setIsWorkoutUpdating(false);
             setIsNutritionUpdating(false);
+            clearPlanGenMarker().catch(() => null);
             releasePlanGenAwake();
           });
       } else {
@@ -1997,12 +2113,15 @@ export default function Index() {
         const tc = getTheme(userProfile?.themePreference).colors;
         const isGoal = pendingSave.mode === 'goal';
         const isMealplan = pendingSave.mode === 'mealplan';
-        // Plan changes always apply to the start of the NEXT plan week
+        const shouldRepairInjuries = pendingSave.mode === 'workout' && pendingSave.repairInjuryConflicts === true;
+        // Plan changes normally apply to the start of the NEXT plan week
         // because mid-week regen would invalidate the user's in-flight
-        // schedule. The next-week start is the active PlanWeek's
-        // end_date + 1 (sign-up-day cadence) — pulled up from HomeScreen
-        // via setActivePlanWeekEnd. Falls back to today + 7 only when
-        // no PlanWeek exists (free users, brand-new signup).
+        // schedule. Injury changes are a safety exception: they can repair
+        // today/future unlocked workouts immediately without changing the
+        // week shape. The next-week start is the active PlanWeek's end_date
+        // + 1 (sign-up-day cadence) — pulled up from HomeScreen via
+        // setActivePlanWeekEnd. Falls back to today + 7 only when no
+        // PlanWeek exists (free users, brand-new signup).
         const effectiveDate = nextPlanWeekStart(activePlanWeekEnd);
         const effectiveDateLabel = formatPlanStartDateShort(effectiveDate);
         const titleText = isGoal
@@ -2013,13 +2132,64 @@ export default function Index() {
         const bodyText = isGoal
           ? `Your active week stays unchanged so your in-flight plan is not disrupted. Your new goal applies starting ${effectiveDateLabel}.`
           : isMealplan
-            ? `Today's meals stay as-is. The next meal plan starting ${effectiveDateLabel} will use these settings.`
-            : `Your current week stays unchanged. The next training week starting ${effectiveDateLabel} will use these settings; use Change Focus or Swap for immediate day-level tweaks.`;
+            ? `Today's meals stay as-is. Save for ${effectiveDateLabel}, or update remaining eligible days this week.`
+            : shouldRepairInjuries
+              ? `Save for ${effectiveDateLabel}, or update today and remaining unlocked workouts now so they avoid active injuries. Completed and started days stay unchanged.`
+              : `Your current week stays unchanged. The next training week starting ${effectiveDateLabel} will use these settings; use Change Focus or Swap for immediate day-level tweaks.`;
         const summaryText = isGoal
           ? `Goal updated to ${(pendingSave.profile.goalDetails?.pace ?? '').toString() || pendingSave.profile.goal.replace(/_/g, ' ')}`
           : isMealplan
             ? `Meal plan settings updated (${pendingSave.profile.mealsPerDay ?? 3} meals/day · variety ${pendingSave.profile.mealVariety ?? 5})`
             : `Workout settings updated (${pendingSave.profile.daysPerWeek ?? 0} days/week · ${pendingSave.profile.workoutDurationMinutes ?? 0} min)`;
+        const commitPendingSave = async (
+          updateRemainingWeekNutrition = false,
+          repairInjuryConflicts = false,
+        ) => {
+          if (!pendingSave) return;
+          const saved = pendingSave;
+          const previousProfile = userProfile;
+          const nextProfile = previousProfile
+            ? stampGoalStart(saved.profile, previousProfile)
+            : saved.profile;
+          setPendingSave(null);
+          try {
+            await _doSaveProfile(
+              saved.profile,
+              saved.mode as any,
+              { updateRemainingWeekNutrition, repairInjuryConflicts },
+            );
+            let nextProfileForChange = nextProfile;
+            try {
+              const storedProfileRaw = await AsyncStorage.getItem('userProfile');
+              if (storedProfileRaw) nextProfileForChange = JSON.parse(storedProfileRaw);
+            } catch { /* keep fallback snapshot */ }
+            try {
+              const scope = saved.mode as 'goal' | 'workout' | 'mealplan';
+              const immediateMealRefresh = scope === 'mealplan' && updateRemainingWeekNutrition;
+              const immediateInjuryRepair = scope === 'workout' && repairInjuryConflicts;
+              await savePlanChange({
+                id: `user-${Date.now()}`,
+                changedAt: new Date().toISOString(),
+                changedBy: 'user',
+                scope,
+                summary: immediateMealRefresh
+                  ? `${summaryText}; remaining eligible days refreshed`
+                  : immediateInjuryRepair
+                    ? `${summaryText}; current week repaired for active injuries`
+                  : summaryText,
+                question: '',
+                effectiveDate: (immediateMealRefresh || immediateInjuryRepair) ? new Date() : effectiveDate,
+                previousProfile: previousProfile ? planChangeProfileSnapshot(previousProfile, scope) : undefined,
+                nextProfile: planChangeProfileSnapshot(nextProfileForChange, scope),
+              });
+            } catch { /* non-critical */ }
+          } catch (err: any) {
+            console.error('[_doSaveProfile] error:', err);
+            Alert.alert('Save failed', err?.message ?? 'Something went wrong. Please try again.');
+            setIsWorkoutUpdating(false);
+            setIsNutritionUpdating(false);
+          }
+        };
         return (
           <Modal visible transparent animationType="fade" onRequestClose={() => setPendingSave(null)}>
             <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
@@ -2032,57 +2202,38 @@ export default function Index() {
                 </Text>
                 <View style={{ backgroundColor: tc.primary + '14', borderRadius: 10, padding: 10, marginBottom: 18, borderWidth: 1, borderColor: tc.primary + '33' }}>
                   <Text style={{ fontSize: 11, fontWeight: '800', color: tc.primary, letterSpacing: 0.5, marginBottom: 2 }}>
-                    APPLIES {effectiveDateLabel.toUpperCase()}
+                    {shouldRepairInjuries ? 'UPDATES CURRENT WEEK' : isMealplan ? 'NEXT WEEK STARTS' : 'APPLIES'} {shouldRepairInjuries ? 'NOW' : effectiveDateLabel.toUpperCase()}
                   </Text>
                   <Text style={{ fontSize: 11, color: tc.textSecondary, lineHeight: 15 }}>
                     Tracked in Progress → Change History so you can review when each change took effect.
                   </Text>
                 </View>
+                {(isMealplan || shouldRepairInjuries) && (
+                  <TouchableOpacity
+                    style={{ backgroundColor: tc.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
+                    testID="pending-save-update-remaining"
+                    accessibilityLabel="pending-save-update-remaining"
+                    onPress={() => isMealplan ? commitPendingSave(true, false) : commitPendingSave(false, true)}>
+                    <Text style={{ color: '#fff', fontSize: 15, fontWeight: '700' }}>
+                      {isMealplan ? 'Save + Update Remaining Week' : 'Save + Update Current Week'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
                 <TouchableOpacity
-                  style={{ backgroundColor: tc.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginBottom: 10 }}
+                  style={{
+                    backgroundColor: (isMealplan || shouldRepairInjuries) ? 'transparent' : tc.primary,
+                    borderRadius: 12,
+                    paddingVertical: 14,
+                    alignItems: 'center',
+                    marginBottom: 10,
+                    borderWidth: (isMealplan || shouldRepairInjuries) ? 1 : 0,
+                    borderColor: (isMealplan || shouldRepairInjuries) ? tc.border : 'transparent',
+                  }}
                   testID="pending-save-confirm"
                   accessibilityLabel="pending-save-confirm"
-                  onPress={async () => {
-                    const saved = pendingSave;
-                    const previousProfile = userProfile;
-                    const nextProfile = previousProfile
-                      ? stampGoalStart(saved.profile, previousProfile)
-                      : saved.profile;
-                    setPendingSave(null);
-                    try {
-                      await _doSaveProfile(saved.profile, saved.mode as any);
-                      let nextProfileForChange = nextProfile;
-                      try {
-                        const storedProfileRaw = await AsyncStorage.getItem('userProfile');
-                        if (storedProfileRaw) nextProfileForChange = JSON.parse(storedProfileRaw);
-                      } catch { /* keep fallback snapshot */ }
-                      // Record this change so the user can see it in
-                      // Progress → Change History alongside coach
-                      // changes. Fire-and-forget — failure here mustn't
-                      // block the actual save.
-                      try {
-                        const scope = saved.mode as 'goal' | 'workout' | 'mealplan';
-                        await savePlanChange({
-                          id: `user-${Date.now()}`,
-                          changedAt: new Date().toISOString(),
-                          changedBy: 'user',
-                          scope,
-                          summary: summaryText,
-                          question: '',
-                          effectiveDate,
-                          previousProfile: previousProfile ? planChangeProfileSnapshot(previousProfile, scope) : undefined,
-                          nextProfile: planChangeProfileSnapshot(nextProfileForChange, scope),
-                        });
-                      } catch { /* non-critical */ }
-                    } catch (err: any) {
-                      console.error('[_doSaveProfile] error:', err);
-                      Alert.alert('Save failed', err?.message ?? 'Something went wrong. Please try again.');
-                      setIsWorkoutUpdating(false);
-                      setIsNutritionUpdating(false);
-                    }
-                  }}>
-                  <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>
-                    {isGoal ? 'Save Goal' : isMealplan ? 'Save Meal Plan' : 'Save Settings'}
+                  onPress={() => commitPendingSave(false)}>
+                  <Text style={{ color: (isMealplan || shouldRepairInjuries) ? tc.textPrimary : '#fff', fontSize: 16, fontWeight: '700' }}>
+                    {isGoal ? 'Save Goal' : (isMealplan || shouldRepairInjuries) ? 'Save For Next Week' : 'Save Settings'}
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
@@ -2352,10 +2503,25 @@ function AccountInfoModal({
     };
   }, [token]);
 
-  const Row = ({ label, value }: { label: string; value: string }) => (
-    <View style={am.row}>
-      <Text style={am.rowLabel}>{label}</Text>
-      <Text style={am.rowValue}>{value}</Text>
+  const Row = ({ label, value, testID }: { label: string; value: string; testID?: string }) => (
+    <View
+      style={am.row}
+      testID={testID}
+      accessibilityLabel={testID}
+      accessible={!!testID}
+      collapsable={false}>
+      <Text
+        style={am.rowLabel}
+        testID={testID ? `${testID}-label` : undefined}
+        accessibilityLabel={testID ? `${testID}-label` : undefined}>
+        {label}
+      </Text>
+      <Text
+        style={am.rowValue}
+        testID={testID ? `${testID}-value` : undefined}
+        accessibilityLabel={testID ? `${testID}-value` : undefined}>
+        {value}
+      </Text>
     </View>
   );
 
@@ -2383,19 +2549,22 @@ function AccountInfoModal({
   };
 
   const ActionRow = ({
-    label, desc, onPress, tone = 'default', busy = false,
+    label, desc, onPress, tone = 'default', busy = false, testID,
   }: {
     label: string;
     desc: string;
     onPress: () => void;
     tone?: 'default' | 'danger';
     busy?: boolean;
+    testID?: string;
   }) => (
     <TouchableOpacity
       style={[am.securityRow, tone === 'danger' && { borderColor: tc.error + '66', backgroundColor: tc.error + '12' }]}
       onPress={onPress}
       disabled={busy}
       activeOpacity={0.8}
+      testID={testID}
+      accessibilityLabel={testID}
     >
       <View style={{ flex: 1 }}>
         <Text style={[am.securityLabel, tone === 'danger' && { color: tc.error }]}>{label}</Text>
@@ -2487,8 +2656,18 @@ function AccountInfoModal({
 
   return (
     <Modal visible animationType="slide" transparent onRequestClose={onClose}>
-      <TouchableOpacity style={am.backdrop} activeOpacity={1} onPress={onClose}>
-        <TouchableOpacity activeOpacity={1} onPress={() => {}} style={[am.sheet, { maxHeight: '85%' }]}>
+      <TouchableOpacity
+        style={am.backdrop}
+        activeOpacity={1}
+        onPress={onClose}
+        accessible={false}>
+        <TouchableOpacity
+          activeOpacity={1}
+          onPress={() => {}}
+          testID="account-modal"
+          accessibilityLabel="account-modal"
+          accessible={false}
+          style={[am.sheet, { maxHeight: '85%' }]}>
           <View style={am.handle} />
           <Text style={am.title}>Account</Text>
 
@@ -2502,6 +2681,7 @@ function AccountInfoModal({
               <Text style={am.rowLabel}>Name</Text>
               <View style={am.nameInputRow}>
                 <TextInput
+                  testID="account-first-name-input"
                   style={am.nameInput}
                   value={nameFirst}
                   onChangeText={(t) => { setNameFirst(t); setNameStatus(''); }}
@@ -2512,6 +2692,7 @@ function AccountInfoModal({
                   returnKeyType="next"
                 />
                 <TextInput
+                  testID="account-last-name-input"
                   style={am.nameInput}
                   value={nameLast}
                   onChangeText={(t) => { setNameLast(t); setNameStatus(''); }}
@@ -2527,6 +2708,8 @@ function AccountInfoModal({
                   {nameStatus || 'Used for greetings and profile display.'}
                 </Text>
                 <TouchableOpacity
+                  testID="account-name-save"
+                  accessibilityLabel="account-name-save"
                   onPress={handleSaveName}
                   disabled={accountBusy === 'name'}
                   style={[am.nameSaveBtn, { opacity: accountBusy === 'name' ? 0.6 : 1 }]}
@@ -2537,16 +2720,16 @@ function AccountInfoModal({
                 </TouchableOpacity>
               </View>
             </View>
-            <Row label="Email"        value={accountData?.email ?? (loading ? 'Loading…' : '—')} />
-            <Row label="Username"     value={accountData?.username ?? (loading ? 'Loading…' : '—')} />
+            <Row label="Email"        value={accountData?.email ?? (loading ? 'Loading…' : '—')} testID="account-email-row" />
+            <Row label="Username"     value={accountData?.username ?? (loading ? 'Loading…' : '—')} testID="account-username-row" />
             {!betaFullAccess && (
-              <Row label="Email Status" value={accountData ? (accountData.emailVerified ? 'Verified' : 'Not verified') : (loading ? 'Loading…' : '—')} />
+              <Row label="Email Status" value={accountData ? (accountData.emailVerified ? 'Verified' : 'Not verified') : (loading ? 'Loading…' : '—')} testID="account-email-status-row" />
             )}
-            <Row label="Legal Version" value={accountData ? (accountData.legalAccepted ? LEGAL_VERSION : 'Needs review') : (loading ? 'Loading…' : '—')} />
-            <Row label="Goal"   value={goalValue} />
-            <Row label="Weight" value={weightValue} />
-            <Row label="Goal Weight" value={targetWeightValue} />
-            <Row label="Age"    value={ageValue} />
+            <Row label="Legal Version" value={accountData ? (accountData.legalAccepted ? LEGAL_VERSION : 'Needs review') : (loading ? 'Loading…' : '—')} testID="account-legal-version-row" />
+            <Row label="Goal"   value={goalValue} testID="account-goal-row" />
+            <Row label="Weight" value={weightValue} testID="account-weight-row" />
+            <Row label="Goal Weight" value={targetWeightValue} testID="account-goal-weight-row" />
+            <Row label="Age"    value={ageValue} testID="account-age-row" />
             {!loading && !accountData && (
               <Text style={am.errorText}>Could not load full account info — tap retry by reopening.</Text>
             )}
@@ -2554,7 +2737,9 @@ function AccountInfoModal({
 
           <TouchableOpacity
             style={am.securityRow}
-            onPress={() => setShowRecoveryModal(true)}>
+            onPress={() => setShowRecoveryModal(true)}
+            testID="account-recovery-question"
+            accessibilityLabel="account-recovery-question">
             <View style={{ flex: 1 }}>
               <Text style={am.securityLabel}>Recovery Question</Text>
               <Text style={am.securityDesc}>
@@ -2583,6 +2768,7 @@ function AccountInfoModal({
               label="Settings"
               desc="Notifications, units (lbs/kg, mi/km), and permissions."
               onPress={onOpenSettings}
+              testID="account-settings-open"
             />
           )}
 
@@ -2590,6 +2776,7 @@ function AccountInfoModal({
             label="Legal & Safety"
             desc="Review Terms, Privacy, Health Disclaimer, and AI Disclosure."
             onPress={() => setShowLegal(true)}
+            testID="account-legal-safety"
           />
 
           {!betaFullAccess && accountData && !accountData.emailVerified && (
@@ -2598,6 +2785,7 @@ function AccountInfoModal({
               desc="Sends a verification link to your account email."
               onPress={handleRequestEmailVerification}
               busy={accountBusy === 'verify'}
+              testID="account-verify-email"
             />
           )}
 
@@ -2605,12 +2793,14 @@ function AccountInfoModal({
             label="Help & Support"
             desc={`Email ${SUPPORT_EMAIL} for account, Watch, HealthKit, or data help.`}
             onPress={handleSupport}
+            testID="account-help-support"
           />
 
           <ActionRow
             label="Apple Watch Sync"
             desc={watchStatus}
             onPress={() => Alert.alert('Apple Watch Sync', watchStatus)}
+            testID="account-watch-sync"
           />
 
           <ActionRow
@@ -2618,6 +2808,7 @@ function AccountInfoModal({
             desc="Share a JSON export of your account, workouts, meals, health, and settings."
             onPress={handleExportData}
             busy={accountBusy === 'export'}
+            testID="account-export-data"
           />
 
           <ActionRow
@@ -2626,6 +2817,7 @@ function AccountInfoModal({
             onPress={handleDeleteAccount}
             tone="danger"
             busy={accountBusy === 'delete'}
+            testID="account-delete"
           />
 
           {showLegal && (
@@ -2798,6 +2990,8 @@ function AccountInfoModal({
 
           <TouchableOpacity
             style={am.signOutBtn}
+            testID="account-sign-out"
+            accessibilityLabel="account-sign-out"
             onPress={() => { onClose(); onSignOut(); }}>
             <Text style={am.signOutText}>Sign Out</Text>
           </TouchableOpacity>
@@ -2808,6 +3002,8 @@ function AccountInfoModal({
               prompt. The overlay opens right where the user is. */}
           {onShowTutorial && (
             <TouchableOpacity
+              testID="account-show-tutorial"
+              accessibilityLabel="account-show-tutorial"
               onPress={() => onShowTutorial()}
               style={{ marginTop: 8, alignItems: 'center', paddingVertical: 8 }}>
               <Text style={{ fontSize: 11, fontWeight: '700', color: c.textMuted, letterSpacing: 0.5 }}>
@@ -2816,7 +3012,11 @@ function AccountInfoModal({
             </TouchableOpacity>
           )}
 
-          <TouchableOpacity onPress={onClose} style={am.closeBtn}>
+          <TouchableOpacity
+            onPress={onClose}
+            testID="account-close"
+            accessibilityLabel="account-close"
+            style={am.closeBtn}>
             <Text style={am.closeText}>Close</Text>
           </TouchableOpacity>
           </ScrollView>

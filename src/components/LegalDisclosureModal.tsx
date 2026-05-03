@@ -40,7 +40,9 @@ export default function LegalDisclosureModal({ visible, onClose, themeColors, on
       onRequestClose={mustAccept ? () => undefined : onClose}
     >
       <View style={styles.backdrop}>
-        <View style={[styles.sheet, { backgroundColor: c.surface, borderColor: c.border }]}>
+        <View
+          testID="legal-disclosure-modal"
+          style={[styles.sheet, { backgroundColor: c.surface, borderColor: c.border }]}>
           <View style={styles.header}>
             <View style={{ flex: 1 }}>
               <Text style={[styles.title, { color: c.textPrimary }]}>Legal And Safety</Text>
@@ -77,6 +79,8 @@ export default function LegalDisclosureModal({ visible, onClose, themeColors, on
           </ScrollView>
 
           <TouchableOpacity
+            testID="legal-done"
+            accessibilityLabel="legal-done"
             style={[styles.doneBtn, { backgroundColor: c.primary, opacity: submitting ? 0.6 : 1 }]}
             disabled={submitting}
             onPress={async () => {

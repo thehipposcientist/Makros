@@ -8,6 +8,9 @@ private struct ThalloComplicationPayload: Codable {
     let exerciseCount: Int?
     let readiness: Int?
     let readinessLabel: String?
+    let sleepScore: Int?
+    let sleepHours: Double?
+    let sleepLabel: String?
     let hydrationOunces: Double?
     let hydrationTargetOunces: Double?
     let dateISO: String
@@ -21,7 +24,8 @@ enum ThalloComplicationSync {
     static func update(
         workout: WatchWorkout?,
         hydration: WatchHydrationDay?,
-        readiness: WatchReadinessSnapshot?
+        readiness: WatchReadinessSnapshot?,
+        sleep: WatchSleepSnapshot?
     ) {
         let payload = ThalloComplicationPayload(
             focus: displayFocus(workout),
@@ -30,6 +34,9 @@ enum ThalloComplicationSync {
             exerciseCount: workout?.exercises.count,
             readiness: readiness?.score ?? workout?.readiness,
             readinessLabel: readiness?.label ?? workout?.readinessLabel,
+            sleepScore: sleep?.score,
+            sleepHours: sleep?.hoursLastNight,
+            sleepLabel: sleep?.label,
             hydrationOunces: hydration?.ounces,
             hydrationTargetOunces: hydration?.targetOunces,
             dateISO: workout?.dateISO ?? hydration?.dateISO ?? localDateISO(),

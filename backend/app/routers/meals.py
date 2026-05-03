@@ -218,6 +218,7 @@ def update_meal(
         raw_items = body.get("items") or []
         if not isinstance(raw_items, list):
             raise HTTPException(status_code=422, detail="items must be a list")
+        from app.food_service import touch_recent_food, upsert_catalog_food_from_search_item
         def _optional_int(value):
             if value in (None, ""):
                 return None
@@ -230,18 +231,27 @@ def update_meal(
 
         for existing in db.exec(select(MealItem).where(MealItem.meal_id == meal_id)).all():
             db.delete(existing)
+        seen_food_ids: set[int] = set()
         for raw in raw_items:
             if not isinstance(raw, dict):
                 raise HTTPException(status_code=422, detail="Each meal item must be an object")
             try:
+                food_id = _optional_int(raw.get("food_id"))
+                serving_grams = _optional_float(raw.get("serving_grams"))
+                if food_id is None:
+                    imported = upsert_catalog_food_from_search_item(db, raw, user_id=current_user.id)
+                    if imported and imported.id is not None:
+                        food_id = imported.id
+                        if serving_grams is None:
+                            serving_grams = imported.serving_grams
                 item = MealItem(
                     meal_id=meal.id,
                     food_name=str(raw.get("food_name") or raw.get("name") or "Item"),
-                    food_id=_optional_int(raw.get("food_id")),
+                    food_id=food_id,
                     serving_id=_optional_int(raw.get("serving_id")),
                     quantity=float(raw.get("quantity") or 1),
                     unit=str(raw.get("unit") or "serving"),
-                    serving_grams=_optional_float(raw.get("serving_grams")),
+                    serving_grams=serving_grams,
                     calories=float(raw.get("calories") or 0),
                     protein_g=float(raw.get("protein_g", raw.get("protein", 0)) or 0),
                     carbs_g=float(raw.get("carbs_g", raw.get("carbs", 0)) or 0),
@@ -250,6 +260,9 @@ def update_meal(
             except (TypeError, ValueError):
                 raise HTTPException(status_code=422, detail="Invalid meal item nutrition values")
             db.add(item)
+            if food_id and food_id not in seen_food_ids:
+                touch_recent_food(db, current_user.id, food_id, commit=False)
+                seen_food_ids.add(food_id)
     db.add(meal)
     db.commit()
     db.refresh(meal)
@@ -814,6 +827,151 @@ def _compute_hydration_target_oz(
     return target, breakdown
 
 
+def _matches_hydration_supplement_signal(item, ingredient, tokens: tuple[str, ...]) -> bool:
+    haystack = " ".join(
+        str(v or "")
+        for v in (
+            getattr(ingredient, "slug", None),
+            getattr(ingredient, "name", None),
+            getattr(ingredient, "category", None),
+            getattr(item, "custom_name", None),
+            getattr(item, "category", None),
+            getattr(item, "notes", None),
+        )
+    ).lower().replace("_", " ").replace("-", " ").replace(".", "")
+    return any(token in haystack for token in tokens)
+
+
+def _hydration_supplement_flags(db: Session, user_id: int, target_date: date) -> dict:
+    from datetime import datetime as _dt, time as _time, timezone as _timezone, timedelta
+    from app.models import SupplementIngredient, SupplementLog, UserSupplementStack
+
+    flags = {
+        "electrolytes_in_stack": False,
+        "electrolytes_logged": False,
+        "creatine_in_stack": False,
+        "creatine_logged": False,
+        "caffeine_in_stack": False,
+        "caffeine_logged": False,
+    }
+    stack = db.exec(
+        select(UserSupplementStack).where(
+            UserSupplementStack.user_id == user_id,
+            UserSupplementStack.active == True,  # noqa: E712
+        )
+    ).all()
+    if not stack:
+        return flags
+
+    ing_ids = [s.supplement_ingredient_id for s in stack if s.supplement_ingredient_id]
+    ingredients = {}
+    if ing_ids:
+        rows = db.exec(select(SupplementIngredient).where(SupplementIngredient.id.in_(ing_ids))).all()
+        ingredients = {r.id: r for r in rows}
+
+    start = _dt.combine(target_date, _time.min, tzinfo=_timezone.utc)
+    end = start + timedelta(days=1)
+    stack_ids = [s.id for s in stack if s.id is not None]
+    logged_ids: set[int] = set()
+    if stack_ids:
+        logs = db.exec(
+            select(SupplementLog).where(
+                SupplementLog.user_id == user_id,
+                SupplementLog.stack_item_id.in_(stack_ids),
+                SupplementLog.taken_at >= start,
+                SupplementLog.taken_at < end,
+                SupplementLog.skipped == False,  # noqa: E712
+            )
+        ).all()
+        logged_ids = {int(log.stack_item_id) for log in logs if log.stack_item_id is not None}
+
+    signals = (
+        ("electrolytes", ("electrolyte", "sodium", "salt", "lmnt", "nuun", "liquid iv", "hydration")),
+        ("creatine", ("creatine",)),
+        ("caffeine", ("caffeine", "pre workout", "preworkout")),
+    )
+    for item in stack:
+        ingredient = ingredients.get(item.supplement_ingredient_id) if item.supplement_ingredient_id else None
+        for key, tokens in signals:
+            if _matches_hydration_supplement_signal(item, ingredient, tokens):
+                flags[f"{key}_in_stack"] = True
+                if item.id in logged_ids:
+                    flags[f"{key}_logged"] = True
+    return flags
+
+
+def _build_hydration_guidance(
+    workout_minutes_today: float,
+    sodium_mg_today: float,
+    supplement_flags: dict | None = None,
+) -> dict:
+    flags = {
+        "electrolytes_in_stack": False,
+        "electrolytes_logged": False,
+        "creatine_in_stack": False,
+        "creatine_logged": False,
+        "caffeine_in_stack": False,
+        "caffeine_logged": False,
+        **(supplement_flags or {}),
+    }
+    workout_minutes = max(0.0, float(workout_minutes_today or 0))
+    sodium_mg = max(0, round(float(sodium_mg_today or 0)))
+    electrolyte = {
+        "status": "not_needed",
+        "message": None,
+        "sodium_mg": sodium_mg,
+        "has_electrolytes_in_stack": bool(flags["electrolytes_in_stack"]),
+        "electrolytes_logged": bool(flags["electrolytes_logged"]),
+    }
+
+    if workout_minutes >= 60:
+        if flags["electrolytes_logged"]:
+            electrolyte.update({
+                "status": "covered",
+                "message": "Longer session today. Logged electrolytes can help replace sweat sodium; keep fluids near target and avoid forcing extra water.",
+            })
+        elif flags["electrolytes_in_stack"]:
+            electrolyte.update({
+                "status": "planned",
+                "message": "Longer session today. You have electrolytes in your stack; use them around the session if you sweat heavily.",
+            })
+        elif 0 < sodium_mg < 1500:
+            electrolyte.update({
+                "status": "consider",
+                "message": f"Longer session + only {sodium_mg} mg sodium logged so far. Pair some fluids with electrolytes or a salty meal if you sweat heavily.",
+            })
+        else:
+            electrolyte.update({
+                "status": "consider",
+                "message": "Longer session today. If you sweat heavily, pair some fluids with electrolytes or sodium; plain water alone may not replace sweat salt.",
+            })
+
+    notes = []
+    if sodium_mg >= 3500:
+        notes.append({
+            "key": "high_sodium",
+            "message": "High sodium can increase thirst, but it should not automatically raise the water target. Keep the target steady and follow thirst.",
+        })
+    if flags["creatine_in_stack"] or flags["creatine_logged"]:
+        notes.append({
+            "key": "creatine",
+            "message": "Creatine can shift water into muscle, but it does not need a fixed extra-water bonus.",
+        })
+    if flags["caffeine_logged"]:
+        notes.append({
+            "key": "caffeine",
+            "message": "Typical caffeine intake can still contribute fluid; very high doses are the hydration caveat.",
+        })
+
+    return {
+        "workout_minutes": round(workout_minutes, 1),
+        "sodium_mg": sodium_mg,
+        "electrolytes": electrolyte,
+        "supplements": flags,
+        "notes": notes,
+    }
+
+
 @router.get("/hydration")
 def get_hydration(
     log_date: Optional[str] = Query(default=None, description="YYYY-MM-DD, defaults to today"),
@@ -824,8 +982,9 @@ def get_hydration(
 
     Defaults to today. The target reflects the user's weight, sex,
     planned + actual workout minutes, that day's protein intake,
-    and any alcohol logged. See `_compute_hydration_target_oz` for the
-    formula and breakdown."""
+    and any alcohol logged. Sodium and supplements are returned as guidance
+    signals, but they do not inflate the ounce target by themselves. See
+    `_compute_hydration_target_oz` for the formula and breakdown."""
     from datetime import date as _date
     from app.models import (
         UserProfile, PlanDay, WorkoutCompletion, DailyNutritionMetrics,
@@ -885,6 +1044,7 @@ def get_hydration(
     # out the bonuses.
     protein_today = 0.0
     alcohol_today = 0.0
+    sodium_today = 0.0
     try:
         metrics = db.exec(
             select(DailyNutritionMetrics)
@@ -894,9 +1054,12 @@ def get_hydration(
         if metrics:
             protein_today = float((metrics.plant_protein_g or 0) + (metrics.animal_protein_g or 0))
             alcohol_today = float(metrics.alcohol_servings or 0)
+            sodium_today = float(metrics.sodium_mg or 0)
     except Exception:
         pass
 
+    supplement_flags = _hydration_supplement_flags(db, current_user.id, d)
+    guidance = _build_hydration_guidance(workout_minutes, sodium_today, supplement_flags)
     target_oz, breakdown = _compute_hydration_target_oz(
         weight_lbs=profile.weight_lbs if profile else None,
         gender=profile.gender if profile else None,
@@ -909,6 +1072,7 @@ def get_hydration(
         "ounces": round(oz, 1),
         "target_ounces": target_oz,
         "breakdown": breakdown,
+        "guidance": guidance,
     }
 
 

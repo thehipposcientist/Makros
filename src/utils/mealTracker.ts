@@ -204,6 +204,18 @@ export async function clearAllSavedNutritionPlans(): Promise<void> {
   } catch {}
 }
 
+export async function clearSavedNutritionPlansForDates(dates: string[]): Promise<void> {
+  try {
+    const set = new Set(dates);
+    if (set.size === 0) return;
+    const raw = await AsyncStorage.getItem(EDITS_KEY);
+    if (!raw) return;
+    const map: Record<string, DailyNutritionPlan> = JSON.parse(raw);
+    for (const key of set) delete map[key];
+    await AsyncStorage.setItem(EDITS_KEY, JSON.stringify(map));
+  } catch {}
+}
+
 /** Wipe every preserved (checked-off snapshot) meal across all dates.
  *  Called after a successful plan regeneration — without this, a meal
  *  the user checked on the OLD plan overlays onto the same date of the
@@ -212,6 +224,18 @@ export async function clearAllSavedNutritionPlans(): Promise<void> {
 export async function clearAllPreservedMeals(): Promise<void> {
   try {
     await AsyncStorage.removeItem(PRESERVED_KEY);
+  } catch {}
+}
+
+export async function clearPreservedMealsForDates(dates: string[]): Promise<void> {
+  try {
+    const set = new Set(dates);
+    if (set.size === 0) return;
+    const raw = await AsyncStorage.getItem(PRESERVED_KEY);
+    if (!raw) return;
+    const map: Record<string, MealSuggestion[]> = JSON.parse(raw);
+    for (const key of set) delete map[key];
+    await AsyncStorage.setItem(PRESERVED_KEY, JSON.stringify(map));
   } catch {}
 }
 
@@ -228,6 +252,18 @@ export async function clearAllMealChecksExceptToday(todayKey: string): Promise<v
     const preserved: Record<string, Record<string, boolean>> = {};
     if (map[todayKey]) preserved[todayKey] = map[todayKey];
     await AsyncStorage.setItem(CHECKS_KEY, JSON.stringify(preserved));
+  } catch {}
+}
+
+export async function clearMealChecksForDates(dates: string[]): Promise<void> {
+  try {
+    const set = new Set(dates);
+    if (set.size === 0) return;
+    const raw = await AsyncStorage.getItem(CHECKS_KEY);
+    if (!raw) return;
+    const map: Record<string, Record<string, boolean>> = JSON.parse(raw);
+    for (const key of set) delete map[key];
+    await AsyncStorage.setItem(CHECKS_KEY, JSON.stringify(map));
   } catch {}
 }
 

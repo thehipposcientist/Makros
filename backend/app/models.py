@@ -472,7 +472,7 @@ class PlanJob(SQLModel, table=True):
     __tablename__ = "plan_jobs"
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
-    kind: str = Field(index=True)                      # "full" | "workout" | "nutrition"
+    kind: str = Field(index=True)                      # "full" | "workout" | "nutrition" | "nutrition_remaining"
     status: str = Field(default="queued", index=True)  # queued | running | completed | failed | cancelled
     request_json: dict | None = Field(default=None, sa_column=Column(JSON))   # opts passed to generator
     result_json: dict | None = Field(default=None, sa_column=Column(JSON))
@@ -592,7 +592,7 @@ class PlanDay(SQLModel, table=True):
     locked_at: datetime | None = Field(default=None)
     lock_reason: str | None = Field(default=None)  # completed | started | manual_edit | skipped
     skip_reason: str | None = Field(default=None)
-    generation_source: str = Field(default="initial")  # initial | adapt | swap | manual | backfill
+    generation_source: str = Field(default="initial")  # initial | adapt | swap | manual | backfill | injury_repair
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -1553,6 +1553,7 @@ class PreferencesUpsert(SQLModel):
     equipment: list[str]       # item names e.g. "Dumbbells", "Pull-up bar"
     equipment_settings: dict | None = None
     foods_available: list[str]
+    injuries: list[str] = Field(default_factory=list)
 
 class OnboardingSync(SQLModel):
     profile: ProfileUpsert
@@ -1672,6 +1673,7 @@ class FoodRead(SQLModel):
     name: str
     category: str
     source: str
+    external_id: str | None = None
     brand: str | None = None
     is_verified: bool = False
     # Canonical nutrition (from FoodNutrition)

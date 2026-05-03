@@ -71,7 +71,7 @@ def model_food_enrichment() -> str:
     return os.getenv("MODEL_FOOD_ENRICHMENT", "gpt-4o-mini")
 
 
-def _hydrate_foods_from_db(food_names: list[str]) -> tuple[list[dict], list[str]]:
+def _hydrate_foods_from_db(food_names: list[str], *, user_id: int | None = None) -> tuple[list[dict], list[str]]:
     """Look up each food name in the local Food DB. Returns (hydrated, unknowns).
 
     For every name we find (by normalized name or alias), pull its default
@@ -84,7 +84,7 @@ def _hydrate_foods_from_db(food_names: list[str]) -> tuple[list[dict], list[str]
     list. In practice users pick ~99% of their foods from the DB-backed
     picker, so the AI call was pure waste.
     """
-    from sqlmodel import Session, select
+    from sqlmodel import Session, select, or_
     from app.database import engine
     from app.models import Food, FoodAlias, FoodServing, FoodNutrition
 
@@ -94,7 +94,19 @@ def _hydrate_foods_from_db(food_names: list[str]) -> tuple[list[dict], list[str]
         return hydrated, unknowns
 
     def _norm(s: str) -> str:
-        return " ".join(s.lower().strip().split())
+        return re.sub(r"[^a-z0-9 ]", "", s.lower()).strip()
+
+    def _visible_food_filter():
+        if user_id is None:
+            return Food.owner_user_id == None  # noqa: E711
+        return or_(Food.owner_user_id == None, Food.owner_user_id == user_id)  # noqa: E711
+
+    def _pick_best_visible(rows):
+        visible = [f for f in rows if f and f.is_active and (f.owner_user_id is None or f.owner_user_id == user_id)]
+        if not visible:
+            return None
+        visible.sort(key=lambda f: (0 if f.owner_user_id == user_id else 1, 0 if f.is_verified else 1, f.name.lower()))
+        return visible[0]
 
     with Session(engine) as session:
         for raw in food_names:
@@ -105,22 +117,25 @@ def _hydrate_foods_from_db(food_names: list[str]) -> tuple[list[dict], list[str]
 
             # Try normalized_name exact match first, then alias, then
             # case-insensitive name match as a last resort.
-            food = session.exec(
-                select(Food).where(Food.normalized_name == norm)
-            ).first()
+            food = _pick_best_visible(session.exec(
+                select(Food).where(Food.normalized_name == norm, _visible_food_filter())
+            ).all())
             if not food:
-                alias = session.exec(
+                aliases = session.exec(
                     select(FoodAlias).where(FoodAlias.alias_normalized == norm)
-                ).first()
-                if alias:
-                    food = session.exec(
-                        select(Food).where(Food.id == alias.food_id)
-                    ).first()
+                ).all()
+                if aliases:
+                    food = _pick_best_visible(session.exec(
+                        select(Food).where(
+                            Food.id.in_([a.food_id for a in aliases]),
+                            _visible_food_filter(),
+                        )
+                    ).all())
             if not food:
                 # Final fuzzy: startswith match. Cheap and catches minor typos.
-                food = session.exec(
-                    select(Food).where(Food.normalized_name.like(f"{norm}%"))
-                ).first()
+                food = _pick_best_visible(session.exec(
+                    select(Food).where(Food.normalized_name.like(f"{norm}%"), _visible_food_filter())
+                ).all())
             if not food:
                 unknowns.append(name)
                 continue
@@ -318,7 +333,7 @@ def _ai_backfill_micros(
     return out
 
 
-def _persist_backfilled_micros(name_to_micros: dict[str, dict[str, float]]) -> None:
+def _persist_backfilled_micros(name_to_micros: dict[str, dict[str, float]], *, user_id: int | None = None) -> None:
     """Write the AI-backfilled micros back to FoodNutrition.extra_nutrients
     so the next plan gen hydrates them from the DB and skips the AI call.
     Silent failure — persistence is an optimization, not a correctness
@@ -326,14 +341,23 @@ def _persist_backfilled_micros(name_to_micros: dict[str, dict[str, float]]) -> N
     if not name_to_micros:
         return
     try:
-        from sqlmodel import Session, select
+        from sqlmodel import Session, select, or_
         from app.database import engine
         from app.models import Food, FoodNutrition
         with Session(engine) as db:
             for name_lower, micros in name_to_micros.items():
-                food = db.exec(
-                    select(Food).where(Food.normalized_name == name_lower)
-                ).first()
+                norm = re.sub(r"[^a-z0-9 ]", "", name_lower.lower()).strip()
+                visibility_filter = (
+                    Food.owner_user_id == None  # noqa: E711
+                    if user_id is None
+                    else or_(Food.owner_user_id == None, Food.owner_user_id == user_id)  # noqa: E711
+                )
+                matches = db.exec(
+                    select(Food).where(Food.normalized_name == norm, visibility_filter)
+                ).all()
+                matches = [f for f in matches if f.is_active and (f.owner_user_id is None or f.owner_user_id == user_id)]
+                matches.sort(key=lambda f: (0 if f.owner_user_id == user_id else 1, 0 if f.is_verified else 1, f.name.lower()))
+                food = matches[0] if matches else None
                 if not food:
                     continue
                 nut = db.exec(
@@ -362,6 +386,8 @@ def enrich_foods_with_macros(
     client: OpenAI,
     foods: list[str],
     meal_routine: str | None = None,
+    *,
+    user_id: int | None = None,
 ) -> dict:
     """
     Convert raw food names and meal routine text into structured macro data.
@@ -380,7 +406,7 @@ def enrich_foods_with_macros(
     if not foods and not meal_routine:
         return {"foods": [], "routine_meals": []}
 
-    hydrated, unknowns = _hydrate_foods_from_db(foods or [])
+    hydrated, unknowns = _hydrate_foods_from_db(foods or [], user_id=user_id)
     print(
         f"[enrich_foods] STEP 1 hydrate: {len(hydrated)} from DB, "
         f"{len(unknowns)} unknowns (input={len(foods or [])})"
@@ -427,7 +453,7 @@ def enrich_foods_with_macros(
                         for mk, mv in name_to_micros[fname].items():
                             f[mk] = mv
                 # Persist to DB so future plan gens skip the AI call.
-                _persist_backfilled_micros(name_to_micros)
+                _persist_backfilled_micros(name_to_micros, user_id=user_id)
                 print(
                     f"[enrich_foods] backfill batch "
                     f"{batch_start // 5 + 1}: enriched "

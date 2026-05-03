@@ -65,7 +65,7 @@ Optional 5th: **thyroid_support** (opt-in, gated by profile). Never hormone-name
 | `GET /meals/score?days=7` | Authoritative Nutrition Score (today + 7-day). |
 | `GET /meals/gut-health?days=14` | Gut & Plants facts. Today includes AI-estimated `collagen_g` + `probiotic_cfu_billions`. |
 | `GET /meals/recovery-flags?days=7` | Fueling & Recovery flags. |
-| `GET /meals/hydration` / `POST /meals/hydration` | Daily hydration log + target. |
+| `GET /meals/hydration` / `POST /meals/hydration` | Daily hydration log + target. Target uses body size/sex, planned/actual exercise, logged protein, and alcohol. Sodium/electrolytes/creatine/caffeine are returned as guidance signals; they do not silently raise ounces. |
 | `GET /meals/averages?window=14` | Adaptive rolling averages (divides by days_with_data). |
 | `GET /meals/insights` | 14-day pattern detection. |
 | `GET /meals/common` | Favorites (meals eaten 2+ times in lookback). |
@@ -88,4 +88,4 @@ Optional 5th: **thyroid_support** (opt-in, gated by profile). Never hormone-name
 
 ## USDA Enrichment
 
-USDA FoodData Central client pulls nutrient #1235 (added sugars) + canonical micros. `food_service.create_food_with_nutrition` persists `added_sugar_g` to `FoodNutrition`. Falls back to AI when USDA returns nothing.
+USDA FoodData Central client pulls nutrient #1235 (added sugars) + canonical micros. Search is read-through: random USDA results are not persisted just because they appeared in search. The user's kitchen (`UserPreferences.foods_available` plus synced `customFoods`) is treated as local Thallo search data and suppresses remote USDA for matching queries. When a user selects a USDA result and saves/logs the meal, the item carries its `fdc_id` through the client and `food_service.upsert_catalog_food_from_search_item` imports it as a verified global `Food`/`FoodNutrition`/`FoodServing` row, then the meal logging path marks it in `UserRecentFood` for that user. AI fallback search results follow the same selection-only rule but are stored as private, unverified `source=ai` foods owned by that user, never as shared catalog rows. Future searches should hit Thallo local/recent/kitchen rows before calling remote USDA/AI. Meal plan generation merges user custom-food names into the generation pantry and hydrates private custom foods with the current user scope. Falls back to AI when USDA returns nothing.

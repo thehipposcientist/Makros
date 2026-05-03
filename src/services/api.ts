@@ -584,7 +584,7 @@ export interface WeeklyReview {
  *  resume polling across app launches / backgrounding events. */
 const PENDING_PLAN_JOB_KEY = 'pending_plan_job';
 
-export type PendingPlanKind = 'full' | 'workout' | 'nutrition';
+export type PendingPlanKind = 'full' | 'workout' | 'nutrition' | 'nutrition_remaining';
 export interface PendingPlanMarker {
   id: number;
   kind: PendingPlanKind;
@@ -945,22 +945,20 @@ export async function getAIWorkoutPlan(
   return result;
 }
 
-/** Nutrition-only plan — called when foods change. Uses the job queue so it
- *  survives app backgrounding / force-close just like full plan gen. */
-export async function getAINutritionPlan(
-  token: string,
+async function buildNutritionOnlyPayload(
   profile: import('../types').UserProfile,
   options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string },
-) {
+): Promise<Record<string, any>> {
   const mealRoutineText = await buildMealRoutineText(profile);
   const routinePayload = await buildRoutinePayload();
-  const payload: Record<string, any> = {
+  return {
     goal:                 profile.goal,
     goalDetails:          profile.goalDetails,
     physicalStats:        profile.physicalStats,
     daysPerWeek:          profile.daysPerWeek,
     equipment:            [],
     foodsAvailable:       profile.foodsAvailable,
+    customFoodNames:      (profile.customFoods ?? []).map(f => f.name).filter(Boolean),
     supplementsAvailable: profile.supplementsAvailable ?? [],
     dietaryPreference:    (profile as any).dietaryPreference ?? undefined,
     allergies:            profile.allergies ?? [],
@@ -972,6 +970,16 @@ export async function getAINutritionPlan(
     customMacros:         profile.customMacros ?? undefined,
     userContext:          buildLogContext(profile, options?.userLog, options?.extraContext),
   };
+}
+
+/** Nutrition-only plan — called when foods change. Uses the job queue so it
+ *  survives app backgrounding / force-close just like full plan gen. */
+export async function getAINutritionPlan(
+  token: string,
+  profile: import('../types').UserProfile,
+  options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string },
+) {
+  const payload = await buildNutritionOnlyPayload(profile, options);
 
   console.log('[getAINutritionPlan] ENQUEUE → /ai/plans/enqueue?kind=nutrition', {
     goal: payload.goal, daysPerWeek: payload.daysPerWeek, foods: payload.foodsAvailable.length,
@@ -987,6 +995,36 @@ export async function getAINutritionPlan(
 
   console.log('[getAINutritionPlan] RECV ←', {
     nutritionistNote: result?.nutritionistNote?.slice(0, 80) ?? 'MISSING',
+  });
+  return result;
+}
+
+/** Nutrition-only refresh that applies the generated templates to eligible
+ *  future days in the active PlanWeek. Today, locked days, checked meals,
+ *  and day-level nutrition overrides are preserved server-side. */
+export async function getAIRemainingWeekNutritionPlan(
+  token: string,
+  profile: import('../types').UserProfile,
+  options?: { userLog?: import('../types').UserLogEntry[]; extraContext?: string },
+) {
+  const payload = await buildNutritionOnlyPayload(profile, options);
+
+  console.log('[getAIRemainingWeekNutritionPlan] ENQUEUE → /ai/plans/enqueue?kind=nutrition_remaining', {
+    goal: payload.goal, daysPerWeek: payload.daysPerWeek, foods: payload.foodsAvailable.length,
+  });
+
+  const job = await request<PlanJob>('/ai/plans/enqueue?kind=nutrition_remaining', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+  }, 60000);
+  await writePendingPlanJob(job.id, 'nutrition_remaining');
+  const result = await _pollPlanJobUntilDone(token, job.id);
+
+  console.log('[getAIRemainingWeekNutritionPlan] RECV ←', {
+    nutritionistNote: result?.nutritionistNote?.slice(0, 80) ?? 'MISSING',
+    updatedDates: result?.remaining_week_nutrition?.updated_dates?.length ?? 0,
+    skippedDates: result?.remaining_week_nutrition?.skipped?.length ?? 0,
   });
   return result;
 }
@@ -1193,9 +1231,11 @@ export async function syncOnboarding(token: string, profile: import('../types').
       },
       preferences: {
         days_per_week:   profile.daysPerWeek,
+        workout_duration_minutes: profile.workoutDurationMinutes ?? null,
         equipment:       profile.equipment,
         equipment_settings: profile.equipmentSettings ?? null,
         foods_available: profile.foodsAvailable,
+        injuries:        buildInjuries(profile),
       },
     }),
   });
@@ -2246,6 +2286,8 @@ export type FoodSearchResult = {
   fiber?: number;
   micronutrients?: Record<string, number>;
   source?: 'seed' | 'user' | 'usda' | 'barcode' | 'ai';
+  fdc_id?: string | null;
+  external_id?: string | null;
   food_id?: number | null;
   serving_id?: number | null;
   serving_grams?: number | null;
@@ -2742,12 +2784,18 @@ export interface MealHistoryItem {
   food_id?: number | null;
   serving_id?: number | null;
   serving_grams?: number | null;
+  source?: string | null;
+  fdc_id?: string | null;
+  external_id?: string | null;
+  brand?: string | null;
+  is_verified?: boolean | null;
   quantity: number;
   unit: string;
   calories: number;
   protein_g: number;
   carbs_g: number;
   fat_g: number;
+  micronutrients?: Record<string, number> | null;
 }
 
 export interface MealHistoryEntry {
@@ -3057,12 +3105,41 @@ export interface HydrationBreakdown {
   protein: number;
   alcohol: number;
 }
+export type HydrationElectrolyteStatus = 'not_needed' | 'consider' | 'planned' | 'covered';
+export interface HydrationElectrolyteGuidance {
+  status: HydrationElectrolyteStatus;
+  message: string | null;
+  sodium_mg: number;
+  has_electrolytes_in_stack: boolean;
+  electrolytes_logged: boolean;
+}
+export interface HydrationSupplementSignals {
+  electrolytes_in_stack: boolean;
+  electrolytes_logged: boolean;
+  creatine_in_stack: boolean;
+  creatine_logged: boolean;
+  caffeine_in_stack: boolean;
+  caffeine_logged: boolean;
+}
+export interface HydrationGuidanceNote {
+  key: 'high_sodium' | 'creatine' | 'caffeine' | string;
+  message: string;
+}
+export interface HydrationGuidance {
+  workout_minutes: number;
+  sodium_mg: number;
+  electrolytes: HydrationElectrolyteGuidance;
+  supplements: HydrationSupplementSignals;
+  notes: HydrationGuidanceNote[];
+}
 export interface HydrationStatus {
   date: string;
   ounces: number;
   target_ounces: number;
   /** Optional — older app builds may not surface this. */
   breakdown?: HydrationBreakdown;
+  /** Sodium/supplement advice. Does not change the ounce target by itself. */
+  guidance?: HydrationGuidance;
 }
 export async function getHydration(token: string, logDate?: string): Promise<HydrationStatus> {
   const qs = logDate ? `?log_date=${encodeURIComponent(logDate)}` : '';
@@ -3836,6 +3913,13 @@ export interface CyclePlanContext {
 export async function getActivePlanWeek(token: string): Promise<PlanWeekResponse | null> {
   return request<PlanWeekResponse | null>('/plans/week/active', {
     method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function repairPlanWeekInjuryConflicts(token: string): Promise<PlanWeekResponse> {
+  return request<PlanWeekResponse>('/plans/week/repair-injury-conflicts', {
+    method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   });
 }

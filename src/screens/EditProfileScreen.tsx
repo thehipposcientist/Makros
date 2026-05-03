@@ -985,6 +985,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const toggleFood = (name: string) =>
     setFoods(prev => prev.includes(name) ? prev.filter(f => f !== name) : [...prev, name]);
 
+  const handleFoodSearchText = (text: string) => {
+    setFoodSearch(text);
+    if (!text.trim()) setAiFoodResults([]);
+  };
+
   const handleAddCustomFood = (item: CustomFoodItem) => {
     setCustomFoods(prev => [...prev.filter(f => f.name !== item.name), item]);
     addFoodToKitchen(item.name);
@@ -2875,6 +2880,19 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             )}
 
             <View style={{ display: foodsExpanded ? 'flex' : 'none' }}>
+              <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+                <SearchInput
+                  containerStyle={{ flex: 1 }}
+                  style={[styles.searchInput, { marginBottom: 0 }]}
+                  value={foodSearch}
+                  onChangeText={handleFoodSearchText}
+                  placeholder="Search foods to add..."
+                  placeholderTextColor={tc.textMuted}
+                  returnKeyType="search"
+                  onSubmitEditing={handleAiFoodSearch}
+                />
+              </View>
+
             {pendingImages.length > 0 && (
               <View style={{ gap: 6, marginBottom: 10 }}>
                 <TextInput
@@ -2917,17 +2935,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   ) : (
                     <Text style={styles.emptySearchText}>No foods selected yet.</Text>
                   )}
-                </View>
-
-                <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-                  <SearchInput
-                    containerStyle={{ flex: 1 }}
-                    style={styles.searchInput}
-                    value={foodSearch}
-                    onChangeText={setFoodSearch}
-                    placeholder="Search foods..."
-                    placeholderTextColor={tc.textMuted}
-                  />
                 </View>
 
                 {foodSearchLower ? (

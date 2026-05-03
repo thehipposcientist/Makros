@@ -64,6 +64,7 @@ def _food_to_read(food: Food, nutrition: FoodNutrition | None, servings: list[Fo
         name=food.name,
         category=food.category.value if hasattr(food.category, "value") else food.category,
         source=food.source.value if hasattr(food.source, "value") else food.source,
+        external_id=food.external_id,
         brand=food.brand,
         is_verified=food.is_verified,
         calories=nutrition.calories if nutrition else food.calories,
@@ -96,6 +97,7 @@ def food_read_to_search_result(food: FoodRead, *, preferred_names: set[str] | No
     serving = _first_serving(food)
     serving_label = serving.label if serving else (food.reference_unit or "100 g")
     serving_grams = serving.grams if serving else None
+    source_value = food.source.value if hasattr(food.source, "value") else food.source
     result = {
         "name": food.name,
         "serving": serving_label,
@@ -108,6 +110,8 @@ def food_read_to_search_result(food: FoodRead, *, preferred_names: set[str] | No
         "food_id": food.id,
         "serving_id": serving.id if serving else None,
         "serving_grams": serving_grams,
+        "fdc_id": food.external_id if source_value == FoodSource.USDA.value else None,
+        "external_id": food.external_id,
         "brand": food.brand,
         "is_verified": food.is_verified,
         "is_preferred": _normalize(food.name) in preferred_names,
@@ -176,11 +180,17 @@ def search_foods(
         return []
 
     pattern = f"%{norm}%"
+    visibility_filter = (
+        Food.owner_user_id == None  # noqa: E711
+        if user_id is None
+        else or_(Food.owner_user_id == None, Food.owner_user_id == user_id)  # noqa: E711
+    )
 
     # Find food_ids matching by name or alias
     name_matches = db.exec(
         select(Food.id).where(
             Food.is_active == True,
+            visibility_filter,
             col(Food.normalized_name).contains(norm),
         )
     ).all()
@@ -196,7 +206,10 @@ def search_foods(
         return []
 
     # Fetch all matching foods
-    foods = db.exec(select(Food).where(col(Food.id).in_(food_ids))).all()
+    foods = db.exec(select(Food).where(col(Food.id).in_(food_ids), visibility_filter)).all()
+    food_ids = [f.id for f in foods if f.id is not None]
+    if not food_ids:
+        return []
 
     # Fetch nutrition + servings in batch
     nutrition_map: dict[int, FoodNutrition] = {}
@@ -221,7 +234,7 @@ def search_foods(
     def _sort_key(f: Food) -> tuple:
         source = f.source.value if hasattr(f.source, "value") else f.source
         # Lower = better
-        if source == "user" and f.owner_user_id == user_id:
+        if f.owner_user_id is not None and f.owner_user_id == user_id:
             tier = 0
         elif f.id in recent_ids:
             tier = 1
@@ -399,6 +412,166 @@ def touch_recent_food(db: Session, user_id: int, food_id: int, *, commit: bool =
         db.add(UserRecentFood(user_id=user_id, food_id=food_id))
     if commit:
         db.commit()
+
+
+def _float_or_none(value) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        parsed = float(value)
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _grams_from_serving_label(label: str) -> float | None:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*g\b", label or "", flags=re.IGNORECASE)
+    return float(match.group(1)) if match else None
+
+
+def _category_from_food_name(name: str) -> FoodCategory:
+    try:
+        from app.services.nutrition.food_classifier import classify_food
+        cls = classify_food(name)
+        lower = name.lower()
+        if getattr(cls, "fruit_flag", False):
+            return FoodCategory.FRUITS
+        if getattr(cls, "vegetable_flag", False):
+            return FoodCategory.VEGETABLES
+        if cls.protein_source == "plant":
+            return FoodCategory.PLANT_PROTEINS
+        if cls.protein_source == "animal":
+            if any(k in lower for k in ("milk", "yogurt", "cheese", "egg", "kefir", "skyr")):
+                return FoodCategory.DAIRY
+            return FoodCategory.PROTEINS
+        if any(k in lower for k in ("coffee", "tea", "juice", "smoothie", "water", "soda")):
+            return FoodCategory.BEVERAGES
+        if any(k in lower for k in ("oil", "butter", "nut", "avocado", "tahini")):
+            return FoodCategory.FATS_OILS
+    except Exception:
+        pass
+    return FoodCategory.GRAINS_CARBS
+
+
+def upsert_catalog_food_from_search_item(db: Session, item: dict, *, user_id: int | None = None) -> Food | None:
+    """Persist a selected search result once it becomes part of a logged meal.
+
+    Searching alone stays read-through. User-selected USDA foods become
+    verified global rows. User-selected AI foods become private, unverified
+    rows for that user so they are easy to reuse without leaking estimates into
+    the shared catalog.
+    """
+    if not isinstance(item, dict):
+        return None
+    source = str(item.get("source") or "").lower()
+    fdc_id = str(item.get("fdc_id") or item.get("external_id") or "").strip()
+    if source not in {"usda", "ai", "user"}:
+        return None
+    if source == "usda" and not fdc_id:
+        return None
+
+    name = str(item.get("name") or "").strip()
+    if not name:
+        return None
+    norm = _normalize(name)
+
+    if source == "usda":
+        existing = db.exec(
+            select(Food).where(Food.external_id == fdc_id, Food.source == FoodSource.USDA)
+        ).first()
+        if existing:
+            return existing
+    else:
+        if user_id is None:
+            return None
+        food_source = FoodSource.AI if source == "ai" else FoodSource.USER
+        existing = db.exec(
+            select(Food).where(
+                Food.normalized_name == norm,
+                Food.owner_user_id == user_id,
+                Food.source == food_source,
+                Food.is_active == True,  # noqa: E712
+            )
+        ).first()
+        if existing:
+            return existing
+
+    serving_label = str(item.get("serving") or item.get("unit") or "100 g").strip() or "100 g"
+    serving_grams = (
+        _float_or_none(item.get("serving_grams"))
+        or _grams_from_serving_label(serving_label)
+        or 100.0
+    )
+    micros = item.get("micronutrients") if isinstance(item.get("micronutrients"), dict) else {}
+
+    def micro(*keys: str) -> float | None:
+        for key in keys:
+            val = _float_or_none(micros.get(key))
+            if val is not None:
+                return val
+        return None
+
+    fiber = _float_or_none(item.get("fiber")) or micro("fiber")
+    sugar = micro("sugar")
+    sodium_mg = micro("sodium_mg", "sodium")
+    added_sugar_g = micro("added_sugar_g", "added_sugar")
+    extras = {}
+    for k, raw in micros.items():
+        if k in {"fiber", "sugar", "sodium", "sodium_mg", "added_sugar", "added_sugar_g"}:
+            continue
+        parsed = _float_or_none(raw)
+        if parsed is not None:
+            extras[k] = parsed
+    extras = extras or None
+
+    food = Food(
+        name=name,
+        normalized_name=norm,
+        category=_category_from_food_name(name),
+        source=FoodSource.USDA if source == "usda" else FoodSource.AI if source == "ai" else FoodSource.USER,
+        owner_user_id=None if source == "usda" else user_id,
+        external_id=fdc_id or None,
+        brand=item.get("brand"),
+        is_verified=(source == "usda"),
+        is_custom=(source in {"ai", "user"}),
+        unit=serving_label,
+        serving_grams=serving_grams,
+        calories=float(item.get("calories") or 0),
+        protein=float(item.get("protein") or 0),
+        carbs=float(item.get("carbs") or 0),
+        fat=float(item.get("fat") or 0),
+    )
+    db.add(food)
+    db.flush()
+
+    db.add(FoodNutrition(
+        food_id=food.id,
+        reference_unit=serving_label,
+        reference_grams=serving_grams,
+        calories=food.calories,
+        protein=food.protein,
+        carbs=food.carbs,
+        fat=food.fat,
+        fiber=fiber,
+        sugar=sugar,
+        added_sugar_g=added_sugar_g,
+        sodium_mg=sodium_mg,
+        extra_nutrients=extras,
+    ))
+    db.add(FoodServing(
+        food_id=food.id,
+        label=serving_label,
+        grams=serving_grams,
+        is_default=True,
+        calories=food.calories,
+        protein=food.protein,
+        carbs=food.carbs,
+        fat=food.fat,
+    ))
+    alias_norm = _normalize(name)
+    if alias_norm and alias_norm != food.normalized_name:
+        db.add(FoodAlias(food_id=food.id, alias=name, alias_normalized=alias_norm))
+    return food
 
 
 # ─── USDA Import ──────────────────────────────────────────────────────────────

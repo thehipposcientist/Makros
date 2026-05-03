@@ -60,6 +60,7 @@ import StartCountdownOverlay from '../components/StartCountdownOverlay';
 import WorkoutTimerModal, { TimerResult } from '../components/WorkoutTimerModal';
 import { isWatchReachable } from '../utils/watchSync';
 import { setActiveWatchSessionId } from '../utils/activeWatchSession';
+import { drainActiveWatchCommands, setActiveWatchCommandConsumerMounted } from '../utils/watchCommandBacklog';
 import { WatchBridge } from '../../modules/thallo-watch-bridge';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
@@ -997,6 +998,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   useEffect(() => {
     // Ref-token cleanup so a teardown that fires before the async
     // import resolves still removes the listener once it attaches.
+    setActiveWatchCommandConsumerMounted(true);
     const token = { cancelled: false, unsub: null as (() => void) | null };
     (async () => {
       try {
@@ -1024,7 +1026,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           }
           return true;
         };
-        const unsub = onWatchCommand((command, payload) => {
+        const handleWatchCommand = (command: string, payload: Record<string, any>) => {
           if (command === 'pull_state') {
             // Watch asked for a refresh while we're mid-workout —
             // push `status: 'active'` + current warmup steps so the
@@ -1098,12 +1100,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           } else if (command === 'cancel_workout') {
             watchHandlersRef.current.cancel();
           }
-        });
+        };
+        const unsub = onWatchCommand(handleWatchCommand);
+        const queued = await drainActiveWatchCommands().catch(() => []);
+        if (!token.cancelled) {
+          queued.forEach(({ command, payload }) => handleWatchCommand(command, payload));
+        }
         if (token.cancelled) { try { unsub(); } catch {} }
         else { token.unsub = unsub; }
       } catch { /* watch bridge optional */ }
     })();
     return () => {
+      setActiveWatchCommandConsumerMounted(false);
       token.cancelled = true;
       if (token.unsub) { try { token.unsub(); } catch {} }
     };
@@ -4586,6 +4594,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </Text>
                   )}
                   <Text
+                    testID={`active-exercise-name-${i}`}
+                    accessibilityLabel={`active-exercise-name-${i}`}
                     style={[styles.exerciseName, isDone && styles.exerciseNameDone]}
                     numberOfLines={isActive ? 3 : 1}
                     ellipsizeMode="tail"

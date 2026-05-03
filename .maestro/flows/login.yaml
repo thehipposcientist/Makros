@@ -51,6 +51,7 @@ tags:
       - tapOn:
           id: "auth-password-input"
       - inputText: ${TEST_PASSWORD}
+      - pressKey: enter
 
       - runFlow:
           when:
@@ -58,9 +59,14 @@ tags:
           commands:
             - tapOn: "Continue"
 
-      - tapOn: "Personalized training, nutrition, and AI coaching."
-      - tapOn:
-          id: "auth-submit"
+      - runFlow:
+          when:
+            visible:
+              id: "auth-submit"
+          commands:
+            - tapOn: "Personalized training, nutrition, and AI coaching."
+            - tapOn:
+                id: "auth-submit"
 
 - waitForAnimationToEnd:
     timeout: 5000

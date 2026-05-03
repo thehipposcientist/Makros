@@ -9,7 +9,9 @@ import HealthKit
 import os.log
 
 private let wcLog = OSLog(subsystem: "com.thallo.app.watchbridge", category: "WC")
-private let staleWorkoutCommandWindowMs: Double = 10 * 60 * 1000
+private let staleWorkoutCommandWindowMs: Double = 4 * 60 * 60 * 1000
+private let staleQueuedCommandWindowMs: Double = 24 * 60 * 60 * 1000
+private let maxQueuedCommandEvents = 50
 
 public class ThalloWatchBridgeModule: Module {
     private let sessionHolder = _SessionHolder()
@@ -145,7 +147,9 @@ public class ThalloWatchBridgeModule: Module {
 // Keeps the WCSession delegate alive across hot reloads and routes
 // incoming commands into the Expo event stream.
 private class _SessionHolder: NSObject, WCSessionDelegate {
-    private let queuedHydrationCommandsKey = "thallo.watchBridge.queuedHydrationCommands"
+    private let queuedCommandsKey = "thallo.watchBridge.queuedCommands"
+    private let legacyQueuedHydrationCommandsKey = "thallo.watchBridge.queuedHydrationCommands"
+    private let recentCommandIdsKey = "thallo.watchBridge.recentCommandIds"
     private var dispatchEvent: ((String, [String: Any]) -> Void)?
     private var userId: String?
     private var commandListenerCount = 0
@@ -154,6 +158,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     private var pendingMessages: [[String: Any]] = []
     private var recentCommandIds: [String] = []
     private var recentCommandIdSet: Set<String> = []
+    private var recentCommandIdsLoaded = false
 
     func setUserId(_ id: String?) { self.userId = id }
 
@@ -166,9 +171,9 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     }
 
     func drainQueuedCommands() -> [[String: Any]] {
-        let queued = dedupCommandEvents(queuedCommands + loadQueuedHydrationCommands())
+        let queued = compactQueuedCommandEvents(queuedCommands + loadQueuedCommands())
         queuedCommands.removeAll()
-        saveQueuedHydrationCommands([])
+        saveQueuedCommands([])
         return queued
     }
 
@@ -493,10 +498,11 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             os_log("[wc-bridge] dispatchCommand: not a command (kind=%{public}@)", log: wcLog, type: .default, (msg["kind"] as? String) ?? "<nil>")
             return
         }
-        if shouldDropStaleWorkoutCommand(cmd, msg) {
+        if shouldDropStaleCommand(cmd, msg) {
             return
         }
         if let commandId = msg["commandId"] as? String, !commandId.isEmpty {
+            ensureRecentCommandIdsLoaded()
             if recentCommandIdSet.contains(commandId) {
                 os_log("[wc-bridge] duplicate command ignored=%{public}@", log: wcLog, type: .default, cmd)
                 logDiag("dispatchCommand.duplicate", [
@@ -518,35 +524,78 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
                 self.dispatchEvent?("command", event)
             } else {
                 self.queuedCommands.append(event)
-                self.persistQueuedHydrationCommand(event)
-                if self.queuedCommands.count > 50 {
-                    self.queuedCommands.removeFirst(self.queuedCommands.count - 50)
+                self.persistQueuedCommand(event)
+                if self.queuedCommands.count > maxQueuedCommandEvents {
+                    self.queuedCommands.removeFirst(self.queuedCommands.count - maxQueuedCommandEvents)
                 }
                 os_log("[wc-bridge] queued command=%{public}@ until JS listener attaches", log: wcLog, type: .default, cmd)
             }
         }
     }
 
-    private func loadQueuedHydrationCommands() -> [[String: Any]] {
-        UserDefaults.standard.array(forKey: queuedHydrationCommandsKey) as? [[String: Any]] ?? []
+    private func loadQueuedCommands() -> [[String: Any]] {
+        let current = UserDefaults.standard.array(forKey: queuedCommandsKey) as? [[String: Any]] ?? []
+        let legacy = UserDefaults.standard.array(forKey: legacyQueuedHydrationCommandsKey) as? [[String: Any]] ?? []
+        if !legacy.isEmpty {
+            UserDefaults.standard.removeObject(forKey: legacyQueuedHydrationCommandsKey)
+        }
+        return current + legacy
     }
 
-    private func saveQueuedHydrationCommands(_ events: [[String: Any]]) {
+    private func saveQueuedCommands(_ events: [[String: Any]]) {
         if events.isEmpty {
-            UserDefaults.standard.removeObject(forKey: queuedHydrationCommandsKey)
+            UserDefaults.standard.removeObject(forKey: queuedCommandsKey)
         } else {
-            UserDefaults.standard.set(events, forKey: queuedHydrationCommandsKey)
+            UserDefaults.standard.set(events, forKey: queuedCommandsKey)
         }
     }
 
-    private func persistQueuedHydrationCommand(_ event: [String: Any]) {
-        guard (event["command"] as? String) == "log_hydration" else { return }
-        var events = loadQueuedHydrationCommands()
+    private func persistQueuedCommand(_ event: [String: Any]) {
+        guard shouldPersistQueuedCommand(event) else { return }
+        var events = loadQueuedCommands()
         events.append(event)
-        if events.count > 50 {
-            events.removeFirst(events.count - 50)
+        saveQueuedCommands(compactQueuedCommandEvents(events))
+    }
+
+    private func shouldPersistQueuedCommand(_ event: [String: Any]) -> Bool {
+        guard let command = event["command"] as? String else { return false }
+        return durableQueuedCommands.contains(command)
+    }
+
+    private var durableQueuedCommands: Set<String> {
+        [
+            "start_workout",
+            "start_custom_workout",
+            "skip_workout",
+            "end_workout",
+            "cancel_workout",
+            "log_set",
+            "skip_rest",
+            "swap_exercise",
+            "toggle_meal",
+            "log_hydration",
+            "toggle_supplement",
+            "take_all_supplements",
+            "log_weight",
+            "confirm_meal_speech",
+        ]
+    }
+
+    private func compactQueuedCommandEvents(_ events: [[String: Any]]) -> [[String: Any]] {
+        let nowMs = Date().timeIntervalSince1970 * 1000
+        let deduped = dedupCommandEvents(events).filter { event in
+            guard shouldPersistQueuedCommand(event),
+                  let command = event["command"] as? String
+            else { return false }
+            let payload = event["payload"] as? [String: Any]
+            guard let tsMs = numericMs(payload?["tsMs"]) else { return true }
+            let window = isWorkoutCommand(command) ? staleWorkoutCommandWindowMs : staleQueuedCommandWindowMs
+            return nowMs - tsMs <= window
         }
-        saveQueuedHydrationCommands(dedupCommandEvents(events))
+        if deduped.count > maxQueuedCommandEvents {
+            return Array(deduped.suffix(maxQueuedCommandEvents))
+        }
+        return deduped
     }
 
     private func dedupCommandEvents(_ events: [[String: Any]]) -> [[String: Any]] {
@@ -563,8 +612,22 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         return deduped
     }
 
-    private func shouldDropStaleWorkoutCommand(_ command: String, _ msg: [String: Any]) -> Bool {
-        let workoutCommands: Set<String> = [
+    private func shouldDropStaleCommand(_ command: String, _ msg: [String: Any]) -> Bool {
+        guard let tsMs = numericMs(msg["tsMs"]) else { return false }
+
+        let ageMs = Date().timeIntervalSince1970 * 1000 - tsMs
+        let window = isWorkoutCommand(command) ? staleWorkoutCommandWindowMs : staleQueuedCommandWindowMs
+        guard ageMs > window else { return false }
+        os_log("[wc-bridge] stale command ignored=%{public}@ ageMs=%.0f", log: wcLog, type: .default, command, ageMs)
+        logDiag("dispatchCommand.staleDropped", [
+            "command": command,
+            "ageMs": ageMs,
+        ])
+        return true
+    }
+
+    private func isWorkoutCommand(_ command: String) -> Bool {
+        [
             "start_workout",
             "start_custom_workout",
             "skip_workout",
@@ -573,19 +636,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             "skip_rest",
             "end_workout",
             "cancel_workout",
-        ]
-        guard workoutCommands.contains(command),
-              let tsMs = numericMs(msg["tsMs"])
-        else { return false }
-
-        let ageMs = Date().timeIntervalSince1970 * 1000 - tsMs
-        guard ageMs > staleWorkoutCommandWindowMs else { return false }
-        os_log("[wc-bridge] stale workout command ignored=%{public}@ ageMs=%.0f", log: wcLog, type: .default, command, ageMs)
-        logDiag("dispatchCommand.staleDropped", [
-            "command": command,
-            "ageMs": ageMs,
-        ])
-        return true
+        ].contains(command)
     }
 
     private func numericMs(_ value: Any?) -> Double? {
@@ -603,7 +654,16 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         return nil
     }
 
+    private func ensureRecentCommandIdsLoaded() {
+        guard !recentCommandIdsLoaded else { return }
+        recentCommandIdsLoaded = true
+        let ids = UserDefaults.standard.stringArray(forKey: recentCommandIdsKey) ?? []
+        recentCommandIds = ids
+        recentCommandIdSet = Set(ids)
+    }
+
     private func rememberCommandId(_ commandId: String) {
+        ensureRecentCommandIdsLoaded()
         recentCommandIds.append(commandId)
         recentCommandIdSet.insert(commandId)
         if recentCommandIds.count > 100 {
@@ -612,5 +672,6 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             for id in dropped { recentCommandIdSet.remove(id) }
             recentCommandIds.removeFirst(overflow)
         }
+        UserDefaults.standard.set(recentCommandIds, forKey: recentCommandIdsKey)
     }
 }

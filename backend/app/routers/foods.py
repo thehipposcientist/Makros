@@ -17,7 +17,7 @@ from app.food_service import (
     normalize_food_name,
     search_foods as search_local_foods,
 )
-from app.models import User, UserPreferences
+from app.models import User, UserPreferences, UserState
 
 router = APIRouter(prefix="/foods", tags=["foods"])
 
@@ -69,6 +69,83 @@ def _preferences_for_user(db: Session, user_id: int, *, create: bool = False) ->
 
 def _preferred_names(prefs: UserPreferences | None) -> set[str]:
     return {normalize_food_name(str(name)) for name in (prefs.foods_available if prefs else []) if str(name).strip()}
+
+
+def _query_matches_name(query: str, name: str) -> bool:
+    norm_query = normalize_food_name(query)
+    norm_name = normalize_food_name(name)
+    if not norm_query or not norm_name:
+        return False
+    return norm_query in norm_name or all(token in norm_name for token in norm_query.split())
+
+
+def _custom_foods_from_state(db: Session, user_id: int) -> list[dict]:
+    row = db.exec(select(UserState).where(UserState.user_id == user_id)).first()
+    state = row.state_json if row and isinstance(row.state_json, dict) else {}
+    profile = state.get("userProfile") if isinstance(state.get("userProfile"), dict) else {}
+    foods = profile.get("customFoods") if isinstance(profile, dict) else []
+    if not isinstance(foods, list):
+        return []
+    return [f for f in foods if isinstance(f, dict)]
+
+
+def _custom_food_to_search_result(item: dict, *, preferred_names: set[str]) -> dict | None:
+    name = str(item.get("name") or "").strip()
+    if not name:
+        return None
+    try:
+        calories = float(item.get("calories") or 0)
+        protein = float(item.get("protein") or 0)
+        carbs = float(item.get("carbs") or 0)
+        fat = float(item.get("fat") or 0)
+    except (TypeError, ValueError):
+        calories = protein = carbs = fat = 0
+    result = {
+        "name": name,
+        "serving": str(item.get("unit") or "1 serving"),
+        "calories": calories,
+        "protein": protein,
+        "carbs": carbs,
+        "fat": fat,
+        "source": "user",
+        "food_id": None,
+        "serving_id": None,
+        "serving_grams": None,
+        "external_id": None,
+        "fdc_id": None,
+        "brand": item.get("brand"),
+        "is_verified": item.get("verificationStatus") in ("ai_validated", "seed_verified"),
+        "is_preferred": normalize_food_name(name) in preferred_names,
+    }
+    micros = item.get("micronutrients")
+    if isinstance(micros, dict):
+        result["micronutrients"] = micros
+        if "fiber" in micros:
+            result["fiber"] = micros.get("fiber")
+    return result
+
+
+def _kitchen_custom_results(
+    db: Session,
+    *,
+    user_id: int,
+    query: str,
+    preferred_names: set[str],
+) -> list[dict]:
+    results: list[dict] = []
+    seen: set[str] = set()
+    for item in _custom_foods_from_state(db, user_id):
+        name = str(item.get("name") or "").strip()
+        key = normalize_food_name(name)
+        if not key or key in seen or key not in preferred_names:
+            continue
+        if not _query_matches_name(query, name):
+            continue
+        result = _custom_food_to_search_result(item, preferred_names=preferred_names)
+        if result:
+            results.append(result)
+            seen.add(key)
+    return results
 
 
 def _search_usda(query: str, max_results: int) -> list[dict]:
@@ -171,10 +248,17 @@ def search_food_catalog(
             "preferred_foods": prefs.foods_available if prefs else [],
         }
 
+    kitchen_results = _kitchen_custom_results(
+        db,
+        user_id=current_user.id,
+        query=query,
+        preferred_names=preferred,
+    )
     local_reads = search_local_foods(db, query, user_id=current_user.id, limit=limit)
-    local_results = [food_read_to_search_result(f, preferred_names=preferred) for f in local_reads]
+    local_results = kitchen_results + [food_read_to_search_result(f, preferred_names=preferred) for f in local_reads]
     remote_results: list[dict] = []
-    if include_remote and len(local_results) < limit:
+    has_kitchen_hit = any(r.get("is_preferred") or r.get("source") == "user" for r in local_results)
+    if include_remote and len(local_results) < limit and not has_kitchen_hit:
         remote_results = _search_usda(query, max_results=min(8, max(3, limit - len(local_results))))
 
     merged = merge_food_search_results(

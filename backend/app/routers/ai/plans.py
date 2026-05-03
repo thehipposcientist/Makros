@@ -23,7 +23,11 @@ from .utils import (
     SCHEMA_WORKOUT,
 )
 from .prompts import build_workout_prompt
-from app.services.nutrition.meal_assembler import assemble_nutrition_response, default_foods_for_generation
+from app.services.nutrition.meal_assembler import (
+    assemble_nutrition_response,
+    food_names_for_generation,
+    selected_food_names_for_generation,
+)
 from app.services.workout.planner import (
     PlannerInputs, generate_workout_plan as planner_generate_workout_plan,
 )
@@ -2320,9 +2324,9 @@ async def run_full_plan_generation(
     # note LLM call so the two AI round-trips overlap instead of
     # serializing.
     async def _run_nutrition() -> dict:
-        foods_for_enrichment = default_foods_for_generation(req, req.foodsAvailable)
+        foods_for_enrichment = food_names_for_generation(req, req.foodsAvailable)
         enriched_local = await asyncio.to_thread(
-            enrich_foods_with_macros, client, foods_for_enrichment, req.mealRoutine
+            enrich_foods_with_macros, client, foods_for_enrichment, req.mealRoutine, user_id=user_id
         )
         # db/user_id threaded in so the skeleton prompt sees the user's
         # real meal-history (rolling averages, common meals from the
@@ -2510,7 +2514,7 @@ async def run_full_plan_generation(
     _persist_active_workout_plan(
         db, user_id, result["workout_plan"], req=req, reason="regen",
     )
-    custom_foods = _build_custom_foods(result, req.foodsAvailable, enriched)
+    custom_foods = _build_custom_foods(result, selected_food_names_for_generation(req, req.foodsAvailable), enriched)
     if custom_foods:
         result["custom_foods"] = custom_foods
 
@@ -2935,9 +2939,9 @@ async def run_nutrition_only_generation(
     client = OpenAI(api_key=api_key)
     _m = model_plan_update()
     print(f"[plan-gen nutrition] goal={plan_req.goal}, foods={len(plan_req.foodsAvailable)}")
-    foods_for_enrichment = default_foods_for_generation(plan_req, plan_req.foodsAvailable)
+    foods_for_enrichment = food_names_for_generation(plan_req, plan_req.foodsAvailable)
     enriched = await asyncio.to_thread(
-        enrich_foods_with_macros, client, foods_for_enrichment, plan_req.mealRoutine
+        enrich_foods_with_macros, client, foods_for_enrichment, plan_req.mealRoutine, user_id=user_id
     )
     # Target macros for drift verification (see `_call_nutrition_ai`).
     targets_for_check = compute_tdee_and_targets(plan_req, db=db, user_id=user_id)
@@ -3009,7 +3013,7 @@ async def run_nutrition_only_generation(
         "supplementStack":  nutrition_data.get("supplementStack", []),
         "nutrition_plans":  plans_list,
     }
-    custom_foods = _build_custom_foods(result, plan_req.foodsAvailable, enriched)
+    custom_foods = _build_custom_foods(result, selected_food_names_for_generation(plan_req, plan_req.foodsAvailable), enriched)
     if custom_foods:
         result["custom_foods"] = custom_foods
 
@@ -3232,6 +3236,36 @@ def _job_to_dict(job: PlanJob) -> dict:
     }
 
 
+def _apply_remaining_week_nutrition(db: Session, user_id: int, result: dict) -> dict:
+    plans_list = result.get("nutrition_plans") if isinstance(result, dict) else None
+    if not isinstance(plans_list, list) or not plans_list:
+        return {
+            "plan_week_id": None,
+            "updated_dates": [],
+            "skipped": [{"date": None, "reason": "no_nutrition_templates"}],
+        }
+
+    from app.services.workout.week_manager import (
+        get_active_week,
+        refresh_remaining_week_nutrition,
+    )
+
+    plan_week = get_active_week(db, user_id)
+    if not plan_week:
+        return {
+            "plan_week_id": None,
+            "updated_dates": [],
+            "skipped": [{"date": None, "reason": "no_active_plan_week"}],
+        }
+
+    updated, skipped = refresh_remaining_week_nutrition(db, plan_week, plans_list)
+    return {
+        "plan_week_id": plan_week.id,
+        "updated_dates": [d.day_date.isoformat() for d in updated],
+        "skipped": skipped,
+    }
+
+
 async def _run_plan_job(job_id: int) -> None:
     """Background worker — runs one plan-gen job to completion.
 
@@ -3261,8 +3295,12 @@ async def _run_plan_job(job_id: int) -> None:
             # Re-hydrate the PlanRequest from stored JSON. PlanRequest is a
             # pydantic BaseModel so .model_validate accepts a dict.
             req = PlanRequest.model_validate(req_dict)
+            apply_remaining_nutrition = False
             if job.kind == "workout":
                 result = await run_workout_only_generation(req, db=db, user_id=job.user_id)
+            elif job.kind == "nutrition_remaining":
+                result = await run_nutrition_only_generation(req, db=db, user_id=job.user_id)
+                apply_remaining_nutrition = True
             elif job.kind == "nutrition":
                 result = await run_nutrition_only_generation(req, db=db, user_id=job.user_id)
             else:
@@ -3274,6 +3312,11 @@ async def _run_plan_job(job_id: int) -> None:
             if job.status == "cancelled":
                 print(f"[plan-job {job_id}] cancelled mid-flight, discarding result")
                 return
+
+            if apply_remaining_nutrition:
+                result["remaining_week_nutrition"] = _apply_remaining_week_nutrition(
+                    db, job.user_id, result,
+                )
 
             # Stale per-day nutrition_plan rows from previous plan runs would
             # otherwise win over the fresh templates on the client (HomeScreen
@@ -3324,12 +3367,12 @@ async def enqueue_plan_job(
     """Enqueue a background plan-generation job. Returns the job id
     immediately; client polls `/ai/plans/job/{id}` for the result.
 
-    `kind` is one of: full | workout | nutrition. Workout-only and
-    nutrition-only jobs use the same PlanRequest body; the worker picks the
-    appropriate generator. Kept as a query param (not body field) so the
-    request shape stays identical to the legacy sync endpoints.
+    `kind` is one of: full | workout | nutrition | nutrition_remaining.
+    Workout-only and nutrition-only jobs use the same PlanRequest body; the
+    worker picks the appropriate generator. Kept as a query param (not body
+    field) so the request shape stays identical to the legacy sync endpoints.
     """
-    if kind not in ("full", "workout", "nutrition"):
+    if kind not in ("full", "workout", "nutrition", "nutrition_remaining"):
         raise HTTPException(status_code=400, detail=f"Invalid kind: {kind}")
 
     # Cancel any earlier running jobs for this user so we don't stack work —
