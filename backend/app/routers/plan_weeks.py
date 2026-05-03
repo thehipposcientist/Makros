@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/plans", tags=["plan-weeks"])
 
 # Day 8 generates immediately. The expired week stays promptable for one day
-# so the user can review coach feedback and regenerate the new week's remaining
-# unlocked days; after that it becomes a saved recap.
+# so the user can review coach feedback and save durable changes for future
+# generated weeks; after that it becomes a saved recap.
 CHECKIN_PROMPT_DAYS_AFTER_END = 1
 CHECKIN_RECAP_DAYS_AFTER_END = 7
 
@@ -1052,10 +1052,9 @@ def submit_plan_week_checkin(
         db.flush()
         ai_decision_id = decision.id
 
-        # Apply delta if warranted
-        if result.response_type in ("small_adjust", "deep_review") and result.delta:
-            from app.routers.coach import _apply_delta
-            _apply_delta(db, current_user.id, result.delta)
+        # LLM deltas are saved for display only. User-confirmed state
+        # changes route through /coach/apply-action or deterministic
+        # check-in logic; this endpoint never rewrites the active PlanWeek.
 
         # Save commitments for next week's grading
         next_commitments = raw.get("next_commitments") if isinstance(raw, dict) else None
@@ -1114,24 +1113,10 @@ def submit_plan_week_checkin(
 
     db.commit()
 
-    regenerated_current_week = False
-    if structured_applied or ai_delta:
-        active_after = get_active_week(db, current_user.id)
-        if active_after and active_after.id != pw.id and not week_needs_renewal(active_after):
-            try:
-                review_and_apply(
-                    ReviewAndApplyRequest(actions=[]),
-                    current_user=current_user,
-                    db=db,
-                )
-                regenerated_current_week = True
-            except Exception as e:
-                logger.warning(f"[week-checkin] regenerate after check-in failed: {e}")
-
     return {
         **_checkin_to_dict(checkin_row),
         "review_summary": review_snapshot,
-        "regenerated_current_week": regenerated_current_week,
+        "regenerated_current_week": False,
     }
 
 
@@ -1234,7 +1219,12 @@ def review_and_apply(
     current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanWeekResponse:
-    """User reviews recommendations and selects which to apply, then regenerates remaining days."""
+    """Apply selected recommendations to durable state only.
+
+    The active PlanWeek is fixed for its 7-day window. Weekly review
+    recommendations may update user-facing settings or coach/day state via
+    apply_action, but they must not regenerate or rewrite PlanDay rows.
+    """
     from app.services.coach.apply_action import apply_action
 
     pw = get_active_week(db, current_user.id)
@@ -1248,49 +1238,6 @@ def review_and_apply(
                 apply_action(db, current_user.id, action_dict)
             except Exception as e:
                 logger.warning(f"[review-and-apply] action failed: {action_dict} — {e}")
-
-    from app.services.workout.planner import generate_workout_plan
-    from app.services.workout.planner_context import build_planweek_planner_context
-    from app.seed_exercises_data import SEED_EXERCISES
-    from app.models import UserProfile, UserPreferences, UserGoal
-
-    profile = db.exec(
-        select(UserProfile).where(UserProfile.user_id == current_user.id)
-    ).first()
-    prefs = db.exec(
-        select(UserPreferences).where(UserPreferences.user_id == current_user.id)
-    ).first()
-    if not profile:
-        raise HTTPException(status_code=400, detail="No profile found")
-
-    active_goal = db.exec(
-        select(UserGoal).where(
-            UserGoal.user_id == current_user.id,
-            UserGoal.is_active == True,
-        )
-    ).first()
-    current_goal = effective_goal_id(active_goal, fallback=pw.goal)
-
-    planner_ctx = build_planweek_planner_context(
-        db,
-        current_user.id,
-        profile,
-        prefs,
-        goal=current_goal,
-        days_per_week=pw.days_per_week,
-        session_minutes=int(getattr(prefs, "workout_duration_minutes", 45) or 45),
-        preferred_split=pw.preferred_split,
-    )
-
-    plan = generate_workout_plan(
-        planner_ctx.inputs, SEED_EXERCISES,
-        history_familiarity=planner_ctx.history_familiarity,
-        recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
-    )
-    fresh_days = plan.get("workout_plan", {}).get("days", [])
-    training_pattern = default_training_pattern(pw.days_per_week)
-
-    regenerate_remaining_days(db, pw, fresh_days, training_pattern)
 
     days = get_week_days(db, pw.id)
     return _plan_week_to_response(pw, days)
@@ -1645,6 +1592,8 @@ def submit_week_checkin(
 ) -> dict:
     """Accept structured check-in answers, return recommended adjustments,
     and optionally apply them to UserPreferences / UserCoachingState.
+    The active PlanWeek remains fixed; applied settings affect future
+    generated weeks or day-state overlays only.
 
     user_decision options:
       apply_recommendations  — calls apply_action for each actionable item.

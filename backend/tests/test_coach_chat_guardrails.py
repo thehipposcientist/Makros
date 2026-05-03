@@ -44,7 +44,7 @@ def test_workout_plan_promise_redirects_to_deterministic_controls() -> None:
     assert result["needs_plan_update"] is False
     assert result["updated_workout_plan"] is None
     assert "can't directly rewrite your active 7-day workout plan" in result["answer"]
-    assert any("Switch this day" in item for item in result["action_items"])
+    assert any("Workout > Plan" in item and "Change Focus" in item for item in result["action_items"])
     _ok("workout rewrite promises are redirected")
 
 
@@ -61,7 +61,7 @@ def test_nutrition_plan_promise_redirects_to_meal_controls() -> None:
     assert result["needs_plan_update"] is False
     assert result["updated_nutrition_plan"] is None
     assert "can't directly rewrite your generated meal plan" in result["answer"]
-    assert any("meal edit controls" in item for item in result["action_items"])
+    assert any("Meals > Plan" in item for item in result["action_items"])
     _ok("nutrition rewrite promises are redirected")
 
 
@@ -76,7 +76,7 @@ def test_goal_setting_update_survives_but_plan_payload_is_stripped() -> None:
         "updated_injuries": None,
     }, is_nutritionist=False)
 
-    assert result["needs_plan_update"] is True
+    assert result["needs_plan_update"] is False
     assert result["updated_goal"] == "fat_loss"
     assert result["updated_workout_plan"] is None
     assert "can't directly rewrite" not in result["answer"]

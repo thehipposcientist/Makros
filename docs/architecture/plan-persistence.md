@@ -38,7 +38,7 @@ indexes into them via a cycling array.
   recommendations from the weekly check-in to durable settings; it does not
   rewrite the active `PlanWeek`.
 - `PATCH /plans/days/{day_date}/workout` and `…/nutrition` — partial
-  per-day patches (used by Switch Day and manual edits).
+  per-day patches (used by Change Focus, exercise swaps, and manual edits).
 - `POST /plans/days/{day_date}/lock` — pins a single day so subsequent
   regens leave it untouched.
 
@@ -88,7 +88,7 @@ workoutHistory, themePreference, metaData_v1.
 `applyPlanResult` calls the appropriate clear **before** writing the new
 plan, so a workout-only regen doesn't wipe meal state.
 
-## Per-Day Patch Flow (Switch Day, AI Swaps, Manual Edits)
+## Per-Day Patch Flow (Change Focus, Exercise Swaps, Manual Edits)
 
 1. UI mutates a single day (e.g., user swaps Push → Pull on Wednesday).
 2. Client calls `PATCH /plans/days/{day_date}/workout` with the new

@@ -61,6 +61,14 @@ function Pill({ label, color, onDark = false }: { label: string; color: string; 
   );
 }
 
+function e2eId(value: string | number | null | undefined): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 export default function SupplementStackScreen({ authToken, themeName }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -271,6 +279,8 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
         {pendingCount > 1 && (
           <View style={{ flexDirection: 'row', gap: 8 }}>
             <TouchableOpacity
+              testID="supplement-take-all"
+              accessibilityLabel="supplement-take-all"
               onPress={handleTakeAll}
               disabled={takingAll || skippingAll}
               style={{
@@ -290,6 +300,8 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
+              testID="supplement-skip-all"
+              accessibilityLabel="supplement-skip-all"
               onPress={handleSkipAll}
               disabled={takingAll || skippingAll}
               style={{
@@ -340,6 +352,8 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
                 </View>
                 {group.items.length >= 2 && groupPending > 0 && (
                   <TouchableOpacity
+                    testID={`supplement-take-group-${e2eId(group.label)}`}
+                    accessibilityLabel={`supplement-take-group-${e2eId(group.label)}`}
                     onPress={() => handleTakeGroup(group)}
                     disabled={isLogging}
                     style={{
@@ -364,7 +378,7 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
                 const taken = logs.find(l => !l.skipped);
                 const skipped = !taken && logs.find(l => l.skipped);
                 return (
-                  <View key={item.id} style={{
+                  <View key={item.id} testID={`supplement-today-row-${e2eId(item.custom_name || 'supplement')}`} style={{
                     backgroundColor: tc.surface, borderWidth: 1, borderColor: tc.border,
                     borderRadius: 12, padding: 12,
                   }}>
@@ -393,6 +407,8 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
                       {!taken && !skipped && (
                         <>
                           <TouchableOpacity
+                            testID={`supplement-mark-taken-${e2eId(item.custom_name || 'supplement')}`}
+                            accessibilityLabel={`supplement-mark-taken-${e2eId(item.custom_name || 'supplement')}`}
                             onPress={() => handleMarkTaken(item, false)}
                             style={{
                               paddingVertical: 6, paddingHorizontal: 10, borderRadius: 8,
@@ -402,6 +418,8 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
                             <Text style={{ fontSize: 11, fontWeight: '700', color: getContrastingTextColor(tc.primary) }}>Mark taken</Text>
                           </TouchableOpacity>
                           <TouchableOpacity
+                            testID={`supplement-skip-${e2eId(item.custom_name || 'supplement')}`}
+                            accessibilityLabel={`supplement-skip-${e2eId(item.custom_name || 'supplement')}`}
                             onPress={() => handleMarkTaken(item, true)}
                             style={{
                               paddingVertical: 6, paddingHorizontal: 8,
@@ -454,6 +472,8 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
             Tap "Add supplement" to get started.
           </Text>
           <TouchableOpacity
+            testID="supplement-add-open"
+            accessibilityLabel="supplement-add-open"
             onPress={() => setShowAdd(true)}
             style={{ backgroundColor: tc.primary, paddingVertical: 10, paddingHorizontal: 16, borderRadius: 10 }}
           >
@@ -465,7 +485,7 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
     return (
       <View style={{ gap: 10 }}>
         {stack.map(item => (
-          <View key={item.id} style={{
+          <View key={item.id} testID={`supplement-stack-row-${e2eId(item.custom_name || 'supplement')}`} style={{
             backgroundColor: tc.surface, borderWidth: 1, borderColor: tc.border,
             borderRadius: 12, padding: 14,
           }}>
@@ -520,6 +540,8 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
           </View>
         ))}
         <TouchableOpacity
+          testID="supplement-add-open"
+          accessibilityLabel="supplement-add-open"
           onPress={() => setShowAdd(true)}
           style={{
             borderWidth: 1.5, borderStyle: 'dashed', borderColor: tc.primary + '66',
@@ -579,7 +601,7 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
   // ─── Render ─────────────────────────────────────────────────────────
 
   return (
-    <View style={{ flex: 1, backgroundColor: tc.background, paddingHorizontal: 16, paddingTop: 8 }}>
+    <View testID="supplement-stack-screen" style={{ flex: 1, backgroundColor: tc.background, paddingHorizontal: 16, paddingTop: 8 }}>
       {/* Section picker */}
       <View style={{
         flexDirection: 'row', backgroundColor: tc.surface,
@@ -592,6 +614,8 @@ export default function SupplementStackScreen({ authToken, themeName }: Props) {
           return (
             <TouchableOpacity
               key={s}
+              testID={`supplement-section-${s}`}
+              accessibilityLabel={`supplement-section-${s}`}
               onPress={() => setSection(s)}
               style={{
                 flex: 1, paddingVertical: 8,
@@ -877,7 +901,7 @@ function AddSupplementModal({
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
-        <View style={{
+        <View testID="supplement-add-modal" style={{
           backgroundColor: tc.background, borderTopLeftRadius: 20, borderTopRightRadius: 20,
           padding: 16, paddingBottom: 30, maxHeight: '85%',
         }}>
@@ -939,6 +963,7 @@ function AddSupplementModal({
             {/* AI search — type a name, get pre-filled form. */}
             <View style={{ flexDirection: 'row', gap: 6, marginBottom: 12 }}>
               <TextInput
+                testID="supplement-ai-search-input"
                 value={aiSearch}
                 onChangeText={setAiSearch}
                 placeholder="Or search AI: 'ashwagandha', 'ZMA'…"
@@ -953,6 +978,8 @@ function AddSupplementModal({
                 }}
               />
               <TouchableOpacity
+                testID="supplement-ai-search-submit"
+                accessibilityLabel="supplement-ai-search-submit"
                 onPress={handleAiSearch}
                 disabled={aiSearching || !aiSearch.trim()}
                 style={{
@@ -988,6 +1015,8 @@ function AddSupplementModal({
                 return (
                   <TouchableOpacity
                     key={ing.id}
+                    testID={`supplement-ingredient-${e2eId(ing.name)}`}
+                    accessibilityLabel={`supplement-ingredient-${e2eId(ing.name)}`}
                     onPress={() => {
                       setSelected(ing);
                       setUnit(ing.default_unit);
@@ -1020,6 +1049,7 @@ function AddSupplementModal({
                   OR CUSTOM NAME
                 </Text>
                 <TextInput
+                  testID="supplement-custom-name-input"
                   value={customName}
                   onChangeText={setCustomName}
                   placeholder="e.g. Brand X Electrolyte Mix"
@@ -1038,6 +1068,7 @@ function AddSupplementModal({
             </Text>
             <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
               <TextInput
+                testID="supplement-dose-input"
                 value={dose}
                 onChangeText={setDose}
                 placeholder="Amount"
@@ -1051,6 +1082,7 @@ function AddSupplementModal({
                 }}
               />
               <TextInput
+                testID="supplement-unit-input"
                 value={unit}
                 onChangeText={setUnit}
                 placeholder="unit"
@@ -1073,6 +1105,8 @@ function AddSupplementModal({
                 return (
                   <TouchableOpacity
                     key={f}
+                    testID={`supplement-frequency-${f}`}
+                    accessibilityLabel={`supplement-frequency-${f}`}
                     onPress={() => setFreq(f)}
                     style={{
                       backgroundColor: active ? tc.primary : tc.surface,
@@ -1101,6 +1135,8 @@ function AddSupplementModal({
                 return (
                   <TouchableOpacity
                     key={t}
+                    testID={`supplement-timing-${t}`}
+                    accessibilityLabel={`supplement-timing-${t}`}
                     onPress={() => setTiming(active ? '' : t)}
                     style={{
                       backgroundColor: active ? tc.primary : tc.surface,
@@ -1124,6 +1160,7 @@ function AddSupplementModal({
               CUSTOM BATCH NAME (OPTIONAL)
             </Text>
             <TextInput
+              testID="supplement-group-label-input"
               value={groupLabel}
               onChangeText={setGroupLabel}
               placeholder="e.g. Stack 1, Travel pack, Race day"
@@ -1141,6 +1178,8 @@ function AddSupplementModal({
             </Text>
 
             <TouchableOpacity
+              testID="supplement-add-submit"
+              accessibilityLabel="supplement-add-submit"
               onPress={handleSave}
               style={{
                 backgroundColor: tc.primary, paddingVertical: 12, borderRadius: 10,

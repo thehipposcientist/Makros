@@ -81,32 +81,56 @@ def _enforce_trainer_plan_guardrails(result: dict, *, is_nutritionist: bool) -> 
         result.setdefault("updated_workout_plan", None)
         result.setdefault("updated_nutrition_plan", None)
 
-    if result.get("needs_plan_update") and not has_setting_update:
-        logger.info("[trainer-question] plan guardrail: cleared needs_plan_update without supported setting update")
+    if result.get("needs_plan_update"):
+        logger.info("[trainer-question] plan guardrail: cleared needs_plan_update; chat cannot request plan rewrites")
         result["needs_plan_update"] = False
 
-    if (intent_detected or had_legacy_plan) and not has_setting_update:
+    should_redirect_plan_promise = intent_detected or (had_legacy_plan and not has_setting_update)
+    if should_redirect_plan_promise:
         if is_nutritionist:
-            result["answer"] = (
-                "I can't directly rewrite your generated meal plan from chat. "
-                "I can recommend the swap, and you can apply it from the meal edit controls or update "
-                "your meal-plan settings for future generated weeks."
-            )
-            result["action_items"] = [
-                "Use the meal edit controls for today's generated meals",
-                "Use Edit Meal Plan for durable food, routine, or preference changes",
-            ]
+            if has_setting_update:
+                result["answer"] = (
+                    "I can queue that settings change for confirmation, but I can't directly rewrite your generated meal plan from chat. "
+                    "For today's meals, open Meals > Plan, expand the day, then edit the meal or use + Add."
+                )
+                result["action_items"] = [
+                    "Review the proposed setting change and tap Apply if it looks right",
+                    "Meals > Plan: expand the day and edit a meal for today",
+                    "Meals > Foods: update Your Kitchen, allergies, meals per day, or targets",
+                ]
+            else:
+                result["answer"] = (
+                    "I can't directly rewrite your generated meal plan from chat. "
+                    "For today's meals, open Meals > Plan, expand the day, then edit the meal or use + Add. "
+                    "For durable food, allergy, meal-count, or target changes, use Meals > Foods; supplements live under Meals > Supps."
+                )
+                result["action_items"] = [
+                    "Meals > Plan: expand the day and edit a meal for today",
+                    "Meals > Foods: update Your Kitchen, allergies, meals per day, or targets",
+                    "Meals > Supps: manage your supplement stack",
+                ]
         else:
-            result["answer"] = (
-                "I can't directly rewrite your active 7-day workout plan from chat. "
-                "For this week, expand the day on the Workout tab and use the deterministic switch "
-                "or exercise swap controls. For future weeks, update the related workout setting."
-            )
-            result["action_items"] = [
-                "Use 'Switch this day to' for current-week focus changes",
-                "Use the exercise swap/edit control for specific exercise replacements",
-                "Use Workout Settings for changes that should affect future generated weeks",
-            ]
+            if has_setting_update:
+                result["answer"] = (
+                    "I can queue that settings change for confirmation, but I can't directly rewrite your active 7-day workout plan from chat. "
+                    "For this week, open Workout > Plan, expand the day, and use Change Focus or the Swap control on an exercise."
+                )
+                result["action_items"] = [
+                    "Review the proposed setting change and tap Apply if it looks right",
+                    "Workout > Plan: expand the day and tap Change Focus",
+                    "Workout > Plan: tap Swap on an exercise row for a replacement",
+                ]
+            else:
+                result["answer"] = (
+                    "I can't directly rewrite your active 7-day workout plan from chat. "
+                    "For this week, open Workout > Plan, expand the day, and use Change Focus or the Swap control "
+                    "on an exercise. For future weeks, use Workout > Settings."
+                )
+                result["action_items"] = [
+                    "Workout > Plan: expand the day and tap Change Focus",
+                    "Workout > Plan: tap Swap on an exercise row for a replacement",
+                    "Workout > Settings: update days/week, split, duration, equipment, or injuries",
+                ]
         result["needs_plan_update"] = False
 
     return result
@@ -397,10 +421,11 @@ def ask_trainer_question(
         "• Recommend safe preference changes for future generated weeks. Recommendations affect settings "
         "or day-state only after the user confirms through the app's deterministic apply path.\n"
         "• For current-week day focus changes (e.g. 'make tomorrow legs', 'swap day 3 to push'), "
-        "tell the user to expand that day on the Workout tab and use 'Switch this day to'. "
+        "tell the user to open Workout > Plan, expand that day, and tap Change Focus. "
         "That deterministic UI is the only supported way to rewrite the active PlanWeek.\n"
         "• For specific exercise or meal swaps, explain what to swap and direct the user to the "
-        "manual swap/edit control. Do not claim the swap has already happened.\n"
+        "manual control: Workout > Plan > exercise row > Swap, or Meals > Plan > meal edit. "
+        "Do not claim the swap has already happened.\n"
         "• Change the user's primary fitness GOAL. If they say things like 'switch me to fat loss', "
         "'I want to build muscle instead', 'change my goal to strength', set the `updated_goal` field "
         "to the new goal id (see allowed values in the schema). The app will confirm with the user and "
@@ -411,23 +436,23 @@ def ask_trainer_question(
         "\n"
         "WHAT YOU CANNOT DO (redirect the user):\n"
         "• Active PlanWeek edits → you cannot directly rewrite the current 7-day plan, change today's "
-        "planned workout, or replace generated meal templates from chat. Guide the user to the relevant "
-        "deterministic control instead.\n"
-        "• Body stats (weight, height, age) → 'You can update that from the ☰ menu → Account.'\n"
-        "• Food preferences or dietary restrictions → 'Head to ☰ menu → Edit Meal Plan to update those.'\n"
-        "• Supplement CHANGES → 'You can manage those from ☰ menu → Edit Meal Plan → Supplements tab.' "
+        "planned workout, or replace generated meal templates from chat. Guide the user to Workout > Plan > "
+        "Change Focus / Swap, or Meals > Plan > meal edit instead.\n"
+        "• Body stats (weight, height, age) → 'You can update that from You > Body & Stats.'\n"
+        "• Food preferences or dietary restrictions → 'Use Meals > Foods to update Your Kitchen, allergies, meals per day, or targets.'\n"
+        "• Supplement CHANGES → 'Use Meals > Supps to manage your supplement stack.' "
         "If profile.supplementsAvailable lists what the user already takes, reference it in advice — never recommend what they already take.\n"
-        "• Meal routines → 'You can edit those from ☰ menu → Edit Meal Plan → Meal Routines.'\n"
-        "• Theme/appearance → 'You can change that from ☰ menu → Themes.'\n"
-        "• Priority region / training emphasis → 'Head to Goals tab to change your priority region (Balanced / Lower Body / Upper Body).'\n"
+        "• Meal routines → 'Open Meals > Plan, expand the day, then tap + Pin on a meal or edit a pinned routine meal.'\n"
+        "• Theme/appearance → 'You can change that from You > Settings > Theme.'\n"
+        "• Goal or training emphasis → 'Use You > Goal for the goal itself, or Workout > Settings for split and schedule.'\n"
         "For anything not listed above, give your best advice and suggest the appropriate menu path if needed.\n"
         "\n"
         "CRITICAL PLAN GUARDRAIL:\n"
         "Never say 'I changed', 'I swapped', 'I updated', 'I moved', or 'I added' when referring to the "
         "active workout or meal plan. Use language like 'I recommend', 'you can change this by...', "
         "or 'for future generated weeks, update this setting'. Always leave `updated_workout_plan` and "
-        "`updated_nutrition_plan` as null. Set `needs_plan_update=false` unless you are returning only "
-        "a goal or macro setting proposal through `updated_goal` / `updated_macros`.\n"
+        "`updated_nutrition_plan` as null. Always set `needs_plan_update=false`; goal or macro setting "
+        "proposals belong only in `updated_goal` / `updated_macros` and require user confirmation in the app.\n"
     )
 
     # Legacy plan fields remain in the API shape for older clients, but
@@ -447,21 +472,21 @@ def ask_trainer_question(
         "supported app control or propose a future preference change. Do not claim you changed the "
         "active plan from chat.\n"
         "- If they ask to change a DAY'S FOCUS (e.g. 'make tomorrow legs', 'swap day 3 to push'), "
-        "tell them: 'You can do this directly! Expand the day on your workout tab and tap "
-        "\"Switch this day to\" to pick a new focus. This generates proper exercises instantly.' "
+        "tell them: 'You can do this directly: open Workout > Plan, expand that day, and tap "
+        "Change Focus to pick a new focus. The deterministic planner generates the replacement day.' "
         "Do NOT attempt to rebuild the entire plan for a single day swap — the app handles this better.\n"
         "- If they ask to SWAP A SPECIFIC EXERCISE (e.g. 'replace bench press with dumbbell press'), "
-        "explain the best replacement and direct them to the exercise swap/edit control. Do NOT return "
+        "explain the best replacement and direct them to Workout > Plan > exercise row > Swap. Do NOT return "
         "a replacement plan or say the swap is already applied.\n"
         "- Do NOT override their request with recovery opinions unless safety signals make it necessary.\n\n"
         "CRITICAL — RESPECT THE USER'S SETTINGS:\n"
-        "The user's profile contains `preferredSplit` and `priorityRegion`. When modifying the workout plan:\n"
+        "The user's profile contains `preferredSplit` and `priorityRegion`. When advising on workout changes:\n"
         "- If they chose a split (e.g. PPL, Upper/Lower), keep that split structure. Do NOT switch to a different split.\n"
         "- If they set a priority region (lower_body, upper_body), maintain emphasis on that region.\n"
         "- Keep the same number of training days (`daysPerWeek`) unless they explicitly ask to change it.\n"
         "- Only use exercises compatible with their `equipment` list.\n"
         "- Respect their `experienceLevel` for exercise complexity and volume.\n"
-        "- You can swap exercises, reorder days, change focus within a day, or adjust volume — but stay within the user's chosen framework.\n"
+        "- You can recommend exercise swaps, day focus changes, or volume adjustments — but stay within the user's chosen framework and route the actual change through the app controls.\n"
         "- Respect `workoutDurationMinutes` — keep each day's exercises within the user's time limit. A 45-minute session should have fewer exercises than a 75-minute session.\n"
         "- Use the app's exact naming: 'Push', 'Pull', 'Legs', 'Upper', 'Lower', 'Full Body' — not 'Chest/Shoulders/Triceps Day'.\n"
         "- Stimulus labels must be exactly: 'strength', 'hypertrophy', or 'volume' — lowercase.\n"
@@ -503,7 +528,7 @@ def ask_trainer_question(
         "updated_workout_plan. Explain the supported manual control or recommend a future preference change.\n"
         "NUTRITION PLAN CHANGES: If the user asks to modify meals, swap foods, or alter generated "
         "meal templates, do NOT set needs_plan_update and do NOT return updated_nutrition_plan. "
-        "Give specific guidance and direct them to Edit Meal Plan / meal editing controls.\n"
+        "Give specific guidance and direct them to Meals > Plan meal editing or Meals > Foods settings.\n"
         "MACRO TARGET CHANGES: set `updated_macros` with only the changed fields. "
         "INJURY HANDLING — IMPORTANT:\n"
         "When a user reports pain or injury, follow this exact protocol:\n"
@@ -516,11 +541,11 @@ def ask_trainer_question(
         "   - Estimated recovery timeline\n"
         "   - What to watch for (warning signs to see a doctor)\n"
         "3. IMMEDIATELY populate updated_injuries with the structured data in the SAME response. "
-        "Do NOT ask the user to type 'yes' — the app renders an 'Add & Update Plan' confirm button "
+        "Do NOT ask the user to type 'yes' — the app renders an 'Add Injury' confirm button "
         "when updated_injuries is present, and the user will tap that button to confirm. Your answer "
         "text should explain the assessment, not ask for text confirmation.\n"
         "4. Do NOT modify the workout plan yourself. Do NOT set needs_plan_update=true for injuries — "
-        "the app regenerates the plan automatically after the user taps the confirm button.\n"
+        "confirmed injuries affect future generated weeks; this week must be adjusted through Change Focus, Swap, or Skip.\n"
         "5. For each injury, include: severity (mild/moderate/severe), affected muscleGroups from "
         "[chest,back,shoulders,biceps,triceps,quads,hamstrings,glutes,calves,core], and "
         "estimatedRecoveryDays (conservative: mild 5-10, moderate 14-28, severe 42-90+).\n"
@@ -569,7 +594,7 @@ def ask_trainer_question(
         '{\n'
         '  "answer": "Detailed, personalised response to the user",\n'
         '  "action_items": ["specific actionable step 1", "..."],\n'
-        '  "needs_plan_update": true|false,\n'
+        '  "needs_plan_update": false,\n'
         '  "safety_note": "string or empty string",\n'
         '  "updated_goal": "fat_loss|muscle_gain|body_recomp|strength|endurance|athletic_performance|toning|maintain" or null,\n'
         '  "updated_macros": {"calories": N, "protein": N, "carbs": N, "fat": N} or null,\n'
@@ -583,9 +608,9 @@ def ask_trainer_question(
         "MACRO ADJUSTMENTS: When the user asks to change calorie or macro targets "
         "(e.g. 'set protein to 130g', 'lower calories to 1800', 'bump carbs up'), "
         "set `updated_macros` with ONLY the changed fields. Example: user says 'make my protein 130g' → "
-        '`"updated_macros": {"protein": 130}`. The app saves these as custom macro preferences '
-        "and triggers a nutrition regen. Do NOT rebuild the full meal plan for macro-only changes — "
-        "the app handles that automatically. If the user also wants to change specific meals, guide them "
+        '`"updated_macros": {"protein": 130}`. After the user confirms, the app saves these as custom macro preferences. '
+        "Do NOT rebuild the full meal plan for macro-only changes - generated meal templates update through the normal planner. "
+        "If the user also wants to change specific meals, guide them "
         "to the meal edit controls instead of returning a generated meal plan.\n"
         "PLAN FIELD GUARDRAIL: Always return updated_workout_plan=null and updated_nutrition_plan=null. "
         "Do not generate replacement plans in chat.\n"

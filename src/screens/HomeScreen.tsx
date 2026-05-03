@@ -38,7 +38,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
 import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, getMealHistory } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, getMealHistory, updateMeal } from '../services/api';
 import type { ApplyActionResult, MealHistoryEntry } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
@@ -1215,6 +1215,9 @@ function mealHistoryEntryToSuggestion(entry: MealHistoryEntry): MealSuggestion {
     const fat = Number(it.fat_g || 0);
     return {
       name: String(it.food_name || 'Item'),
+      food_id: it.food_id ?? null,
+      serving_id: it.serving_id ?? null,
+      serving_grams: it.serving_grams ?? null,
       quantity: qty,
       unit: String(it.unit || 'serving'),
       calories: cal,
@@ -1259,6 +1262,22 @@ function mealHistoryEntryToSuggestion(entry: MealHistoryEntry): MealSuggestion {
     _consumedAt: entry.consumed_at ?? entry.created_at ?? undefined,
     _loggedMealId: entry.id,
   } as MealSuggestion;
+}
+
+function mealSuggestionToHistoryItems(meal: MealSuggestion): import('../services/api').MealHistoryItem[] {
+  const withItems = ensureItems(meal);
+  return (withItems.items ?? []).map((it: any) => ({
+    food_name: String(it.food_name || it.name || 'Item'),
+    food_id: it.food_id ?? null,
+    serving_id: it.serving_id ?? null,
+    serving_grams: it.serving_grams ?? null,
+    quantity: Number(it.quantity || 1),
+    unit: String(it.unit || 'serving'),
+    calories: Number(it.calories || 0),
+    protein_g: Number(it.protein_g ?? it.protein ?? 0),
+    carbs_g: Number(it.carbs_g ?? it.carbs ?? 0),
+    fat_g: Number(it.fat_g ?? it.fat ?? 0),
+  }));
 }
 
 /** Build the front-page schedule directly from a persisted PlanWeek's
@@ -1878,7 +1897,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [checkedMealsByDate, setCheckedMealsByDate] = useState<Record<string, MealChecks>>({});
   const [mealLogRefreshKey, setMealLogRefreshKey] = useState(0);
   const [backendMealHistory, setBackendMealHistory] = useState<MealHistoryEntry[] | null>(null);
-  const [editingMeal, setEditingMeal] = useState<{ dateKey: string; type: string; meal: MealSuggestion } | null>(null);
+  const [editingMeal, setEditingMeal] = useState<{ dateKey: string; type: string; meal: MealSuggestion; historyMealId?: number } | null>(null);
   const [hydration, setHydration] = useState<HydrationSummary | null>(null);
   const [hydrationByDate, setHydrationByDate] = useState<Record<string, HydrationSummary>>({});
   const [hydrationLoading, setHydrationLoading] = useState(false);
@@ -2283,13 +2302,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return () => { cancelled = true; };
   }, [workoutPlan, planWeek, planRefreshKey]);
 
-  // Defensive re-schedule of the 9pm meal-log reminder. Cheap: if the
-  // settings say disabled, the helper no-ops. If already scheduled,
-  // the helper cancels + re-schedules so we don't stack duplicates.
-  // Also re-establishes the repeating schedule after a
-  // `maybeCancelTodayReminder` path swapped it for a one-shot tomorrow.
+  // Defensive re-schedule of workout + meal reminders. Cheap: if settings
+  // say disabled, helpers no-op. If already scheduled, helpers cancel +
+  // re-schedule so we don't stack duplicates. This also restores repeating
+  // reminders after a same-day completion/log path temporarily swapped the
+  // current slot for a one-shot future reminder.
   useEffect(() => {
     (async () => {
+      try {
+        const { loadReminderSettings, scheduleWorkoutReminder } = await import('../utils/workoutReminders');
+        const workoutSettings = await loadReminderSettings();
+        if (workoutSettings.enabled) await scheduleWorkoutReminder(workoutSettings);
+      } catch {}
       try {
         const { loadMealReminderSettings, scheduleMealReminder } = await import('../utils/mealReminders');
         const settings = await loadMealReminderSettings();
@@ -3529,9 +3553,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setTodayDone(done);
     if (done) {
       setCompletedDates(prev => { const next = new Set(prev); next.add(today); return next; });
+    }
+    if (done || skipped.has(today)) {
       // Suppress today's workout reminder so the user isn't pinged after
-      // training. WEEKLY reminder for this weekday is re-scheduled inside
-      // cancelTodayWorkoutReminder so next week still fires.
+      // training or explicitly skipping. The reminder helper preserves the
+      // next future occurrence without re-firing today.
       import('../utils/workoutReminders')
         .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
         .catch(() => undefined);
@@ -5115,6 +5141,57 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
   }, [persistDayState, authToken, checkedMealsByDate]);
 
+  const handleHistoryMealSave = useCallback(async (date: string, mealType: string, mealId: number, updated: MealSuggestion) => {
+    if (!authToken) return;
+    const normalized = ensureItems(updated);
+    const items = mealSuggestionToHistoryItems(normalized);
+    const totals = items.reduce(
+      (acc, it) => ({
+        calories: acc.calories + Number(it.calories || 0),
+        protein_g: acc.protein_g + Number(it.protein_g || 0),
+        carbs_g: acc.carbs_g + Number(it.carbs_g || 0),
+        fat_g: acc.fat_g + Number(it.fat_g || 0),
+      }),
+      { calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0 },
+    );
+    const name = normalized.meal || (normalized as any).name || 'Meal';
+    const consumed_at = consumedAtForMealDate(normalized, date);
+
+    try {
+      await updateMeal(authToken, mealId, { name, consumed_at, items });
+      setBackendMealHistory(prev => prev?.map(entry => entry.id === mealId
+        ? { ...entry, name, consumed_at, items, totals }
+        : entry,
+      ) ?? prev);
+
+      let nextPlan: DailyNutritionPlan | null = null;
+      setNutritionPlansByDate(prev => {
+        const current = prev[date];
+        if (!current) return prev;
+        const meals = [...(current.meals ?? [])];
+        let idx = meals.findIndex(m => (m as any)._loggedMealId === mealId);
+        if (idx < 0 && mealType.startsWith('meal_')) {
+          const parsed = parseInt(mealType.slice(5), 10);
+          if (parsed >= 0 && parsed < meals.length) idx = parsed;
+        }
+        if (idx < 0) return prev;
+        meals[idx] = { ...normalized, _loggedMealId: mealId } as MealSuggestion;
+        nextPlan = { ...current, meals };
+        return { ...prev, [date]: nextPlan as DailyNutritionPlan };
+      });
+      if (nextPlan) {
+        await saveNutritionPlan(date, nextPlan);
+        await persistDayState(date, { nutrition_plan: nextPlan });
+        if (mealType.startsWith('meal_')) {
+          try { await savePreservedMeal(date, mealType, { ...normalized, _loggedMealId: mealId } as MealSuggestion); } catch {}
+        }
+      }
+      setMealLogRefreshKey(k => k + 1);
+    } catch (err: any) {
+      Alert.alert('Could not save meal', err?.message || 'The meal history update did not go through.');
+    }
+  }, [authToken, persistDayState]);
+
   const handleAddSnack = useCallback((date: string) => {
     const emptyMeal: MealSuggestion = { meal: 'New Meal', foods: [], calories: 0, protein: 0, carbs: 0, fat: 0 };
     setEditingMeal({ dateKey: date, type: 'new_meal', meal: emptyMeal });
@@ -5940,6 +6017,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           resizeMode="contain"
         />
         <TouchableOpacity
+          testID="open-ai-coach"
           style={[styles.askAiBtn, { backgroundColor: themeColors.surface, borderWidth: 1, borderColor: themeColors.border }]}
           onPress={() => {
             import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
@@ -6068,10 +6146,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           end={{ x: 0, y: 1 }}
           style={[styles.fixedSubTabBar, { top: insets.top + 68, borderBottomColor: 'transparent' }]}>
           <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-            <SubTabBtn label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
-            <SubTabBtn label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setSelectedExercise(null); setShowExerciseLibrary(true); ensureExerciseLibrary().catch(() => {}); }} />
-            <SubTabBtn label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
-            <SubTabBtn label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); requestAnimationFrame(() => { loadWorkoutHistory().then(setWorkoutHistoryList).catch(() => {}); }); }} />
+            <SubTabBtn testID="workout-subtab-plan" label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
+            <SubTabBtn testID="workout-subtab-library" label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setSelectedExercise(null); setShowExerciseLibrary(true); ensureExerciseLibrary().catch(() => {}); }} />
+            <SubTabBtn testID="workout-subtab-settings" label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
+            <SubTabBtn testID="workout-subtab-history" label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); requestAnimationFrame(() => { loadWorkoutHistory().then(setWorkoutHistoryList).catch(() => {}); }); }} />
           </View>
         </LinearGradient>
       )}
@@ -6084,10 +6162,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           end={{ x: 0, y: 1 }}
           style={[styles.fixedSubTabBar, { top: insets.top + 68, borderBottomColor: 'transparent' }]}>
           <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-            <SubTabBtn label="Plan"    active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
-            <SubTabBtn label="Foods"   active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
-            <SubTabBtn label="Supps" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
-            <SubTabBtn label="History" active={mealsSubTab === 'history'}     tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('history')} />
+            <SubTabBtn testID="meals-subtab-plan" label="Plan"    active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
+            <SubTabBtn testID="meals-subtab-foods" label="Foods"   active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
+            <SubTabBtn testID="meals-subtab-supplements" label="Supps" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
+            <SubTabBtn testID="meals-subtab-history" label="History" active={mealsSubTab === 'history'}     tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('history')} />
           </View>
         </LinearGradient>
       )}
@@ -6227,7 +6305,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               }
 
               return (
-                <View style={{ gap: 10, marginBottom: 80 }}>
+                <View testID="workout-history-screen" style={{ gap: 10, marginBottom: 80 }}>
                   {/* Month calendar */}
                   <View style={{ backgroundColor: themeColors.surface, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: themeColors.border }}>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -6337,6 +6415,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           : session.focus;
                         return (
                           <TouchableOpacity
+                            testID={`workout-history-row-${i}`}
+                            accessibilityLabel={`workout-history-row-${i}`}
                             key={session.id ?? i}
                             activeOpacity={0.85}
                             onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedWorkoutHistoryId(isExpanded ? null : (session.id ?? `s${i}`)); }}
@@ -7615,7 +7695,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 return themeColors.error;
               };
               return (
-                <View style={{ gap: 10, marginBottom: 80 }}>
+                <View testID="meal-history-screen" style={{ gap: 10, marginBottom: 80 }}>
                   {/* Score calendar — 14 days, 7 per row */}
                   <View style={{ backgroundColor: themeColors.surface, borderRadius: 14, borderWidth: 1, borderColor: themeColors.border, padding: 12 }}>
                     <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, letterSpacing: 0.5, marginBottom: 8 }}>
@@ -7706,7 +7786,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       ))}
                     </View>
                   </View>
-                  {sorted.map(d => {
+                  {sorted.map((d, historyIdx) => {
                     const plan = nutritionPlansByDate[d];
                     const planMeals = plan?.meals ?? [];
                     const backendMeals = backendMealSuggestionsByDate.get(d) ?? [];
@@ -7765,6 +7845,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         borderColor: cardFullyLogged ? themeColors.success + '55' : themeColors.border,
                       }}>
                         <TouchableOpacity
+                          testID={`meal-history-row-${historyIdx}`}
+                          accessibilityLabel={`meal-history-row-${historyIdx}`}
                           activeOpacity={0.85}
                           onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedHistoryDate(isExpanded ? null : d); }}
                           style={{ padding: 14 }}>
@@ -7802,8 +7884,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         {isExpanded && meals.length > 0 && (
                           <View style={{ borderTopWidth: 1, borderTopColor: themeColors.border, padding: 12, gap: 8 }}>
                             {meals.map((m, i) => {
-                              const mealType = `meal_${i}`;
+                              const historyMealId = Number((m as any)._loggedMealId || 0) || undefined;
+                              const mealType = hasBackendMeals && historyMealId ? `history_${historyMealId}` : `meal_${i}`;
                               const ate = hasBackendMeals ? true : !!checks[mealType];
+                              const openMealEditor = () => setEditingMeal({ dateKey: d, type: mealType, meal: m, historyMealId });
                               return (
                                 <View key={(m as any)._localId ?? `${d}-${i}`} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                                   <TouchableOpacity
@@ -7821,16 +7905,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                   </TouchableOpacity>
                                   <TouchableOpacity
                                     style={{ flex: 1 }}
-                                    disabled={hasBackendMeals}
-                                    onPress={() => setEditingMeal({ dateKey: d, type: mealType, meal: m })}>
+                                    onPress={openMealEditor}>
                                     <Text style={{ fontSize: 13, fontWeight: '600', color: themeColors.textPrimary }} numberOfLines={1}>{m.meal}</Text>
                                     <Text style={{ fontSize: 10, color: themeColors.textMuted, marginTop: 1 }}>
                                       {Math.round(m.calories ?? 0)} cal · {Math.round(m.protein ?? 0)}g P · {Math.round(m.carbs ?? 0)}g C · {Math.round(m.fat ?? 0)}g F
                                     </Text>
                                   </TouchableOpacity>
-                                  {!hasBackendMeals && (
+                                  {(!hasBackendMeals || historyMealId) && (
                                     <TouchableOpacity
-                                      onPress={() => setEditingMeal({ dateKey: d, type: mealType, meal: m })}
+                                      onPress={openMealEditor}
                                       hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                                       <Ionicons name="create-outline" size={18} color={mealPalette.strong} />
                                     </TouchableOpacity>
@@ -8835,12 +8918,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         onSave={async (session) => {
           const { saveWorkoutSession, dateKey: dk } = await import('../utils/workoutHistory');
           await saveWorkoutSession(session);
+          const sessionDate = dk(new Date(session.date));
+          if (sessionDate === dk(new Date())) {
+            import('../utils/workoutReminders')
+              .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
+              .catch(() => undefined);
+          }
           if (authToken) {
             try {
               const { logWorkoutDone } = await import('../services/api');
               await logWorkoutDone(
                 authToken,
-                dk(new Date(session.date)),
+                sessionDate,
                 session.focus,
                 session.durationSeconds,
                 undefined,
@@ -8890,11 +8979,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         enableHealthKit={!isFreeTier}
         onSave={async (session) => {
           await saveWorkoutSession(session);
+          const sessionDate = dateKey(new Date(session.date));
+          if (sessionDate === dateKey(new Date())) {
+            import('../utils/workoutReminders')
+              .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
+              .catch(() => undefined);
+          }
           if (authToken) {
             try {
               await logWorkoutDone(
                 authToken,
-                dateKey(new Date(session.date)),
+                sessionDate,
                 session.focus,
                 session.durationSeconds,
                 undefined,
@@ -9024,14 +9119,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       )}
 
       {/* Meal edit modal */}
-      {editingMeal && nutritionPlansByDate[editingMeal.dateKey] && (
+      {editingMeal && (() => {
+        const modalNutritionPlan = nutritionPlansByDate[editingMeal.dateKey]
+          ?? (editingMeal.historyMealId
+            ? { meals: [], removedMealIds: [], targets: { calories: 0, protein: 0, carbs: 0, fat: 0 } } as DailyNutritionPlan
+            : null);
+        if (!modalNutritionPlan) return null;
+        return (
         <MealEditModal
           visible={!!editingMeal}
           mealType={editingMeal.type}
           meal={editingMeal.meal}
           dateKey={editingMeal.dateKey}
           themeName={userProfile.themePreference}
-          nutritionPlan={nutritionPlansByDate[editingMeal.dateKey]}
+          nutritionPlan={modalNutritionPlan}
           allFoods={allFoodsWithCustom}
           foodCategories={userFoodCategories}
           savedMeals={userProfile.savedMeals ?? []}
@@ -9040,12 +9141,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           prepTimeMinutes={userProfile.prepTimeMinutes}
           dietaryPreference={userProfile.dietaryPreference}
           allergies={userProfile.allergies}
-          onSave={(updated) => handleMealSave(editingMeal.dateKey, editingMeal.type, updated)}
-          onSaveRoutine={(updated, scope) =>
+          onSave={(updated) => {
+            if (editingMeal.historyMealId) {
+              handleHistoryMealSave(editingMeal.dateKey, editingMeal.type, editingMeal.historyMealId, updated);
+            } else {
+              handleMealSave(editingMeal.dateKey, editingMeal.type, updated);
+            }
+          }}
+          onSaveRoutine={editingMeal.historyMealId ? undefined : ((updated, scope) =>
             handleMealSave(editingMeal.dateKey, editingMeal.type, updated, { routineScope: scope })
-          }
+          )}
           onClose={() => setEditingMeal(null)}
-          onToggleRoutine={() => handleToggleRoutine(editingMeal.dateKey, editingMeal.type)}
+          onToggleRoutine={editingMeal.historyMealId ? undefined : (() => handleToggleRoutine(editingMeal.dateKey, editingMeal.type))}
           onSaveAsMeal={async () => {
             if (!authToken || !editingMeal) return;
             const m = editingMeal.meal;
@@ -9110,7 +9217,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             onProfileUpdate?.({ customFoods: next } as any, true); // skipRegen
           }}
         />
-      )}
+        );
+      })()}
 
       {/* Saved-meal template editor — opens from Foods → Saved Meals ⋯
           menu. Reuses MealEditModal in template mode so the editing
@@ -9897,7 +10005,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     </Text>
                   ))}
                   <Text style={{ fontSize: 10, color: themeColors.textMuted }}>
-                    Future generated plans will avoid the injured area. For this week, use Switch Day or exercise swaps and stop anything painful.
+                    Future generated plans will avoid the injured area. For this week, use Workout {'>'} Plan {'>'} Change Focus or exercise swaps and stop anything painful.
                   </Text>
                   <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
                     <TouchableOpacity
@@ -9919,7 +10027,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           }
                         } catch (e) { console.error('[injury apply] failed:', e); }
                         setPendingInjuries(null);
-                        setWorkoutChat(prev => [...prev, { role: 'assistant', content: 'Injury logged. Future plans will avoid it; adjust this week with Switch Day or swaps.' }]);
+                        setWorkoutChat(prev => [...prev, { role: 'assistant', content: 'Injury logged. Future plans will avoid it; adjust this week with Workout > Plan > Change Focus or swaps.' }]);
                         setTimeout(() => {
                           setShowTrainerModal(false);
                           setWorkoutChat([]); setWorkoutChat([]);
@@ -9993,6 +10101,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <Ionicons name="camera-outline" size={20} color={themeColors.textSecondary} />
               </TouchableOpacity>
               <TextInput
+                testID="ai-coach-input"
                 value={trainerInput}
                 onChangeText={setTrainerInput}
                 placeholder={coachMode === 'nutritionist' ? 'Ask nutritionist...' : 'Ask trainer...'}
@@ -10001,6 +10110,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 multiline
               />
               <TouchableOpacity
+                testID="ai-coach-send"
+                accessibilityLabel="ai-coach-send"
                 style={[styles.trainerSendBtn, { backgroundColor: trainerLoading ? themeColors.error : themeColors.primary }]}
                 onPress={trainerLoading ? () => {
                   trainerAbortRef.current?.abort();
@@ -11641,7 +11752,7 @@ function HydrationTodayPanel({
   };
 
   return (
-    <View style={[
+    <View testID="hydration-panel" style={[
       styles.mealHydrationPanel,
       {
         backgroundColor: MEALS_ACCENT + '0F',
@@ -11708,6 +11819,7 @@ function HydrationTodayPanel({
             paddingHorizontal: 8,
           }}>
             <TextInput
+              testID="hydration-ounces-input"
               value={manualOunces}
               onChangeText={setManualOunces}
               onSubmitEditing={submitManual}
@@ -11727,6 +11839,7 @@ function HydrationTodayPanel({
             <Text style={{ fontSize: 9, fontWeight: '800', color: colors.textMuted }}>oz</Text>
           </View>
           <PressableScale
+            testID="hydration-set"
             onPress={submitManual}
             disabled={loading}
             scaleDown={0.94}
@@ -11746,6 +11859,7 @@ function HydrationTodayPanel({
         {HYDRATION_QUICK_ADD_OUNCES.map(oz => (
             <PressableScale
               key={oz}
+              testID={`hydration-quick-add-${oz}`}
               onPress={() => onDelta(oz)}
               disabled={loading}
               scaleDown={0.94}
@@ -12102,6 +12216,8 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
 
       <View style={styles.todayActivityQuickRow}>
         <TouchableOpacity
+          testID="extra-workout-custom"
+          accessibilityLabel="extra-workout-custom"
           style={[styles.todayActivityQuickAction, { backgroundColor: tc.primary + '10', borderColor: tc.primary + '55' }]}
           onPress={onStartCustom}
           activeOpacity={0.78}>
@@ -12109,6 +12225,8 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
           <Text style={[styles.todayActivityQuickText, { color: tc.textPrimary }]}>Custom</Text>
         </TouchableOpacity>
         <TouchableOpacity
+          testID="extra-workout-log"
+          accessibilityLabel="extra-workout-log"
           style={[styles.todayActivityQuickAction, { backgroundColor: tc.surface, borderColor: tc.border }]}
           onPress={onLogActivity}
           activeOpacity={0.75}>
@@ -12116,6 +12234,8 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
           <Text style={[styles.todayActivityQuickText, { color: tc.textPrimary }]}>Log</Text>
         </TouchableOpacity>
         <TouchableOpacity
+          testID="extra-workout-edit"
+          accessibilityLabel="extra-workout-edit"
           style={[styles.todayActivityQuickAction, { backgroundColor: tc.surface, borderColor: tc.border }]}
           onPress={onEditPlan}
           activeOpacity={0.75}>
@@ -12136,6 +12256,8 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
               ) : null}
               {onNewTemplate && (!isFreeTier || templates.length < FREE_WORKOUT_TEMPLATE_LIMIT) && (
                 <TouchableOpacity
+                  testID="workout-template-new"
+                  accessibilityLabel="workout-template-new"
                   onPress={onNewTemplate}
                   activeOpacity={0.7}
                   style={{
@@ -12161,7 +12283,7 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
               </Text>
             </View>
           )}
-          {templates.map((template) => {
+          {templates.map((template, idx) => {
             const exerciseCount = template.workout?.exercises?.length ?? 0;
             const setCount = (template.workout?.exercises ?? []).reduce((n, ex: any) => n + (Number(ex.sets) || Number(ex.targetSets) || 0), 0);
             const meta = [
@@ -12174,6 +12296,8 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
                 key={template.id}
                 style={[styles.todayActivityLoggedCard, { backgroundColor: tc.surface, borderColor: tc.border }]}>
                 <TouchableOpacity
+                  testID={`workout-template-card-${idx}`}
+                  accessibilityLabel={`workout-template-card-${idx}`}
                   style={styles.todayTemplateLaunchArea}
                   onPress={() => onStartTemplate?.(template)}
                   activeOpacity={0.78}>
@@ -12199,6 +12323,8 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
                   </TouchableOpacity>
                 ) : null}
                 <TouchableOpacity
+                  testID={`workout-template-start-${idx}`}
+                  accessibilityLabel={`workout-template-start-${idx}`}
                   style={styles.todayTemplateIconBtn}
                   onPress={() => onStartTemplate?.(template)}
                   hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}

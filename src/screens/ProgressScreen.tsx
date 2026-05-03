@@ -3766,7 +3766,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const STAGE_COLOR = { deep: '#6366F1', core: '#818CF8', rem: '#A78BFA', awake: tc.error };
 
             return (
-              <View style={[styles.vitalsCard, { marginTop: 0 }]}>
+              <View testID="nutrition-trend-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
                 {/* Header: icon + title + score (score is the hero metric). */}
                 <View style={[styles.vitalsHeader, { marginBottom: 8 }]}>
                   <Ionicons name="moon-outline" size={16} color="#818CF8" />
@@ -4027,7 +4027,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     { label: 'Logged cal', value: `${Math.round(calorieAvg)}`, delta: `${calorieDelta >= 0 ? '+' : ''}${Math.round(calorieDelta)}` },
                   ].map(item => (
                     <View key={item.label} style={{ flex: 1, backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingVertical: 9, paddingHorizontal: 8 }}>
-                      <Text style={{ fontSize: 17, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
+                      <Text
+                        testID={item.label === 'Logged cal' ? `nutrition-trend-logged-calories-${item.value}` : undefined}
+                        style={{ fontSize: 17, fontWeight: '900', color: tc.textPrimary }}>
+                        {item.value}
+                      </Text>
                       <Text style={{ fontSize: 9, fontWeight: '700', color: tc.textMuted, textTransform: 'uppercase', marginTop: 2 }}>
                         {item.label}
                       </Text>
@@ -4052,8 +4056,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
           {/* Nutrition & Gut Facts — 7-day rolling window (facts only, no scores). */}
           {isProTier && (gutHealthWindow || mealAverages) && (
-            <View style={[styles.vitalsCard, { marginTop: 0 }]}>
+            <View testID="nutrition-gut-facts-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
               <TouchableOpacity
+                testID="nutrition-gut-facts-toggle"
                 activeOpacity={0.7}
                 onPress={() => { configureExpandAnimation(300); setNutritionGutExpanded(prev => !prev); }}
               >
@@ -4061,7 +4066,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <Ionicons name="leaf-outline" size={16} color={tc.primary} />
                   <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Nutrition & Gut Facts</Text>
                   {gutHealthWindow && (
-                    <Text style={{ fontSize: 10, color: tc.textMuted, marginRight: 6 }}>{gutHealthWindow.days_with_data}d data</Text>
+                    <Text
+                      testID={`nutrition-gut-facts-days-${gutHealthWindow.days_with_data}`}
+                      style={{ fontSize: 10, color: tc.textMuted, marginRight: 6 }}>
+                      {gutHealthWindow.days_with_data}d data
+                    </Text>
                   )}
                   <Ionicons name={nutritionGutExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
                 </View>
@@ -4081,7 +4090,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       { label: 'Plants total', value: `${gutHealthWindow.distinct_plant_foods_week}` },
                     ].map(s => (
                       <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingVertical: 8 }}>
-                        <Text style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary }}>{s.value}</Text>
+                        <Text
+                          testID={s.label === 'Fiber/day' ? `nutrition-gut-fiber-${s.value}` : undefined}
+                          style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary }}>
+                          {s.value}
+                        </Text>
                         <Text style={{ fontSize: 9, fontWeight: '600', color: tc.textMuted, marginTop: 2 }}>{s.label}</Text>
                       </View>
                     ))}
@@ -4119,7 +4132,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       { label: 'Fat', value: `${Math.round(loggedFat)}g`, color: '#A78BFA' },
                     ].map(s => (
                       <View key={s.label} style={{ flex: 1, alignItems: 'center', backgroundColor: tc.surfaceRaised, borderRadius: 8, paddingVertical: 8 }}>
-                        <Text style={{ fontSize: 15, fontWeight: '800', color: s.color }}>{s.value}</Text>
+                        <Text
+                          testID={s.label === 'Calories' ? `nutrition-facts-macro-calories-${s.value}` : undefined}
+                          style={{ fontSize: 15, fontWeight: '800', color: s.color }}>
+                          {s.value}
+                        </Text>
                         <Text style={{ fontSize: 9, fontWeight: '600', color: tc.textMuted, marginTop: 1 }}>{s.label}</Text>
                       </View>
                     ))}
@@ -5311,12 +5328,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         themeName={themeName}
         onSave={async (session) => {
           await saveWorkoutSession(session);
+          const sessionDate = dateKey(new Date(session.date));
+          if (sessionDate === dateKey(new Date())) {
+            import('../utils/workoutReminders')
+              .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
+              .catch(() => undefined);
+          }
           if (authToken) {
             try {
               const { logWorkoutDone } = await import('../services/api');
-              const dk = dateKey(new Date(session.date));
               await logWorkoutDone(
-                authToken, dk, session.focus, session.durationSeconds,
+                authToken, sessionDate, session.focus, session.durationSeconds,
                 undefined,
                 session.manualActivity ? {
                   category: session.manualActivity.category,

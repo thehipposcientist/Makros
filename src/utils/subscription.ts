@@ -35,6 +35,7 @@ export {
 declare const require: (moduleName: string) => any;
 
 export function isBetaFullAccessEnabled(): boolean {
+  if (process.env.EXPO_PUBLIC_DISABLE_FREE_BETA_FULL_ACCESS === '1') return false;
   const extra = Constants.expoConfig?.extra ?? {};
   return extra.freeBetaFullAccess === true || process.env.EXPO_PUBLIC_FREE_BETA_FULL_ACCESS === '1';
 }

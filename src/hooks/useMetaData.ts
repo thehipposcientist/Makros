@@ -11,6 +11,7 @@ import { getFoods, getFoodCategories, getEquipment, getGoals, getPaces, getGoalC
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface FoodItem {
+  id?: number | null;
   name: string;
   unit: string;
   calories: number;
@@ -139,6 +140,7 @@ export function useMetaData(): MetaData {
         for (const f of rawFoods as any[]) {
           if (!foodsByCat[f.category]) foodsByCat[f.category] = [];
           foodsByCat[f.category].push({
+            id: f.id ?? null,
             name: f.name, unit: f.unit,
             calories: f.calories, protein: f.protein, carbs: f.carbs, fat: f.fat,
           });

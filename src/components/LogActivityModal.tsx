@@ -406,6 +406,8 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                 {CATEGORIES.map(cat => (
                   <TouchableOpacity
                     key={cat.key}
+                    testID={`activity-category-${cat.key}`}
+                    accessibilityLabel={`activity-category-${cat.key}`}
                     style={[s.catCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}
                     onPress={() => selectCategory(cat.key)}
                     activeOpacity={0.7}>
@@ -428,6 +430,8 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                     return (
                       <TouchableOpacity
                         key={opt.key}
+                        testID={`activity-subtype-${category}-${opt.key}`}
+                        accessibilityLabel={`activity-subtype-${category}-${opt.key}`}
                         style={[s.subChip, {
                           borderColor: active ? tc.primary : tc.border,
                           backgroundColor: active ? tc.primary + '18' : tc.surfaceRaised,
@@ -440,6 +444,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                   })}
                 </View>
                 <TextInput
+                  testID="activity-custom-subtype-input"
                   style={[s.input, { backgroundColor: tc.surfaceRaised, borderColor: tc.border, color: tc.textPrimary }]}
                   placeholder="Or describe your own"
                   placeholderTextColor={tc.textMuted}
@@ -503,14 +508,16 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                     Edit button flips the summary back to editable
                     pickers for users who do need to tweak. */}
                 {prefill && !showAdvanced ? (
-                  <View style={{
-                    marginTop: 16,
-                    padding: 12,
-                    borderRadius: 10,
-                    backgroundColor: tc.surfaceRaised,
-                    borderWidth: 1,
-                    borderColor: tc.border,
-                  }}>
+                  <View
+                    testID="activity-prefill-summary"
+                    style={{
+                      marginTop: 16,
+                      padding: 12,
+                      borderRadius: 10,
+                      backgroundColor: tc.surfaceRaised,
+                      borderWidth: 1,
+                      borderColor: tc.border,
+                    }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                       <Ionicons name="information-circle-outline" size={14} color={tc.primary} />
                       <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.4 }}>
@@ -548,6 +555,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                       </TouchableOpacity>
                       <View style={[s.durationDisplay, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
                         <TextInput
+                          testID="activity-duration-input"
                           style={{ fontSize: 20, fontWeight: '800', color: tc.textPrimary, textAlign: 'center', minWidth: 50 }}
                           value={String(durationMin)}
                           onChangeText={t => {
@@ -575,6 +583,8 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                         return (
                           <TouchableOpacity
                             key={offset}
+                            testID={`activity-date-offset-${offset}`}
+                            accessibilityLabel={`activity-date-offset-${offset}`}
                             style={[s.chip, { borderColor: active ? tc.primary : tc.border, backgroundColor: active ? tc.primary + '18' : tc.surfaceRaised }]}
                             onPress={() => setDateOffset(offset)}>
                             <Text style={{ fontSize: 12, fontWeight: '600', color: active ? tc.primary : tc.textSecondary }}>{formatDate(offset)}</Text>
@@ -599,6 +609,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
 
                 {/* Advanced toggle */}
                 <TouchableOpacity
+                  testID="activity-advanced-toggle"
                   style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, alignSelf: 'flex-start' }}
                   onPress={() => { configureExpandAnimation(300); setShowAdvanced(!showAdvanced); }}>
                   <Ionicons name={showAdvanced ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
@@ -635,6 +646,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
 
                 {/* Save */}
                 <PressableScale
+                  testID="activity-save"
                   style={{ marginTop: 20, marginBottom: 30 }}
                   onPress={handleSave}
                   disabled={saving || !effectiveSubtype}>

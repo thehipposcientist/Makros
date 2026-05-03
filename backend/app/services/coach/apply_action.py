@@ -5,7 +5,8 @@ Architectural principle (per product direction):
   existing app UI. Recommendations don't directly mutate the active
   WorkoutPlan — they mutate the user-facing settings (UserPreferences,
   UserCoachingState, UserGoal, UserDayState) that the planner already
-  reacts to on regen. The next regen picks up the changes.
+  reacts to when a future PlanWeek is generated. The active PlanWeek
+  is not regenerated or rewritten by this service.
 
 This means: every applyable action maps to ONE of these existing
 user-touchable surfaces. Anything else is descriptive guidance, not
@@ -35,8 +36,8 @@ add_muscle_volume, etc.) we record them as `CoachMemory(event_type=
 next pass, but they don't mutate any state directly.
 
 Pure-ish: writes to the DB but never calls AI. Returns a structured
-result the caller can show on the UI ("changed days/week from 4 to 3,
-plan will refresh").
+result the caller can show on the UI ("changed days/week from 4 to 3;
+future weeks will use it").
 """
 from __future__ import annotations
 
@@ -168,8 +169,8 @@ def apply_action(
     rec_key: str | None = None,
 ) -> ApplyResult:
     """Apply a single recommendation action. Caller is responsible for
-    the regen call (returned via `needs_regen=True`) so we don't
-    couple the apply path to the planner here."""
+    any follow-up refresh. This service never calls the planner or
+    rewrites the active PlanWeek."""
     if not isinstance(action, dict):
         return ApplyResult(applied=False, summary="No action provided", needs_regen=False, changed_fields={}, error="invalid_action")
     action_type = str(action.get("type") or "").strip()
@@ -203,7 +204,7 @@ def apply_action(
         db.commit()
         return ApplyResult(
             applied=True,
-            summary=f"Updated to {target} days / week. Plan will refresh.",
+            summary=f"Updated to {target} days / week. Future generated weeks will use it.",
             needs_regen=True,
             changed_fields={
                 "days_per_week": target,
@@ -232,7 +233,7 @@ def apply_action(
         verb = "Raised" if delta > 0 else "Lowered"
         return ApplyResult(
             applied=True,
-            summary=f"{verb} daily calorie target by {abs(delta)} kcal. Macros refresh on next plan check.",
+            summary=f"{verb} daily calorie target by {abs(delta)} kcal. Daily macro targets will use it on the next check.",
             needs_regen=False,
             changed_fields={
                 "calorie_adjustment": state.calorie_adjustment,
@@ -303,7 +304,7 @@ def apply_action(
         db.commit()
         return ApplyResult(
             applied=True,
-            summary="Tomorrow swapped to active recovery (walk / mobility / yoga).",
+            summary="Marked tomorrow as recovery guidance. Your active PlanWeek stays fixed; use Workout > Plan if you want a visible day change.",
             needs_regen=False,
             changed_fields={"skipped_focus": {"date": str(tomorrow), "from": old, "to": "recovery"}},
             undo_action={"type": "set_day_focus", "date": str(tomorrow), "skipped_focus": old},
@@ -656,16 +657,16 @@ def apply_action(
     # existing volume / focus rotation logic. We log them so the
     # coach AI can reference them and the user gets a confirmation.
     descriptive = {
-        "reduce_muscle_volume": "The next plan refresh will dial back that muscle's volume.",
-        "add_muscle_volume": "The next plan refresh will add sets for that muscle.",
-        "hold_muscle_volume": "Holding the current volume — next plan refresh will keep it stable.",
-        "reduce_cardio": "Logged. Next plan refresh will trim cardio days.",
+        "reduce_muscle_volume": "The next generated week will dial back that muscle's volume.",
+        "add_muscle_volume": "The next generated week will add sets for that muscle.",
+        "hold_muscle_volume": "Holding the current volume; the next generated week will keep it stable.",
+        "reduce_cardio": "Logged. The next generated week will trim cardio days.",
         "reduce_intensity": "Today's intensity will dial back. Drop top-set loads ~10-15%.",
         "raise_protein_target": "Protein target preference noted.",
         "raise_fiber_target": "Fiber target preference noted.",
-        "rebalance_week": "Acknowledged — the planner will reshuffle remaining days.",
+        "rebalance_week": "Acknowledged. Your active week stays fixed; this note will inform the next review.",
         "strength_preservation": "Logged. We'll protect strength while you adjust calories + volume.",
-        "swap_to_recovery_or_reduce": "Pick: swap to recovery (use Switch Day → Recovery) or just go lighter.",
+        "swap_to_recovery_or_reduce": "Use Workout > Plan > Change Focus for a recovery day, or go lighter today.",
         # Nutrition review advisory actions — no persistent state yet.
         "increase_meal_logging": "Logged. Tracking 4+ days/week gives you the most accurate nutrition coaching.",
         "adjust_meal_timing": "Logged. Spreading meals evenly through the day can help with energy and satiety.",

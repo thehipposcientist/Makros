@@ -275,10 +275,15 @@ def test_regen_with_all_days_locked_is_noop():
 
 def test_regen_with_mix_of_locked_and_unlocked():
     """Locked days are preserved; unlocked future + DOW-matching days are rewritten."""
-    monday = _monday_of_current_week()
+    class WednesdayDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 4, 29)
+
+    monday = date(2026, 4, 27)
     pw, days = _build_week(monday, locked_indexes=(0, 1, 2))
     original_locked = [d.workout_json for d in days[:3]]
-    with _patch_get_week_days(days):
+    with patch.object(week_manager, "date", WednesdayDate), _patch_get_week_days(days):
         fresh = [{"focus": "NEW1"}, {"focus": "NEW2"}, {"focus": "NEW3"}, {"focus": "NEW4"}, {"focus": "NEW5"}]
         week_manager.regenerate_remaining_days(
             FakeSession(), pw, fresh, training_day_pattern=[0, 1, 2, 3, 4],
@@ -800,9 +805,14 @@ def test_workout_idx_continues_past_locked_days():
 
 def test_workout_idx_does_not_advance_for_past_rest_days():
     """Past rest days don't bump workout_idx."""
-    today = date.today()
+    class TuesdayDate(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 4, 28)
+
+    today = TuesdayDate.today()
     pw, days = _build_week(today - timedelta(days=1), rest_indexes=(0,), locked_indexes=(0,))
-    with _patch_get_week_days(days):
+    with patch.object(week_manager, "date", TuesdayDate), _patch_get_week_days(days):
         fresh = [{"focus": "F0"}, {"focus": "F1"}, {"focus": "F2"}, {"focus": "F3"}, {"focus": "F4"}]
         week_manager.regenerate_remaining_days(
             FakeSession(), pw, fresh, training_day_pattern=[1, 2, 3, 4, 5],

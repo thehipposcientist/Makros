@@ -38,6 +38,14 @@ interface DraftExercise {
   restSeconds: number;
 }
 
+function e2eId(value: string | number | null | undefined): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 interface Props {
   visible: boolean;
   themeName?: AppThemeName;
@@ -189,7 +197,7 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
           <Text style={[s.title, { color: tc.textPrimary }]}>
             {editTarget ? 'Edit Template' : 'New Template'}
           </Text>
-          <TouchableOpacity onPress={handleSave} disabled={saving}>
+          <TouchableOpacity testID="workout-template-save" accessibilityLabel="workout-template-save" onPress={handleSave} disabled={saving}>
             {saving
               ? <ActivityIndicator size="small" color={tc.primary} />
               : <Text style={[s.save, { color: tc.primary }]}>Save</Text>}
@@ -199,6 +207,7 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
         <ScrollView contentContainerStyle={{ padding: 18, paddingBottom: 60 }}>
           <Text style={[s.label, { color: tc.textSecondary }]}>NAME</Text>
           <TextInput
+            testID="workout-template-name-input"
             value={name}
             onChangeText={setName}
             placeholder="e.g. Upper Body — Push"
@@ -266,6 +275,8 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
           )}
 
           <TouchableOpacity
+            testID="workout-template-add-exercise"
+            accessibilityLabel="workout-template-add-exercise"
             onPress={() => setPicker(true)}
             style={[s.addBtn, { borderColor: tc.primary + '66', backgroundColor: tc.primary + '0E' }]}
             activeOpacity={0.75}>
@@ -286,6 +297,7 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
             </View>
             <View style={{ padding: 14 }}>
               <TextInput
+                testID="workout-template-exercise-search"
                 value={search}
                 onChangeText={setSearch}
                 placeholder="Search exercises..."
@@ -302,6 +314,8 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
                 {filtered.map((it, i) => (
                   <TouchableOpacity
                     key={`${it.id ?? it.slug ?? it.name}-${i}`}
+                    testID={`workout-template-exercise-option-${e2eId(it.slug ?? it.name)}`}
+                    accessibilityLabel={`workout-template-exercise-option-${e2eId(it.slug ?? it.name)}`}
                     onPress={() => handleAddExercise(it)}
                     style={[s.libRow, { borderBottomColor: tc.border }]}
                     activeOpacity={0.7}>

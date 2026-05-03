@@ -99,6 +99,13 @@ tags:
       - tapOn:
           id: "tutorial-skip"
 
+- runFlow:
+    when:
+      visible: "Start with manual tracking"
+    commands:
+      - tapOn:
+          id: "tutorial-skip"
+
 - waitForAnimationToEnd:
     timeout: 3000
 
@@ -111,6 +118,13 @@ tags:
 - runFlow:
     when:
       visible: "Welcome to Thallo Pro"
+    commands:
+      - tapOn:
+          id: "tutorial-skip"
+
+- runFlow:
+    when:
+      visible: "Start with manual tracking"
     commands:
       - tapOn:
           id: "tutorial-skip"

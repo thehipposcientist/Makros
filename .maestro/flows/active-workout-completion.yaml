@@ -1,0 +1,145 @@
+# Active workout completion E2E coverage.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: active-workout-completion
+tags:
+  - e2e
+  - seeded
+  - workouts
+  - active-workout
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-workouts"
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 30000
+
+- scrollUntilVisible:
+    element:
+      id: "start-workout-cta"
+    direction: DOWN
+    timeout: 20000
+    visibilityPercentage: 50
+- tapOn:
+    id: "start-workout-cta"
+
+- extendedWaitUntil:
+    visible:
+      id: "active-workout-screen"
+    timeout: 15000
+- extendedWaitUntil:
+    visible:
+      id: "exercise-card-0"
+    timeout: 30000
+
+- runFlow:
+    when:
+      visible: "Lock-screen timer unavailable"
+    commands:
+      - tapOn: "Not now"
+
+# Log one deliberately-low set. This proves inline set persistence,
+# enables Finish Workout, and avoids PR overlays in normal seeded history.
+- tapOn:
+    id: "set-weight-input-0-0"
+- inputText: "1"
+- pressKey: Enter
+- tapOn:
+    id: "set-reps-input-0-0"
+- inputText: "1"
+- pressKey: Enter
+- tapOn:
+    id: "log-set-0-0"
+- extendedWaitUntil:
+    visible: "Set 1 logged"
+    timeout: 15000
+
+- scrollUntilVisible:
+    element:
+      id: "finish-workout-button"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "finish-workout-button"
+- extendedWaitUntil:
+    visible:
+      id: "finish-workout-confirm-modal"
+    timeout: 15000
+- tapOn:
+    id: "finish-workout-confirm-save"
+
+- extendedWaitUntil:
+    visible:
+      id: "post-workout-summary"
+    timeout: 90000
+
+- runFlow:
+    when:
+      visible: "New PR!"
+    commands:
+      - tapOn: "Dismiss PR celebration"
+
+- assertVisible: "Workout Complete"
+- assertVisible: "1 sets logged"
+- tapOn:
+    id: "summary-close"
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 30000
+- tapOn:
+    id: "workout-subtab-history"
+- extendedWaitUntil:
+    visible:
+      id: "workout-history-screen"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "workout-history-row-0"
+    timeout: 30000
+- assertVisible: "1 sets"

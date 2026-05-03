@@ -828,6 +828,9 @@ def get_meal_history(
             "items": [
                 {
                     "food_name": it.food_name,
+                    "food_id": it.food_id,
+                    "serving_id": it.serving_id,
+                    "serving_grams": it.serving_grams,
                     "quantity": it.quantity,
                     "unit": it.unit,
                     "calories": it.calories,

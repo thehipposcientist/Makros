@@ -1,6 +1,6 @@
 # AI Coach System — Architecture
 
-Last synced from app state: 2026-04-29
+Last synced from app state: 2026-05-03
 
 ## Overview
 
@@ -20,7 +20,7 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 - **Single-phase**: deterministic quick-intent classification OR full LLM. Chat never generates replacement workout or nutrition plans.
 - **Context**: slimProfile + full workoutPlan + nutritionPlan + scheduleMapping + progress (sessionsLast30d, recentDays, last-6 workoutHistory) + foodsAvailable + injuries + last-6 chat turns + optional photo + userContext (last 10 activity-log entries).
 - **Response shape**: `{answer, action_items, needs_plan_update, safety_note, updated_goal?, updated_macros?, updated_workout_plan=null, updated_nutrition_plan=null, updated_injuries?, logged_workouts?, injury_clarification_needed?}`.
-- **Persistence**: no active PlanWeek mutation. Any legacy `updated_workout_plan` / `updated_nutrition_plan` payload is stripped server-side and client-side. Goal/macro proposals are held in `PendingPlanUpdate` until user taps Apply. Injury proposals are held for explicit confirmation; once confirmed they update the user's injury profile for future generated weeks and the current week must be changed through deterministic Switch/Swap/Skip controls.
+- **Persistence**: no active PlanWeek mutation. Any legacy `updated_workout_plan` / `updated_nutrition_plan` payload is stripped server-side and client-side. Goal/macro proposals are held in `PendingPlanUpdate` until user taps Apply. Injury proposals are held for explicit confirmation; once confirmed they update the user's injury profile for future generated weeks and the current week must be changed through deterministic Change Focus / Swap / Skip controls.
 
 ## 2. In-Workout Coach
 
@@ -41,7 +41,7 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 - **Context** (richest): profile + plan targets + 4-7 days metrics + 7/14/28-day trends + weight summary + active UserFlag rows + last 1-3 AIDecision rows + user feedback + (weekly) history_digest + prior commitments + trimmed `weekly_review` from `compute_weekly_review`.
 - **Response gated** by `decision_rules.gate()` — caps delta size, enforces response-type rules.
 - **Response**: `{response_type, message, delta, rationale_key, next_commitments}`.
-- **Persistence**: `AIDecision` row + `CoachMemory` rows + optional delta to `UserCoachingState.calorie_adjustment`.
+- **Persistence**: `AIDecision` row + `CoachMemory` rows. LLM deltas are stored as recommendations for display; they are not auto-applied. User-confirmed mutations route through `POST /coach/apply-action` or deterministic check-in logic.
 - **Smart check-in**: AI must reference at least one specific number from the weekly review and one rec by short name.
 
 ## 4. Quick-Action Intent Router (deterministic, no LLM)
@@ -54,25 +54,33 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 
 ## AI Apply Path (architectural rule)
 
-**Rule**: AI/weekly-review can only do what the user can do via existing UI. Recommendations mutate settings that the planner reacts to on next regen.
+**Rule**: AI/weekly-review can only do what the user can do via existing UI. Recommendations may mutate durable settings / coach state only after a user-confirmed apply path. The active PlanWeek is fixed for its 7-day window.
 
 - **Endpoint**: `POST /coach/apply-action` body `{action, rec_key?}`.
 - **Implementation**: `services/coach/apply_action.py::apply_action`.
 
 **State-mutating actions:**
 - `change_days_per_week` → `UserPreferences.days_per_week` (capped ±1 per apply)
+- `adjust_calorie_target` → `UserCoachingState.calorie_adjustment` (signed delta, capped ±250 kcal per apply)
 - `raise_calories` / `lower_calories` → `UserCoachingState.calorie_adjustment` (capped ±250 kcal per apply)
 - `hold_calorie_adjustment` → CoachMemory record
 - `swap_to_recovery` → tomorrow's `UserDayState.skipped_focus = "recovery"`
+- `shorten_workout` / `set_workout_duration` → `UserPreferences.workout_duration_minutes`
+- `schedule_deload` → `UserCoachingState.deload_until_date` + volume adjustment
+- `set_core_frequency` → `UserPreferences.core_frequency_per_week`
+- `carb_bump_today` → today's `UserDayState.macro_overrides`
+- `travel_mode` / `pause_week` → dated `UserDayState.skipped_focus`
 - `noop` → ack only
 
-**Descriptive-only (CoachMemory record, no state mutation):** `reduce_muscle_volume`, `add_muscle_volume`, `hold_muscle_volume`, `add_cardio_session`, `add_zone2_session`, `reduce_cardio`, `schedule_deload`, `set_core_frequency`, `shorten_workout`, `reduce_intensity`, `carb_bump_today`, `raise_protein_target`, `raise_fiber_target`, `rebalance_week`, `strength_preservation`, `swap_to_recovery_or_reduce`.
+`add_cardio_session` / `add_zone2_session` may increment `days_per_week` by one when the user is below the 7-day cap; otherwise they are descriptive.
+
+**Descriptive-only (CoachMemory record, no state mutation):** `reduce_muscle_volume`, `add_muscle_volume`, `hold_muscle_volume`, `reduce_cardio`, `reduce_intensity`, `raise_protein_target`, `raise_fiber_target`, `rebalance_week`, `strength_preservation`, `swap_to_recovery_or_reduce`, plus any state action missing required parameters.
 
 **Wired by**: `WeeklyCoachingCard` (Progress → Health), `CoachCheckinModal` (inline pills), trainer chat (Apply button on assistant messages).
 
 ## Known Context Gaps (Home Trainer)
 
-1. Not gated by `decision_rules.gate()` — plan/macro deltas rely on prompt constraints + client approval instead of the check-in safety gate.
+1. Not gated by `decision_rules.gate()` — goal/macro proposals rely on prompt constraints + client approval instead of the check-in safety gate.
 2. No `AIDecision` row written for Home Trainer goal/macro proposals — check-in decisions are persisted, chat decisions are not.
 
 **Other:**

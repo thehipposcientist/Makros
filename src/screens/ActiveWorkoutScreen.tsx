@@ -48,7 +48,7 @@ import {
 } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, askTrainerQuestion, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, type WorkoutPostSummary } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, type WorkoutPostSummary } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
@@ -3395,9 +3395,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   const handleSubmitFeedback = async (skip = false) => {
     // Close immediately — the user doesn't need a two-step confirmation
-    // screen. Feedback persistence + the AI-driven plan update happen in
-    // the background; if the plan changes, HomeScreen will pick it up on
-    // next mount / planRefreshKey bump. If skip is true, we just dismiss.
+    // screen. Feedback persistence happens in the background and feeds the
+    // deterministic weekly review; it never asks AI to rewrite the plan.
     const captured = {
       feeling: feedbackFeeling,
       intensity: feedbackIntensity,
@@ -3454,36 +3453,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               console.log('[handleSubmitFeedback] backend feedback patch failed:', e);
             }
           }
-        }
-        if (!authToken || (!captured.feeling && !captured.intensity)) return;
-
-        const feelingLabels: Record<string, string> = {
-          great: 'great — felt strong and energized',
-          good: 'good — solid session',
-          okay: 'okay — got through it',
-          rough: 'rough — struggled throughout',
-        };
-        const intensityLabels: Record<number, string> = {
-          1: 'way too easy',
-          2: 'a bit easy',
-          3: 'just right',
-          4: 'hard but manageable',
-          5: 'too hard / overwhelming',
-        };
-        const feelingText = captured.feeling ? feelingLabels[captured.feeling] : 'neutral';
-        const intensityText = captured.intensity ? intensityLabels[captured.intensity] : 'moderate';
-        const sorenessText = captured.soreness.length > 0 ? ` Soreness noted in: ${captured.soreness.join(', ')}.` : '';
-        const notesText = captured.notes.trim() ? ` User note: "${captured.notes.trim()}".` : '';
-        const question = `I just finished ${workout.focus}. Overall feeling: ${feelingText}. Perceived intensity: ${intensityText}.${sorenessText}${notesText} Based on this feedback, should my upcoming workouts be adjusted? If the intensity was wrong or I had soreness concerns, please update the plan.`;
-
-        const resp = await askTrainerQuestion(authToken, {
-          question,
-          mode: 'trainer',
-          profile: { goal },
-          conversation: [],
-        });
-        if (resp.needs_plan_update && resp.updated_workout_plan) {
-          await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(resp.updated_workout_plan));
         }
       } catch (e) {
         console.log('[handleSubmitFeedback] background sync failed (non-fatal):', (e as any)?.message ?? e);
@@ -3554,6 +3523,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       completed: true,
     };
     await saveWorkoutSession(session);
+    import('../utils/workoutReminders')
+      .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
+      .catch(() => undefined);
     // Push completed status immediately so the watch exits active state.
     import('../utils/watchSync').then(({ pushWorkoutToWatch }) =>
       pushWorkoutToWatch(buildWatchWorkoutSnapshotRef.current(), {
@@ -5200,6 +5172,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               style={[styles.inlineSetRow, isLogged && styles.inlineSetRowDone, { backgroundColor: pulseBg }]}>
                               <Text style={styles.inlineSetNum}>{slot + 1}</Text>
                               {!hideWeight && <AnimatedTextInput
+                                testID={`set-weight-input-${i}-${slot}`}
                                 style={[
                                   styles.inlineInput,
                                   isLogged && styles.inlineInputDone,
@@ -5243,6 +5216,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 </Text>
                               ) : (
                                 <TextInput
+                                  testID={`set-reps-input-${i}-${slot}`}
                                   style={[styles.inlineInput, isLogged && styles.inlineInputDone]}
                                   value={isLogged ? (editingSetKey === inputKey ? (editDraft.reps ?? String(logged.reps)) : String(logged.reps)) : input.reps}
                                   onChangeText={v => {
@@ -5639,7 +5613,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       {/* Confirm Finish Modal */}
       <Modal visible={finishModalVisible} transparent animationType="fade" onRequestClose={() => setFinishModalVisible(false)}>
         <View style={styles.finishBackdrop}>
-          <FadeInView style={styles.finishModal} duration={260} slideDistance={10}>
+          <FadeInView testID="finish-workout-confirm-modal" style={styles.finishModal} duration={260} slideDistance={10}>
             <View style={[styles.finishIconWrap, { backgroundColor: workoutPalette.soft }]}>
               <Ionicons name="flag" size={26} color={workoutPalette.strong} />
             </View>
@@ -5663,10 +5637,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 <Text style={styles.finishModalStatLabel}>Sets</Text>
               </View>
             </View>
-            <TouchableOpacity style={styles.finishConfirmBtn} onPress={handleFinish}>
+            <TouchableOpacity
+              testID="finish-workout-confirm-save"
+              accessibilityLabel="finish-workout-confirm-save"
+              style={styles.finishConfirmBtn}
+              onPress={handleFinish}>
               <Text style={styles.finishConfirmText}>Save and Finish</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setFinishModalVisible(false)}>
+            <TouchableOpacity
+              testID="finish-workout-confirm-cancel"
+              accessibilityLabel="finish-workout-confirm-cancel"
+              onPress={() => setFinishModalVisible(false)}>
               <Text style={styles.finishCancelText}>Keep Going</Text>
             </TouchableOpacity>
           </FadeInView>
@@ -5679,7 +5660,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           <ScrollView contentContainerStyle={styles.summaryScroll} keyboardShouldPersistTaps="handled">
 
             {/* ── Shareable Workout Summary Card ────────────────────── */}
-              <FadeInView style={styles.summaryModal} duration={360} slideDistance={18}>
+              <FadeInView testID="post-workout-summary" style={styles.summaryModal} duration={360} slideDistance={18}>
                 <ViewShot ref={summaryCardRef} options={{ format: 'png', quality: 1 }}>
                   <View style={styles.shareCard}>
                     <LinearGradient
@@ -5999,6 +5980,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 ) : null}
 
                 <TouchableOpacity
+                  testID="summary-save-template"
+                  accessibilityLabel="summary-save-template"
                   style={[styles.summaryFeedbackBtn, { backgroundColor: templateSaved ? themeColors.success + '22' : themeColors.surfaceRaised, borderWidth: 1, borderColor: templateSaved ? themeColors.success : themeColors.border }]}
                   onPress={handleSaveWorkoutTemplate}
                   disabled={templateSaving || templateSaved}
@@ -6053,7 +6036,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </TouchableOpacity>
                   ) : null}
                 </View>
-                <TouchableOpacity onPress={dismissSummaryModal} style={styles.summarySkipBtn}>
+                <TouchableOpacity
+                  testID="summary-close"
+                  accessibilityLabel="summary-close"
+                  onPress={dismissSummaryModal}
+                  style={styles.summarySkipBtn}>
                   <Text style={styles.summarySkipText}>Close</Text>
                 </TouchableOpacity>
               </FadeInView>

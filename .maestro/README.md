@@ -64,6 +64,44 @@ Or run both through the Makefile shortcut:
 make smoke-mobile-seeded
 ```
 
+## Workout + tier-gate flows
+
+Additional seeded E2E coverage:
+
+```bash
+make seed-e2e
+maestro test .maestro/flows/recovery-live-workouts.yaml
+maestro test .maestro/flows/workout-templates.yaml
+maestro test .maestro/flows/active-workout-completion.yaml
+```
+
+Or:
+
+```bash
+make smoke-mobile-workouts
+```
+
+State-mutation coverage for meals, hydration, and supplements:
+
+```bash
+make seed-e2e
+maestro test .maestro/flows/meals-supplements-state.yaml
+maestro test .maestro/flows/meal-history-facts-alignment.yaml
+```
+
+Or:
+
+```bash
+make smoke-mobile-state
+```
+
+Free-vs-Pro gates need beta full-access disabled for the running JS bundle:
+
+```bash
+EXPO_PUBLIC_DISABLE_FREE_BETA_FULL_ACCESS=1 npx expo start --dev-client
+make smoke-mobile-free-gates
+```
+
 Seeded credentials:
 
 - `e2e_returning@test.thallo` / `SeedTest1234` — pro returning user with active
@@ -152,4 +190,17 @@ maestro test \
   → plan gen → equipment toggle regen → Start Workout)
 - `flows/seeded-returning-user.yaml` — returning-user smoke flow backed by
   `make seed-e2e`
+- `flows/recovery-live-workouts.yaml` — manual recovery logging plus live
+  tracker finish → confirmation save
+- `flows/workout-templates.yaml` — build a template from the exercise library
+  and launch it into ActiveWorkoutScreen
+- `flows/active-workout-completion.yaml` — inline set logging → finish
+  confirmation → post-workout summary → workout history
+- `flows/meals-supplements-state.yaml` — hydration quick-add, favorite meal
+  quick-log, meal history, supplement add + mark-taken
+- `flows/meal-history-facts-alignment.yaml` — verifies Meal History, Nutrition
+  Trend, and Nutrition & Gut Facts read the same seeded backend meal-history
+  totals
+- `flows/free-vs-pro-gates.yaml` — true free tier vs pro gate assertions
+  (requires `EXPO_PUBLIC_DISABLE_FREE_BETA_FULL_ACCESS=1`)
 - `flows/login.yaml` — helper flow for logging in an existing user

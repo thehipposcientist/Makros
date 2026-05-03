@@ -22,7 +22,6 @@ from app.models import (
     CoachMemory,
     DailyRollup,
     User,
-    UserCoachingState,
     UserFlag,
     UserRollup,
 )
@@ -184,32 +183,6 @@ def get_flags(
     }
 
 
-def _apply_delta(db: Session, user_id: int, delta: dict[str, Any] | None) -> int | None:
-    """Apply an accepted calorie delta to UserCoachingState.
-
-    Returns the new total coaching kcal adjustment, or None if nothing applied.
-    Macro deltas aren't applied to coaching state (which only tracks kcal +
-    volume); they show up via a plan regeneration downstream.
-    """
-    if not delta or "kcal" not in delta:
-        return None
-    try:
-        kcal_delta = int(delta["kcal"])
-    except (TypeError, ValueError):
-        return None
-    if kcal_delta == 0:
-        return None
-    state = db.exec(
-        select(UserCoachingState).where(UserCoachingState.user_id == user_id)
-    ).first()
-    if not state:
-        state = UserCoachingState(user_id=user_id)
-    state.calorie_adjustment = int(state.calorie_adjustment) + kcal_delta
-    state.updated_at = datetime.now(timezone.utc)
-    db.add(state)
-    return state.calorie_adjustment
-
-
 @router.post("/checkin")
 def post_checkin(
     body: CheckinRequest,
@@ -310,13 +283,11 @@ def post_checkin(
     # 4. Gate the response against decision rules.
     result = gate(ai_response, payload, db, current_user.id)
 
-    # 5. Persist + optionally apply.
+    # 5. Persist only. LLM deltas are recommendations for display; user-
+    # confirmed state changes route through /coach/apply-action.
     applied_adjustment: int | None = None
     decision_id: int | None = None
     if not body.dry_run:
-        if result.response_type in {"small_adjust", "deep_review"}:
-            applied_adjustment = _apply_delta(db, current_user.id, result.delta)
-
         decision = AIDecision(
             user_id=current_user.id,
             checkin_type=body.checkin_type,

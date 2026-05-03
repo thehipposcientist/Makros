@@ -1,0 +1,110 @@
+# Verifies the same backend meal-history rows drive Meal History,
+# Nutrition Trend, and Nutrition & Gut Facts macro/fact displays.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: meal-history-facts-alignment
+tags:
+  - e2e
+  - seeded
+  - meals
+  - progress
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- runFlow:
+    when:
+      visible: "Welcome to Thallo Pro"
+    commands:
+      - tapOn:
+          id: "tutorial-skip"
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- tapOn:
+    id: "bottom-tab-meals"
+- extendedWaitUntil:
+    visible: "Meal week"
+    timeout: 30000
+- tapOn:
+    id: "meals-subtab-history"
+- extendedWaitUntil:
+    visible:
+      id: "meal-history-screen"
+    timeout: 30000
+
+# Yesterday's seeded row is the most recent past history day:
+# Greek yogurt bowl + chicken rice bowl + salmon plate.
+- extendedWaitUntil:
+    visible: "1427 cal · 139g P · 144g C · 30g F"
+    timeout: 15000
+- tapOn:
+    id: "meal-history-row-0"
+- extendedWaitUntil:
+    visible: "Greek yogurt protein bowl"
+    timeout: 15000
+- assertVisible: "Salmon sweet potato plate"
+
+# Progress facts should aggregate the same seven seeded meal-history days:
+# four 933-cal days + three 1427-cal days => 1145 logged-cal average.
+- tapOn:
+    id: "bottom-tab-progress"
+- extendedWaitUntil:
+    visible:
+      id: "progress-tab-screen"
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      id: "nutrition-trend-card"
+    direction: DOWN
+    timeout: 30000
+    visibilityPercentage: 50
+- assertVisible:
+    id: "nutrition-trend-logged-calories-1145"
+- scrollUntilVisible:
+    element:
+      id: "nutrition-gut-facts-card"
+    direction: DOWN
+    timeout: 30000
+    visibilityPercentage: 50
+- tapOn:
+    id: "nutrition-gut-facts-toggle"
+- extendedWaitUntil:
+    visible:
+      id: "nutrition-gut-facts-days-7"
+    timeout: 15000
+- assertVisible:
+    id: "nutrition-facts-macro-calories-1145"

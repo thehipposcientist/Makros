@@ -37,6 +37,14 @@ const MEAL_TYPE_OPTIONS = [
   { key: 'post_workout', label: 'Post-workout' },
 ] as const;
 
+function e2eId(value: string | number | null | undefined): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 /** Pick a sensible default meal_type by current time-of-day so the
  *  user doesn't have to choose on every log. */
 function defaultMealTypeByHour(): string {
@@ -146,7 +154,7 @@ export default function SavedMealsSection({ authToken, themeName, onLogged, onEd
   }
 
   return (
-    <View style={{ marginBottom: 14 }}>
+    <View testID="saved-meals-section" style={{ marginBottom: 14 }}>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
         <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textMuted, letterSpacing: 0.5 }}>FAVORITES</Text>
         {saved.length > 0 && (
@@ -167,9 +175,10 @@ export default function SavedMealsSection({ authToken, themeName, onLogged, onEd
         </View>
       ) : (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast">
-          {saved.map(sm => (
+          {saved.map((sm, idx) => (
             <View
               key={sm.id}
+              testID={`saved-meal-card-${idx}`}
               style={{
                 backgroundColor: tc.surface, borderRadius: 12, padding: 12, marginRight: 8,
                 borderWidth: 1, borderColor: tc.border,
@@ -178,6 +187,8 @@ export default function SavedMealsSection({ authToken, themeName, onLogged, onEd
               }}
             >
               <TouchableOpacity
+                testID={`saved-meal-log-open-${e2eId(sm.name)}`}
+                accessibilityLabel={`saved-meal-log-open-${e2eId(sm.name)}`}
                 activeOpacity={0.8}
                 onLongPress={() => handleActions(sm)}
                 onPress={() => setTarget(sm)}
@@ -281,7 +292,7 @@ function LogSavedMealModal({
   return (
     <Modal visible={!!saved} animationType="slide" transparent onRequestClose={onClose}>
       <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' }}>
-        <View style={{
+        <View testID="saved-meal-log-modal" style={{
           backgroundColor: tc.background, borderTopLeftRadius: 20, borderTopRightRadius: 20,
           padding: 16, paddingBottom: 30, maxHeight: '80%',
         }}>
@@ -309,6 +320,8 @@ function LogSavedMealModal({
                 return (
                   <TouchableOpacity
                     key={opt.key}
+                    testID={`saved-meal-type-${opt.key}`}
+                    accessibilityLabel={`saved-meal-type-${opt.key}`}
                     onPress={() => setMealType(opt.key)}
                     style={{
                       backgroundColor: active ? tc.primary : tc.surface,
@@ -355,6 +368,8 @@ function LogSavedMealModal({
             </View>
 
             <TouchableOpacity
+              testID="saved-meal-log-submit"
+              accessibilityLabel="saved-meal-log-submit"
               onPress={handleLog}
               disabled={submitting}
               style={{

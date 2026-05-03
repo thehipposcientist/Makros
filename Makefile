@@ -1,5 +1,6 @@
 .PHONY: start tunnel stop reset-db wait-backend test dev seed-e2e \
-        deploy deploy-backend deploy-ios deploy-ios-clean smoke-prod smoke-mobile smoke-mobile-seeded
+        deploy deploy-backend deploy-ios deploy-ios-clean smoke-prod smoke-mobile smoke-mobile-seeded \
+        smoke-mobile-workouts smoke-mobile-state smoke-mobile-free-gates
 
 # ── AWS / deploy config ──────────────────────────────────────────────────────
 AWS_ACCOUNT_ID  := 225629394823
@@ -201,6 +202,35 @@ smoke-mobile-seeded: seed-e2e
 	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
 	  exit 1; }
 	@maestro test .maestro/flows/seeded-returning-user.yaml
+
+smoke-mobile-workouts: seed-e2e
+	@echo "Running Maestro workout E2E flows (requires backend + Metro running)..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@maestro test .maestro/flows/recovery-live-workouts.yaml
+	@maestro test .maestro/flows/workout-templates.yaml
+	@maestro test .maestro/flows/active-workout-completion.yaml
+
+smoke-mobile-state: seed-e2e
+	@echo "Running Maestro state-mutation E2E flows (requires backend + Metro running)..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@maestro test .maestro/flows/active-workout-completion.yaml
+	@maestro test .maestro/flows/meals-supplements-state.yaml
+	@maestro test .maestro/flows/meal-history-facts-alignment.yaml
+
+smoke-mobile-free-gates: seed-e2e
+	@echo "Running Maestro free/pro gate flow."
+	@echo "Make sure Metro was started with: EXPO_PUBLIC_DISABLE_FREE_BETA_FULL_ACCESS=1 npx expo start --dev-client"
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@maestro test .maestro/flows/free-vs-pro-gates.yaml
 
 # ── Smoke-test the prod backend ──────────────────────────────────────────────
 smoke-prod:

@@ -23,7 +23,6 @@ import {
   getWeeklyReview,
   WeeklyReviewResponse,
   applyRecommendationAction,
-  reviewAndApplyPlanWeek,
 } from '../services/api';
 
 /**
@@ -355,12 +354,15 @@ export default function CoachCheckinModal({
 
                 {existingCheckin.ai_delta && Object.keys(existingCheckin.ai_delta).length > 0 && (
                   <View style={styles.deltaBlock}>
-                    <Text style={styles.deltaLabel}>Plan adjustment</Text>
+                    <Text style={styles.deltaLabel}>Coaching adjustment</Text>
                     {Object.entries(existingCheckin.ai_delta).map(([k, v]) => (
                       <Text key={k} style={styles.deltaLine}>
                         {k}: {typeof v === 'number' && v > 0 ? '+' : ''}{String(v)}
                       </Text>
                     ))}
+                    <Text style={styles.deltaFootnote}>
+                      Coach suggestion only. Your active PlanWeek stays fixed.
+                    </Text>
                   </View>
                 )}
 
@@ -485,16 +487,21 @@ export default function CoachCheckinModal({
                                     onPress={async () => {
                                       try {
                                         const applied = await applyRecommendationAction(authToken, rec.action, rec.key);
-                                        if (planWeekId) {
-                                          await reviewAndApplyPlanWeek(authToken, []);
+                                        const changed = applied.changed_fields ?? {};
+                                        if (
+                                          'paused_dates' in changed ||
+                                          'cleared_dates' in changed ||
+                                          'skipped_focus' in changed ||
+                                          'macro_overrides' in changed
+                                        ) {
                                           onPlanUpdated?.();
                                         }
                                         // Show concise feedback then
                                         // remove the rec from view so
                                         // it's clear it was handled.
-                                        setApplyNotice(applied.summary || (planWeekId
-                                          ? 'Applied and refreshed the current generated week.'
-                                          : 'Applied to your next generated week.'));
+                                        setApplyNotice(applied.summary || (applied.descriptive_only
+                                          ? 'Recommendation noted.'
+                                          : 'Applied to your saved settings.'));
                                         setReview(prev => prev ? {
                                           ...prev,
                                           recommendations: prev.recommendations.filter(x => x.key !== rec.key),
@@ -525,13 +532,11 @@ export default function CoachCheckinModal({
                     {applyNotice && (
                       <View style={[styles.deltaBlock, { marginTop: 12, marginBottom: 0, borderWidth: 1, borderColor: colors.primary + '44' }]}>
                         <Text style={styles.deltaLabel}>
-                          {planWeekId ? 'Applied for current week' : 'Applied for next plan'}
+                          Applied to settings
                         </Text>
                         <Text style={styles.deltaLine}>{applyNotice}</Text>
                         <Text style={styles.deltaFootnote}>
-                          {planWeekId
-                            ? 'The current generated week is refreshed; locked days stay unchanged.'
-                            : 'Your current 7-day PlanWeek stays fixed; this changes the next generated week.'}
+                          Your active 7-day PlanWeek stays fixed. Future generated weeks read these settings; use Workout {'>'} Plan {'>'} Change Focus or Swap for this week.
                         </Text>
                       </View>
                     )}
@@ -591,7 +596,7 @@ export default function CoachCheckinModal({
                 </TouchableOpacity>
                 <Text style={styles.submitHint}>
                   {planWeekId
-                    ? 'Coach changes refresh the current generated week; locked days stay unchanged.'
+                    ? 'Check-in changes save to settings and coach state for future generated weeks. Your active week stays fixed.'
                     : 'The coach will review your trends and let you know if anything needs to change.'}
                 </Text>
                 {onSkip && (
@@ -626,7 +631,7 @@ export default function CoachCheckinModal({
 
                       {delta && (
                         <View style={styles.deltaBlock}>
-                          <Text style={styles.deltaLabel}>Plan adjustment</Text>
+                          <Text style={styles.deltaLabel}>Coaching adjustment</Text>
                           {Object.entries(delta).map(([k, v]) => (
                             <Text key={k} style={styles.deltaLine}>
                               {k}: {typeof v === 'number' && (v as number) > 0 ? '+' : ''}{String(v)}
@@ -640,8 +645,8 @@ export default function CoachCheckinModal({
                           )}
                           <Text style={styles.deltaFootnote}>
                             {planWeekId
-                              ? 'Applied to the current generated week after check-in; locked days stay unchanged.'
-                              : 'Applies to the next generated plan; this week stays fixed.'}
+                              ? 'Coach suggestion only. Your active PlanWeek stays fixed.'
+                              : 'Coach suggestion only; confirm changes through Apply actions or settings.'}
                           </Text>
                         </View>
                       )}

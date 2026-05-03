@@ -66,8 +66,9 @@ Last updated: 2026-05-01
 - Auto-renew: when the active PlanWeek's `end_date < today`, `loadPlans`
   calls `POST /plans/week/auto-renew` and renders the freshly generated
   next 7 days. The prior week's coach check-in remains available for one
-  day; applying changes refreshes the current week's remaining unlocked
-  days. If ignored, the generated week stays as-is and the recap remains
+  day. Applying check-in recommendations saves durable settings / coach
+  state for future generated weeks; the active 7-day PlanWeek stays
+  fixed. If ignored, the generated week stays as-is and the recap remains
   visible from Progress.
 
 ## Key UI Features

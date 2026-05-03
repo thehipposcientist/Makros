@@ -119,10 +119,16 @@ export default function DetectedWorkoutsCard({ themeName, appleWorkouts, authTok
 
   const handleSave = async (session: WorkoutSession) => {
     await saveWorkoutSession(session);
+    const sessionDate = dateKey(new Date(session.date));
+    if (sessionDate === dateKey(new Date())) {
+      import('../utils/workoutReminders')
+        .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
+        .catch(() => undefined);
+    }
     if (authToken) {
       await logWorkoutDone(
         authToken,
-        dateKey(new Date(session.date)),
+        sessionDate,
         session.focus,
         session.durationSeconds,
         undefined,
@@ -147,14 +153,16 @@ export default function DetectedWorkoutsCard({ themeName, appleWorkouts, authTok
   if (!candidates || candidates.length === 0) return null;
 
   return (
-    <View style={{
-      backgroundColor: tc.surface,
-      borderRadius: radius.lg,
-      padding: 14,
-      marginBottom: 12,
-      borderWidth: 1,
-      borderColor: tc.primary + '44',
-    }}>
+    <View
+      testID="detected-workouts-card"
+      style={{
+        backgroundColor: tc.surface,
+        borderRadius: radius.lg,
+        padding: 14,
+        marginBottom: 12,
+        borderWidth: 1,
+        borderColor: tc.primary + '44',
+      }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
         <Ionicons name="download-outline" size={18} color={tc.primary} />
         <Text style={{ fontSize: 14, fontWeight: '800', color: tc.textPrimary, flex: 1 }}>

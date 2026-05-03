@@ -17,6 +17,7 @@ interface Props {
   duration?: number;
   slideDistance?: number;
   style?: StyleProp<ViewStyle>;
+  testID?: string;
 }
 
 export default function FadeInView({
@@ -25,6 +26,7 @@ export default function FadeInView({
   duration = 300,
   slideDistance = 12,
   style,
+  testID,
 }: Props) {
   const reducedMotion = useReducedMotion();
   const opacity = useRef(new Animated.Value(0)).current;
@@ -69,7 +71,7 @@ export default function FadeInView({
   }, [delay, duration, opacity, reducedMotion, scale, slideDistance, translateY]);
 
   return (
-    <Animated.View style={[style, { opacity, transform: [{ translateY }, { scale }] }]}>
+    <Animated.View testID={testID} style={[style, { opacity, transform: [{ translateY }, { scale }] }]}>
       {children}
     </Animated.View>
   );

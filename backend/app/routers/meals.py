@@ -183,16 +183,18 @@ def create_meal(
 @router.patch("/{meal_id}")
 def update_meal(
     meal_id: int,
-    body: dict,  # accept partial — {meal_type, consumed_at, notes, name}
+    body: dict,  # accept partial — {meal_type, consumed_at, notes, name, items}
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
     """Patch a small set of mutable fields on an existing meal. Used by
-    the meal editor to change `meal_type` (e.g. correct a mis-defaulted
-    breakfast → pre_workout) and `consumed_at` (back-log time)."""
+    the meal editor to change name/items/macros, `meal_type` (e.g.
+    correct a mis-defaulted breakfast → pre_workout), and `consumed_at`
+    (back-log time)."""
     meal = db.get(Meal, meal_id)
     if not meal or meal.user_id != current_user.id:
         raise HTTPException(status_code=404, detail="Meal not found")
+    affected_dates = {meal.meal_date}
     if "meal_type" in body and body["meal_type"]:
         try:
             from app.enums import MealType as _MT
@@ -212,9 +214,47 @@ def update_meal(
         meal.notes = body["notes"]
     if "name" in body and body["name"]:
         meal.name = body["name"]
+    if "items" in body:
+        raw_items = body.get("items") or []
+        if not isinstance(raw_items, list):
+            raise HTTPException(status_code=422, detail="items must be a list")
+        def _optional_int(value):
+            if value in (None, ""):
+                return None
+            return int(value)
+
+        def _optional_float(value):
+            if value in (None, ""):
+                return None
+            return float(value)
+
+        for existing in db.exec(select(MealItem).where(MealItem.meal_id == meal_id)).all():
+            db.delete(existing)
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                raise HTTPException(status_code=422, detail="Each meal item must be an object")
+            try:
+                item = MealItem(
+                    meal_id=meal.id,
+                    food_name=str(raw.get("food_name") or raw.get("name") or "Item"),
+                    food_id=_optional_int(raw.get("food_id")),
+                    serving_id=_optional_int(raw.get("serving_id")),
+                    quantity=float(raw.get("quantity") or 1),
+                    unit=str(raw.get("unit") or "serving"),
+                    serving_grams=_optional_float(raw.get("serving_grams")),
+                    calories=float(raw.get("calories") or 0),
+                    protein_g=float(raw.get("protein_g", raw.get("protein", 0)) or 0),
+                    carbs_g=float(raw.get("carbs_g", raw.get("carbs", 0)) or 0),
+                    fat_g=float(raw.get("fat_g", raw.get("fat", 0)) or 0),
+                )
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=422, detail="Invalid meal item nutrition values")
+            db.add(item)
     db.add(meal)
     db.commit()
     db.refresh(meal)
+    for affected_date in affected_dates:
+        _refresh_daily_metrics(db, current_user.id, affected_date, force=True)
     return _build_meal_response(meal, db)
 
 

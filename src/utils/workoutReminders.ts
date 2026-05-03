@@ -67,6 +67,61 @@ async function saveReminderIds(ids: Record<string, string>): Promise<void> {
   await AsyncStorage.setItem(REMINDER_IDS_KEY, JSON.stringify(ids));
 }
 
+function workoutReminderContent(dow: number) {
+  return {
+    title: 'Time to train',
+    body: 'Your workout is ready. Let\'s go.',
+    sound: true,
+    data: { kind: 'workout_reminder', dow },
+  };
+}
+
+function todaysReminderDate(settings: ReminderSettings, now = new Date()): Date {
+  const d = new Date(now);
+  d.setHours(settings.hour, settings.minute, 0, 0);
+  return d;
+}
+
+function nextOccurrenceDate(dow: number, settings: ReminderSettings, now = new Date()): Date {
+  const d = new Date(now);
+  const daysUntil = ((dow - now.getDay() + 7) % 7) || 7;
+  d.setDate(now.getDate() + daysUntil);
+  d.setHours(settings.hour, settings.minute, 0, 0);
+  return d;
+}
+
+async function todayWorkoutAlreadyHandled(): Promise<boolean> {
+  try {
+    const { loadWorkoutHistory, todayKey } = await import('./workoutHistory');
+    const today = todayKey();
+    const history = await loadWorkoutHistory();
+    return history.some(s =>
+      typeof s.date === 'string' &&
+      s.date.startsWith(today) &&
+      (s.completed || s.skipped)
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function shouldSkipTodaysSlot(settings: ReminderSettings, scheduledDays: number[]): Promise<boolean> {
+  if (settings.skipIfCompleted === false) return false;
+  const now = new Date();
+  const todayDow = now.getDay();
+  if (!scheduledDays.includes(todayDow)) return false;
+  if (now >= todaysReminderDate(settings, now)) return false;
+  return todayWorkoutAlreadyHandled();
+}
+
+async function scheduleOneShotWorkoutReminder(dow: number, settings: ReminderSettings): Promise<string> {
+  const date = nextOccurrenceDate(dow, settings);
+  return Notifications.scheduleNotificationAsync({
+    content: workoutReminderContent(dow),
+    trigger: { date, repeats: false } as any,
+  });
+}
+
 async function readTrainingDays(): Promise<number[]> {
   try {
     const raw = await AsyncStorage.getItem('userProfile');
@@ -119,23 +174,30 @@ export async function scheduleWorkoutReminder(settings: ReminderSettings): Promi
   await cancelWorkoutReminders();
 
   const trainingDays = await resolveScheduleDays(settings.scheduleType, settings.customDays);
+  const skipToday = await shouldSkipTodaysSlot(settings, trainingDays);
+  const todayDow = new Date().getDay();
   const ids: Record<string, string> = {};
 
   // Schedule one weekly notification per training day. Per-weekday IDs are
   // tracked so `cancelTodayWorkoutReminder` can suppress just today's slot
   // (when the user already trained or skipped) without nuking next week's.
   for (const dow of trainingDays) {
+    if (dow === todayDow && skipToday) {
+      // A WEEKLY trigger for today's weekday would still fire today when
+      // scheduled before the reminder time. Use a one-shot for next week
+      // instead; HomeScreen re-establishes the weekly schedule on app open.
+      try {
+        ids[String(dow)] = await scheduleOneShotWorkoutReminder(dow, settings);
+      } catch {}
+      continue;
+    }
+
     // expo-notifications weekday: 1=Sunday, 2=Monday, ..., 7=Saturday
     // our format: 0=Sunday, 1=Monday, ..., 6=Saturday
     const expoWeekday = dow + 1;
 
     const id = await Notifications.scheduleNotificationAsync({
-      content: {
-        title: 'Time to train',
-        body: 'Your workout is ready. Let\'s go.',
-        sound: true,
-        data: { kind: 'workout_reminder', dow },
-      },
+      content: workoutReminderContent(dow),
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.WEEKLY,
         weekday: expoWeekday,
@@ -160,18 +222,18 @@ export async function cancelWorkoutReminders(): Promise<void> {
 }
 
 /** Cancel today's workout reminder so the user isn't pinged after they've
- *  already trained or explicitly skipped. The WEEKLY repeat for that weekday
- *  is then re-scheduled, which iOS aims at the next occurrence — typically
- *  next week (the common case where the user marks done AFTER the reminder
- *  has already fired). Edge case: if the user marks done before today's
- *  reminder time, the rescheduled WEEKLY may still fire today — acceptable
- *  vs. the complexity of skipping a single first-fire occurrence. */
+ *  already trained or explicitly skipped. If today's reminder time has not
+ *  passed yet, replace the weekly slot with a one-shot for next week; a newly
+ *  created WEEKLY trigger for today's weekday can still fire today on iOS. */
 export async function cancelTodayWorkoutReminder(): Promise<void> {
   // Respect the user's opt-out FIRST so we don't cancel the slot they
   // explicitly want to keep firing today.
   const settings = await loadReminderSettings();
   if (!settings.enabled) return;
   if (settings.skipIfCompleted === false) return;
+
+  const now = new Date();
+  if (now >= todaysReminderDate(settings, now)) return;
 
   const todayDow = new Date().getDay();
   const ids = await loadReminderIds();
@@ -189,21 +251,6 @@ export async function cancelTodayWorkoutReminder(): Promise<void> {
   const granted = await requestPermissions();
   if (!granted) return;
 
-  const expoWeekday = todayDow + 1;
-  const newId = await Notifications.scheduleNotificationAsync({
-    content: {
-      title: 'Time to train',
-      body: 'Your workout is ready. Let\'s go.',
-      sound: true,
-      data: { kind: 'workout_reminder', dow: todayDow },
-    },
-    trigger: {
-      type: Notifications.SchedulableTriggerInputTypes.WEEKLY,
-      weekday: expoWeekday,
-      hour: settings.hour,
-      minute: settings.minute,
-    },
-  });
-  ids[String(todayDow)] = newId;
+  ids[String(todayDow)] = await scheduleOneShotWorkoutReminder(todayDow, settings);
   await saveReminderIds(ids);
 }

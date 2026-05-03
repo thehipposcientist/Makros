@@ -2646,6 +2646,9 @@ export interface BodyScanResult {
 
 export interface MealHistoryItem {
   food_name: string;
+  food_id?: number | null;
+  serving_id?: number | null;
+  serving_grams?: number | null;
   quantity: number;
   unit: string;
   calories: number;
@@ -3250,7 +3253,7 @@ export async function logSavedMeal(
 export async function updateMeal(
   token: string,
   mealId: number,
-  patch: { meal_type?: string; consumed_at?: string | null; notes?: string | null; name?: string },
+  patch: { meal_type?: string; consumed_at?: string | null; notes?: string | null; name?: string; items?: MealHistoryItem[] },
 ): Promise<any> {
   return request(`/meals/${mealId}`, {
     method: 'PATCH',
@@ -3854,6 +3857,8 @@ export async function reviewAndApplyPlanWeek(
   token: string,
   actions: Array<Record<string, any>> = [],
 ): Promise<PlanWeekResponse> {
+  // Applies selected recommendations to durable settings/state only.
+  // The backend returns the unchanged active PlanWeek.
   return request<PlanWeekResponse>('/plans/week/review-and-apply', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -3965,8 +3970,9 @@ export async function getReadinessToday(
 /** Apply a recommendation action to durable user state. The backend
  *  maps action types to existing user-facing settings (days/week,
  *  calorie adjustment, day-state) — same path the user would take
- *  manually through Edit Profile / Switch Day / etc. Caller is
- *  responsible for kicking plan regen when `needs_regen=true`. */
+ *  manually through app controls. The active PlanWeek remains fixed;
+ *  `needs_regen` means future generated weeks should read the updated
+ *  settings. */
 export async function applyRecommendationAction(
   token: string,
   action: Record<string, any>,

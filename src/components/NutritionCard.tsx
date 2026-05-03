@@ -17,6 +17,14 @@ import AnimatedNumber from './AnimatedNumber';
 import FadeInView from './FadeInView';
 import { dynamicCompactTextProps } from '../utils/dynamicType';
 
+function e2eId(value: string | number | null | undefined): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
 interface NutritionCardProps {
   title?: string;
   themeName?: AppThemeName;
@@ -1125,6 +1133,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
                   accessibilityRole="button"
                   accessibilityLabel={`Meal: ${meal.meal}. Tap to rename.`}>
                   <Text
+                    testID={`meal-row-name-${e2eId(meal.meal)}`}
                     style={[styles.mealName, checked && styles.mealNameDone]}
                     numberOfLines={2}
                     ellipsizeMode="tail">

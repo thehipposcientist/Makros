@@ -1,7 +1,7 @@
 // WeeklyCheckinCard — end-of-week coaching entry point.
 //
 // Three states:
-//   pending   → "Weekly check-in ready" + dates + Start / Skip; current week already exists
+//   pending   → "Weekly check-in ready" + dates + Start / Skip; next week already exists
 //   completed → read-only recap with AI message + "View recap"
 //   skipped   → saved deterministic summary + "View summary"
 //   none      → renders nothing
@@ -26,7 +26,7 @@ interface Props {
   authToken: string;
   themeName?: AppThemeName;
   /** Called after a successful check-in submission or skip so parent can
-   *  reload the current PlanWeek. */
+   *  reload check-in status and any day-state overlays. */
   onCheckinCompleted?: () => void;
 }
 
@@ -157,7 +157,7 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
             </Text>
             {dateRange ? (
               <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary, marginTop: 1 }}>
-                {isPending ? `Review ${dateRange} and tune the week already generated.` : dateRange}
+                {isPending ? `Review ${dateRange} and save guidance for future weeks.` : dateRange}
               </Text>
             ) : null}
           </View>

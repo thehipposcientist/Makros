@@ -1,0 +1,177 @@
+# Meal, hydration, and supplement state-mutation E2E coverage.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: meals-supplements-state
+tags:
+  - e2e
+  - seeded
+  - meals
+  - supplements
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-meals"
+- extendedWaitUntil:
+    visible: "Meal week"
+    timeout: 30000
+
+# Hydration should hydrate from the seeded DayState and persist quick adds
+# through the backend /meals/hydration path.
+- extendedWaitUntil:
+    visible:
+      id: "hydration-panel"
+    timeout: 30000
+- assertVisible: "48 /"
+- tapOn:
+    id: "hydration-quick-add-8"
+- extendedWaitUntil:
+    visible: "56 /"
+    timeout: 15000
+
+# Favorite meal quick-log should create a real meal row in today's plan view.
+- tapOn:
+    id: "today-meal-card-header"
+- extendedWaitUntil:
+    visible:
+      id: "today-nutrition-card"
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      id: "saved-meal-log-open-e2e_post_workout_shake"
+    direction: DOWN
+    timeout: 20000
+    visibilityPercentage: 50
+- tapOn:
+    id: "saved-meal-log-open-e2e_post_workout_shake"
+- extendedWaitUntil:
+    visible:
+      id: "saved-meal-log-modal"
+    timeout: 15000
+- assertVisible: "Log E2E post-workout shake"
+- tapOn:
+    id: "saved-meal-type-snack"
+- tapOn:
+    id: "saved-meal-log-submit"
+- scrollUntilVisible:
+    element:
+      id: "meal-row-name-e2e_post_workout_shake"
+    direction: UP
+    timeout: 20000
+    visibilityPercentage: 50
+
+# History should render server-backed meal history instead of future plan data.
+- tapOn:
+    id: "meals-subtab-history"
+- extendedWaitUntil:
+    visible:
+      id: "meal-history-screen"
+    timeout: 30000
+- tapOn:
+    id: "meal-history-row-0"
+- extendedWaitUntil:
+    visible: "Greek yogurt protein bowl"
+    timeout: 15000
+
+# Supplement stack: add a new daily item, then log it from Today.
+- tapOn:
+    id: "meals-subtab-supplements"
+- extendedWaitUntil:
+    visible:
+      id: "supplement-stack-screen"
+    timeout: 30000
+- tapOn:
+    id: "supplement-section-stack"
+- extendedWaitUntil:
+    visible:
+      id: "supplement-stack-row-creatine_monohydrate"
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      id: "supplement-add-open"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "supplement-add-open"
+- extendedWaitUntil:
+    visible:
+      id: "supplement-add-modal"
+    timeout: 15000
+- tapOn:
+    id: "supplement-custom-name-input"
+- inputText: "E2E electrolyte"
+- pressKey: Enter
+- tapOn:
+    id: "supplement-dose-input"
+- inputText: "1"
+- pressKey: Enter
+- tapOn:
+    id: "supplement-timing-morning"
+- scrollUntilVisible:
+    element:
+      id: "supplement-add-submit"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "supplement-add-submit"
+- extendedWaitUntil:
+    visible:
+      id: "supplement-stack-row-e2e_electrolyte"
+    timeout: 30000
+- tapOn:
+    id: "supplement-section-today"
+- scrollUntilVisible:
+    element:
+      id: "supplement-today-row-e2e_electrolyte"
+    direction: DOWN
+    timeout: 20000
+    visibilityPercentage: 50
+- tapOn:
+    id: "supplement-mark-taken-e2e_electrolyte"
+- extendedWaitUntil:
+    visible: "Taken"
+    timeout: 15000

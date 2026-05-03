@@ -573,6 +573,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
 
     const newItem: MealItem = {
       name: cleanName,
+      food_id: lib?.id ?? null,
       quantity: qty,
       unit,
       calories: lib?.calories ?? 0,

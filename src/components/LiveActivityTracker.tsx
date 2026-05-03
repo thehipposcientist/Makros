@@ -373,7 +373,12 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
           {phase === 'pick' ? (
             <>
               <View style={[styles.header, { borderBottomColor: tc.border, paddingTop: insets.top + 6 }]}>
-                <TouchableOpacity onPress={onClose} style={styles.headerBtn} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+                <TouchableOpacity
+                  testID="live-tracker-close"
+                  accessibilityLabel="live-tracker-close"
+                  onPress={onClose}
+                  style={styles.headerBtn}
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
                   <Ionicons name="close" size={26} color={tc.textPrimary} />
                 </TouchableOpacity>
                 <Text style={[styles.headerTitle, { color: tc.textPrimary }]}>Custom Workout</Text>
@@ -388,6 +393,8 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                 {QUICK_START.map((c) => (
                   <TouchableOpacity
                     key={`${c.category}-${c.subtype}`}
+                    testID={`live-quickstart-${c.category}-${c.subtype}`}
+                    accessibilityLabel={`live-quickstart-${c.category}-${c.subtype}`}
                     onPress={() => handleStart(c)}
                     style={{
                       flexDirection: 'row', alignItems: 'center', gap: 12,
@@ -444,6 +451,8 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
               <View style={{ gap: 10 }}>
                 {phase === 'running' ? (
                   <TouchableOpacity
+                    testID="live-pause"
+                    accessibilityLabel="live-pause"
                     onPress={handlePause}
                     style={{
                       paddingVertical: 16, borderRadius: 14,
@@ -454,6 +463,8 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                   </TouchableOpacity>
                 ) : (
                   <TouchableOpacity
+                    testID="live-resume"
+                    accessibilityLabel="live-resume"
                     onPress={handleResume}
                     style={{
                       paddingVertical: 16, borderRadius: 14,
@@ -464,6 +475,8 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                   </TouchableOpacity>
                 )}
                 <TouchableOpacity
+                  testID="live-finish"
+                  accessibilityLabel="live-finish"
                   onPress={handleFinish}
                   style={{
                     paddingVertical: 16, borderRadius: 14,
@@ -473,6 +486,8 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                   <Text style={{ fontSize: 15, fontWeight: '800', color: '#fff' }}>Finish</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
+                  testID="live-discard"
+                  accessibilityLabel="live-discard"
                   onPress={handleDiscard}
                   style={{
                     paddingVertical: 12, alignItems: 'center',

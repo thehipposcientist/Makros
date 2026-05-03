@@ -810,6 +810,111 @@ def test_logged_ai_food_micros_are_persisted_for_gut_metrics() -> None:
     _ok("unmatched AI food micros feed daily gut metrics")
 
 
+def test_patch_meal_items_refreshes_history_averages_and_gut_metrics() -> None:
+    """Editing a backend meal-history row should replace MealItem rows and
+    immediately refresh the facts surfaces that read meal history, rolling
+    averages, and DailyNutritionMetrics."""
+    print("\n[test] meal patch refreshes history averages and gut metrics")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.enums import FoodCategory, FoodSource, MealSource, MealType
+    from app.models import Food, FoodNutrition, Meal, MealItem, User  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.meals import update_meal
+    from app.services.nutrition.gut_health import compute_daily_metrics, compute_weekly_rollup
+    from app.services.nutrition.meal_history import get_meal_history, get_rolling_averages
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    meal_date = date.today()
+    with Session(engine) as s:
+        u = User(email="meal-patch@example.com", username="mealpatch", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        food = Food(
+            name="Fiber oats",
+            normalized_name="fiber oats",
+            category=FoodCategory.GRAINS_CARBS,
+            source=FoodSource.SEED,
+            is_verified=True,
+        )
+        s.add(food); s.flush()
+        s.add(FoodNutrition(
+            food_id=food.id,
+            reference_grams=100,
+            calories=100,
+            protein=8,
+            carbs=18,
+            fat=2,
+            fiber=10,
+            added_sugar_g=1,
+        ))
+        meal = Meal(
+            user_id=u.id,
+            meal_date=meal_date,
+            meal_type=MealType.BREAKFAST,
+            name="Old oats",
+            source=MealSource.LOGGED,
+        )
+        s.add(meal); s.flush()
+        s.add(MealItem(
+            meal_id=meal.id,
+            food_name="Fiber oats",
+            food_id=food.id,
+            quantity=1,
+            unit="serving",
+            serving_grams=100,
+            calories=100,
+            protein_g=8,
+            carbs_g=18,
+            fat_g=2,
+        ))
+        s.commit(); s.refresh(meal)
+        before = compute_daily_metrics(s, user_id=u.id, metric_date=meal_date, allow_ai=False)
+        assert before.fiber_total_g == 10, before.model_dump()
+
+        update_meal(
+            meal.id,
+            {
+                "name": "Edited oats",
+                "items": [{
+                    "food_name": "Fiber oats",
+                    "food_id": food.id,
+                    "quantity": 2,
+                    "unit": "serving",
+                    "serving_grams": 200,
+                    "calories": 200,
+                    "protein_g": 16,
+                    "carbs_g": 36,
+                    "fat_g": 4,
+                }],
+            },
+            current_user=u,
+            db=s,
+        )
+
+        rows = s.exec(select(MealItem).where(MealItem.meal_id == meal.id)).all()
+        assert len(rows) == 1, rows
+        assert rows[0].calories == 200, rows[0].model_dump()
+
+        history = get_meal_history(u.id, days=1, db=s)
+        assert history[0]["name"] == "Edited oats", history
+        assert history[0]["totals"]["calories"] == 200, history
+        averages = get_rolling_averages(u.id, window=1, db=s)
+        assert averages["avg_calories"] == 200.0, averages
+
+        rollup = compute_weekly_rollup(s, user_id=u.id, end_date=meal_date, days=1)
+        assert rollup["avg_calories"] == 200.0, rollup
+        assert rollup["avg_fiber_g"] == 20.0, rollup
+        assert rollup["avg_added_sugar_g"] == 2.0, rollup
+    _ok("meal edit updates history, averages, and gut facts")
+
+
 def test_score_micros_read_unsuffixed_aliases_and_calorie_fallback() -> None:
     """FoodNutrition.extra_nutrients historically stores both suffixed
     keys (`calcium_mg`) and plan/search keys (`calcium`). The score builder
@@ -1268,6 +1373,7 @@ cases = [
     test_meal_history_window_matches_rolling_average_window,
     test_saved_meal_log_retry_is_idempotent,
     test_logged_ai_food_micros_are_persisted_for_gut_metrics,
+    test_patch_meal_items_refreshes_history_averages_and_gut_metrics,
     test_score_micros_read_unsuffixed_aliases_and_calorie_fallback,
     test_gut_rollup_uses_logged_days_not_empty_metric_placeholders,
     test_compute_daily_metrics_recovers_from_duplicate_insert_race,

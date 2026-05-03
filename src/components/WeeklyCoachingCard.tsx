@@ -325,8 +325,8 @@ export default function WeeklyCoachingCard({
                             const result = await applyRecommendationAction(
                               authToken, rec.action, rec.key,
                             );
-                            // Hand back to the parent so HomeScreen
-                            // can kick plan regen when needs_regen=true.
+                            // Hand back to the parent so it can refresh
+                            // status; the active PlanWeek stays fixed.
                             onAcceptRecommendation?.(rec);
                             Alert.alert(
                               result.applied ? 'Applied' : 'Acknowledged',

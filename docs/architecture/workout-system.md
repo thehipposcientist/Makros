@@ -1,6 +1,6 @@
 # Workout System — Architecture
 
-Last updated: 2026-04-29
+Last updated: 2026-05-03
 
 ## Pipeline
 
@@ -95,8 +95,8 @@ All entry points must pass the same shape of inputs. Audited Apr 2026:
 |---|---|
 | `POST /plans/start-new-week` | Generates a fresh 7-day PlanWeek anchored on the most recent Monday. First-run setup. |
 | `POST /plans/week/auto-renew` | When the active PlanWeek's `end_date` has passed, generates the next 7 days immediately and snapshots the expired week for the one-day coach check-in/recap. Idempotent while still active. |
-| `PATCH /plans/days/{day_date}/workout` | Per-day workout swap (Switch Day, manual edits, AI swaps). |
-| `POST /plans/week/review-and-apply` | Applies user-selected weekly check-in recommendations and regenerates remaining days. |
+| `PATCH /plans/days/{day_date}/workout` | Per-day workout patch (Change Focus, manual edits, exercise swaps). |
+| `POST /plans/week/review-and-apply` | Applies user-selected weekly check-in recommendations to durable settings / coach state only. It does not rewrite the active PlanWeek or regenerate remaining days. |
 | `POST /workouts/generate-day` | **Legacy** — used by the now-removed daily fresh-day regen. Still defined; no active caller on the front page. |
 | `POST /workouts/generate-week` | **Legacy** — used by the legacy Switch Day flow before the PlanWeek model. Active for the migration tail. |
 
