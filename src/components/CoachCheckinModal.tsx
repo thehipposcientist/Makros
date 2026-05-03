@@ -316,7 +316,7 @@ export default function CoachCheckinModal({
                         {existingCheckin.review_snapshot_json.headline}
                       </Text>
                     ) : null}
-                    <View style={{ flexDirection: 'row', gap: 16, marginBottom: existingCheckin.ai_message ? 12 : 0 }}>
+                    <View style={{ flexDirection: 'row', gap: 16, flexWrap: 'wrap', marginBottom: existingCheckin.ai_message ? 12 : 0 }}>
                       {existingCheckin.review_snapshot_json.sessions_completed != null && (
                         <View>
                           <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>SESSIONS</Text>
@@ -341,7 +341,20 @@ export default function CoachCheckinModal({
                           </Text>
                         </View>
                       )}
+                      {(existingCheckin.review_snapshot_json.nutrition_logging_pct ?? existingCheckin.review_snapshot_json.nutrition_adherence_pct) != null && (
+                        <View>
+                          <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>FOOD LOGS</Text>
+                          <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginTop: 1 }}>
+                            {Math.round(existingCheckin.review_snapshot_json.nutrition_logging_pct ?? existingCheckin.review_snapshot_json.nutrition_adherence_pct)}%
+                          </Text>
+                        </View>
+                      )}
                     </View>
+                    {existingCheckin.review_snapshot_json.nutrition_summary ? (
+                      <Text style={{ fontSize: 12, color: colors.textSecondary, lineHeight: 17, marginTop: 2 }}>
+                        {existingCheckin.review_snapshot_json.nutrition_summary}
+                      </Text>
+                    ) : null}
                   </View>
                 )}
 
@@ -423,7 +436,7 @@ export default function CoachCheckinModal({
                     <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary, lineHeight: 19 }}>
                       {review.headline}
                     </Text>
-                    <View style={{ flexDirection: 'row', gap: 14, marginTop: 10 }}>
+                    <View style={{ flexDirection: 'row', gap: 14, flexWrap: 'wrap', marginTop: 10 }}>
                       <View>
                         <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>SESSIONS</Text>
                         <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginTop: 1 }}>
@@ -450,7 +463,18 @@ export default function CoachCheckinModal({
                           </Text>
                         </View>
                       )}
+                      <View>
+                        <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '700' }}>FOOD LOGS</Text>
+                        <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginTop: 1 }}>
+                          {Math.round(review.nutrition_logging_pct ?? review.nutrition_adherence_pct)}%
+                        </Text>
+                      </View>
                     </View>
+                    {review.nutrition_summary ? (
+                      <Text style={{ fontSize: 11, color: colors.textSecondary, marginTop: 10, lineHeight: 15 }}>
+                        {review.nutrition_summary}
+                      </Text>
+                    ) : null}
                     {/* Top 2 recs — the rest of the list lives on the
                         weekly coaching card. We surface the highest-
                         priority ones here to tee up a conversation. */}

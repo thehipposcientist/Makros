@@ -22,11 +22,15 @@ import {
   WeekSummaryResponse, WeekCheckinAnswers,
   WeekCheckinResponse, RecommendedAdjustments,
   DifficultyRating, BlockerType, PainArea, CheckinDecision,
+  submitPlanWeekCheckin, PlanWeekCheckinRecord,
 } from '../services/api';
 
 interface Props {
   visible: boolean;
   authToken: string;
+  planWeekId?: number | null;
+  weekStart?: string | null;
+  weekEnd?: string | null;
   goal?: string;
   themeName?: AppThemeName;
   // Optional health signals to pass to backend
@@ -35,7 +39,8 @@ interface Props {
   avgRestingHr?: number | null;
   avgSteps?: number | null;
   onClose: () => void;
-  onComplete: (applied: boolean) => void;
+  onComplete: (applied: boolean, result?: WeekCheckinResponse | PlanWeekCheckinRecord) => void;
+  onSkip?: () => void;
 }
 
 type Step = 1 | 2 | 3 | 4 | 5;
@@ -163,6 +168,7 @@ const DECISION_OPTIONS: Array<{ value: CheckinDecision; label: string; sub: stri
 
 export default function WeeklyCheckinModal({
   visible, authToken, goal = 'body_recomp', themeName, onClose, onComplete,
+  planWeekId, weekEnd, onSkip,
   weightSlopeLbsPerWeek, avgSleepHours, avgRestingHr, avgSteps,
 }: Props) {
   const theme = getTheme(themeName);
@@ -182,11 +188,11 @@ export default function WeeklyCheckinModal({
     setAnswers({});
     setCheckinResult(null);
     setLoading(true);
-    getWeekSummary(authToken)
+    getWeekSummary(authToken, { planWeekId, endDate: weekEnd })
       .then(s => setSummary(s))
       .catch(() => setSummary(null))
       .finally(() => setLoading(false));
-  }, [visible, authToken]);
+  }, [visible, authToken, planWeekId, weekEnd]);
 
   const goalQ4Config = GOAL_Q4[goal] ?? GOAL_Q4.general_health;
 
@@ -205,8 +211,20 @@ export default function WeeklyCheckinModal({
         avg_resting_hr: avgRestingHr ?? null,
         avg_steps: avgSteps ?? null,
       };
-      const result = await postWeekCheckin(authToken, payload);
-      setCheckinResult(result);
+      if (planWeekId) {
+        const result = await submitPlanWeekCheckin(authToken, planWeekId, {
+          overall_difficulty: answers.difficulty,
+          biggest_blocker: answers.blocker,
+          pain_area: answers.pain,
+          goal_q4: answers.goalQ4,
+          user_decision: decision,
+        });
+        const normalized = normalizePlanWeekCheckinResult(result);
+        setCheckinResult(normalized);
+      } else {
+        const result = await postWeekCheckin(authToken, payload);
+        setCheckinResult(result);
+      }
       setStep(5);
     } catch {
       // Still move to step 5 so user can close
@@ -214,7 +232,38 @@ export default function WeeklyCheckinModal({
     } finally {
       setSubmitting(false);
     }
-  }, [authToken, answers, weightSlopeLbsPerWeek, avgSleepHours, avgRestingHr, avgSteps]);
+  }, [authToken, planWeekId, answers, weightSlopeLbsPerWeek, avgSleepHours, avgRestingHr, avgSteps]);
+
+  const emptyAdjustment = (): RecommendedAdjustments => ({
+    difficulty_adjustment: 'same',
+    volume_adjustment_pct: 0,
+    intensity_adjustment: 'maintain',
+    session_length_adjustment: null,
+    cardio_adjustment: null,
+    mobility_adjustment: null,
+    nutrition_adjustment: null,
+    muscle_priorities: [],
+    avoid_patterns: [],
+    preferred_cardio_modes: [],
+    summary: 'No saved setting changes.',
+  });
+
+  const normalizePlanWeekCheckinResult = (record: PlanWeekCheckinRecord): WeekCheckinResponse => {
+    const snap = record.review_snapshot_json ?? {};
+    const summary = (snap.structured_adjustment ?? emptyAdjustment()) as RecommendedAdjustments;
+    const appliedRaw = Array.isArray(snap.structured_applied) ? snap.structured_applied : [];
+    const applied = appliedRaw.map((item: any) => ({
+      type: String(item?.type ?? 'applied'),
+      summary: String(item?.summary ?? item?.type ?? 'Applied'),
+      changed_fields: item?.changed_fields,
+      verified: item?.verified,
+    }));
+    return {
+      summary,
+      applied,
+      coach_message: record.ai_message ?? summary.summary ?? 'Your weekly check-in has been saved.',
+    };
+  };
 
   // ── Shared UI helpers ────────────────────────────────────────────────────────
 
@@ -283,8 +332,9 @@ export default function WeeklyCheckinModal({
         </View>
       );
     }
-    const adherencePct = Math.round(summary.adherence_pct);
+    const adherencePct = Math.round(summary.workout_adherence_pct ?? summary.adherence_pct);
     const adherenceColor = adherencePct >= 80 ? tc.success : adherencePct >= 60 ? tc.warning : tc.error;
+    const nutritionLoggingPct = Math.round(summary.nutrition_logging_pct ?? summary.nutrition_adherence_pct);
     return (
       <ScrollView contentContainerStyle={{ padding: 20, gap: 16 }} showsVerticalScrollIndicator={false}>
         <Text style={{ fontSize: 13, color: tc.textMuted, lineHeight: 20 }}>{summary.headline}</Text>
@@ -292,7 +342,7 @@ export default function WeeklyCheckinModal({
         {/* Adherence bar */}
         <View style={{ backgroundColor: tc.surface, borderRadius: radius.md, padding: 16, borderWidth: 1, borderColor: tc.border }}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
-            <Text style={{ fontSize: 12, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.5 }}>WEEKLY ADHERENCE</Text>
+            <Text style={{ fontSize: 12, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.5 }}>WORKOUT ADHERENCE</Text>
             <Text style={{ fontSize: 16, fontWeight: '900', color: adherenceColor }}>{adherencePct}%</Text>
           </View>
           <View style={{ height: 6, backgroundColor: tc.border, borderRadius: 3, overflow: 'hidden' }}>
@@ -313,14 +363,25 @@ export default function WeeklyCheckinModal({
           )}
         </View>
 
-        {summary.days_logged > 0 && (
-          <View style={{ backgroundColor: tc.surface, borderRadius: radius.md, padding: 12, borderWidth: 1, borderColor: tc.border }}>
-            <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.4 }}>NUTRITION</Text>
-            <Text style={{ fontSize: 13, color: tc.textSecondary, marginTop: 4 }}>
-              {Math.round(summary.nutrition_adherence_pct)}% logged — {summary.days_logged} day{summary.days_logged !== 1 ? 's' : ''} tracked
+        <View style={{ backgroundColor: tc.surface, borderRadius: radius.md, padding: 12, borderWidth: 1, borderColor: tc.border }}>
+          <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '700', letterSpacing: 0.4 }}>NUTRITION LOGGING</Text>
+          <Text style={{ fontSize: 13, color: tc.textSecondary, marginTop: 4, lineHeight: 18 }}>
+            {nutritionLoggingPct}% coverage — {summary.days_logged} of 7 day{summary.days_logged !== 1 ? 's' : ''} tracked
+          </Text>
+          {summary.nutrition_summary ? (
+            <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 6, lineHeight: 17 }}>
+              {summary.nutrition_summary}
             </Text>
-          </View>
-        )}
+          ) : summary.days_logged > 0 ? (
+            <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 6, lineHeight: 17 }}>
+              Avg {Math.round(summary.avg_calories ?? 0)} kcal · {Math.round(summary.avg_protein_g ?? 0)}g protein · {Math.round(summary.avg_fiber_g ?? 0)}g fiber.
+            </Text>
+          ) : (
+            <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 6, lineHeight: 17 }}>
+              No nutrition data yet, so the coach will hold calorie and macro changes.
+            </Text>
+          )}
+        </View>
       </ScrollView>
     );
   };
@@ -425,6 +486,7 @@ export default function WeeklyCheckinModal({
     else if (difficulty === 'too_hard') previewMessage = 'Dialing back intensity — finishable sessions.';
     else if (difficulty === 'too_easy' && adherence >= 80) previewMessage = 'Stepping up load and volume.';
     else if (difficulty === 'did_not_like_plan') previewMessage = 'Prioritizing exercise variety.';
+    else if (blocker === 'nutrition_hard') previewMessage = 'Keeping training steady and simplifying the nutrition target.';
 
     return (
       <ScrollView contentContainerStyle={{ padding: 20, gap: 20 }} showsVerticalScrollIndicator={false}>
@@ -507,7 +569,7 @@ export default function WeeklyCheckinModal({
             backgroundColor: tc.primary, borderRadius: radius.md,
             padding: 16, alignItems: 'center', marginTop: 8,
           }}
-          onPress={() => { onComplete(!!checkinResult?.applied.length); onClose(); }}
+          onPress={() => { onComplete(!!checkinResult?.applied.length, checkinResult ?? undefined); onClose(); }}
         >
           <Text style={{ fontSize: 15, fontWeight: '800', color: '#FFF' }}>Done</Text>
         </TouchableOpacity>
@@ -608,6 +670,16 @@ export default function WeeklyCheckinModal({
               </Text>
             </TouchableOpacity>
           </View>
+        )}
+        {step === 4 && onSkip && (
+          <TouchableOpacity
+            onPress={onSkip}
+            style={{ alignItems: 'center', paddingBottom: 14 }}
+          >
+            <Text style={{ fontSize: 13, color: tc.textMuted, fontWeight: '600' }}>
+              Skip this week's check-in
+            </Text>
+          </TouchableOpacity>
         )}
       </View>
     </Modal>

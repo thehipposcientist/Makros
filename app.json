@@ -43,7 +43,10 @@
         "UIBackgroundModes": ["audio"]
       },
       "entitlements": {
-        "com.apple.developer.healthkit": true
+        "com.apple.developer.healthkit": true,
+        "com.apple.developer.applesignin": [
+          "Default"
+        ]
       },
       "buildNumber": "140"
     },

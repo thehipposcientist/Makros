@@ -2,9 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
-  Platform, Image, Dimensions,
+  Platform, Image, Dimensions, Alert,
 } from 'react-native';
 import * as AppleAuthentication from 'expo-apple-authentication';
+import { Ionicons } from '@expo/vector-icons';
 import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestion, loginWithApple } from '../services/api';
 import { colors, radius } from '../constants/theme';
 import FadeInView from '../components/FadeInView';
@@ -48,7 +49,9 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const emailValid = EMAIL_RE.test(email.trim());
   const signupDisabled = mode === 'signup' && emailTouched && !emailValid;
   const maestroTestAccount = __DEV__ && email.trim().endsWith('@test.thallo');
-  const showAppleSignIn = Platform.OS === 'ios' && appleAvailable && (mode === 'login' || mode === 'signup');
+  const showSocialSignIn = mode === 'login' || mode === 'signup';
+  const showAppleSignIn = Platform.OS === 'ios' && showSocialSignIn;
+  const socialVerb = mode === 'signup' ? 'Sign up' : 'Log in';
 
   const firstNameRef       = useRef<TextInput>(null);
   const lastNameRef        = useRef<TextInput>(null);
@@ -79,11 +82,30 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     setShowConfirmPassword(false);
   };
 
+  const showProviderError = (title: string, message: string) => {
+    setError(message);
+    Alert.alert(title, message);
+  };
+
+  const handleGoogleSignIn = () => {
+    if (loading) return;
+    const action = mode === 'signup' ? 'sign-up' : 'login';
+    showProviderError(
+      `Google ${action} unavailable`,
+      'Google account auth is not configured in this build yet. Use Apple or email for now.',
+    );
+  };
+
   const handleAppleSignIn = async () => {
     if (loading) return;
     setError('');
     setLoading(true);
     try {
+      const available = appleAvailable || await AppleAuthentication.isAvailableAsync().catch(() => false);
+      if (!available) {
+        throw new Error('Apple sign-in is not available on this device.');
+      }
+      if (!appleAvailable) setAppleAvailable(true);
       const credential = await AppleAuthentication.signInAsync({
         requestedScopes: [
           AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
@@ -105,7 +127,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       onAuthenticated(access_token, is_new_user);
     } catch (e: any) {
       if (e?.code !== 'ERR_REQUEST_CANCELED') {
-        setError(e?.message ?? 'Unable to continue with Apple');
+        showProviderError('Apple sign-in failed', e?.message ?? 'Unable to continue with Apple');
       }
     } finally {
       setLoading(false);
@@ -251,22 +273,49 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
             </TouchableOpacity>
           </View>
 
-          {showAppleSignIn && (
+          {showSocialSignIn && (
             <View style={styles.socialBlock}>
-              <AppleAuthentication.AppleAuthenticationButton
-                buttonType={
-                  mode === 'signup'
-                    ? AppleAuthentication.AppleAuthenticationButtonType.SIGN_UP
-                    : AppleAuthentication.AppleAuthenticationButtonType.SIGN_IN
-                }
-                buttonStyle={AppleAuthentication.AppleAuthenticationButtonStyle.WHITE}
-                cornerRadius={8}
-                style={styles.appleButton}
-                onPress={handleAppleSignIn}
-              />
+              <View style={styles.socialRow}>
+                <TouchableOpacity
+                  testID="auth-google-button"
+                  activeOpacity={0.78}
+                  style={[styles.socialProviderButton, loading && styles.socialProviderButtonDisabled]}
+                  onPress={handleGoogleSignIn}
+                  disabled={loading}
+                >
+                  <Ionicons name="logo-google" size={18} color="#4285F4" />
+                  <Text
+                    style={styles.socialProviderText}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.82}
+                  >
+                    {socialVerb} with Google
+                  </Text>
+                </TouchableOpacity>
+                {showAppleSignIn && (
+                  <TouchableOpacity
+                    testID="auth-apple-button"
+                    activeOpacity={0.78}
+                    style={[styles.socialProviderButton, loading && styles.socialProviderButtonDisabled]}
+                    onPress={handleAppleSignIn}
+                    disabled={loading}
+                  >
+                    <Ionicons name="logo-apple" size={20} color="#111827" />
+                    <Text
+                      style={styles.socialProviderText}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.82}
+                    >
+                      {socialVerb} with Apple
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
               <TouchableOpacity onPress={() => setShowLegal(true)} activeOpacity={0.75}>
                 <Text style={styles.socialLegalText}>
-                  By continuing with Apple, you accept Thallo's Terms, Privacy Policy, Health Disclaimer, and AI Disclosure.
+                  By continuing with {showAppleSignIn ? 'Google or Apple' : 'Google'}, you accept Thallo's Terms, Privacy Policy, Health Disclaimer, and AI Disclosure.
                 </Text>
               </TouchableOpacity>
               <View style={styles.orRow}>
@@ -565,7 +614,28 @@ const styles = StyleSheet.create({
 
   formCard: { gap: 12 },
   socialBlock: { gap: 10, marginBottom: 2 },
-  appleButton: { width: '100%', height: 48 },
+  socialRow: { flexDirection: 'row', gap: 10 },
+  socialProviderButton: {
+    flex: 1,
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 8,
+    overflow: 'hidden',
+  },
+  socialProviderButtonDisabled: { opacity: 0.62 },
+  socialProviderText: {
+    flexShrink: 1,
+    color: '#111827',
+    fontSize: 13,
+    fontWeight: '800',
+  },
   socialLegalText: {
     fontSize: 11,
     color: colors.textMuted,

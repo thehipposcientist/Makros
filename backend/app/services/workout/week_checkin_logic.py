@@ -100,7 +100,12 @@ class WeeklyCheckinSummary:
     zone2_minutes: float = 0.0
     strength_sessions: int = 0
     nutrition_adherence_pct: float = 0.0
+    nutrition_logging_pct: float = 0.0
     days_logged: int = 0
+    avg_calories: float = 0.0
+    avg_protein_g: float = 0.0
+    avg_fiber_g: float = 0.0
+    nutrition_summary: str = ""
     avg_sleep_hours: float | None = None
     avg_resting_hr: float | None = None
     goal: str = ""
@@ -121,7 +126,12 @@ class WeeklyCheckinSummary:
             "zone2_minutes": round(self.zone2_minutes, 0),
             "strength_sessions": self.strength_sessions,
             "nutrition_adherence_pct": round(self.nutrition_adherence_pct, 1),
+            "nutrition_logging_pct": round(self.nutrition_logging_pct, 1),
             "days_logged": self.days_logged,
+            "avg_calories": round(self.avg_calories, 1),
+            "avg_protein_g": round(self.avg_protein_g, 1),
+            "avg_fiber_g": round(self.avg_fiber_g, 1),
+            "nutrition_summary": self.nutrition_summary,
             "avg_sleep_hours": self.avg_sleep_hours,
             "avg_resting_hr": self.avg_resting_hr,
             "goal": self.goal,
@@ -148,7 +158,12 @@ def compute_checkin_summary_from_review(review: Any) -> WeeklyCheckinSummary:
         cardio_minutes=review.cardio_minutes,
         zone2_minutes=review.zone2_minutes,
         nutrition_adherence_pct=review.nutrition_adherence_pct,
+        nutrition_logging_pct=getattr(review, "nutrition_logging_pct", review.nutrition_adherence_pct),
         days_logged=review.days_logged,
+        avg_calories=getattr(review, "avg_calories", 0.0),
+        avg_protein_g=getattr(review, "avg_protein_g", 0.0),
+        avg_fiber_g=getattr(review, "avg_fiber_g", 0.0),
+        nutrition_summary=getattr(review, "nutrition_summary", ""),
         avg_sleep_hours=review.avg_sleep_hours,
         avg_resting_hr=review.avg_resting_hr,
         goal=review.goal,
@@ -284,7 +299,7 @@ def compute_checkin_recommendations(
         adj.cardio_adjustment = (adj.cardio_adjustment or "") + extra
 
     # ── Nutrition ─────────────────────────────────────────────────────────────
-    if blocker == "nutrition_hard" or summary.nutrition_adherence_pct < 50:
+    if blocker == "nutrition_hard" or summary.nutrition_logging_pct < 50:
         adj.nutrition_adjustment = "Simplifying meal structure — focus on protein and calories first, everything else second."
 
     # ── Goal-specific Q4 ─────────────────────────────────────────────────────
@@ -341,12 +356,36 @@ def _compute_coach_findings(review: Any) -> CoachFindings:
     if review.zone2_minutes >= 60:
         findings.wins.append(f"{int(review.zone2_minutes)} min Zone 2 — solid aerobic base work.")
 
-    try:
-        avg_protein = getattr(review, "avg_protein_g", 0) or 0
-        if avg_protein >= 160:
-            findings.wins.append("Protein intake was on point this week.")
-    except Exception:
-        pass
+    avg_protein = getattr(review, "avg_protein_g", 0) or 0
+    avg_fiber = getattr(review, "avg_fiber_g", 0) or 0
+    days_logged = getattr(review, "days_logged", 0) or 0
+    nutrition_logging_pct = getattr(review, "nutrition_logging_pct", getattr(review, "nutrition_adherence_pct", 0)) or 0
+    protein_target_adherence_pct = getattr(review, "protein_target_adherence_pct", None)
+    calorie_target_adherence_pct = getattr(review, "calorie_target_adherence_pct", None)
+    nutrition_summary = getattr(review, "nutrition_summary", "") or ""
+    if avg_protein >= 160:
+        findings.wins.append("Protein intake was on point this week.")
+    if nutrition_summary:
+        findings.nutrition_notes.append(nutrition_summary)
+    if days_logged == 0:
+        findings.nutrition_notes.append("No meals logged this week — nutrition coaching is data-limited.")
+    elif nutrition_logging_pct < 50:
+        findings.nutrition_notes.append(
+            f"Only {days_logged} day{'s' if days_logged != 1 else ''} logged — get to 4+ days before changing targets."
+        )
+    else:
+        if protein_target_adherence_pct is not None:
+            findings.nutrition_notes.append(
+                f"Protein target hit on {protein_target_adherence_pct:.0f}% of logged target days."
+            )
+        elif avg_protein > 0:
+            findings.nutrition_notes.append(f"Protein averaged {avg_protein:.0f}g/day.")
+        if calorie_target_adherence_pct is not None:
+            findings.nutrition_notes.append(
+                f"Calories were near target on {calorie_target_adherence_pct:.0f}% of logged target days."
+            )
+        if avg_fiber > 0 and avg_fiber < 20:
+            findings.nutrition_notes.append(f"Fiber averaged {avg_fiber:.0f}g/day — push toward 25g+.")
 
     # Needs attention
     if missed > 0:
@@ -357,9 +396,9 @@ def _compute_coach_findings(review: Any) -> CoachFindings:
     if review.cardio_minutes < 20 and planned > 0:
         findings.needs_attention.append("Cardio was minimal — even 20 min helps recovery and base fitness.")
 
-    if review.nutrition_adherence_pct < 50 and review.days_logged > 0:
+    if nutrition_logging_pct < 50 and days_logged > 0:
         findings.needs_attention.append("Nutrition tracking was sparse — harder to hit targets without logging.")
-    elif review.days_logged == 0:
+    elif days_logged == 0:
         findings.needs_attention.append("No nutrition data this week.")
 
     # Volume-based

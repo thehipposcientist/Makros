@@ -28,7 +28,8 @@ from typing import Any, Literal
 from sqlmodel import select
 
 from app.models import (
-    DailyNutritionMetrics, PlanDay, PlanWeek, UserGoal, UserRollup, WorkoutCompletion, WorkoutPlan,
+    DailyNutritionMetrics, DailyRollup, PlanDay, PlanWeek, UserGoal, UserRollup,
+    WorkoutCompletion, WorkoutPlan,
 )
 from app.services.workout.weekly_volume import (
     WeeklyVolumeSnapshot, compute_weekly_volume,
@@ -71,14 +72,21 @@ class WeeklyReview:
     sessions_completed: int
     sessions_planned: int
     adherence_pct: float
+    workout_adherence_pct: float
     cardio_minutes: float
     zone2_minutes: float
     volume: WeeklyVolumeSnapshot
     # Nutrition signals — averaged over the window.
-    nutrition_adherence_pct: float = 0.0
+    nutrition_adherence_pct: float = 0.0  # Back-compat alias for nutrition_logging_pct.
+    nutrition_logging_pct: float = 0.0
     days_logged: int = 0
+    avg_calories: float = 0.0
     avg_protein_g: float = 0.0
     avg_fiber_g: float = 0.0
+    calorie_target_adherence_pct: float | None = None
+    protein_target_adherence_pct: float | None = None
+    nutrition_summary: str = ""
+    nutrition_notes: list[str] = field(default_factory=list)
     # Weight trend signals.
     weight_trend_lbs_per_week: float | None = None
     weight_trend_direction: str = "flat"    # "up" | "down" | "flat" | "unknown"
@@ -101,13 +109,26 @@ class WeeklyReview:
             "sessions_completed": self.sessions_completed,
             "sessions_planned": self.sessions_planned,
             "adherence_pct": round(self.adherence_pct, 1),
+            "workout_adherence_pct": round(self.workout_adherence_pct or self.adherence_pct, 1),
             "cardio_minutes": round(self.cardio_minutes, 0),
             "zone2_minutes": round(self.zone2_minutes, 0),
             "volume": self.volume.to_dict(),
             "nutrition_adherence_pct": round(self.nutrition_adherence_pct, 1),
+            "nutrition_logging_pct": round(self.nutrition_logging_pct, 1),
             "days_logged": self.days_logged,
+            "avg_calories": round(self.avg_calories, 1),
             "avg_protein_g": round(self.avg_protein_g, 1),
             "avg_fiber_g": round(self.avg_fiber_g, 1),
+            "calorie_target_adherence_pct": (
+                round(self.calorie_target_adherence_pct, 1)
+                if self.calorie_target_adherence_pct is not None else None
+            ),
+            "protein_target_adherence_pct": (
+                round(self.protein_target_adherence_pct, 1)
+                if self.protein_target_adherence_pct is not None else None
+            ),
+            "nutrition_summary": self.nutrition_summary,
+            "nutrition_notes": self.nutrition_notes,
             "weight_trend_lbs_per_week": self.weight_trend_lbs_per_week,
             "weight_trend_direction": self.weight_trend_direction,
             "weight_ema_lbs": self.weight_ema_lbs,
@@ -385,6 +406,10 @@ def compute_weekly_review(
         .where(DailyNutritionMetrics.metric_date <= end_date)
     ).all()
     days_logged = len(nutrition_rows)
+    avg_calories = (
+        sum(r.calories_total or 0 for r in nutrition_rows) / days_logged
+        if days_logged > 0 else 0.0
+    )
     avg_protein = (
         sum((r.plant_protein_g or 0) + (r.animal_protein_g or 0) for r in nutrition_rows) / days_logged
         if days_logged > 0 else 0.0
@@ -393,10 +418,51 @@ def compute_weekly_review(
         sum(r.fiber_total_g or 0 for r in nutrition_rows) / days_logged
         if days_logged > 0 else 0.0
     )
-    # Nutrition adherence proxy = % of days with at least 50% of target kcal
-    # logged. Conservative — cheaper than the full adherence engine and
-    # still catches "user forgot to log half the week".
-    nutrition_adherence_pct = 100.0 * days_logged / days if days > 0 else 0.0
+    # Nutrition logging coverage = % of days with meal-derived metrics.
+    # Keep the legacy `nutrition_adherence_pct` response field as an alias
+    # for now, but UI should label this as logging coverage unless target
+    # adherence fields below are populated.
+    nutrition_logging_pct = 100.0 * days_logged / days if days > 0 else 0.0
+
+    daily_rollups = db.exec(
+        select(DailyRollup)
+        .where(DailyRollup.user_id == user_id)
+        .where(DailyRollup.day >= start)
+        .where(DailyRollup.day <= end_date)
+    ).all()
+    kcal_target_days = [
+        r for r in daily_rollups
+        if (r.kcal_target or 0) > 0 and (r.kcal or 0) > 0
+    ]
+    calorie_target_adherence_pct = None
+    if kcal_target_days:
+        hits = [
+            r for r in kcal_target_days
+            if abs(float(r.kcal or 0) - float(r.kcal_target or 0)) <= float(r.kcal_target or 0) * 0.15
+        ]
+        calorie_target_adherence_pct = 100.0 * len(hits) / len(kcal_target_days)
+    protein_target_days = [
+        r for r in daily_rollups
+        if (r.protein_target_g or 0) > 0 and (r.protein_g or 0) > 0
+    ]
+    protein_target_adherence_pct = None
+    if protein_target_days:
+        hits = [
+            r for r in protein_target_days
+            if float(r.protein_g or 0) >= float(r.protein_target_g or 0) * 0.85
+        ]
+        protein_target_adherence_pct = 100.0 * len(hits) / len(protein_target_days)
+
+    nutrition_summary, nutrition_notes = _build_nutrition_summary(
+        days=days,
+        days_logged=days_logged,
+        logging_pct=nutrition_logging_pct,
+        avg_calories=avg_calories,
+        avg_protein=avg_protein,
+        avg_fiber=avg_fiber,
+        calorie_target_adherence_pct=calorie_target_adherence_pct,
+        protein_target_adherence_pct=protein_target_adherence_pct,
+    )
 
     # Weight trend direction for headline + rec gating.
     weight_trend_direction = "unknown"
@@ -615,7 +681,7 @@ def compute_weekly_review(
                 ),
                 action={"type": "raise_fiber_target"},
             ))
-    elif nutrition_adherence_pct < 50 and planned > 0:
+    elif nutrition_logging_pct < 50 and planned > 0:
         recs.append(Recommendation(
             key="log_more_meals",
             area="nutrition",
@@ -681,13 +747,20 @@ def compute_weekly_review(
         sessions_completed=completed_for_adherence,
         sessions_planned=planned,
         adherence_pct=adherence_pct,
+        workout_adherence_pct=adherence_pct,
         cardio_minutes=cardio_mins,
         zone2_minutes=zone2_mins,
         volume=volume,
-        nutrition_adherence_pct=nutrition_adherence_pct,
+        nutrition_adherence_pct=nutrition_logging_pct,
+        nutrition_logging_pct=nutrition_logging_pct,
         days_logged=days_logged,
+        avg_calories=avg_calories,
         avg_protein_g=avg_protein,
         avg_fiber_g=avg_fiber,
+        calorie_target_adherence_pct=calorie_target_adherence_pct,
+        protein_target_adherence_pct=protein_target_adherence_pct,
+        nutrition_summary=nutrition_summary,
+        nutrition_notes=nutrition_notes,
         weight_trend_lbs_per_week=weight_trend_lbs_per_week,
         weight_trend_direction=weight_trend_direction,
         weight_ema_lbs=weight_ema_lbs,
@@ -696,6 +769,55 @@ def compute_weekly_review(
         headline=headline,
         recommendations=recs,
     )
+
+
+def _build_nutrition_summary(
+    *,
+    days: int,
+    days_logged: int,
+    logging_pct: float,
+    avg_calories: float,
+    avg_protein: float,
+    avg_fiber: float,
+    calorie_target_adherence_pct: float | None,
+    protein_target_adherence_pct: float | None,
+) -> tuple[str, list[str]]:
+    notes: list[str] = []
+
+    if days_logged <= 0:
+        return (
+            "No meals logged this week, so nutrition changes are held until there is data.",
+            ["No nutrition data this week — log a few meals before changing calories or macros."],
+        )
+
+    notes.append(f"{days_logged}/{days} days logged ({logging_pct:.0f}% coverage).")
+    if avg_protein > 0:
+        notes.append(f"Protein averaged {avg_protein:.0f}g/day.")
+    if avg_fiber > 0:
+        notes.append(f"Fiber averaged {avg_fiber:.0f}g/day.")
+    if calorie_target_adherence_pct is not None:
+        notes.append(f"Calories were near target on {calorie_target_adherence_pct:.0f}% of logged target days.")
+    if protein_target_adherence_pct is not None:
+        notes.append(f"Protein target hit on {protein_target_adherence_pct:.0f}% of logged target days.")
+
+    if logging_pct < 50:
+        summary = (
+            f"Nutrition logging was light ({days_logged}/{days} days), so this review should not change calories yet."
+        )
+    elif calorie_target_adherence_pct is not None or protein_target_adherence_pct is not None:
+        parts = [f"{days_logged}/{days} days logged"]
+        if calorie_target_adherence_pct is not None:
+            parts.append(f"{calorie_target_adherence_pct:.0f}% calorie-target days")
+        if protein_target_adherence_pct is not None:
+            parts.append(f"{protein_target_adherence_pct:.0f}% protein-target days")
+        summary = "Nutrition read: " + " · ".join(parts) + "."
+    else:
+        summary = (
+            f"Nutrition read: {days_logged}/{days} days logged, "
+            f"averaging {avg_calories:.0f} kcal, {avg_protein:.0f}g protein, and {avg_fiber:.0f}g fiber."
+        )
+
+    return summary, notes
 
 
 def _build_headline(

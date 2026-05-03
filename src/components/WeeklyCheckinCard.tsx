@@ -9,7 +9,7 @@
 // Self-contained: fetches its own status on mount. No parent state needed.
 
 import { useEffect, useState, useCallback } from 'react';
-import { View, Text, TouchableOpacity, ActivityIndicator, Modal, Alert } from 'react-native';
+import { View, Text, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -20,6 +20,7 @@ import {
   PlanWeekCheckinRecord,
 } from '../services/api';
 import CoachCheckinModal from './CoachCheckinModal';
+import WeeklyCheckinModal from './WeeklyCheckinModal';
 import { maybeNotifyWeeklyCheckinDue } from '../utils/weeklyCheckinNotifications';
 
 interface Props {
@@ -175,7 +176,7 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
 
         {/* Completed: stats row */}
         {hasRecap && checkin?.review_snapshot_json ? (
-          <View style={{ flexDirection: 'row', gap: 16, marginBottom: 10 }}>
+          <View style={{ flexDirection: 'row', gap: 16, flexWrap: 'wrap', marginBottom: 10 }}>
             {checkin.review_snapshot_json.sessions_completed != null && (
               <View>
                 <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5 }}>SESSIONS</Text>
@@ -186,9 +187,17 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
             )}
             {checkin.review_snapshot_json.adherence_pct != null && (
               <View>
-                <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5 }}>ADHERENCE</Text>
+                <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5 }}>WORKOUT ADH.</Text>
                 <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginTop: 1 }}>
-                  {Math.round(checkin.review_snapshot_json.adherence_pct)}%
+                  {Math.round(checkin.review_snapshot_json.workout_adherence_pct ?? checkin.review_snapshot_json.adherence_pct)}%
+                </Text>
+              </View>
+            )}
+            {(checkin.review_snapshot_json.nutrition_logging_pct ?? checkin.review_snapshot_json.nutrition_adherence_pct) != null && (
+              <View>
+                <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.5 }}>FOOD LOGS</Text>
+                <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginTop: 1 }}>
+                  {Math.round(checkin.review_snapshot_json.nutrition_logging_pct ?? checkin.review_snapshot_json.nutrition_adherence_pct)}%
                 </Text>
               </View>
             )}
@@ -241,7 +250,20 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
         </View>
       </View>
 
-      {status.plan_week_id && (
+      {status.plan_week_id && isPending && !recapMode && (
+        <WeeklyCheckinModal
+          visible={modalVisible}
+          authToken={authToken}
+          planWeekId={status.plan_week_id}
+          weekStart={status.week_start}
+          weekEnd={status.week_end}
+          themeName={themeName}
+          onClose={() => setModalVisible(false)}
+          onComplete={handleCheckinSubmitted}
+          onSkip={handleSkip}
+        />
+      )}
+      {status.plan_week_id && (!isPending || recapMode) && (
         <CoachCheckinModal
           visible={modalVisible}
           authToken={authToken}

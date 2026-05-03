@@ -110,6 +110,35 @@ def test_empty_user_returns_review_with_no_recs():
     assert review.user_id == u.id
     assert review.sessions_completed == 0
     assert review.adherence_pct == 0.0
+    assert review.nutrition_summary
+
+
+def test_review_separates_workout_adherence_from_nutrition_logging():
+    """Workout adherence and food logging are different metrics. The
+    review should expose explicit names so the UI doesn't show two
+    unexplained adherence percentages."""
+    print("\n[test] review separates workout adherence from nutrition logging")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    from app.models import DailyNutritionMetrics
+    s, u = _setup_user_with_goal()
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    for i in range(6):
+        s.add(DailyNutritionMetrics(
+            user_id=u.id,
+            metric_date=today - timedelta(days=i),
+            calories_total=2100,
+            plant_protein_g=35,
+            animal_protein_g=115,
+            fiber_total_g=24,
+        ))
+    s.commit()
+
+    review = compute_weekly_review(s, u.id)
+    data = review.to_dict()
+    assert data["workout_adherence_pct"] == 0.0
+    assert data["nutrition_logging_pct"] == 85.7
+    assert "6/7 days logged" in data["nutrition_summary"]
 
 
 # ── Low adherence ─────────────────────────────────────────────

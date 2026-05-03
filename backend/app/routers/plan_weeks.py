@@ -9,7 +9,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -107,6 +107,7 @@ class PlanWeekCheckinSubmitRequest(BaseModel):
     biggest_blocker: str | None = None
     pain_area: str | None = None
     goal_q4: str | None = None
+    user_decision: str = "apply_recommendations"
 
 
 class StartNewWeekRequest(BaseModel):
@@ -272,12 +273,20 @@ def _review_snapshot_from_review(review, *, history_context: dict | None = None)
         "sessions_completed": review.sessions_completed,
         "sessions_planned": review.sessions_planned,
         "adherence_pct": review.adherence_pct,
+        "workout_adherence_pct": getattr(review, "workout_adherence_pct", review.adherence_pct),
         "cardio_minutes": review.cardio_minutes,
         "zone2_minutes": review.zone2_minutes,
         "total_hard_sets": review.volume.total_hard_sets,
+        "nutrition_logging_pct": getattr(review, "nutrition_logging_pct", review.nutrition_adherence_pct),
+        "nutrition_adherence_pct": review.nutrition_adherence_pct,
+        "avg_calories": getattr(review, "avg_calories", 0.0),
         "avg_protein_g": review.avg_protein_g,
         "avg_fiber_g": review.avg_fiber_g,
         "days_logged": review.days_logged,
+        "calorie_target_adherence_pct": getattr(review, "calorie_target_adherence_pct", None),
+        "protein_target_adherence_pct": getattr(review, "protein_target_adherence_pct", None),
+        "nutrition_summary": getattr(review, "nutrition_summary", ""),
+        "nutrition_notes": getattr(review, "nutrition_notes", []),
         "weight_trend_direction": review.weight_trend_direction,
         "recommendations": [
             {"key": r.key, "title": r.title, "priority": r.priority, "area": r.area, "detail": r.detail}
@@ -358,6 +367,52 @@ def _build_plan_week_review_snapshot(db: Session, user_id: int, pw: PlanWeek) ->
                 "previous_summary_count": history_context.get("previous_summary_count", 0),
             },
         }
+
+
+def _plan_week_review_snapshot_needs_backfill(snapshot: dict | None) -> bool:
+    if not isinstance(snapshot, dict):
+        return True
+    required_keys = (
+        "workout_adherence_pct",
+        "nutrition_logging_pct",
+        "avg_calories",
+        "calorie_target_adherence_pct",
+        "protein_target_adherence_pct",
+        "nutrition_summary",
+        "nutrition_notes",
+    )
+    return any(key not in snapshot for key in required_keys)
+
+
+def _backfill_plan_week_checkin_review_snapshot(
+    db: Session,
+    user_id: int,
+    checkin,
+):
+    if not checkin or not _plan_week_review_snapshot_needs_backfill(checkin.review_snapshot_json):
+        return checkin
+
+    pw = db.exec(
+        select(PlanWeek).where(
+            PlanWeek.id == checkin.plan_week_id,
+            PlanWeek.user_id == user_id,
+        )
+    ).first()
+    if not pw:
+        return checkin
+
+    old_snapshot = checkin.review_snapshot_json if isinstance(checkin.review_snapshot_json, dict) else {}
+    new_snapshot = _build_plan_week_review_snapshot(db, user_id, pw)
+    merged_snapshot = {**old_snapshot, **new_snapshot}
+    for key in ("structured_checkin", "structured_adjustment", "structured_applied"):
+        if key in old_snapshot:
+            merged_snapshot[key] = old_snapshot[key]
+    checkin.review_snapshot_json = merged_snapshot
+    checkin.plan_goal = checkin.plan_goal or pw.goal
+    db.add(checkin)
+    db.commit()
+    db.refresh(checkin)
+    return checkin
 
 
 def _ensure_plan_week_checkin_pending(
@@ -837,6 +892,8 @@ def get_checkin_status(
     ) and not _checkin_recap_active_for_dates(checkin.week_end_date, today=today):
         return {"status": "none", "checkin": None, "week_start": None, "week_end": None, "plan_week_id": None}
 
+    checkin = _backfill_plan_week_checkin_review_snapshot(db, current_user.id, checkin)
+
     status = "pending"
     if checkin and checkin.skipped:
         status = "skipped"
@@ -869,6 +926,7 @@ def get_plan_week_checkin(
     ).first()
     if not checkin:
         raise HTTPException(status_code=404, detail="No check-in found for this plan week")
+    checkin = _backfill_plan_week_checkin_review_snapshot(db, current_user.id, checkin)
     return _checkin_to_dict(checkin)
 
 
@@ -952,6 +1010,8 @@ def submit_plan_week_checkin(
         structured_feedback["pain_area"] = body.pain_area
     if body.goal_q4:
         structured_feedback["goal_q4"] = body.goal_q4
+    if body.user_decision:
+        structured_feedback["user_decision"] = body.user_decision
     if structured_feedback:
         feedback_dict["structured_weekly_answers"] = structured_feedback
 
@@ -973,7 +1033,7 @@ def submit_plan_week_checkin(
                 biggest_blocker=body.biggest_blocker,
                 pain_area=body.pain_area,
                 goal_q4=body.goal_q4,
-                user_decision="apply_recommendations",
+                user_decision=body.user_decision or "apply_recommendations",
             )
             goal_for_adjustment = str(getattr(review, "goal", None) or pw.goal or "body_recomp")
             adj = compute_checkin_recommendations(summary, answers, goal_for_adjustment)
@@ -991,6 +1051,9 @@ def submit_plan_week_checkin(
                 structured_applied.append({
                     "type": "volume_adjustment",
                     "summary": f"Volume {coaching.volume_adjustment_pct:+d}% next week",
+                    "changed_fields": {
+                        "volume_adjustment_pct": coaching.volume_adjustment_pct,
+                    },
                 })
 
             for action in adj.action_list:
@@ -1002,6 +1065,9 @@ def submit_plan_week_checkin(
                         "type": action.get("type"),
                         "summary": result.summary,
                         "needs_regen": result.needs_regen,
+                        "changed_fields": result.changed_fields,
+                        "descriptive_only": result.descriptive_only,
+                        "verified": bool(result.changed_fields) or result.descriptive_only,
                     })
 
             if body.pain_area and body.pain_area != "none":
@@ -1020,6 +1086,7 @@ def submit_plan_week_checkin(
                     structured_applied.append({
                         "type": "injury_flag",
                         "summary": f"Flagged {body.pain_area} for next week's planner.",
+                        "changed_fields": {"injuries": existing},
                     })
                 db.add(CoachMemory(
                     user_id=current_user.id,
@@ -1612,6 +1679,8 @@ def regenerate_remaining(
 
 @router.get("/week-summary")
 def get_week_summary(
+    plan_week_id: int | None = Query(default=None),
+    end_date: date | None = Query(default=None),
     current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> dict:
@@ -1623,7 +1692,18 @@ def get_week_summary(
     from app.services.workout.plan_review_v2 import compute_weekly_review
     from app.services.workout.week_checkin_logic import compute_checkin_summary_from_review
 
-    pw = get_active_week(db, current_user.id)
+    pw = None
+    if plan_week_id is not None:
+        pw = db.exec(
+            select(PlanWeek).where(
+                PlanWeek.id == plan_week_id,
+                PlanWeek.user_id == current_user.id,
+            )
+        ).first()
+        if not pw:
+            raise HTTPException(status_code=404, detail="Plan week not found")
+    if pw is None:
+        pw = get_active_week(db, current_user.id)
     if not pw:
         from app.models import PlanWeek as _PW
         pw = db.exec(
@@ -1635,7 +1715,13 @@ def get_week_summary(
         raise HTTPException(status_code=404, detail="No plan week found")
 
     try:
-        review = compute_weekly_review(db, current_user.id)
+        review = compute_weekly_review(
+            db,
+            current_user.id,
+            end_date=end_date or pw.end_date,
+            days=7,
+            goal_override=pw.goal,
+        )
     except Exception as e:
         logger.warning(f"[week-summary] compute_weekly_review failed: {e}")
         raise HTTPException(status_code=500, detail="Could not compute weekly review")

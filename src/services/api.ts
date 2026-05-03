@@ -121,11 +121,43 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
         continue;
       }
 
-      const data = await res.json();
+      // Empty-body responses (204 No Content, or anything sent without a
+      // Content-Length / explicit empty body) can't be JSON-parsed —
+      // calling `res.json()` on them throws `SyntaxError: Unexpected end
+      // of JSON input`. The original implementation called .json()
+      // unconditionally, which silently broke every DELETE endpoint
+      // returning 204 (delete_meal, delete_gear, etc.). Detect those
+      // cases first and resolve with `undefined` cast to T — callers
+      // typing the result as `void` get a clean no-op.
+      const contentLength = res.headers.get('Content-Length');
+      const isEmptyBody = res.status === 204
+        || res.status === 205
+        || contentLength === '0';
+      if (isEmptyBody) {
+        if (!res.ok) {
+          recordTelemetryEvent('api_error', { path, status: res.status, detail: `HTTP ${res.status}` }, tokenFromHeaders(options.headers));
+          throw new Error(`HTTP ${res.status}`);
+        }
+        return undefined as unknown as T;
+      }
+
+      // Some servers reply with an empty 200 body too (rare but possible).
+      // Try to parse, fall back to undefined on parse error so a void
+      // helper doesn't crash on a payload-less success.
+      const text = await res.text();
+      let data: any = null;
+      if (text.length > 0) {
+        try { data = JSON.parse(text); }
+        catch {
+          if (res.ok) return undefined as unknown as T;
+          recordTelemetryEvent('api_error', { path, status: res.status, detail: 'invalid_json' }, tokenFromHeaders(options.headers));
+          throw new Error(`HTTP ${res.status}`);
+        }
+      }
       if (!res.ok) {
-        const detail = Array.isArray(data.detail)
+        const detail = Array.isArray(data?.detail)
           ? data.detail.map((e: any) => `${e.loc?.join('.')}: ${e.msg}`).join(', ')
-          : (typeof data.detail === 'string' ? data.detail : `HTTP ${res.status}`);
+          : (typeof data?.detail === 'string' ? data.detail : `HTTP ${res.status}`);
         recordTelemetryEvent('api_error', { path, status: res.status, detail }, tokenFromHeaders(options.headers));
         throw new Error(detail);
       }
@@ -3528,13 +3560,22 @@ export interface WeeklyReviewResponse {
   sessions_completed: number;
   sessions_planned: number;
   adherence_pct: number;
+  workout_adherence_pct?: number;
   cardio_minutes: number;
   zone2_minutes: number;
   volume: WeeklyVolumeSnapshot;
+  /** Legacy alias. Prefer nutrition_logging_pct for the label unless target
+   *  adherence fields are populated. */
   nutrition_adherence_pct: number;
+  nutrition_logging_pct?: number;
   days_logged: number;
+  avg_calories?: number;
   avg_protein_g: number;
   avg_fiber_g: number;
+  calorie_target_adherence_pct?: number | null;
+  protein_target_adherence_pct?: number | null;
+  nutrition_summary?: string;
+  nutrition_notes?: string[];
   weight_trend_lbs_per_week: number | null;
   weight_trend_direction: 'up' | 'down' | 'flat' | 'unknown';
   /** EMA-smoothed weight from the 7-day UserRollup. Cleaner trend
@@ -3599,11 +3640,17 @@ export interface WeekSummaryResponse {
   completed_workouts: number;
   missed_workouts: number;
   adherence_pct: number;
+  workout_adherence_pct?: number;
   cardio_minutes: number;
   zone2_minutes: number;
   strength_sessions: number;
   nutrition_adherence_pct: number;
+  nutrition_logging_pct?: number;
   days_logged: number;
+  avg_calories?: number;
+  avg_protein_g?: number;
+  avg_fiber_g?: number;
+  nutrition_summary?: string;
   avg_sleep_hours: number | null;
   avg_resting_hr: number | null;
   goal: string;
@@ -3659,12 +3706,19 @@ export interface RecommendedAdjustments {
 
 export interface WeekCheckinResponse {
   summary: RecommendedAdjustments;
-  applied: Array<{ type: string; summary: string }>;
+  applied: Array<{ type: string; summary: string; changed_fields?: Record<string, any>; verified?: boolean }>;
   coach_message: string;
 }
 
-export async function getWeekSummary(token: string): Promise<WeekSummaryResponse> {
-  return request<WeekSummaryResponse>('/plans/week-summary', {
+export async function getWeekSummary(
+  token: string,
+  opts: { planWeekId?: number | null; endDate?: string | null } = {},
+): Promise<WeekSummaryResponse> {
+  const params = new URLSearchParams();
+  if (opts.planWeekId != null) params.set('plan_week_id', String(opts.planWeekId));
+  if (opts.endDate) params.set('end_date', opts.endDate);
+  const qs = params.toString();
+  return request<WeekSummaryResponse>(`/plans/week-summary${qs ? `?${qs}` : ''}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -3874,6 +3928,7 @@ export interface PlanWeekCheckinSubmit {
   biggest_blocker?: BlockerType | null;
   pain_area?: PainArea | null;
   goal_q4?: string | null;
+  user_decision?: CheckinDecision | null;
 }
 
 /** Auto-generate the next 7-day week when the active PlanWeek has

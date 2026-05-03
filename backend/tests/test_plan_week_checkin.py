@@ -111,6 +111,9 @@ class FakeDB:
     def commit(self):
         self._committed = True
 
+    def refresh(self, obj):
+        pass
+
     _last_model: str = ""
 
 
@@ -334,6 +337,49 @@ def test_recap_returns_saved_ai_message():
     assert recap["submitted_at"] is not None
 
 
+def test_legacy_checkin_snapshot_backfills_new_review_fields():
+    """Old saved check-ins get the renamed metrics without losing actions."""
+    from app.routers.plan_weeks import _backfill_plan_week_checkin_review_snapshot
+
+    class FakeQuery:
+        def where(self, *args, **kwargs):
+            return self
+
+    checkin = FakePlanWeekCheckin(
+        submitted_at=datetime.now(timezone.utc),
+        review_snapshot_json={
+            "headline": "Saved recap",
+            "adherence_pct": 0.0,
+            "structured_applied": [{"type": "volume_adjustment"}],
+        },
+    )
+    db = FakeDB(checkin=checkin, plan_week=FakePlanWeek())
+    db._last_model = "PlanWeek"
+
+    backfilled_snapshot = {
+        "headline": "Recomputed recap",
+        "adherence_pct": 0.0,
+        "workout_adherence_pct": 0.0,
+        "nutrition_logging_pct": 85.7,
+        "nutrition_adherence_pct": 85.7,
+        "avg_calories": 2100.0,
+        "calorie_target_adherence_pct": None,
+        "protein_target_adherence_pct": None,
+        "nutrition_summary": "Nutrition: 6/7 days logged.",
+        "nutrition_notes": ["Nutrition logging was consistent."],
+    }
+    with patch("app.routers.plan_weeks.select", lambda model: FakeQuery()), \
+         patch("app.routers.plan_weeks._build_plan_week_review_snapshot", return_value=backfilled_snapshot):
+        result = _backfill_plan_week_checkin_review_snapshot(db, 1, checkin)
+
+    snap = result.review_snapshot_json
+    assert snap["workout_adherence_pct"] == 0.0
+    assert snap["nutrition_logging_pct"] == 85.7
+    assert snap["nutrition_summary"].startswith("Nutrition:")
+    assert snap["structured_applied"] == [{"type": "volume_adjustment"}]
+    assert db._committed
+
+
 def test_week_needs_renewal_for_expired_week():
     """week_needs_renewal returns True for a week whose end_date is in the past."""
     from app.services.workout.week_manager import week_needs_renewal
@@ -378,6 +424,7 @@ if __name__ == "__main__":
         test_skip_clears_submitted_at,
         test_checkin_record_stores_ratings,
         test_recap_returns_saved_ai_message,
+        test_legacy_checkin_snapshot_backfills_new_review_fields,
         test_week_needs_renewal_for_expired_week,
         test_week_needs_renewal_false_for_active_week,
     ]
