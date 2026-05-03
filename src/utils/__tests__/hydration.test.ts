@@ -11,7 +11,13 @@
 //   - Liter conversion is consistent with oz output
 //   - Format helper returns "X oz / Y L" string
 
-import { dailyWaterOz, dailyWaterLiters, formatWaterTarget } from '../hydration.ts';
+import {
+  HYDRATION_QUICK_ADD_OUNCES,
+  dailyWaterOz,
+  dailyWaterLiters,
+  formatHydrationQuickAddLabel,
+  formatWaterTarget,
+} from '../hydration.ts';
 
 describe('hydration target', () => {
   describe('dailyWaterOz', () => {
@@ -81,6 +87,19 @@ describe('hydration target', () => {
       const s = formatWaterTarget(170);
       expect(typeof s === 'string' && s.length > 0).toBe(true);
       expect(s.includes('oz') || s.includes('L')).toBe(true);
+    });
+  });
+
+  describe('hydration quick-add display', () => {
+    it('keeps quick-add amounts in fluid ounces', () => {
+      expect([...HYDRATION_QUICK_ADD_OUNCES]).toEqual([8, 16, 24, 32, 40]);
+      expect(HYDRATION_QUICK_ADD_OUNCES.map(formatHydrationQuickAddLabel)).toEqual([
+        '+8 oz',
+        '+16 oz',
+        '+24 oz',
+        '+32 oz',
+        '+40 oz',
+      ]);
     });
   });
 });

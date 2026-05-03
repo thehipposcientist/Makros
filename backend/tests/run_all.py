@@ -192,6 +192,9 @@ _TEST_MODULES = (
     # (the active-workout coach can now see a snapped photo and answer
     # follow-up questions without re-stating context).
     "tests.test_coach_chat_photos",
+    # Coach chat guardrails: AI may propose settings/injuries, but never
+    # return replacement workout/nutrition plans.
+    "tests.test_coach_chat_guardrails",
     # Gear tracker: photo identification should use the shared vision-model
     # selector and multipart image payloads.
     "tests.test_gear_tracking",

@@ -21,6 +21,12 @@ export interface HydrationInputs {
   isHotDay?: boolean;
 }
 
+export const HYDRATION_QUICK_ADD_OUNCES = [8, 16, 24, 32, 40] as const;
+
+export function formatHydrationQuickAddLabel(ounces: number): string {
+  return `+${Math.round(ounces)} oz`;
+}
+
 export function dailyWaterOz(input: HydrationInputs | number, legacyWorkoutMinutes?: number, legacyHot?: boolean, legacyGender?: GenderInput): number {
   // Back-compat: original signature was (weightLbs, workoutMinutes, isHotDay, gender).
   const i: HydrationInputs = typeof input === 'number'

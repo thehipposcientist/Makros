@@ -51,7 +51,7 @@ import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, sca
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
-import { dailyBarDenominator, headlineLoggedCalories, macrosHeadlineFromAverages, selectDailyRows } from './progressData';
+import { aggregateDailyFromHistory, dailyBarDenominator, headlineLoggedCalories, macrosHeadlineFromAverages, macrosHeadlineFromDailyRows, selectDailyRows } from './progressData';
 import { tierOf } from '../utils/subscription';
 
 interface ProgressScreenProps {
@@ -1378,6 +1378,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory),
     [history, mealHistory, paceHistory, prs, summaries, weightEntries],
   );
+  const mealHistoryDailyRows = useMemo(
+    () => (mealHistory == null ? null : aggregateDailyFromHistory(mealHistory as any)),
+    [mealHistory],
+  );
+  const mealMacroHeadline = useMemo(() => {
+    if (mealHistoryDailyRows != null) {
+      return macrosHeadlineFromDailyRows(mealHistoryDailyRows as any);
+    }
+    return mealAverages ? macrosHeadlineFromAverages(mealAverages as any) : null;
+  }, [mealAverages, mealHistoryDailyRows]);
   const trainingSignals = useMemo(
     () => buildTrainingSignals(history, summaries, isHealthKitAvailable(), healthEnabled),
     [healthEnabled, history, summaries],
@@ -3989,7 +3999,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             // Direction + delta still come from the half-window comparison
             // (that's what makes "improving" / "slipping" meaningful).
             const calendarCalorieAvg = Number(mealAverages?.avg_calories ?? recent.avg_calories ?? 0);
-            const calorieAvg = headlineLoggedCalories(mealAverages as any, trends as any);
+            const calorieAvg = mealMacroHeadline?.calories ?? headlineLoggedCalories(mealAverages as any, trends as any);
             const calorieDelta = Number(trends.calorie_delta_when_logged ?? trends.calorie_delta ?? 0);
             return (
               <View style={[styles.vitalsCard, { marginTop: 0 }]}>
@@ -4069,18 +4079,21 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
               {/* Nutrition macros — logged-day average first, with the
                   calendar-window average called out separately when it differs. */}
-              {mealAverages && mealAverages.days_with_data >= 2 && (() => {
-                // Sourced from the same helpers the Trend card uses + tested
-                // in progressData.test.ts. Anything inline here should mirror.
-                const macrosHead = macrosHeadlineFromAverages(mealAverages as any);
+              {mealAverages && (() => {
+                const allDailyRows = mealHistoryDailyRows ?? selectDailyRows(null, mealAverages.daily as any, Number.MAX_SAFE_INTEGER);
+                if (mealHistoryDailyRows != null && allDailyRows.length === 0) return null;
+                const loggedDayCount = allDailyRows.length || mealAverages.days_with_data;
+                if (loggedDayCount < 2) return null;
+                const macrosHead = mealMacroHeadline ?? macrosHeadlineFromDailyRows(allDailyRows as any) ?? macrosHeadlineFromAverages(mealAverages as any);
                 const loggedCal = macrosHead.calories;
                 const loggedProtein = macrosHead.protein;
                 const loggedCarbs = macrosHead.carbs;
                 const loggedFat = macrosHead.fat;
-                // Prefer client-aggregated history (matches the meal tab
-                // exactly). Falls back to the server-rolled averages.daily
-                // if history hasn't loaded yet.
-                const dailyRows = selectDailyRows(mealHistory as any, mealAverages.daily as any, 5);
+                const dailyRows = allDailyRows.slice(0, 5);
+                const totalMealsLogged = allDailyRows.length > 0
+                  ? allDailyRows.reduce((sum, row) => sum + Number(row.meal_count ?? 0), 0)
+                  : mealAverages.total_meals_logged;
+                const avgMealsLoggedDay = totalMealsLogged / Math.max(loggedDayCount, 1);
                 return (
                 <View style={{ marginBottom: 14, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '44' }}>
                   <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>
@@ -4100,7 +4113,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     ))}
                   </View>
                   <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6 }}>
-                    {mealAverages.days_with_data} logged day{mealAverages.days_with_data === 1 ? '' : 's'} in last {mealAverages.window_days} · {Math.round(mealAverages.avg_meals_per_day)} meals/day · {mealAverages.total_meals_logged} total
+                    {loggedDayCount} logged day{loggedDayCount === 1 ? '' : 's'} in last {mealAverages.window_days} · {Math.round(avgMealsLoggedDay)} meals/logged day · {totalMealsLogged} total
                     {Math.abs(loggedCal - mealAverages.avg_calories) >= 25
                       ? ` · calendar avg ${Math.round(mealAverages.avg_calories)} cal`
                       : ''}

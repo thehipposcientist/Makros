@@ -67,6 +67,10 @@ def test_handlers_return_actions():
         # All but `hungrier` carry an action.
         if intent != "hungrier":
             assert resp.action is not None, f"{intent}: missing action dict"
+        payload = resp.to_dict()
+        assert payload["needs_plan_update"] is False, f"{intent}: quick intents must not request plan rewrites"
+        assert "updated_workout_plan" not in payload, f"{intent}: quick intents must not return workout plans"
+        assert "updated_nutrition_plan" not in payload, f"{intent}: quick intents must not return nutrition plans"
         print(f"  ✓ {intent}")
 
 

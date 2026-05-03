@@ -17,10 +17,10 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 - **Trigger**: chat input on HomeScreen.
 - **Endpoint**: `POST /ai/trainer-question` → `routers/ai/chat.py::ask_trainer_question`.
 - **Model**: `MODEL_CHAT` (env var, default gpt-4o-mini).
-- **Two-phase**: Phase 1 = deterministic intent classification OR full LLM. Phase 2 = re-call for structured plan generation when `needs_plan_update=true` and plan not returned.
+- **Single-phase**: deterministic quick-intent classification OR full LLM. Chat never generates replacement workout or nutrition plans.
 - **Context**: slimProfile + full workoutPlan + nutritionPlan + scheduleMapping + progress (sessionsLast30d, recentDays, last-6 workoutHistory) + foodsAvailable + injuries + last-6 chat turns + optional photo + userContext (last 10 activity-log entries).
-- **Response shape**: `{answer, action_items, needs_plan_update, safety_note, updated_goal?, updated_macros?, updated_workout_plan?, updated_nutrition_plan?, updated_injuries?, logged_workouts?, injury_clarification_needed?}`.
-- **Persistence**: none on backend. Plan deltas held in `PendingPlanUpdate` client state until user taps Apply.
+- **Response shape**: `{answer, action_items, needs_plan_update, safety_note, updated_goal?, updated_macros?, updated_workout_plan=null, updated_nutrition_plan=null, updated_injuries?, logged_workouts?, injury_clarification_needed?}`.
+- **Persistence**: no active PlanWeek mutation. Any legacy `updated_workout_plan` / `updated_nutrition_plan` payload is stripped server-side and client-side. Goal/macro proposals are held in `PendingPlanUpdate` until user taps Apply. Injury proposals are held for explicit confirmation; once confirmed they update the user's injury profile for future generated weeks and the current week must be changed through deterministic Switch/Swap/Skip controls.
 
 ## 2. In-Workout Coach
 
@@ -73,7 +73,7 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 ## Known Context Gaps (Home Trainer)
 
 1. Not gated by `decision_rules.gate()` — plan/macro deltas rely on prompt constraints + client approval instead of the check-in safety gate.
-2. No `AIDecision` row written for Home Trainer plan updates — check-in decisions are persisted, chat decisions are not.
+2. No `AIDecision` row written for Home Trainer goal/macro proposals — check-in decisions are persisted, chat decisions are not.
 
 **Other:**
 3. Meal routine protection (`isRoutine=true`) is prompt-enforced, but not represented as a dedicated server-side routine-protection block.
@@ -81,6 +81,6 @@ Three coaches + one deterministic intent router. No AI in workout plan generatio
 ## Recommended AI Improvements
 
 - Apply `decision_rules.gate()` to Home Trainer responses.
-- Persist Home Trainer decisions as `AIDecision` rows when `updated_*` fields are returned.
+- Persist Home Trainer decisions as `AIDecision` rows when goal/macro proposal fields are returned.
 - Move long system prompts out of f-strings into `backend/app/prompts/*.md` files loaded at startup.
 - Build 10-20 prompt eval harness for regression testing on prompt edits.

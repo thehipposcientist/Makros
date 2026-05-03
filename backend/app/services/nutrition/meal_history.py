@@ -790,16 +790,19 @@ def get_meal_history(
     limit: int = 50,
     *,
     db: Session,
+    end_date: date | None = None,
 ) -> list[dict]:
     """Get recent meal history with items, ordered by date desc. Bounded by
     `days` lookback window and `limit` row count."""
     from app.models import Meal, MealItem
 
-    cutoff = date.today() - timedelta(days=days)
+    today_d = end_date or date.today()
+    cutoff = today_d - timedelta(days=days - 1)
     meals = db.exec(
         select(Meal)
         .where(Meal.user_id == user_id)
         .where(col(Meal.meal_date) >= cutoff)
+        .where(col(Meal.meal_date) <= today_d)
         .order_by(col(Meal.meal_date).desc(), col(Meal.created_at).desc())
     ).all()
 

@@ -19,8 +19,8 @@ interface Props {
   authToken: string;
   themeName?: AppThemeName;
   /** Called after a saved meal is logged so the parent can refresh the
-   *  day's meal list. Passed the logged meal_id. */
-  onLogged?: (mealId: number) => void;
+   *  day's meal list. */
+  onLogged?: (log: { mealId: number; saved: api.SavedMeal; meal_date: string; meal_type: string; consumed_at: string }) => void;
   /** Open the template-mode MealEditModal for a saved meal. The parent
    *  handles the modal wiring + the PATCH call so this component stays
    *  focused on list/log concerns. Called with the raw SavedMeal row
@@ -46,6 +46,10 @@ function defaultMealTypeByHour(): string {
   if (h < 17) return 'snack';
   if (h < 21) return 'dinner';
   return 'snack';
+}
+
+function dateKey(value: Date): string {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 }
 
 export default function SavedMealsSection({ authToken, themeName, onLogged, onEditTemplate }: Props) {
@@ -224,7 +228,7 @@ export default function SavedMealsSection({ authToken, themeName, onLogged, onEd
         authToken={authToken}
         themeName={themeName}
         onClose={() => setTarget(null)}
-        onLogged={(mealId) => { setTarget(null); reload(); onLogged?.(mealId); }}
+        onLogged={(log) => { setTarget(null); reload(); Promise.resolve(onLogged?.(log)).catch(() => {}); }}
       />
     </View>
   );
@@ -240,7 +244,7 @@ function LogSavedMealModal({
   authToken: string;
   themeName?: AppThemeName;
   onClose: () => void;
-  onLogged: (mealId: number) => void;
+  onLogged: (log: { mealId: number; saved: api.SavedMeal; meal_date: string; meal_type: string; consumed_at: string }) => void;
 }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -259,12 +263,14 @@ function LogSavedMealModal({
     if (!saved) return;
     setSubmitting(true);
     try {
+      const mealDate = dateKey(consumedAt);
+      const consumedAtISO = consumedAt.toISOString();
       const r = await api.logSavedMeal(authToken, saved.id, {
+        meal_date: mealDate,
         meal_type: mealType,
-        // meal_date defaults to today on the backend.
-        consumed_at: consumedAt.toISOString(),
+        consumed_at: consumedAtISO,
       });
-      onLogged(r.meal_id);
+      onLogged({ mealId: r.meal_id, saved, meal_date: mealDate, meal_type: mealType, consumed_at: consumedAtISO });
     } catch (e: any) {
       Alert.alert('Could not log', String(e?.message ?? e));
     } finally {

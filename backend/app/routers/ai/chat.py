@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 
 import openai
 
@@ -16,11 +17,99 @@ from app.models import User
 from .router import router
 from .models import TrainerQuestionRequest, WorkoutCoachQuestionRequest
 from .utils import (
-    get_openai_api_key, model_chat, model_chat_fallback,
+    get_openai_api_key, model_chat,
     _is_gpt5, _build_chat_kwargs, _chat_create, _looks_truncated, _extract_json,
-    _log_openai_error,
-    SCHEMA_TRAINER_QUESTION, SCHEMA_WORKOUT_QUESTION,
+    SCHEMA_WORKOUT_QUESTION,
 )
+
+_PLAN_CHANGE_FOCUS_KW = (
+    r"(?:push|pull|legs?|upper|lower|chest|back|full[- ]body|"
+    r"cardio|conditioning|zone[ -]?2|intervals?|hiit|tempo|"
+    r"sprint|mobility|stretch|recovery|rest|arms?|shoulders?|"
+    r"hypertrophy|strength)"
+)
+
+_PLAN_CHANGE_INTENT_PATTERNS = (
+    # Future-tense promises: "I'll update / I'll add / I'll swap"
+    r"\bi['\u2019]?ll (?:update|swap|change|move|replace|make|set|add|include|schedule|slot|put)\b",
+    # Past-tense declarations: "I've added / I updated / I swapped"
+    r"\bi['\u2019]?ve (?:updated|swapped|changed|moved|replaced|made|set|added|included|scheduled|slotted|put)\b",
+    r"\bi (?:will|have|just) (?:updated|swapped|changed|moved|replaced|made|set|added|included|scheduled)\b",
+    # Verb + target: "updated tomorrow", "added a pull day",
+    # "swapping tomorrow", "replacing the Wednesday session".
+    r"\b(?:updated|swapped|replaced|moved|changed|added|included|scheduled|slotted) (?:a |an |some )?(?:tomorrow|your|the|that|wednesday|thursday|friday|saturday|sunday|monday|tuesday|" + _PLAN_CHANGE_FOCUS_KW + r")",
+    r"\b(?:swapping|changing|moving|replacing|adding|including|scheduling|slotting) (?:a |an |some )?(?:tomorrow|your|the|that|" + _PLAN_CHANGE_FOCUS_KW + r")",
+    # "add a cardio day", "add a pull day", "added an upper day"
+    r"\b(?:add(?:ed|ing)?|includ(?:ed|ing)?|schedul(?:ed|ing)?) (?:a |an |another )?" + _PLAN_CHANGE_FOCUS_KW + r" (?:day|session|workout|block)\b",
+    # "tomorrow will be push", "tomorrow is now a cardio day"
+    r"\btomorrow(?:['\u2019]s)? (?:will (?:be|have)|is now|becomes|now has) ",
+    r"\b(?:making|made) (?:it|tomorrow|that day|wednesday|thursday|friday|saturday|sunday|monday|tuesday) (?:a |an )?" + _PLAN_CHANGE_FOCUS_KW,
+    r"\blet['\u2019]?s (?:make|swap|change|move|add|include|schedule)\b",
+    r"\bhere['\u2019]?s your (?:updated|new|revised) (?:plan|week|split|schedule)\b",
+    # Soft affirmatives immediately followed by a plan verb:
+    # "sure, I can add", "absolutely — adding a cardio day",
+    # "done, I've swapped tomorrow".
+    r"\b(?:sure|absolutely|done|got it|okay|ok|yes)[,!.\-\u2014 ]+ ?(?:i['\u2019]?(?:ll|ve)|i (?:can|will|have)|let['\u2019]?s|adding|swapping|updating|scheduling)\b",
+)
+
+
+def _enforce_trainer_plan_guardrails(result: dict, *, is_nutritionist: bool) -> dict:
+    """Keep Home Trainer responses inside the app's real mutation surface."""
+    if not isinstance(result, dict):
+        return result
+
+    updated_injuries = result.get("updated_injuries")
+    has_injury_update = isinstance(updated_injuries, list) and len(updated_injuries) > 0
+    if has_injury_update:
+        if result.get("needs_plan_update") or result.get("updated_workout_plan") or result.get("updated_nutrition_plan"):
+            logger.info("[trainer-question] injury guard: stripping plan update from injury response — planner handles this")
+        result["needs_plan_update"] = False
+        result["updated_workout_plan"] = None
+        result["updated_nutrition_plan"] = None
+        return result
+
+    answer_text = (result.get("answer") or "").lower()
+    intent_detected = any(re.search(p, answer_text) for p in _PLAN_CHANGE_INTENT_PATTERNS)
+    had_legacy_plan = bool(result.get("updated_workout_plan")) or bool(result.get("updated_nutrition_plan"))
+    has_setting_update = bool(result.get("updated_goal")) or bool(result.get("updated_macros"))
+
+    if had_legacy_plan:
+        logger.info("[trainer-question] plan guardrail: stripped legacy plan payload from trainer response")
+        result["updated_workout_plan"] = None
+        result["updated_nutrition_plan"] = None
+    else:
+        result.setdefault("updated_workout_plan", None)
+        result.setdefault("updated_nutrition_plan", None)
+
+    if result.get("needs_plan_update") and not has_setting_update:
+        logger.info("[trainer-question] plan guardrail: cleared needs_plan_update without supported setting update")
+        result["needs_plan_update"] = False
+
+    if (intent_detected or had_legacy_plan) and not has_setting_update:
+        if is_nutritionist:
+            result["answer"] = (
+                "I can't directly rewrite your generated meal plan from chat. "
+                "I can recommend the swap, and you can apply it from the meal edit controls or update "
+                "your meal-plan settings for future generated weeks."
+            )
+            result["action_items"] = [
+                "Use the meal edit controls for today's generated meals",
+                "Use Edit Meal Plan for durable food, routine, or preference changes",
+            ]
+        else:
+            result["answer"] = (
+                "I can't directly rewrite your active 7-day workout plan from chat. "
+                "For this week, expand the day on the Workout tab and use the deterministic switch "
+                "or exercise swap controls. For future weeks, update the related workout setting."
+            )
+            result["action_items"] = [
+                "Use 'Switch this day to' for current-week focus changes",
+                "Use the exercise swap/edit control for specific exercise replacements",
+                "Use Workout Settings for changes that should affect future generated weeks",
+            ]
+        result["needs_plan_update"] = False
+
+    return result
 
 
 @router.get("/smoke-test")
@@ -304,19 +393,26 @@ def ask_trainer_question(
     # ── What the AI can and cannot do ────────────────────────────────────────
     _capability_instructions = (
         "\n\nWHAT YOU CAN DO:\n"
-        "• Modify the plan directly (swap exercises, change days, adjust meals/macros) — "
-        "set needs_plan_update=true and return the full updated plan.\n"
-        "• If the user asks to change training days (e.g. 'make it 6 days'), return an updated plan "
-        "with the new number of days. The app will detect the change and update their settings automatically.\n"
-        "• If they ask to change equipment focus, adjust exercises accordingly in the updated plan.\n"
+        "• Answer questions about workouts, nutrition, recovery, injuries, goals, and the user's current plan.\n"
+        "• Recommend safe preference changes for future generated weeks. Recommendations affect settings "
+        "or day-state only after the user confirms through the app's deterministic apply path.\n"
+        "• For current-week day focus changes (e.g. 'make tomorrow legs', 'swap day 3 to push'), "
+        "tell the user to expand that day on the Workout tab and use 'Switch this day to'. "
+        "That deterministic UI is the only supported way to rewrite the active PlanWeek.\n"
+        "• For specific exercise or meal swaps, explain what to swap and direct the user to the "
+        "manual swap/edit control. Do not claim the swap has already happened.\n"
         "• Change the user's primary fitness GOAL. If they say things like 'switch me to fat loss', "
         "'I want to build muscle instead', 'change my goal to strength', set the `updated_goal` field "
         "to the new goal id (see allowed values in the schema). The app will confirm with the user and "
-        "regenerate plans accordingly. Also set needs_plan_update=true and return a plan that matches "
-        "the new goal so the change takes effect immediately after approval.\n"
-        "• Log workouts, track injuries.\n"
+        "future generated weeks will use the new goal. Do not return a replacement plan.\n"
+        "• For explicit calorie or macro target changes, set `updated_macros` with only the changed fields. "
+        "The app will confirm the setting change; generated meal templates refresh through the normal planner.\n"
+        "• Log workouts and track injuries.\n"
         "\n"
         "WHAT YOU CANNOT DO (redirect the user):\n"
+        "• Active PlanWeek edits → you cannot directly rewrite the current 7-day plan, change today's "
+        "planned workout, or replace generated meal templates from chat. Guide the user to the relevant "
+        "deterministic control instead.\n"
         "• Body stats (weight, height, age) → 'You can update that from the ☰ menu → Account.'\n"
         "• Food preferences or dietary restrictions → 'Head to ☰ menu → Edit Meal Plan to update those.'\n"
         "• Supplement CHANGES → 'You can manage those from ☰ menu → Edit Meal Plan → Supplements tab.' "
@@ -326,32 +422,38 @@ def ask_trainer_question(
         "• Priority region / training emphasis → 'Head to Goals tab to change your priority region (Balanced / Lower Body / Upper Body).'\n"
         "For anything not listed above, give your best advice and suggest the appropriate menu path if needed.\n"
         "\n"
-        "IMPORTANT — TEMPORARY vs PERMANENT CHANGES:\n"
-        "When you modify the workout plan in chat, tell the user: 'I've adjusted this week's plan. "
-        "This change applies to the current week only — your next generated plan will follow your "
-        "saved settings. For a permanent change, update your preferences in the Goals or Workout Settings tab.'\n"
-        "This keeps the deterministic planner as the source of truth for future weeks.\n"
+        "CRITICAL PLAN GUARDRAIL:\n"
+        "Never say 'I changed', 'I swapped', 'I updated', 'I moved', or 'I added' when referring to the "
+        "active workout or meal plan. Use language like 'I recommend', 'you can change this by...', "
+        "or 'for future generated weeks, update this setting'. Always leave `updated_workout_plan` and "
+        "`updated_nutrition_plan` as null. Set `needs_plan_update=false` unless you are returning only "
+        "a goal or macro setting proposal through `updated_goal` / `updated_macros`.\n"
     )
 
-    # Unified coach — can update both workout and nutrition plans
+    # Legacy plan fields remain in the API shape for older clients, but
+    # Home Trainer is no longer allowed to return replacement plans. The
+    # persisted PlanWeek and deterministic planner own that surface.
     plan_schema = (
-        '  "updated_workout_plan": <full workout plan object or null>,\n'
-        '  "updated_nutrition_plan": <full nutrition plan object or null>\n'
+        '  "updated_workout_plan": null,\n'
+        '  "updated_nutrition_plan": null\n'
     )
     system_prompt = (
         "You are an expert fitness coach, strength trainer, and registered dietitian — a single unified coach. "
         "You handle BOTH workout programming AND nutrition advice in the same conversation. "
         "Reference specific exercises, foods, macros, and plan details from the user's actual data. "
         "\n\n"
-        "ABSOLUTE RULE — DO WHAT THE USER ASKS:\n"
-        "When the user explicitly asks for a specific change, YOU MUST DO IT.\n"
+        "ABSOLUTE RULE — BE HONEST ABOUT CONTROL:\n"
+        "When the user explicitly asks for a specific plan change, help them make it through the "
+        "supported app control or propose a future preference change. Do not claim you changed the "
+        "active plan from chat.\n"
         "- If they ask to change a DAY'S FOCUS (e.g. 'make tomorrow legs', 'swap day 3 to push'), "
         "tell them: 'You can do this directly! Expand the day on your workout tab and tap "
         "\"Switch this day to\" to pick a new focus. This generates proper exercises instantly.' "
         "Do NOT attempt to rebuild the entire plan for a single day swap — the app handles this better.\n"
         "- If they ask to SWAP A SPECIFIC EXERCISE (e.g. 'replace bench press with dumbbell press'), "
-        "DO IT by returning the updated plan with the exercise swapped.\n"
-        "- Do NOT override their request with recovery opinions.\n\n"
+        "explain the best replacement and direct them to the exercise swap/edit control. Do NOT return "
+        "a replacement plan or say the swap is already applied.\n"
+        "- Do NOT override their request with recovery opinions unless safety signals make it necessary.\n\n"
         "CRITICAL — RESPECT THE USER'S SETTINGS:\n"
         "The user's profile contains `preferredSplit` and `priorityRegion`. When modifying the workout plan:\n"
         "- If they chose a split (e.g. PPL, Upper/Lower), keep that split structure. Do NOT switch to a different split.\n"
@@ -396,12 +498,12 @@ def ask_trainer_question(
         "- When modifying the plan, check `recentDays` first. If the user already did 'Push' today, tomorrow should be 'Pull' or 'Legs' — not 'Push' again.\n"
         "- NEVER mark a day as 'done' or override a day the user already completed. Completed days are immutable.\n"
         "\n"
-        "WORKOUT CHANGES: If the user asks to modify workouts, swap exercises, change days, or report injuries, "
-        "set needs_plan_update=true and return the COMPLETE updated_workout_plan. "
-        "Use structure: { name, totalDays, days: [{ day, focus, stimulus, exercises: [{ name, sets, reps, restSeconds, equipment }] }] }. "
-        "NUTRITION CHANGES: If the user asks to modify meals, swap foods, or adjust nutrition, "
-        "set needs_plan_update=true and return the COMPLETE updated_nutrition_plan. "
-        "Preserve isRoutine=true meals exactly as-is. "
+        "WORKOUT PLAN CHANGES: If the user asks to modify workouts, swap exercises, change days, "
+        "or alter this week's schedule, do NOT set needs_plan_update and do NOT return "
+        "updated_workout_plan. Explain the supported manual control or recommend a future preference change.\n"
+        "NUTRITION PLAN CHANGES: If the user asks to modify meals, swap foods, or alter generated "
+        "meal templates, do NOT set needs_plan_update and do NOT return updated_nutrition_plan. "
+        "Give specific guidance and direct them to Edit Meal Plan / meal editing controls.\n"
         "MACRO TARGET CHANGES: set `updated_macros` with only the changed fields. "
         "INJURY HANDLING — IMPORTANT:\n"
         "When a user reports pain or injury, follow this exact protocol:\n"
@@ -433,8 +535,8 @@ def ask_trainer_question(
         "- Tie the advice to THEIR goal, training volume, and weight — don't give generic tips.\n"
         "- Flag honest tradeoffs (e.g. fasting may help with adherence for some but can hurt "
         "recovery/strength performance when training intensity is high).\n"
-        "- If applying to the plan requires a meal schedule change, offer to update it (set "
-        "needs_plan_update=true and return an updated_nutrition_plan that reflects the new window).\n"
+        "- If applying to the plan requires a meal schedule change, explain which meal routine or "
+        "meal-plan setting to edit. Do not claim you updated generated meals from chat.\n"
         "- Don't medicalize — you're a coach, not a doctor. Recommend professional help for "
         "diagnosable conditions (thyroid, GI disorders, diabetes, etc.)."
         "\n\nReturn JSON only."
@@ -483,40 +585,24 @@ def ask_trainer_question(
         "set `updated_macros` with ONLY the changed fields. Example: user says 'make my protein 130g' → "
         '`"updated_macros": {"protein": 130}`. The app saves these as custom macro preferences '
         "and triggers a nutrition regen. Do NOT rebuild the full meal plan for macro-only changes — "
-        "the app handles that automatically. You can still set needs_plan_update=true if you ALSO "
-        "want to change specific meals.\n"
-        "IMPORTANT: If needs_plan_update is true, you MUST include the complete updated plan object "
-        "(not just the changed parts - the full structure). Preserve all unchanged days/meals exactly.\n"
+        "the app handles that automatically. If the user also wants to change specific meals, guide them "
+        "to the meal edit controls instead of returning a generated meal plan.\n"
+        "PLAN FIELD GUARDRAIL: Always return updated_workout_plan=null and updated_nutrition_plan=null. "
+        "Do not generate replacement plans in chat.\n"
         "PLAN SETTING CHANGES: If the user asks to change training days, workout duration, or equipment, "
-        "set needs_plan_update=true and return the FULL updated plan reflecting the change. "
-        "For example, if they say 'make it 6 days', return a complete 6-day plan. "
-        "Do NOT just say you've made the change — you must actually return the updated plan.\n"
-        "CRITICAL PROMISE RULE: If your `answer` describes ANY change to the user's plan — "
+        "explain that the setting affects future generated weeks and tell them where to update it. "
+        "Do NOT say you have made the change unless the response includes a supported structured field "
+        "such as updated_goal or updated_macros.\n"
+        "CRITICAL PROMISE RULE: If your `answer` describes ANY active plan change — "
         "'I'll swap', 'I'll update', 'I'll move', 'I'll change tomorrow to X', 'making it push', "
-        "'swapped legs for push', 'moved your rest day', 'let's make it chest focus' — you MUST set "
-        "needs_plan_update=true AND return the complete updated plan object. "
-        "If you cannot produce a complete plan, DO NOT describe the change in your answer. "
-        "Never promise a change you aren't returning as structured data — that leaves the user with "
-        "a useless 'Apply' button. Either describe + return, or acknowledge that you can't make the "
-        "change right now without promising.\n"
+        "'swapped legs for push', 'moved your rest day', 'let's make it chest focus' — rewrite the answer "
+        "before returning it. You cannot make that promise from chat.\n"
         + (
-            "WORKOUT PLAN FORMAT: updated_workout_plan must use this exact structure: "
-            '{"name": "...", "totalDays": N, "days": [{"day": "Day 1", "focus": "...", "stimulus": "strength|hypertrophy|volume|conditioning|mixed", "exercises": [{"name": "...", "sets": N, "reps": "...", "restSeconds": N, "equipment": "..."}]}]}. '
-            "CRITICAL: Every day MUST have at least 3 exercises. NEVER return a day with an empty exercises array. "
-            "STIMULUS FIELD: Every day MUST include a `stimulus` field. Use 'strength' for heavy/low-rep days (3-5 reps), "
-            "'hypertrophy' for moderate rep days (6-10 reps), 'volume' for high-rep days (10-15 reps), "
-            "'conditioning' for cardio/circuit days, 'mixed' for combination days. "
-            "Copy from the original plan when the day's intent hasn't changed."
+            "WORKOUT PLAN FORMAT: updated_workout_plan must be null. The active PlanWeek is DB-owned "
+            "and can only be changed by deterministic app controls."
             if not is_nutritionist else
-            "NUTRITION PLAN FORMAT: updated_nutrition_plan must use this exact structure: "
-            '{"targets": {"calories": N, "protein": N, "carbs": N, "fat": N}, '
-            '"breakfast": {"meal": "...", "items": [{"name": "plain food name", "quantity": N, "unit": "g|oz|lb|ml|fl_oz|cup|tbsp|tsp|piece|slice|scoop|serving", "calories": N, "protein": N, "carbs": N, "fat": N}], "calories": N, "protein": N, "carbs": N, "fat": N, "estimated_alignment": "...", "isRoutine": false}, '
-            '"lunch": {...same structure...}, "dinner": {...same structure...}, "snack": {...same structure or omit if no snack...}}. '
-            "CRITICAL ITEM RULES: Each items[] entry must have `name` (no quantity in the name), separate `quantity` (number), and `unit` (from the enum). "
-            "WRONG: {name: '2 eggs'}.  RIGHT: {name: 'eggs', quantity: 2, unit: 'piece'}. "
-            "Per-item macros must sum to meal-level totals. "
-            "When the user asks to change a macro target (e.g. 'set protein to 200g'), "
-            "update the targets object AND recalculate all meal items to match the new totals."
+            "NUTRITION PLAN FORMAT: updated_nutrition_plan must be null. Generated meal templates "
+            "refresh through deterministic nutrition regeneration, not chat-generated replacements."
         )
     )
 
@@ -566,8 +652,7 @@ def ask_trainer_question(
     client = OpenAI(api_key=api_key)
     try:
         _m_fast = model_chat()           # Phase 1: fast model for answer
-        _m_full = model_chat_fallback()   # Phase 2: fallback model for plan generation
-        print(f"[trainer-question] phase1_model={_m_fast} phase2_model={_m_full}")
+        print(f"[trainer-question] model={_m_fast}")
 
         # Phase 1: answer + optional plan in one call.
         # Don't pass json_schema for gpt-5 — the trainer schema has optional/typeless
@@ -634,126 +719,7 @@ def ask_trainer_question(
         result = _extract_json(raw)
         logger.info(f"[trainer-question] phase-1: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')} logged_workouts={len(result.get('logged_workouts') or [])}")
 
-        # ── Injury guard: NEVER modify the plan when reporting injuries ──
-        # The AI sometimes ignores the system prompt and returns both
-        # updated_injuries AND needs_plan_update. The deterministic planner
-        # handles injury-aware plan changes — not the AI.
-        if result.get("updated_injuries") and isinstance(result["updated_injuries"], list) and len(result["updated_injuries"]) > 0:
-            if result.get("needs_plan_update") or result.get("updated_workout_plan") or result.get("updated_nutrition_plan"):
-                logger.info("[trainer-question] injury guard: stripping plan update from injury response — planner handles this")
-                result["needs_plan_update"] = False
-                result["updated_workout_plan"] = None
-                result["updated_nutrition_plan"] = None
-
-        # ── Intent-detection safety net ──────────────────────────────
-        # The LLM sometimes describes a plan change in `answer` ("yes,
-        # I'll update tomorrow to push") but forgets to set
-        # needs_plan_update or return the plan object. Without this
-        # fallback, the Apply banner never appears and the user sees
-        # a confirmation that silently does nothing.
-        #
-        # We pattern-match on a conservative list of phrases that
-        # strongly imply an applied change. Regex is deterministic so
-        # this is safe and auditable. False positives here are cheap
-        # (they just trigger phase-2 which generates the plan); false
-        # negatives are expensive (the user's promised change is lost).
-        import re as _re
-        answer_text = (result.get("answer") or "").lower()
-        # Focus keyword alternation shared across patterns. Must cover
-        # lifting splits AND non-lifting modalities — "add a cardio day"
-        # is just as much an apply-intent as "make it push". Missing
-        # keywords here → intent slips through → Apply banner never
-        # shows → user reports "the trainer said yes and did nothing."
-        _focus_kw = (
-            r"(?:push|pull|legs?|upper|lower|chest|back|full[- ]body|"
-            r"cardio|conditioning|zone[ -]?2|intervals?|hiit|tempo|"
-            r"sprint|mobility|stretch|recovery|rest|arms?|shoulders?|"
-            r"hypertrophy|strength)"
-        )
-        _intent_patterns = (
-            # Future-tense promises: "I'll update / I'll add / I'll swap"
-            r"\bi['\u2019]?ll (?:update|swap|change|move|replace|make|set|add|include|schedule|slot|put)\b",
-            # Past-tense declarations: "I've added / I updated / I swapped"
-            r"\bi['\u2019]?ve (?:updated|swapped|changed|moved|replaced|made|set|added|included|scheduled|slotted|put)\b",
-            r"\bi (?:will|have|just) (?:updated|swapped|changed|moved|replaced|made|set|added|included|scheduled)\b",
-            # Verb + target: "updated tomorrow", "added a pull day",
-            # "swapping tomorrow", "replacing the Wednesday session".
-            r"\b(?:updated|swapped|replaced|moved|changed|added|included|scheduled|slotted) (?:a |an |some )?(?:tomorrow|your|the|that|wednesday|thursday|friday|saturday|sunday|monday|tuesday|" + _focus_kw + r")",
-            r"\b(?:swapping|changing|moving|replacing|adding|including|scheduling|slotting) (?:a |an |some )?(?:tomorrow|your|the|that|" + _focus_kw + r")",
-            # "add a cardio day", "add a pull day", "added an upper day"
-            r"\b(?:add(?:ed|ing)?|includ(?:ed|ing)?|schedul(?:ed|ing)?) (?:a |an |another )?" + _focus_kw + r" (?:day|session|workout|block)\b",
-            # "tomorrow will be push", "tomorrow is now a cardio day"
-            r"\btomorrow(?:['\u2019]s)? (?:will (?:be|have)|is now|becomes|now has) ",
-            r"\b(?:making|made) (?:it|tomorrow|that day|wednesday|thursday|friday|saturday|sunday|monday|tuesday) (?:a |an )?" + _focus_kw,
-            r"\blet['\u2019]?s (?:make|swap|change|move|add|include|schedule)\b",
-            r"\bhere['\u2019]?s your (?:updated|new|revised) (?:plan|week|split|schedule)\b",
-            # Soft affirmatives immediately followed by a plan verb:
-            # "sure, I can add", "absolutely — adding a cardio day",
-            # "done, I've swapped tomorrow".
-            r"\b(?:sure|absolutely|done|got it|okay|ok|yes)[,!.\-\u2014 ]+ ?(?:i['\u2019]?(?:ll|ve)|i (?:can|will|have)|let['\u2019]?s|adding|swapping|updating|scheduling)\b",
-        )
-        intent_detected = any(_re.search(p, answer_text) for p in _intent_patterns)
-        if intent_detected and not result.get("needs_plan_update"):
-            print(
-                f"[trainer-question] intent-detection fired — answer describes a change "
-                f"but needs_plan_update was {result.get('needs_plan_update')}. "
-                f"Forcing needs_plan_update=true so phase-2 runs."
-            )
-            result["needs_plan_update"] = True
-
-        # Phase 2: if a plan update was signalled but no plan included, do a dedicated plan-generation call
-        needs_workout = not is_nutritionist and result.get("needs_plan_update") and not result.get("updated_workout_plan")
-        needs_nutrition = is_nutritionist and result.get("needs_plan_update") and not result.get("updated_nutrition_plan")
-        if needs_workout or needs_nutrition:
-            plan_type = "workout" if needs_workout else "nutrition"
-            print(f"[trainer-question] phase-2: generating {plan_type} plan update at 4500 tokens")
-            # Build a focused phase-2 message: carry the answer already given, just ask for the plan
-            phase2_answer = result.get("answer", "")
-            phase2_injuries = result.get("updated_injuries")
-            phase2_injury_note = result.get("injury_clarification_needed", False)
-            if needs_workout:
-                phase2_user = (
-                    f"The coach already answered: {json.dumps(phase2_answer)}\n\n"
-                    "Now return ONLY a JSON object with the COMPLETE updated_workout_plan. "
-                    "Include ALL days and ALL exercises — even unchanged ones. "
-                    "Use this exact structure: "
-                    '{"name": "...", "totalDays": N, "days": [{"day": "Day 1", "focus": "...", "exercises": [{"name": "...", "sets": N, "reps": "...", "restSeconds": N, "equipment": "..."}]}]}\n'
-                    "Return the full JSON response schema with the plan included:\n"
-                    '{"answer": ' + json.dumps(phase2_answer) + ', "action_items": [], "needs_plan_update": true, "safety_note": "", '
-                    '"updated_workout_plan": <FULL PLAN HERE>, "updated_nutrition_plan": null, '
-                    '"updated_injuries": ' + json.dumps(phase2_injuries) + ', "injury_clarification_needed": ' + json.dumps(phase2_injury_note) + '}'
-                )
-            else:
-                phase2_user = (
-                    f"The nutritionist already answered: {json.dumps(phase2_answer)}\n\n"
-                    "Now return ONLY a JSON object with the COMPLETE updated_nutrition_plan. "
-                    "Include ALL meal keys even if unchanged. Preserve all isRoutine=true meals exactly.\n"
-                    "Structure: {\"targets\": {\"calories\": N, \"protein\": N, \"carbs\": N, \"fat\": N}, "
-                    "\"breakfast\": {\"meal\": \"...\", \"foods\": [\"...\"], \"calories\": N, \"protein\": N, \"carbs\": N, \"fat\": N, \"isRoutine\": bool}, ...}\n"
-                    "Return the full JSON response schema with the plan included:\n"
-                    '{"answer": ' + json.dumps(phase2_answer) + ', "action_items": [], "needs_plan_update": true, "safety_note": "", '
-                    '"updated_workout_plan": null, "updated_nutrition_plan": <FULL PLAN HERE>, '
-                    '"updated_injuries": null, "injury_clarification_needed": false}'
-                )
-            phase2_messages = [
-                {"role": "system", "content": system_prompt},
-                user_message,
-                {"role": "assistant", "content": raw},
-                {"role": "user", "content": phase2_user},
-            ]
-            kwargs2 = _build_chat_kwargs(_m_full, phase2_messages, json_schema=None, max_tokens=4500, timeout_secs=70)
-            response2 = _chat_create(client, **kwargs2)
-            raw2 = response2.choices[0].message.content
-            result2 = _extract_json(raw2)
-            # Merge: keep phase-1 answer/action_items/safety_note, take plan from phase-2
-            if needs_workout and result2.get("updated_workout_plan"):
-                result["updated_workout_plan"] = result2["updated_workout_plan"]
-                print(f"[trainer-question] phase-2: workout plan keys={list(result2['updated_workout_plan'].keys()) if isinstance(result2['updated_workout_plan'], dict) else 'non-dict'}")
-            elif needs_nutrition and result2.get("updated_nutrition_plan"):
-                result["updated_nutrition_plan"] = result2["updated_nutrition_plan"]
-            # Pick up any injury updates from phase-2 if phase-1 didn't have them
-            if not result.get("updated_injuries") and result2.get("updated_injuries"):
-                result["updated_injuries"] = result2["updated_injuries"]
+        result = _enforce_trainer_plan_guardrails(result, is_nutritionist=is_nutritionist)
 
         # Validate workout plan — reject if any day has 0 exercises
         wp = result.get("updated_workout_plan")

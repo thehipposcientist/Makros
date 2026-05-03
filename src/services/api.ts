@@ -2718,8 +2718,8 @@ export async function unlogMealChecked(
   }, 10000, true);
 }
 
-export async function getMealHistory(token: string, days = 30): Promise<{ meals: MealHistoryEntry[] }> {
-  return request(`/meals/history?days=${days}`, {
+export async function getMealHistory(token: string, days = 30, limit = 100): Promise<{ meals: MealHistoryEntry[] }> {
+  return request(`/meals/history?days=${days}&limit=${limit}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }

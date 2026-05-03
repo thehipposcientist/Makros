@@ -166,6 +166,26 @@ export interface DailyRowShape {
   meal_count: number;
 }
 
+export function macrosHeadlineFromDailyRows(rows: DailyRowShape[]) {
+  if (rows.length === 0) return null;
+  const totals = rows.reduce(
+    (acc, row) => ({
+      calories: acc.calories + Number(row.calories ?? 0),
+      protein: acc.protein + Number(row.protein_g ?? 0),
+      carbs: acc.carbs + Number(row.carbs_g ?? 0),
+      fat: acc.fat + Number(row.fat_g ?? 0),
+    }),
+    { calories: 0, protein: 0, carbs: 0, fat: 0 },
+  );
+  const denom = rows.length;
+  return {
+    calories: totals.calories / denom,
+    protein: totals.protein / denom,
+    carbs: totals.carbs / denom,
+    fat: totals.fat / denom,
+  };
+}
+
 /** Aggregate per-day totals straight from meal history. Mirrors the
  *  meal-tab math exactly so the user sees one set of numbers across both
  *  surfaces. Returns rows newest-first, only days with at least one meal. */

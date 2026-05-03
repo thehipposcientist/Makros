@@ -19,6 +19,7 @@ import {
   calorieDeltaLabel,
   dailyBarDenominator,
   headlineLoggedCalories,
+  macrosHeadlineFromDailyRows,
   macrosHeadlineFromAverages,
   recentLoggedDays,
   selectDailyRows,
@@ -267,6 +268,24 @@ describe('Progress data layer', () => {
       // Should round to 1 dp — no 300.33299999999997 nonsense.
       const decimals = String(rows[0].calories).split('.')[1] ?? '';
       expect(decimals.length <= 1).toBe(true);
+    });
+  });
+
+  describe('macrosHeadlineFromDailyRows', () => {
+    it('averages the same daily rows rendered under Recent Logged Days', () => {
+      const rows = [
+        { date: '2026-04-25', calories: 1500, protein_g: 90, carbs_g: 180, fat_g: 37, meal_count: 2 },
+        { date: '2026-04-23', calories: 750, protein_g: 30, carbs_g: 110, fat_g: 18, meal_count: 1 },
+      ];
+      const h = macrosHeadlineFromDailyRows(rows);
+      expect(h?.calories).toBe(1125);
+      expect(h?.protein).toBe(60);
+      expect(h?.carbs).toBe(145);
+      expect(h?.fat).toBe(27.5);
+    });
+
+    it('returns null when no daily rows are available', () => {
+      expect(macrosHeadlineFromDailyRows([])).toBe(null);
     });
   });
 

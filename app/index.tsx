@@ -928,7 +928,13 @@ export default function Index() {
     }
     const remote = await getMyProfile(token);
     if (remote) {
-      profile = profile ? { ...profile, ...remote, subscriptionTier: remote.subscriptionTier } : remote;
+      profile = profile ? {
+        ...profile,
+        ...remote,
+        subscriptionTier: remote.subscriptionTier,
+        customFoods: remote.customFoods?.length ? remote.customFoods : (profile.customFoods ?? []),
+        savedMeals: remote.savedMeals?.length ? remote.savedMeals : (profile.savedMeals ?? []),
+      } : remote;
       await AsyncStorage.setItem('userProfile', JSON.stringify(profile));
     }
     if (!profile) return null;

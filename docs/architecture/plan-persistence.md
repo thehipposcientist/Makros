@@ -30,14 +30,15 @@ indexes into them via a cycling array.
 - `POST /plans/week/auto-renew` — when the active week's `end_date` has
   passed, generates the next 7 days immediately. It also snapshots the
   expired week into `plan_week_checkins` so the user has one day to review
-  the coach summary, apply changes, and regenerate the current week's
-  remaining unlocked days. If the user ignores it, the generated week stays
-  as-is and the recap remains readable.
+  the coach summary and apply durable setting changes for future generated
+  weeks. If the user ignores it, the generated week stays as-is and the
+  recap remains readable.
   Idempotent: a no-op while the current week is still active.
 - `POST /plans/week/review-and-apply` — applies user-selected
-  recommendations from the weekly check-in and regenerates remaining days.
+  recommendations from the weekly check-in to durable settings; it does not
+  rewrite the active `PlanWeek`.
 - `PATCH /plans/days/{day_date}/workout` and `…/nutrition` — partial
-  per-day patches (used by Switch Day, manual edits, AI swaps).
+  per-day patches (used by Switch Day and manual edits).
 - `POST /plans/days/{day_date}/lock` — pins a single day so subsequent
   regens leave it untouched.
 

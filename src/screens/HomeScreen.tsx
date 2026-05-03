@@ -38,8 +38,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
 import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration } from '../services/api';
-import type { ApplyActionResult } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, getMealHistory } from '../services/api';
+import type { ApplyActionResult, MealHistoryEntry } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
@@ -54,6 +54,7 @@ import {
 } from '../utils/workoutHistory';
 import { workoutFromTemplateForToday } from '../utils/workoutTemplates';
 import { workoutSessionToLoggedPayload } from '../utils/workoutLogPayload';
+import { HYDRATION_QUICK_ADD_OUNCES, formatHydrationQuickAddLabel } from '../utils/hydration';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
 import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan } from '../utils/mealItems';
@@ -93,6 +94,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ProgressScreen from './ProgressScreen';
 import EditProfileScreen from './EditProfileScreen';
 import GearScreen from './GearScreen';
+import { aggregateDailyFromHistory } from './progressData';
+import type { DailyRowShape } from './progressData';
 import { computeNutritionScore } from '../utils/nutritionScore';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { getActiveWatchSessionId, setActiveWatchSessionId } from '../utils/activeWatchSession';
@@ -1146,6 +1149,63 @@ function consumedAtForMealDate(meal: Partial<MealSuggestion> | Record<string, an
   return defaultConsumedAtForDate(dateISO);
 }
 
+function savedMealToSuggestion(saved: { id?: number; name: string; items?: any[]; total_calories?: number; total_protein_g?: number; total_carbs_g?: number; total_fat_g?: number }, consumedAt?: string, mealId?: number): MealSuggestion {
+  const mappedItems = (saved.items || []).map((it: any) => {
+    const qty = Number(it.quantity || 1);
+    const cal = Number(it.calories || 0);
+    const pro = Number(it.protein_g ?? it.protein ?? 0);
+    const carbs = Number(it.carbs_g ?? it.carbs ?? 0);
+    const fat = Number(it.fat_g ?? it.fat ?? 0);
+    return {
+      name: String(it.food_name || it.name || 'Item'),
+      food_id: it.food_id ?? null,
+      serving_id: it.serving_id ?? null,
+      serving_grams: it.serving_grams ?? null,
+      quantity: qty,
+      unit: String(it.unit || 'serving'),
+      calories: cal,
+      protein: pro,
+      carbs,
+      fat,
+      baseQuantity: qty > 0 ? qty : 1,
+      baseCalories: cal,
+      baseProtein: pro,
+      baseCarbs: carbs,
+      baseFat: fat,
+    };
+  });
+  const itemTotals = mappedItems.reduce(
+    (acc, it) => ({
+      calories: acc.calories + Number(it.calories || 0),
+      protein: acc.protein + Number(it.protein || 0),
+      carbs: acc.carbs + Number(it.carbs || 0),
+      fat: acc.fat + Number(it.fat || 0),
+    }),
+    { calories: 0, protein: 0, carbs: 0, fat: 0 },
+  );
+  const totals = mappedItems.length > 0 ? itemTotals : {
+    calories: Number(saved.total_calories || 0),
+    protein: Number(saved.total_protein_g || 0),
+    carbs: Number(saved.total_carbs_g || 0),
+    fat: Number(saved.total_fat_g || 0),
+  };
+  const localId = mealId ? `saved_log_${mealId}` : `saved_${saved.id ?? 'meal'}_${Date.now()}`;
+  return {
+    meal: saved.name || 'Saved meal',
+    name: saved.name || 'Saved meal',
+    items: mappedItems as any,
+    foods: mappedItems.map(it => it.name),
+    amounts: mappedItems.map(it => `${it.quantity} ${it.unit}`),
+    calories: totals.calories,
+    protein: totals.protein,
+    carbs: totals.carbs,
+    fat: totals.fat,
+    _localId: localId,
+    _consumedAt: consumedAt,
+    ...(mealId ? { _loggedMealId: mealId } : {}),
+  } as MealSuggestion;
+}
+
 /** Build the front-page schedule directly from a persisted PlanWeek's
  *  dated days. Each PlanDay already carries its own date + workout JSON,
  *  so we surface them in chronological order — yesterday's completed
@@ -1762,6 +1822,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Meal tracking
   const [checkedMealsByDate, setCheckedMealsByDate] = useState<Record<string, MealChecks>>({});
   const [mealLogRefreshKey, setMealLogRefreshKey] = useState(0);
+  const [backendMealHistory, setBackendMealHistory] = useState<MealHistoryEntry[] | null>(null);
   const [editingMeal, setEditingMeal] = useState<{ dateKey: string; type: string; meal: MealSuggestion } | null>(null);
   const [hydration, setHydration] = useState<HydrationSummary | null>(null);
   const [hydrationByDate, setHydrationByDate] = useState<Record<string, HydrationSummary>>({});
@@ -1774,6 +1835,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [expandedMealDays, setExpandedMealDays] = useState<Set<string>>(() => new Set());
   const [availabilityItems, setAvailabilityItems] = useState<AvailabilityItem[]>([]);
   const [shufflingInfo, setShufflingInfo] = useState<{ date: string; mealKey: string } | null>(null);
+  const backendMealDailyRows = useMemo(
+    () => backendMealHistory == null ? [] : aggregateDailyFromHistory(backendMealHistory),
+    [backendMealHistory],
+  );
+  const backendMealDailyByDate = useMemo(() => {
+    const byDate = new Map<string, DailyRowShape>();
+    for (const row of backendMealDailyRows) byDate.set(row.date, row);
+    return byDate;
+  }, [backendMealDailyRows]);
 
   // Meal-side day list mirrors the workout PlanWeek: 7 fixed dated days
   // (Mon-Sun anchor). Past days, today, and forward days are rendered
@@ -2006,6 +2076,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     })();
     return () => { cancelled = true; };
   }, [authToken, checkedMealsByDate]);
+
+  // Home history should show the same deduped meal rows Progress uses.
+  // Plan/check state still powers editing, but backend rows are the
+  // authority for daily logged totals.
+  useEffect(() => {
+    if (!authToken) {
+      setBackendMealHistory(null);
+      return;
+    }
+    let cancelled = false;
+    getMealHistory(authToken, 14, 100)
+      .then((result) => {
+        if (!cancelled) setBackendMealHistory(result.meals ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setBackendMealHistory(null);
+      });
+    return () => { cancelled = true; };
+  }, [authToken, mealLogRefreshKey]);
 
   const persistDayState = useCallback(async (
     dayKey: string,
@@ -4362,7 +4451,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         experienceLevel: userProfile.experienceLevel,
       };
 
-      const resp = await askTrainerQuestion(authToken, {
+      const rawResp = await askTrainerQuestion(authToken, {
         question: q,
         mode: 'trainer',  // unified coach — handles both workout and nutrition
         topic: chatTopic,
@@ -4386,6 +4475,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         mime_type: 'image/jpeg',
         userContext,
       });
+      const resp: typeof rawResp = {
+        ...rawResp,
+        // Guardrail: chat is advisory + settings-only. Active PlanWeek
+        // edits must go through deterministic app controls, not AI-
+        // generated replacement plan payloads.
+        needs_plan_update: false,
+        updated_workout_plan: null,
+        updated_nutrition_plan: null,
+      };
 
       const actionLines = (resp.action_items ?? []).slice(0, 4).map((x: string) => `• ${x}`).join('\n');
       const combined = [
@@ -4406,9 +4504,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       }]);
       setTrainerLoading(false);
 
-      // Unified coach can update both workout and nutrition
-      const canUpdateWorkout   = true;
-      const canUpdateNutrition = true;
+      // Chat can propose settings changes, but active PlanWeek / meal-template
+      // replacements are stripped above and must use deterministic app controls.
+      const canUpdateWorkout   = false;
+      const canUpdateNutrition = false;
       const hasUpdate = (canUpdateWorkout && !!resp.updated_workout_plan) || (canUpdateNutrition && !!resp.updated_nutrition_plan);
       console.log('[handleAskTrainer] plan update check:', { needs: resp.needs_plan_update, hasUpdate, canW: canUpdateWorkout, canN: canUpdateNutrition, hasWP: !!resp.updated_workout_plan, hasNP: !!resp.updated_nutrition_plan });
 
@@ -4441,7 +4540,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             if (np.targets.calories !== todayPlanLocal.targets.calories) summaryParts.push(`Calories: ${todayPlanLocal.targets.calories} → ${np.targets.calories}`);
             if (np.targets.protein !== todayPlanLocal.targets.protein) summaryParts.push(`Protein: ${todayPlanLocal.targets.protein}g → ${np.targets.protein}g`);
           }
-          summaryParts.push('Meal plan updated');
+          summaryParts.push('Meal targets changed');
         }
         // Goal changes: prefer the structured `updated_goal` field from the AI response.
         // Fall back to string matching for backwards compatibility with older backend versions.
@@ -4486,7 +4585,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           if (parts.length > 0) summaryParts.push(`Macros → ${parts.join(', ')}`);
         }
 
-        const summary = summaryParts.length > 0 ? summaryParts.join(' · ') : (coachMode === 'trainer' ? 'Workout plan updated' : 'Meal plan updated');
+        const summary = summaryParts.length > 0 ? summaryParts.join(' · ') : 'Settings change proposed';
         // Store as pending — wait for user approval
         setPendingUpdate({ resp, question: q, coachMode, profileChanges, summary });
         console.log('[handleAskTrainer] pending update stored for approval:', summary);
@@ -4593,8 +4692,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     setIsChatPlanUpdating(true);
     setPendingUpdate(null);
     try {
-      const canUpdateWorkout   = true;
-      const canUpdateNutrition = true;
+      const canUpdateWorkout   = false;
+      const canUpdateNutrition = false;
       const prevWorkout = workoutPlan;
       const nextWorkout = (canUpdateWorkout && resp.updated_workout_plan) ? resp.updated_workout_plan as WorkoutPlan : null;
       let appliedNutrition: DailyNutritionPlan | null = null;
@@ -4660,7 +4759,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         console.warn('[applyPendingUpdate] needs_plan_update=true but no updated_workout_plan in response');
         setActiveChat(prev => [...prev, {
           role: 'assistant',
-          content: 'I described a change but didn\'t return the actual updated plan. Could you ask again with more specific detail about the change you want?',
+          content: 'I described a change that needs a deterministic app control. Use the Workout tab for current-week edits, or ask for a future settings recommendation.',
         }]);
         return;
       }
@@ -4707,7 +4806,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       const changeSummary = summarizeTrainerUpdate(prevWorkout, nextWorkout, todayPlan, appliedNutrition);
       const setUpdateSummary = mode === 'trainer' ? setWorkoutUpdateSummary : setNutritionUpdateSummary;
       setUpdateSummary(changeSummary);
-      setActiveChat(prev => [...prev, { role: 'assistant', content: `Changes applied!` }]);
+      setActiveChat(prev => [...prev, { role: 'assistant', content: `Settings saved.` }]);
       // Auto-close chat after a short delay so user sees the confirmation
       setTimeout(() => {
         setShowTrainerModal(false);
@@ -5551,6 +5650,34 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // When the add-from-saved picker fires on a day card we stash the
   // target date so the quick-log modal knows where to paste.
   const [addFromSavedFor, setAddFromSavedFor] = useState<string | null>(null);
+
+  const mirrorLoggedSavedMealToDay = useCallback(async (
+    date: string,
+    saved: { id?: number; name: string; items?: any[]; total_calories?: number; total_protein_g?: number; total_carbs_g?: number; total_fat_g?: number },
+    mealId: number,
+    consumedAt?: string,
+  ) => {
+    const loggedMeal = savedMealToSuggestion(saved, consumedAt, mealId);
+    const currentPlan = nutritionPlansByDate[date] ?? {
+      meals: [],
+      targets: { calories: 0, protein: 0, carbs: 0, fat: 0 },
+    } as DailyNutritionPlan;
+    const existingIdx = (currentPlan.meals ?? []).findIndex(m => (m as any)._loggedMealId === mealId);
+    const nextMeals = existingIdx >= 0
+      ? (currentPlan.meals ?? []).map((m, idx) => idx === existingIdx ? loggedMeal : m)
+      : [...(currentPlan.meals ?? []), loggedMeal];
+    const mealType = `meal_${existingIdx >= 0 ? existingIdx : nextMeals.length - 1}`;
+    const nextPlan: DailyNutritionPlan = { ...currentPlan, meals: nextMeals };
+    const nextChecks = { ...(checkedMealsByDate[date] ?? {}), [mealType]: true };
+
+    setNutritionPlansByDate(prev => ({ ...prev, [date]: nextPlan }));
+    setCheckedMealsByDate(prev => ({ ...prev, [date]: { ...(prev[date] ?? {}), [mealType]: true } }));
+    await saveNutritionPlan(date, nextPlan);
+    await saveMealChecks(date, nextChecks);
+    await savePreservedMeal(date, mealType, loggedMeal).catch(() => {});
+    await persistDayState(date, { nutrition_plan: nextPlan, meal_checks: nextChecks });
+    setMealLogRefreshKey(k => k + 1);
+  }, [checkedMealsByDate, nutritionPlansByDate, persistDayState]);
 
   // Template-mode meal editor target. When set, we render a
   // MealEditModal hydrated from the saved meal's items and route save
@@ -7321,16 +7448,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       <SavedMealsSection
                         authToken={authToken}
                         themeName={userProfile.themePreference}
-                        onLogged={() => {
-                          // Reload today's plan so the newly-logged
-                          // meal appears on the plan tab. `onWeeklyRefresh`
-                          // is the wrong callback here — it expects a
-                          // `{adherence, energy, notes}` review object
-                          // from the weekly check-in flow and crashes
-                          // when called empty.
+                        onLogged={async (log) => {
+                          await mirrorLoggedSavedMealToDay(log.meal_date, log.saved, log.mealId, log.consumed_at);
                           loadDayStatus();
                           if (userProfile) loadPlans(userProfile);
-                          setMealLogRefreshKey(k => k + 1);
                         }}
                         onEditTemplate={(sm) => {
                           setEditingSavedMeal({
@@ -7366,7 +7487,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               // or meal-check data. Limited to the last 14 days.
               const days: string[] = [];
               const seen = new Set<string>();
-              for (const k of Object.keys(nutritionPlansByDate).concat(Object.keys(checkedMealsByDate))) {
+              for (const k of Object.keys(nutritionPlansByDate).concat(Object.keys(checkedMealsByDate), backendMealDailyRows.map(row => row.date))) {
                 if (!seen.has(k)) { seen.add(k); days.push(k); }
               }
               const todayStr = todayKey();
@@ -7516,6 +7637,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     const plan = nutritionPlansByDate[d];
                     const meals = plan?.meals ?? [];
                     const checks = checkedMealsByDate[d] ?? {};
+                    const backendRow = backendMealDailyByDate.get(d);
                     const checkedCount = meals.reduce((n, _m, i) => n + (checks[`meal_${i}`] ? 1 : 0), 0);
                     const totals = meals.reduce((acc, m, i) => {
                       if (!checks[`meal_${i}`]) return acc;
@@ -7526,6 +7648,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         fat: acc.fat + (m.fat ?? 0),
                       };
                     }, { cal: 0, pro: 0, carb: 0, fat: 0 });
+                    const displayTotals = backendRow
+                      ? {
+                          cal: backendRow.calories,
+                          pro: backendRow.protein_g,
+                          carb: backendRow.carbs_g,
+                          fat: backendRow.fat_g,
+                        }
+                      : totals;
                     const targets = plan?.targets;
                     const isExpanded = expandedHistoryDate === d;
                     const dateObj = new Date(d + 'T12:00:00');
@@ -7538,7 +7668,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     // plan meal-count exactly).
                     const _historyActiveKeys = meals.map((_, i) => `meal_${i}`);
                     const _historyAllChecked = _historyActiveKeys.length > 0 && _historyActiveKeys.every(k => !!checks[k]);
-                    const cardFullyLogged = _historyAllChecked || checkedCount >= 3;
+                    const displayLoggedCount = backendRow?.meal_count ?? checkedCount;
+                    const cardFullyLogged = _historyAllChecked || displayLoggedCount >= 3;
                     return (
                       <View key={d} style={{
                         backgroundColor: cardFullyLogged ? themeColors.success + '12' : themeColors.surface,
@@ -7568,14 +7699,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             </View>
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                               <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
-                                {checkedCount}/{meals.length || '–'} logged
+                                {backendRow ? `${displayLoggedCount} logged` : `${checkedCount}/${meals.length || '–'} logged`}
                               </Text>
                               <Ionicons name={isExpanded ? 'chevron-down' : 'chevron-forward'} size={14} color={themeColors.textMuted} />
                             </View>
                           </View>
-                          {meals.length > 0 && (
+                          {(backendRow || meals.length > 0) && (
                             <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginTop: 4 }}>
-                              {Math.round(totals.cal)} cal · {Math.round(totals.pro)}g P · {Math.round(totals.carb)}g C · {Math.round(totals.fat)}g F
+                              {Math.round(displayTotals.cal)} cal · {Math.round(displayTotals.pro)}g P · {Math.round(displayTotals.carb)}g C · {Math.round(displayTotals.fat)}g F
                               {targets?.calories ? ` · target ${Math.round(targets.calories)} cal` : ''}
                             </Text>
                           )}
@@ -7972,11 +8103,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           <SavedMealsSection
                             authToken={authToken}
                             themeName={userProfile.themePreference}
-                            onLogged={() => {
+                            onLogged={async (log) => {
+                              await mirrorLoggedSavedMealToDay(log.meal_date, log.saved, log.mealId, log.consumed_at);
                               loadDayStatus();
                               if (userProfile) loadPlans(userProfile);
                               reloadSavedMeals();
-                              setMealLogRefreshKey(k => k + 1);
                             }}
                             onEditTemplate={(sm) => {
                               setEditingSavedMeal({
@@ -7993,11 +8124,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         <SavedMealsSection
                           authToken={authToken}
                           themeName={userProfile.themePreference}
-                          onLogged={() => {
+                          onLogged={async (log) => {
+                            await mirrorLoggedSavedMealToDay(log.meal_date, log.saved, log.mealId, log.consumed_at);
                             loadDayStatus();
                             if (userProfile) loadPlans(userProfile);
                             reloadSavedMeals();
-                            setMealLogRefreshKey(k => k + 1);
                           }}
                           onEditTemplate={(sm) => {
                             setEditingSavedMeal({
@@ -8767,13 +8898,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         // via inline edit if needed.
                         const h = new Date().getHours();
                         const mt = h < 10 ? 'breakfast' : h < 14 ? 'lunch' : h < 17 ? 'snack' : h < 21 ? 'dinner' : 'snack';
-                        await logSavedMeal(authToken, sm.id, {
+                        const consumedAt = defaultConsumedAtForDate(dateKey);
+                        const logged = await logSavedMeal(authToken, sm.id, {
                           meal_date: dateKey,
                           meal_type: mt,
-                          consumed_at: defaultConsumedAtForDate(dateKey),
+                          consumed_at: consumedAt,
                         });
+                        await mirrorLoggedSavedMealToDay(dateKey, sm, logged.meal_id, consumedAt);
                         loadDayStatus();
                         if (userProfile) loadPlans(userProfile);
+                        reloadSavedMeals();
                       } catch (e: any) {
                         Alert.alert('Could not log', String(e?.message ?? e));
                       }
@@ -9453,7 +9587,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             {workoutUpdateSummary && (
               <View style={[styles.trainerSummaryCard, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
-                <Text style={[styles.trainerSummaryTitle, { color: themeColors.primary }]}>Plan Updated</Text>
+                <Text style={[styles.trainerSummaryTitle, { color: themeColors.primary }]}>Settings Updated</Text>
                 <Text style={[styles.trainerSummaryText, { color: themeColors.textSecondary }]}>{workoutUpdateSummary}</Text>
               </View>
             )}
@@ -9465,11 +9599,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     return (<>
                       <Text style={{ fontSize: 16, fontWeight: '700', color: themeColors.textPrimary }}>Your AI Coach</Text>
                       <Text style={{ fontSize: 12, color: themeColors.textSecondary, lineHeight: 18 }}>
-                        Ask me anything about your workouts, nutrition, injuries, or goals. I can also make changes to your plans.
+                        Ask me anything about workouts, nutrition, injuries, or goals. I can suggest safe settings changes and guide current-week edits.
                       </Text>
                       <View style={{ gap: 4, marginTop: 4 }}>
                         {[
-                          { icon: 'swap-horizontal-outline', text: '"Swap bench press for dumbbell press"' },
+                          { icon: 'swap-horizontal-outline', text: '"What can replace bench press?"' },
                           { icon: 'nutrition-outline', text: '"Suggest lower sugar breakfast options"' },
                           { icon: 'bandage-outline', text: '"My knee hurts when squatting"' },
                           { icon: 'airplane-outline', text: '"Pause my workouts for 5 days of travel"' },
@@ -9633,7 +9767,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               )}
               {pendingUpdate && (
                 <View style={[styles.trainerBubble, { backgroundColor: themeColors.primary + '15', borderColor: themeColors.primary + '44', alignSelf: 'flex-start', maxWidth: '95%', padding: 14 }]}>
-                  <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.textPrimary, marginBottom: 6 }}>Proposed Changes</Text>
+                  <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.textPrimary, marginBottom: 6 }}>Proposed Settings</Text>
                   <Text style={{ fontSize: 12, color: themeColors.textSecondary, lineHeight: 18, marginBottom: 4 }}>{pendingUpdate.summary}</Text>
                   {Object.keys(pendingUpdate.profileChanges).length > 0 && (
                     <Text style={{ fontSize: 11, color: themeColors.textMuted, marginBottom: 8 }}>
@@ -9671,7 +9805,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     </Text>
                   ))}
                   <Text style={{ fontSize: 10, color: themeColors.textMuted }}>
-                    Your workout plan will automatically update to avoid the injured area.
+                    Future generated plans will avoid the injured area. For this week, use Switch Day or exercise swaps and stop anything painful.
                   </Text>
                   <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
                     <TouchableOpacity
@@ -9693,7 +9827,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           }
                         } catch (e) { console.error('[injury apply] failed:', e); }
                         setPendingInjuries(null);
-                        setWorkoutChat(prev => [...prev, { role: 'assistant', content: 'Injury logged — plan updating...' }]);
+                        setWorkoutChat(prev => [...prev, { role: 'assistant', content: 'Injury logged. Future plans will avoid it; adjust this week with Switch Day or swaps.' }]);
                         setTimeout(() => {
                           setShowTrainerModal(false);
                           setWorkoutChat([]); setWorkoutChat([]);
@@ -9702,7 +9836,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         }, 1500);
                       }}
                       style={{ flex: 1, backgroundColor: themeColors.primary, borderRadius: 8, paddingVertical: 10, alignItems: 'center' }}>
-                      <Text style={{ fontSize: 13, fontWeight: '800', color: getContrastingTextColor(themeColors.primary) }}>Add & Update Plan</Text>
+                      <Text style={{ fontSize: 13, fontWeight: '800', color: getContrastingTextColor(themeColors.primary) }}>Add Injury</Text>
                     </TouchableOpacity>
                     <TouchableOpacity
                       onPress={() => {
@@ -11465,77 +11599,90 @@ function HydrationTodayPanel({
           overflow: 'hidden',
           marginTop: 10,
         }}>
-        <Animated.View style={{ width: fillWidth, height: '100%', backgroundColor: MEALS_ACCENT }} />
+          <Animated.View style={{ width: fillWidth, height: '100%', backgroundColor: MEALS_ACCENT }} />
         </View>
       </View>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 10 }}>
-        <View style={{
-          width: 82,
-          minHeight: 32,
-          borderRadius: 10,
-          backgroundColor: colors.surface,
-          borderWidth: 1,
-          borderColor: colors.border,
-          flexDirection: 'row',
-          alignItems: 'center',
-          paddingHorizontal: 8,
-        }}>
-          <TextInput
-            value={manualOunces}
-            onChangeText={setManualOunces}
-            onSubmitEditing={submitManual}
-            keyboardType="decimal-pad"
-            returnKeyType="done"
-            editable={!loading}
-            selectTextOnFocus
-            style={{
-              flex: 1,
-              minWidth: 0,
-              paddingVertical: 5,
-              fontSize: 12,
-              fontWeight: '900',
-              color: colors.textPrimary,
-            }}
-          />
-          <Text style={{ fontSize: 9, fontWeight: '800', color: colors.textMuted }}>oz</Text>
-        </View>
-        <PressableScale
-          onPress={submitManual}
-          disabled={loading}
-          scaleDown={0.94}
-          style={{
+      <View style={{ gap: 8, marginTop: 10 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <View style={{
+            flex: 1,
             minHeight: 32,
-            paddingHorizontal: 10,
             borderRadius: 10,
-            backgroundColor: MEALS_ACCENT,
+            backgroundColor: colors.surface,
+            borderWidth: 1,
+            borderColor: colors.border,
+            flexDirection: 'row',
             alignItems: 'center',
-            justifyContent: 'center',
-            opacity: loading ? 0.55 : 1,
+            paddingHorizontal: 8,
           }}>
-          <Text style={{ fontSize: 10, fontWeight: '900', color: '#fff' }}>Set</Text>
-        </PressableScale>
-        {[8, 16, 24, 32, 40].map(oz => (
+            <TextInput
+              value={manualOunces}
+              onChangeText={setManualOunces}
+              onSubmitEditing={submitManual}
+              keyboardType="decimal-pad"
+              returnKeyType="done"
+              editable={!loading}
+              selectTextOnFocus
+              style={{
+                flex: 1,
+                minWidth: 0,
+                paddingVertical: 5,
+                fontSize: 12,
+                fontWeight: '900',
+                color: colors.textPrimary,
+              }}
+            />
+            <Text style={{ fontSize: 9, fontWeight: '800', color: colors.textMuted }}>oz</Text>
+          </View>
           <PressableScale
-            key={oz}
-            onPress={() => onDelta(oz)}
+            onPress={submitManual}
             disabled={loading}
             scaleDown={0.94}
             style={{
-              flex: 1,
               minHeight: 32,
-              paddingVertical: 7,
-              paddingHorizontal: 4,
+              paddingHorizontal: 10,
               borderRadius: 10,
-              backgroundColor: colors.surface,
-              borderWidth: 1,
-              borderColor: MEALS_ACCENT + '3D',
+              backgroundColor: MEALS_ACCENT,
               alignItems: 'center',
               justifyContent: 'center',
               opacity: loading ? 0.55 : 1,
             }}>
-            <Text style={{ fontSize: 10, fontWeight: '900', color: MEALS_ACCENT }} numberOfLines={1}>+{oz}</Text>
+            <Text style={{ fontSize: 10, fontWeight: '900', color: '#fff' }}>Set</Text>
           </PressableScale>
-        ))}
+        </View>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+        {HYDRATION_QUICK_ADD_OUNCES.map(oz => (
+            <PressableScale
+              key={oz}
+              onPress={() => onDelta(oz)}
+              disabled={loading}
+              scaleDown={0.94}
+              style={{
+                flex: 1,
+                flexBasis: '18%',
+                minWidth: 54,
+                minHeight: 32,
+                paddingVertical: 7,
+                paddingHorizontal: 6,
+                borderRadius: 10,
+                backgroundColor: colors.surface,
+                borderWidth: 1,
+                borderColor: MEALS_ACCENT + '3D',
+                alignItems: 'center',
+                justifyContent: 'center',
+                opacity: loading ? 0.55 : 1,
+              }}>
+              <Text
+                style={{ fontSize: 10, fontWeight: '900', color: MEALS_ACCENT }}
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                minimumFontScale={0.85}
+              >
+                {formatHydrationQuickAddLabel(oz)}
+              </Text>
+            </PressableScale>
+          ))}
+        </View>
       </View>
     </View>
   );

@@ -36,6 +36,11 @@ _INJURY_CASES = [
         {"hinge"},
     ),
     (
+        "recovering shoulder phrase",
+        ["shoulder strain (shoulder, status: recovering) muscles: shoulders severity: mild"],
+        {"vertical_press"},
+    ),
+    (
         "combined upper/lower/back injuries",
         [
             "shoulder",

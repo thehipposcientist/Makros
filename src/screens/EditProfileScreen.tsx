@@ -30,6 +30,7 @@ import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { APP_THEMES, THEME_PICKER_ORDER, colors, getContrastingTextColor, getTheme, radius, resolveThemeName } from '../constants/theme';
 import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult, getCalorieRanges, CalorieRanges } from '../services/api';
+import type { FoodSearchResult } from '../services/api';
 import {
   LAUNCH_GOALS, GOAL_CATEGORIES, ENDURANCE_EVENT_GOALS, goalCategory,
   isEnduranceEventGoal,
@@ -499,7 +500,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [suppSearchResult, setSuppSearchResult] = useState<any>(null);
   const [aiFoodSearchLoading, setAiFoodSearchLoading] = useState(false);
   const [barcodeScanVisible, setBarcodeScanVisible] = useState(false);
-  const [aiFoodResults, setAiFoodResults] = useState<Array<{ name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; micronutrients?: Record<string, number> }>>([]);
+  const [aiFoodResults, setAiFoodResults] = useState<FoodSearchResult[]>([]);
 
   // Custom macro overrides
   const [useCustomMacros, setUseCustomMacros] = useState(!!profile.customMacros);
@@ -978,12 +979,15 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     ]);
   };
 
+  const addFoodToKitchen = (name: string) =>
+    setFoods(prev => prev.includes(name) ? prev : [...prev, name]);
+
   const toggleFood = (name: string) =>
     setFoods(prev => prev.includes(name) ? prev.filter(f => f !== name) : [...prev, name]);
 
   const handleAddCustomFood = (item: CustomFoodItem) => {
     setCustomFoods(prev => [...prev.filter(f => f.name !== item.name), item]);
-    setFoods(prev => prev.includes(item.name) ? prev : [...prev, item.name]);
+    addFoodToKitchen(item.name);
   };
 
   const handleAddEquipment = () => {
@@ -1198,7 +1202,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     }
   };
 
-  const addAiFoodResult = (item: { name: string; serving: string; calories: number; protein: number; carbs: number; fat: number; micronutrients?: Record<string, number> }) => {
+  const addAiFoodResult = (item: FoodSearchResult) => {
     const customItem: CustomFoodItem = {
       name: item.name,
       unit: item.serving,
@@ -1208,7 +1212,9 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
       fat: Math.round(item.fat),
       ...(item.micronutrients ? { micronutrients: item.micronutrients } : {}),
     };
-    handleAddCustomFood(customItem);
+    const standardMatch = meta.allFoods.some(f => f.name.toLowerCase() === item.name.toLowerCase());
+    if (standardMatch) addFoodToKitchen(item.name);
+    else handleAddCustomFood(customItem);
     setAiFoodResults(prev => prev.filter(r => r.name !== item.name));
   };
 
@@ -1502,13 +1508,23 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const standardEquipNames = new Set(meta.equipmentCategories.flatMap(c => c.items.map(i => i.name)));
   const customEquipItems   = equipment.filter(e => !standardEquipNames.has(e));
   const standardFoodNames  = new Set(meta.allFoods.map(f => f.name));
+  const selectedFoodNames = foods.filter(f => !f.startsWith('__supp__'));
+  const selectedFoodNameSet = new Set(selectedFoodNames.map(f => f.toLowerCase()));
   const customFoodSelected = customFoods.filter(f => !standardFoodNames.has(f.name));
+  const foodLibraryByName = new Map<string, any>();
+  for (const f of meta.allFoods) foodLibraryByName.set(f.name.toLowerCase(), f);
+  for (const f of customFoods) foodLibraryByName.set(f.name.toLowerCase(), f);
+  const selectedKitchenFoods = selectedFoodNames.map(name => ({
+    name,
+    item: foodLibraryByName.get(name.toLowerCase()),
+  }));
   const foodSearchLower = foodSearch.trim().toLowerCase();
-  const filteredFoodCategories = meta.foodCategories
+  const filteredFoodCategories = foodSearchLower ? meta.foodCategories
     .filter(category => foodCategoryFilter === 'all' || category.key === foodCategoryFilter)
     .map(category => ({
       ...category,
       foods: category.foods.filter(food => {
+        if (selectedFoodNameSet.has(food.name.toLowerCase())) return false;
         if (!foodSearchLower) return true;
         return [food.name, food.unit ?? '', category.label]
           .join(' ')
@@ -1516,12 +1532,13 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
           .includes(foodSearchLower);
       }),
     }))
-    .filter(category => category.foods.length > 0);
-  const filteredCustomFoods = customFoodSelected.filter(food => {
+    .filter(category => category.foods.length > 0) : [];
+  const filteredCustomFoods = foodSearchLower ? customFoodSelected.filter(food => {
+    if (selectedFoodNameSet.has(food.name.toLowerCase())) return false;
     if (foodCategoryFilter !== 'all' && foodCategoryFilter !== 'custom') return false;
-    if (!foodSearchLower) return true;
     return `${food.name} ${food.unit ?? ''}`.toLowerCase().includes(foodSearchLower);
-  });
+  }) : [];
+  const visibleFoodSearchResults = aiFoodResults.filter(item => !selectedFoodNameSet.has(item.name.toLowerCase()));
 
   const screenTitle = mode === 'workout'
     ? 'Edit Workout'
@@ -2882,6 +2899,26 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             )}
             {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
               <>
+                <View style={styles.chipGroup}>
+                  <Text style={styles.chipGroupLabel}>In Your Kitchen</Text>
+                  {selectedKitchenFoods.length > 0 ? (
+                    <View style={styles.chips}>
+                      {selectedKitchenFoods.map(({ name, item }) => (
+                        <TouchableOpacity
+                          key={name}
+                          style={[styles.chip, styles.chipActive]}
+                          onPress={() => toggleFood(name)}>
+                          <Text style={[styles.chipText, styles.chipTextActive]}>
+                            {name}{item?.calories ? ` (${Math.round(item.calories)} cal)` : ''} <Ionicons name="close" size={12} />
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  ) : (
+                    <Text style={styles.emptySearchText}>No foods selected yet.</Text>
+                  )}
+                </View>
+
                 <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center', marginBottom: 8 }}>
                   <SearchInput
                     containerStyle={{ flex: 1 }}
@@ -2892,31 +2929,34 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                     placeholderTextColor={tc.textMuted}
                   />
                 </View>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
-                  <TouchableOpacity
-                    style={[styles.filterChip, foodCategoryFilter === 'all' && styles.filterChipActive]}
-                    onPress={() => setFoodCategoryFilter('all')}>
-                    <Text style={[styles.filterChipText, foodCategoryFilter === 'all' && styles.filterChipTextActive]}>All</Text>
-                  </TouchableOpacity>
-                  {meta.foodCategories.map(category => (
-                    <TouchableOpacity
-                      key={category.key}
-                      style={[styles.filterChip, foodCategoryFilter === category.key && styles.filterChipActive]}
-                      onPress={() => setFoodCategoryFilter(category.key)}>
-                      <Text style={[styles.filterChipText, foodCategoryFilter === category.key && styles.filterChipTextActive]}>{category.label}</Text>
-                    </TouchableOpacity>
-                  ))}
-                  {customFoodSelected.length > 0 ? (
-                    <TouchableOpacity
-                      style={[styles.filterChip, foodCategoryFilter === 'custom' && styles.filterChipActive]}
-                      onPress={() => setFoodCategoryFilter('custom')}>
-                      <Text style={[styles.filterChipText, foodCategoryFilter === 'custom' && styles.filterChipTextActive]}>Custom</Text>
-                    </TouchableOpacity>
-                  ) : null}
-                </ScrollView>
 
-                {filteredFoodCategories.length === 0 && filteredCustomFoods.length === 0 && !aiFoodSearchLoading && aiFoodResults.length === 0 ? (
-                  <Text style={styles.emptySearchText}>No local foods match — try AI search below.</Text>
+                {foodSearchLower ? (
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+                    <TouchableOpacity
+                      style={[styles.filterChip, foodCategoryFilter === 'all' && styles.filterChipActive]}
+                      onPress={() => setFoodCategoryFilter('all')}>
+                      <Text style={[styles.filterChipText, foodCategoryFilter === 'all' && styles.filterChipTextActive]}>All</Text>
+                    </TouchableOpacity>
+                    {meta.foodCategories.map(category => (
+                      <TouchableOpacity
+                        key={category.key}
+                        style={[styles.filterChip, foodCategoryFilter === category.key && styles.filterChipActive]}
+                        onPress={() => setFoodCategoryFilter(category.key)}>
+                        <Text style={[styles.filterChipText, foodCategoryFilter === category.key && styles.filterChipTextActive]}>{category.label}</Text>
+                      </TouchableOpacity>
+                    ))}
+                    {customFoodSelected.length > 0 ? (
+                      <TouchableOpacity
+                        style={[styles.filterChip, foodCategoryFilter === 'custom' && styles.filterChipActive]}
+                        onPress={() => setFoodCategoryFilter('custom')}>
+                        <Text style={[styles.filterChipText, foodCategoryFilter === 'custom' && styles.filterChipTextActive]}>Custom</Text>
+                      </TouchableOpacity>
+                    ) : null}
+                  </ScrollView>
+                ) : null}
+
+                {foodSearchLower && filteredFoodCategories.length === 0 && filteredCustomFoods.length === 0 && !aiFoodSearchLoading && visibleFoodSearchResults.length === 0 ? (
+                  <Text style={styles.emptySearchText}>No matching foods yet.</Text>
                 ) : null}
 
                 {authToken && foodSearch.length > 1 && (
@@ -2926,14 +2966,14 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                     disabled={aiFoodSearchLoading}>
                     {aiFoodSearchLoading
                       ? <ActivityIndicator size="small" color={tc.primary} />
-                      : <Text style={[styles.sectionAddBtnText, { color: tc.primary, fontWeight: '700' }]}>Search "{foodSearch}" with AI</Text>}
+                      : <Text style={[styles.sectionAddBtnText, { color: tc.primary, fontWeight: '700' }]}>Search full catalog for "{foodSearch}"</Text>}
                   </TouchableOpacity>
                 )}
 
-                {aiFoodResults.length > 0 && (
+                {visibleFoodSearchResults.length > 0 && (
                   <View style={{ marginBottom: 16 }}>
-                    <Text style={[styles.chipGroupLabel, { marginBottom: 8 }]}>AI Results</Text>
-                    {aiFoodResults.map((item, idx) => (
+                    <Text style={[styles.chipGroupLabel, { marginBottom: 8 }]}>Catalog Results</Text>
+                    {visibleFoodSearchResults.map((item, idx) => (
                       <TouchableOpacity
                         key={`${item.name}-${idx}`}
                         style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tc.surface, borderRadius: radius.md, borderWidth: 1, borderColor: tc.primary + '44', padding: 12, marginBottom: 8 }}
@@ -2958,17 +2998,14 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                       <Text style={styles.chipGroupLabel}>{category.label}</Text>
                     </View>
                     <View style={styles.chips}>
-                      {category.foods.map(food => {
-                        const selected = foods.includes(food.name);
-                        return (
+                      {category.foods.map(food => (
                           <TouchableOpacity
                             key={food.name}
-                            style={[styles.chip, selected && styles.chipActive]}
-                            onPress={() => toggleFood(food.name)}>
-                            <Text style={[styles.chipText, selected && styles.chipTextActive]}>{food.name}</Text>
+                            style={styles.chip}
+                            onPress={() => addFoodToKitchen(food.name)}>
+                            <Text style={styles.chipText}>{food.name}</Text>
                           </TouchableOpacity>
-                        );
-                      })}
+                      ))}
                     </View>
                   </View>
                 ))}
@@ -2976,19 +3013,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   <View style={styles.chipGroup}>
                     <Text style={styles.chipGroupLabel}>Custom</Text>
                     <View style={styles.chips}>
-                      {filteredCustomFoods.map(f => {
-                        const selected = foods.includes(f.name);
-                        return (
+                      {filteredCustomFoods.map(f => (
                           <TouchableOpacity
                             key={f.name}
-                            style={[styles.chip, selected && styles.chipActive]}
-                            onPress={() => toggleFood(f.name)}>
-                            <Text style={[styles.chipText, selected && styles.chipTextActive]}>
+                            style={styles.chip}
+                            onPress={() => addFoodToKitchen(f.name)}>
+                            <Text style={styles.chipText}>
                               {f.name}{f.calories ? ` (${f.calories} cal)` : ''}
                             </Text>
                           </TouchableOpacity>
-                        );
-                      })}
+                      ))}
                     </View>
                   </View>
                 )}

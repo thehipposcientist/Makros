@@ -454,7 +454,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const [foodsAvailable, setFoodsAvailable] = useState<string[]>([]);
   const [foodScanLoading, setFoodScanLoading] = useState(false);
   const [scannedFoods, setScannedFoods] = useState<{ name: string; selected: boolean }[]>([]);
-  const [customFoodInput, setCustomFoodInput] = useState('');
 
   // Allergies / dietary restrictions — plumbed through to UserProfile.allergies
   // and read by the meal-planner so suggested meals filter these out. Stored
@@ -1887,13 +1886,35 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     </View>
   );
 
+  const addFoodToKitchen = (food: string) => {
+    const name = food.trim();
+    if (!name) return;
+    setFoodsAvailable(prev => prev.includes(name) ? prev : [...prev, name]);
+  };
+
   const toggleFood = (food: string) => {
     setFoodsAvailable(prev =>
       prev.includes(food) ? prev.filter(f => f !== food) : [...prev, food]
     );
   };
 
-  const renderFoodsStep = () => (
+  const renderFoodsStep = () => {
+    const foodSearchTerm = foodSearch.trim();
+    const foodSearchLower = foodSearchTerm.toLowerCase();
+    const selectedFoodNameSet = new Set(foodsAvailable.map(f => f.toLowerCase()));
+    const filteredFoodCategories = foodSearchLower ? meta.foodCategories
+      .map(category => ({
+        ...category,
+        foods: category.foods.filter(food =>
+          !selectedFoodNameSet.has(food.name.toLowerCase())
+          && food.name.toLowerCase().includes(foodSearchLower)
+        ),
+      }))
+      .filter(category => category.foods.length > 0) : [];
+    const exactSearchKnown = meta.allFoods.some(f => f.name.toLowerCase() === foodSearchLower);
+    const canAddSearchTerm = !!foodSearchTerm && !selectedFoodNameSet.has(foodSearchLower) && !exactSearchKnown;
+
+    return (
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>Your Kitchen</Text>
       <Text style={styles.stepDescription}>
@@ -2043,8 +2064,25 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         })}
       </ScrollView>
 
-      {/* Manual selection */}
-      <Text style={styles.sectionHeading}>Or pick manually</Text>
+      <Text style={styles.sectionHeading}>In your kitchen</Text>
+      {foodsAvailable.length > 0 ? (
+        <View style={[styles.foodChips, { marginBottom: 18 }]}>
+          {foodsAvailable.map(f => (
+            <TouchableOpacity
+              key={f}
+              style={[styles.foodChip, styles.foodChipActive]}
+              onPress={() => toggleFood(f)}>
+              <Text style={[styles.foodChipText, styles.foodChipTextActive]}>
+                {f} <Ionicons name="close" size={12} />
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      ) : (
+        <Text style={[styles.hint, { marginBottom: 18, marginTop: 0 }]}>No foods selected yet.</Text>
+      )}
+
+      <Text style={styles.sectionHeading}>Add food</Text>
       <View style={styles.searchRow}>
         <TextInput
           style={[styles.input, styles.searchInput, { flex: 1 }]}
@@ -2053,6 +2091,12 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           value={foodSearch}
           onChangeText={setFoodSearch}
           autoCapitalize="none"
+          onSubmitEditing={() => {
+            if (canAddSearchTerm) {
+              addFoodToKitchen(foodSearchTerm);
+              setFoodSearch('');
+            }
+          }}
           returnKeyType="done"
         />
         {foodSearch.length > 0 && (
@@ -2064,79 +2108,41 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       {meta.loading ? (
         <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
       ) : (
-        meta.foodCategories.map(category => {
-          const filteredFoods = foodSearch.trim()
-            ? category.foods.filter(food => food.name.toLowerCase().includes(foodSearch.toLowerCase()))
-            : category.foods;
-          if (filteredFoods.length === 0) return null;
-          return (
+        <>
+          {canAddSearchTerm && (
+            <TouchableOpacity
+              style={[styles.foodChip, { alignSelf: 'flex-start', marginBottom: 14, borderColor: colors.primary }]}
+              onPress={() => {
+                addFoodToKitchen(foodSearchTerm);
+                setFoodSearch('');
+              }}>
+              <Text style={[styles.foodChipText, { color: colors.primary, fontWeight: '700' }]}>Add "{foodSearchTerm}"</Text>
+            </TouchableOpacity>
+          )}
+          {foodSearchLower && filteredFoodCategories.length === 0 && !canAddSearchTerm ? (
+            <Text style={[styles.hint, { marginTop: 0, marginBottom: 14 }]}>No matching foods.</Text>
+          ) : null}
+          {filteredFoodCategories.map(category => (
             <View key={category.key} style={styles.foodCategory}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={16} color={colors.textSecondary} /> : <Text style={{ fontSize: 16 }}>{category.icon}</Text>}
                 <Text style={styles.foodCategoryLabel}>{category.label}</Text>
               </View>
               <View style={styles.foodChips}>
-                {filteredFoods.map(food => {
-                  const selected = foodsAvailable.includes(food.name);
-                  return (
+                {category.foods.map(food => (
                     <TouchableOpacity
                       key={food.name}
-                      style={[styles.foodChip, selected && styles.foodChipActive]}
-                      onPress={() => toggleFood(food.name)}>
-                      <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
+                      style={styles.foodChip}
+                      onPress={() => addFoodToKitchen(food.name)}>
+                      <Text style={styles.foodChipText}>
                         {food.name}
                       </Text>
                     </TouchableOpacity>
-                  );
-                })}
+                ))}
               </View>
             </View>
-          );
-        })
-      )}
-
-      {/* Custom food input */}
-      <Text style={styles.sectionHeading}>Add a custom food</Text>
-      <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
-        <TextInput
-          style={[styles.textArea, { flex: 1, height: 44, textAlignVertical: 'center', paddingTop: 0 }]}
-          placeholder="e.g. dragon fruit, sourdough bread..."
-          placeholderTextColor={colors.textMuted}
-          value={customFoodInput}
-          onChangeText={setCustomFoodInput}
-          onFocus={scrollToInput}
-          onSubmitEditing={() => {
-            const name = customFoodInput.trim();
-            if (name && !foodsAvailable.includes(name)) {
-              setFoodsAvailable(prev => [...prev, name]);
-            }
-            setCustomFoodInput('');
-          }}
-          returnKeyType="done"
-        />
-        <TouchableOpacity
-          style={{ backgroundColor: colors.primary, borderRadius: 10, paddingHorizontal: 16, justifyContent: 'center' }}
-          onPress={() => {
-            const name = customFoodInput.trim();
-            if (name && !foodsAvailable.includes(name)) {
-              setFoodsAvailable(prev => [...prev, name]);
-            }
-            setCustomFoodInput('');
-          }}>
-          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Add</Text>
-        </TouchableOpacity>
-      </View>
-      {foodsAvailable.filter(f => !meta.allFoods.some((mf: any) => mf.name === f)).length > 0 && (
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
-          {foodsAvailable.filter(f => !meta.allFoods.some((mf: any) => mf.name === f)).map(f => (
-            <TouchableOpacity
-              key={f}
-              style={[styles.foodChip, styles.foodChipActive]}
-              onPress={() => setFoodsAvailable(prev => prev.filter(x => x !== f))}>
-              <Text style={[styles.foodChipText, styles.foodChipTextActive]}>{f} <Ionicons name="close" size={12} /></Text>
-            </TouchableOpacity>
           ))}
-        </View>
+        </>
       )}
 
       <Text style={styles.hint}>Skip to use default meal suggestions</Text>
@@ -2179,6 +2185,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       </Modal>
     </View>
   );
+  };
 
   const toggleSupplement = (name: string) => {
     setSupplementsAvailable(prev =>

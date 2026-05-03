@@ -638,6 +638,62 @@ def test_meal_history_limits_after_deduping_generated_rows() -> None:
     _ok("history limit is applied after duplicate collapse")
 
 
+def test_meal_history_window_matches_rolling_average_window() -> None:
+    """History should use the same inclusive window as rolling averages:
+    days=1 means today only, never yesterday or future-dated rows."""
+    print("\n[test] meal history window matches rolling averages")
+    from datetime import date, timedelta
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.enums import MealSource, MealType
+    from app.models import User, Meal, MealItem  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.meal_history import get_meal_history
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    today = date.today()
+    with Session(engine) as s:
+        u = User(email="meal-history-window@example.com", username="mealwindow", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        for meal_date, name, calories in (
+            (today - timedelta(days=1), "Yesterday", 400),
+            (today, "Today", 700),
+            (today + timedelta(days=1), "Tomorrow", 900),
+        ):
+            meal = Meal(
+                user_id=u.id,
+                meal_date=meal_date,
+                meal_type=MealType.LUNCH,
+                name=name,
+                source=MealSource.LOGGED,
+            )
+            s.add(meal); s.flush()
+            s.add(MealItem(
+                meal_id=meal.id,
+                food_name=name,
+                quantity=1,
+                unit="serving",
+                calories=calories,
+                protein_g=20,
+                carbs_g=50,
+                fat_g=10,
+            ))
+        s.commit()
+
+        one_day = get_meal_history(u.id, days=1, limit=10, db=s)
+        assert [row["meal_date"] for row in one_day] == [str(today)], one_day
+        assert one_day[0]["totals"]["calories"] == 700, one_day
+
+        two_days = get_meal_history(u.id, days=2, limit=10, db=s)
+        assert [row["meal_date"] for row in two_days] == [str(today), str(today - timedelta(days=1))], two_days
+    _ok("history days window is today-capped and off-by-one free")
+
+
 def test_saved_meal_log_retry_is_idempotent() -> None:
     """A retry of the same saved-meal log should return the existing row
     instead of inflating nutrition totals."""
@@ -1209,6 +1265,7 @@ cases = [
     test_rolling_averages_ignore_duplicate_generated_plan_rows,
     test_rolling_averages_preserve_distinct_generic_meals,
     test_meal_history_limits_after_deduping_generated_rows,
+    test_meal_history_window_matches_rolling_average_window,
     test_saved_meal_log_retry_is_idempotent,
     test_logged_ai_food_micros_are_persisted_for_gut_metrics,
     test_score_micros_read_unsuffixed_aliases_and_calorie_fallback,
