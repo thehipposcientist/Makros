@@ -1317,9 +1317,14 @@ def _ensure_user_oauth_columns() -> None:
     try:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             conn.execute(text('ALTER TABLE "user" ADD COLUMN IF NOT EXISTS apple_sub VARCHAR'))
+            conn.execute(text('ALTER TABLE "user" ADD COLUMN IF NOT EXISTS google_sub VARCHAR'))
             conn.execute(text(
                 'CREATE UNIQUE INDEX IF NOT EXISTS ix_user_apple_sub '
                 'ON "user"(apple_sub) WHERE apple_sub IS NOT NULL'
+            ))
+            conn.execute(text(
+                'CREATE UNIQUE INDEX IF NOT EXISTS ix_user_google_sub '
+                'ON "user"(google_sub) WHERE google_sub IS NOT NULL'
             ))
     except Exception as e:
         print(f"[migration] user oauth columns failed (non-fatal): {e}")

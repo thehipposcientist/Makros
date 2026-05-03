@@ -9,12 +9,15 @@
 /* Begin PBXBuildFile section */
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		1A09E0FAA3BDA80BF4C3898D /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F59622927C84C027EC0D3FD9 /* PrivacyInfo.xcprivacy */; };
+		23833471B8A71C59C9C0E28C /* ThalloWatchComplication.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = DC216BDC419BF6AE306EE71C /* ThalloWatchComplication.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		3209BC932FC2A932B05E0C39 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = XX470101BAEB8E0BBC8B0DXX /* WidgetKit.framework */; };
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
 		6C223D8B36A13F0B708FAB91 /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B992C273ECDF12B55B9681F4 /* ExpoModulesProvider.swift */; };
 		83ED4284C76C4278F920D0DD /* libPods-Thallo.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 333D3F5A7E487BBDCFDD35B4 /* libPods-Thallo.a */; };
 		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
 		C28CAD8BD12A93C2F9D8C355 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = F59622927C84C027EC0D3FD9 /* PrivacyInfo.xcprivacy */; };
 		F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11748412D0307B40044C1D9 /* AppDelegate.swift */; };
+		12F709DE796C703482E4B7BF /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = XX4DFF38D47332D6BF0183XX /* SwiftUI.framework */; };
 		XX12B55A1EDABF083C3B51XX /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = XX470101BAEB8E0BBC8B0DXX /* WidgetKit.framework */; };
 		XX1A6800511A685AB346D2XX /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = XXA12889081EB894481655XX /* AppIntents.framework */; };
 		XX3C562DEF346B45594832XX /* ActivityKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = XXCAF23C3FC41F82140FA1XX /* ActivityKit.framework */; };
@@ -30,6 +33,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = XXD0A31120F9629F3C94E5XX;
 			remoteInfo = RestTimerWidget;
+		};
+		BC1579E4B2213B6DD2E2985B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 83CBB9F71A601CBA00E9B192 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2DA201EE7A8B67213B89C53E;
+			remoteInfo = ThalloWatchComplication;
 		};
 		XXE1A5D38229C42F3616C5XX /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -48,6 +58,17 @@
 			dstSubfolderSpec = 13;
 			files = (
 				XX5990D9A638018B12D445XX /* RestTimerWidget.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D0F7CEDA22A9E9713920A6E0 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				23833471B8A71C59C9C0E28C /* ThalloWatchComplication.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -75,6 +96,7 @@
 		B73D2D3AEEE299616334EE49 /* Pods-Thallo.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Thallo.release.xcconfig"; path = "Target Support Files/Pods-Thallo/Pods-Thallo.release.xcconfig"; sourceTree = "<group>"; };
 		B992C273ECDF12B55B9681F4 /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-Thallo/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
 		BB2F792C24A3F905000567C9 /* Expo.plist */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = 0; lastKnownFileType = text.plist.xml; path = Expo.plist; sourceTree = "<group>"; };
+		DC216BDC419BF6AE306EE71C /* ThalloWatchComplication.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; fileEncoding = 4; includeInIndex = 0; path = ThalloWatchComplication.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = undefined; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 		F11748412D0307B40044C1D9 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = 0; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = Thallo/AppDelegate.swift; sourceTree = "<group>"; };
 		F11748442D0722820044C1D9 /* Thallo-Bridging-Header.h */ = {isa = PBXFileReference; fileEncoding = 4; includeInIndex = 0; lastKnownFileType = sourcecode.c.h; name = "Thallo-Bridging-Header.h"; path = "Thallo/Thallo-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -104,6 +126,14 @@
 			);
 			target = XXD0A31120F9629F3C94E5XX /* RestTimerWidget */;
 		};
+		74E430EA81482652E5E8AB54 /* Exceptions for "thallo-watch-complication" folder in "ThalloWatchComplication" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+				"expo-target.config.js",
+			);
+			target = 2DA201EE7A8B67213B89C53E /* ThalloWatchComplication */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -131,6 +161,18 @@
 			path = "resttimer-widget";
 			sourceTree = "<group>";
 		};
+		6E35230430E10936E9D78B03 /* thallo-watch-complication */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				74E430EA81482652E5E8AB54 /* Exceptions for "thallo-watch-complication" folder in "ThalloWatchComplication" target */,
+			);
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = "thallo-watch-complication";
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -150,6 +192,15 @@
 				XX6A44985675A04437B8C4XX /* SwiftUI.framework in Frameworks */,
 				XX3C562DEF346B45594832XX /* ActivityKit.framework in Frameworks */,
 				XX1A6800511A685AB346D2XX /* AppIntents.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BC23740CE14C42CBC6C5AE4B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3209BC932FC2A932B05E0C39 /* WidgetKit.framework in Frameworks */,
+				12F709DE796C703482E4B7BF /* SwiftUI.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -230,6 +281,7 @@
 				13B07F961A680F5B00A75B9A /* Thallo.app */,
 				XXA1883D81CB34046DC9B2XX /* RestTimerWidget.appex */,
 				XX28DCEECD70C334C7621DXX /* ThalloWatch.app */,
+				DC216BDC419BF6AE306EE71C /* ThalloWatchComplication.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -255,6 +307,7 @@
 			isa = PBXGroup;
 			children = (
 				XXCFE8163559D503B0273CXX /* resttimer-widget */,
+				6E35230430E10936E9D78B03 /* thallo-watch-complication */,
 				XX215C09124A8FB7A05440XX /* thallo-watch */,
 			);
 			name = "expo:targets";
@@ -296,10 +349,12 @@
 			buildPhases = (
 				XXDC105B0E28F884B8E02DXX /* Sources */,
 				XXC55EF014B50CBDECCD15XX /* Resources */,
+				D0F7CEDA22A9E9713920A6E0 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				3D20D3CB8C52CF7B438B7313 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				XX215C09124A8FB7A05440XX /* thallo-watch */,
@@ -308,6 +363,26 @@
 			productName = ThalloWatch;
 			productReference = XX28DCEECD70C334C7621DXX /* ThalloWatch.app */;
 			productType = "com.apple.product-type.application";
+		};
+		2DA201EE7A8B67213B89C53E /* ThalloWatchComplication */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 7F969CC765A8B81F94A43F44 /* Build configuration list for PBXNativeTarget "ThalloWatchComplication" */;
+			buildPhases = (
+				BC23740CE14C42CBC6C5AE4B /* Frameworks */,
+				4218D5803BCE3382E117DB5F /* Sources */,
+				D78254C20AD693652C606CD0 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				6E35230430E10936E9D78B03 /* thallo-watch-complication */,
+			);
+			name = ThalloWatchComplication;
+			productName = ThalloWatchComplication;
+			productReference = DC216BDC419BF6AE306EE71C /* ThalloWatchComplication.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 		XXD0A31120F9629F3C94E5XX /* RestTimerWidget */ = {
 			isa = PBXNativeTarget;
@@ -340,6 +415,11 @@
 					13B07F861A680F5B00A75B9A = {
 						LastSwiftMigration = 1250;
 					};
+					2DA201EE7A8B67213B89C53E = {
+						CreatedOnToolsVersion = 14.3;
+						DevelopmentTeam = 2K37DX38H2;
+						ProvisioningStyle = Automatic;
+					};
 					XX90DE4EA210EDCCC242C2XX = {
 						CreatedOnToolsVersion = 14.3;
 						DevelopmentTeam = 2K37DX38H2;
@@ -367,6 +447,7 @@
 			targets = (
 				13B07F861A680F5B00A75B9A /* Thallo */,
 				XXD0A31120F9629F3C94E5XX /* RestTimerWidget */,
+				2DA201EE7A8B67213B89C53E /* ThalloWatchComplication */,
 				XX90DE4EA210EDCCC242C2XX /* ThalloWatch */,
 			);
 		};
@@ -389,6 +470,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A09E0FAA3BDA80BF4C3898D /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D78254C20AD693652C606CD0 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -552,6 +640,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		4218D5803BCE3382E117DB5F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		XXE45443DC38DCFE1DB622XX /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -562,6 +657,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		3D20D3CB8C52CF7B438B7313 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2DA201EE7A8B67213B89C53E /* ThalloWatchComplication */;
+			targetProxy = BC1579E4B2213B6DD2E2985B /* PBXContainerItemProxy */;
+		};
 		XX43A6A45565519B011590XX /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = XXD0A31120F9629F3C94E5XX /* RestTimerWidget */;
@@ -760,6 +860,90 @@
 				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
 				USE_HERMES = true;
 				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		2A8CA5B7DB2C9A0E5B806FD9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = $accent;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CODE_SIGN_ENTITLEMENTS = "../targets/thallo-watch-complication/generated.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 140;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 2K37DX38H2;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "../targets/thallo-watch-complication/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = ThalloWatchComplication;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_DEBUG";
+				PRODUCT_BUNDLE_IDENTIFIER = com.thallo.app.watch.complication;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
+			};
+			name = Debug;
+		};
+		1903482EC78B1C7F0C3B0874 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = $accent;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CODE_SIGN_ENTITLEMENTS = "../targets/thallo-watch-complication/generated.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 140;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 2K37DX38H2;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "../targets/thallo-watch-complication/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = ThalloWatchComplication;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				MTL_FAST_MATH = YES;
+				OTHER_SWIFT_FLAGS = "$(inherited) -D EXPO_CONFIGURATION_RELEASE";
+				PRODUCT_BUNDLE_IDENTIFIER = com.thallo.app.watch.complication;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = watchos;
+				SKIP_INSTALL = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 4;
+				WATCHOS_DEPLOYMENT_TARGET = 10.0;
 			};
 			name = Release;
 		};
@@ -965,6 +1149,15 @@
 			buildConfigurations = (
 				XXD3E5D5CFF97C70CEA9B1XX /* Debug */,
 				XX5019A8E7253E4D85C87CXX /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		7F969CC765A8B81F94A43F44 /* Build configuration list for PBXNativeTarget "ThalloWatchComplication" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2A8CA5B7DB2C9A0E5B806FD9 /* Debug */,
+				1903482EC78B1C7F0C3B0874 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

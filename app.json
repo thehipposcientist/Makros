@@ -23,7 +23,8 @@
           "cameraPermission": "Thallo uses the camera to scan food barcodes for nutrition tracking."
         }
       ],
-      "@bacons/apple-targets"
+      "@bacons/apple-targets",
+      "expo-web-browser"
     ],
     "ios": {
       "bundleIdentifier": "com.thallo.app",
@@ -40,7 +41,9 @@
         "ITSAppUsesNonExemptEncryption": false,
         "NSSupportsLiveActivities": true,
         "NSSupportsLiveActivitiesFrequentUpdates": true,
-        "UIBackgroundModes": ["audio"]
+        "UIBackgroundModes": [
+          "audio"
+        ]
       },
       "entitlements": {
         "com.apple.developer.healthkit": true,

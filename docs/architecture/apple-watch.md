@@ -1,6 +1,6 @@
 # Apple Watch — Architecture
 
-Last synced from app state: 2026-05-01
+Last synced from app state: 2026-05-03
 
 ## Bidirectional Sync via WCSession
 
@@ -52,14 +52,15 @@ TabView: **Today** (workout) / **Meals** / **Hydration** / **Supps** / **Sleep**
 - Rest countdowns persist as absolute end timestamps and are reconciled on timer ticks and SwiftUI `scenePhase == .active`, so watchOS sleep/wake does not freeze the timer.
 - Recommendation hydration uses `state.currentRecommendation ?? ex.recommendation`, so the watch prefers fresh phone-pushed guidance during a live rest window and falls back to the static exercise recommendation when no live override exists.
 
-## Watch Complication Scaffold (#110 — NOT YET SHIPPED)
+## Watch Complication + Smart Stack (#110 — IMPLEMENTED)
 
-`targets/thallo-watch-complication/` — `@bacons/apple-targets` widget config + SwiftUI complication source. Surfaces today's focus + readiness (accessoryCircular / Rectangular / Inline). Reads payload from SharedDefaults `group.com.thallo.app`.
+`targets/thallo-watch-complication/` — watchOS WidgetKit extension embedded in `ThalloWatch.app`. Surfaces today's focus, readiness, hydration progress, and workout duration across accessoryCircular / accessoryRectangular / accessoryInline.
 
-**Blocked until:**
-1. `expo prebuild` generates the target.
-2. App Group entitlement matches across both watch targets.
-3. Main watch app calls `WidgetCenter.shared.reloadAllTimelines()` after writing SharedDefaults.
+**Data path:** `targets/thallo-watch/ConnectivityStore.swift` mirrors the latest workout / hydration / readiness snapshot into SharedDefaults `group.com.thallo.app` via `ThalloComplicationSync`, then calls `WidgetCenter.shared.reloadAllTimelines()`.
+
+**Actions:** widget links open the watch app through the `thallowatch://` URL scheme. `thallowatch://start-workout` starts or rejoins today's workout through the existing watch `start_workout` command path; `thallowatch://hydration/add?oz=8` switches to Hydration, optimistically adds water locally, and sends the existing `log_hydration` command to the phone. Phone/backend remain authoritative.
+
+**Signing requirement:** the App Group `group.com.thallo.app` must be enabled for both `com.thallo.app.watch` and `com.thallo.app.watch.complication` in Apple Developer before device/TestFlight signing.
 
 ## Siri Intent Scaffold (#111 — NOT YET SHIPPED)
 

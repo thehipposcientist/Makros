@@ -26,7 +26,11 @@ TOKEN_TTL_MINUTES = 30
 APPLE_ISSUER = "https://appleid.apple.com"
 APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys"
 APPLE_JWKS_TTL_SECONDS = 6 * 60 * 60
+GOOGLE_ISSUERS = ("https://accounts.google.com", "accounts.google.com")
+GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
+GOOGLE_JWKS_TTL_SECONDS = 6 * 60 * 60
 _apple_jwks_cache: dict[str, Any] | None = None
+_google_jwks_cache: dict[str, Any] | None = None
 
 
 def _user_read(user: User) -> UserRead:
@@ -141,6 +145,23 @@ def _apple_audiences() -> list[str]:
     return audiences
 
 
+def _google_audiences() -> list[str]:
+    values = [
+        os.getenv("GOOGLE_CLIENT_IDS"),
+        os.getenv("GOOGLE_CLIENT_ID"),
+        os.getenv("GOOGLE_WEB_CLIENT_ID"),
+        os.getenv("GOOGLE_IOS_CLIENT_ID"),
+        os.getenv("GOOGLE_ANDROID_CLIENT_ID"),
+    ]
+    audiences: list[str] = []
+    for raw in values:
+        for item in (raw or "").split(","):
+            audience = item.strip()
+            if audience and audience not in audiences:
+                audiences.append(audience)
+    return audiences
+
+
 def _apple_jwks(force_refresh: bool = False) -> list[dict[str, Any]]:
     global _apple_jwks_cache
     now = time.time()
@@ -160,6 +181,28 @@ def _apple_jwks(force_refresh: bool = False) -> list[dict[str, Any]]:
     if not keys:
         raise HTTPException(status_code=503, detail="Unable to verify Apple sign-in right now")
     _apple_jwks_cache = {"keys": keys, "expires_at": now + APPLE_JWKS_TTL_SECONDS}
+    return keys
+
+
+def _google_jwks(force_refresh: bool = False) -> list[dict[str, Any]]:
+    global _google_jwks_cache
+    now = time.time()
+    if (
+        not force_refresh
+        and _google_jwks_cache
+        and _google_jwks_cache.get("expires_at", 0) > now
+    ):
+        return list(_google_jwks_cache.get("keys", []))
+    try:
+        with urlopen(GOOGLE_JWKS_URL, timeout=5) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        logger.warning("auth_google_jwks_failed", extra={"error": str(e)})
+        raise HTTPException(status_code=503, detail="Unable to verify Google sign-in right now")
+    keys = payload.get("keys") or []
+    if not keys:
+        raise HTTPException(status_code=503, detail="Unable to verify Google sign-in right now")
+    _google_jwks_cache = {"keys": keys, "expires_at": now + GOOGLE_JWKS_TTL_SECONDS}
     return keys
 
 
@@ -199,7 +242,52 @@ def _verify_apple_identity_token(identity_token: str) -> dict[str, Any]:
     raise HTTPException(status_code=401, detail="Apple sign-in token is invalid")
 
 
+def _verify_google_identity_token(identity_token: str) -> dict[str, Any]:
+    token = (identity_token or "").strip()
+    if not token:
+        raise HTTPException(status_code=422, detail="Google identity token is required")
+    audiences = _google_audiences()
+    if not audiences:
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured")
+    try:
+        header = jwt.get_unverified_header(token)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
+    kid = header.get("kid")
+    if not kid:
+        raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
+
+    key = next((k for k in _google_jwks() if k.get("kid") == kid), None)
+    if key is None:
+        key = next((k for k in _google_jwks(force_refresh=True) if k.get("kid") == kid), None)
+    if key is None:
+        raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
+
+    last_error: Exception | None = None
+    for issuer in GOOGLE_ISSUERS:
+        for audience in audiences:
+            try:
+                claims = jwt.decode(
+                    token,
+                    key,
+                    algorithms=["RS256"],
+                    audience=audience,
+                    issuer=issuer,
+                )
+                if claims.get("sub"):
+                    return claims
+            except JWTError as e:
+                last_error = e
+    logger.warning("auth_google_token_failed", extra={"error": str(last_error or "missing_sub")})
+    raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
+
+
 def _apple_email_verified(claims: dict[str, Any]) -> bool:
+    value = claims.get("email_verified")
+    return value is True or str(value).lower() == "true"
+
+
+def _google_email_verified(claims: dict[str, Any]) -> bool:
     value = claims.get("email_verified")
     return value is True or str(value).lower() == "true"
 
@@ -317,11 +405,22 @@ class AppleAuthRequest(BaseModel):
     accepted_ai_disclaimer: bool = True
 
 
+class GoogleAuthRequest(BaseModel):
+    identity_token: str
+    first_name: str | None = None
+    last_name: str | None = None
+    legal_version: str | None = None
+    accepted_terms: bool = True
+    accepted_privacy: bool = True
+    accepted_health_disclaimer: bool = True
+    accepted_ai_disclaimer: bool = True
+
+
 class OAuthToken(Token):
     is_new_user: bool = False
 
 
-def _require_apple_legal_acceptance(body: AppleAuthRequest) -> None:
+def _require_oauth_legal_acceptance(body: AppleAuthRequest | GoogleAuthRequest) -> None:
     if not (
         body.accepted_terms
         and body.accepted_privacy
@@ -332,6 +431,10 @@ def _require_apple_legal_acceptance(body: AppleAuthRequest) -> None:
             status_code=422,
             detail="Terms, Privacy Policy, health disclaimer, and AI disclaimer must be accepted",
         )
+
+
+def _name_from_google_claim(claims: dict[str, Any], key: str) -> str | None:
+    return _clean_optional_name(str(claims.get(key) or ""))
 
 
 @router.post("/apple", response_model=OAuthToken)
@@ -391,7 +494,7 @@ def login_with_apple(
         logger.info("auth_apple_linked", extra={"user_id": existing.id, "email": email, "ip": ip})
         return OAuthToken(access_token=token, is_new_user=False)
 
-    _require_apple_legal_acceptance(body)
+    _require_oauth_legal_acceptance(body)
     legal_version = (body.legal_version or LEGAL_VERSION).strip() or LEGAL_VERSION
     user = User(
         email=email,
@@ -417,6 +520,89 @@ def login_with_apple(
     token = create_access_token(user.id, token_version=user.token_version)
     set_request_context(user_id=user.id)
     logger.info("auth_apple_created", extra={"user_id": user.id, "email": email, "ip": ip})
+    return OAuthToken(access_token=token, is_new_user=True)
+
+
+@router.post("/google", response_model=OAuthToken)
+@limiter.limit("10/minute;100/hour")
+def login_with_google(
+    body: GoogleAuthRequest,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    ip = _client_ip(request)
+    claims = _verify_google_identity_token(body.identity_token)
+    google_sub = str(claims.get("sub") or "").strip()
+    if not google_sub:
+        raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
+
+    user = session.exec(select(User).where(User.google_sub == google_sub)).first()
+    if user:
+        if not user.is_active:
+            logger.warning("auth_google_disabled", extra={"user_id": user.id, "ip": ip})
+            raise HTTPException(status_code=403, detail="Account disabled")
+        token = create_access_token(user.id, token_version=user.token_version)
+        set_request_context(user_id=user.id)
+        logger.info("auth_google_ok", extra={"user_id": user.id, "ip": ip, "is_new": False})
+        return OAuthToken(access_token=token, is_new_user=False)
+
+    email = str(claims.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=422, detail="Google did not provide an email address")
+    _validate_email(email)
+    if not _google_email_verified(claims):
+        raise HTTPException(status_code=401, detail="Google email is not verified")
+
+    now = datetime.now(timezone.utc)
+    first_name = _clean_optional_name(body.first_name) or _name_from_google_claim(claims, "given_name")
+    last_name = _clean_optional_name(body.last_name) or _name_from_google_claim(claims, "family_name")
+    existing = session.exec(select(User).where(User.email == email)).first()
+    if existing:
+        if not existing.is_active:
+            logger.warning("auth_google_disabled", extra={"user_id": existing.id, "email": email, "ip": ip})
+            raise HTTPException(status_code=403, detail="Account disabled")
+        if existing.google_sub and existing.google_sub != google_sub:
+            raise HTTPException(status_code=409, detail="This email is already linked to a different Google account")
+        existing.google_sub = google_sub
+        existing.email_verified_at = existing.email_verified_at or now
+        if first_name and not existing.first_name:
+            existing.first_name = first_name
+        if last_name and not existing.last_name:
+            existing.last_name = last_name
+        session.add(existing)
+        session.commit()
+        session.refresh(existing)
+        token = create_access_token(existing.id, token_version=existing.token_version)
+        set_request_context(user_id=existing.id)
+        logger.info("auth_google_linked", extra={"user_id": existing.id, "email": email, "ip": ip})
+        return OAuthToken(access_token=token, is_new_user=False)
+
+    _require_oauth_legal_acceptance(body)
+    legal_version = (body.legal_version or LEGAL_VERSION).strip() or LEGAL_VERSION
+    user = User(
+        email=email,
+        username=_unique_oauth_username(session, email),
+        hashed_password=hash_password(secrets.token_urlsafe(32)),
+        first_name=first_name,
+        last_name=last_name,
+        google_sub=google_sub,
+        terms_accepted_at=now,
+        terms_version=legal_version,
+        privacy_accepted_at=now,
+        privacy_version=legal_version,
+        health_disclaimer_accepted_at=now,
+        health_disclaimer_version=legal_version,
+        ai_disclaimer_accepted_at=now,
+        ai_disclaimer_version=legal_version,
+        email_verified_at=now,
+        subscription_tier="pro",
+    )
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    token = create_access_token(user.id, token_version=user.token_version)
+    set_request_context(user_id=user.id)
+    logger.info("auth_google_created", extra={"user_id": user.id, "email": email, "ip": ip})
     return OAuthToken(access_token=token, is_new_user=True)
 
 

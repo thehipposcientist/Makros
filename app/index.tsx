@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { View, Text, Modal, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated, Easing, Linking, TextInput } from 'react-native';
+import { View, Text, Modal, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, Image, Alert, Platform, Switch, AppState, AppStateStatus, Animated, Easing, Linking, TextInput, InteractionManager } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -328,7 +328,7 @@ import TutorialOverlay from '../src/components/TutorialOverlay';
 import LegalDisclosureModal from '../src/components/LegalDisclosureModal';
 import { colors, getTheme, radius } from '../src/constants/theme';
 import { LEGAL_VERSION, SUPPORT_EMAIL } from '../src/constants/legal';
-import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, savePlanChange, todayKey, isAppleHealthEnabled, setAppleHealthEnabled } from '../src/utils/workoutHistory';
+import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, savePlanChange, todayKey } from '../src/utils/workoutHistory';
 import { nextPlanWeekStart, formatPlanStartDateShort } from '../src/utils/planEffectiveDate';
 import { workoutSessionToLoggedPayload } from '../src/utils/workoutLogPayload';
 import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
@@ -2242,6 +2242,7 @@ function AccountInfoModal({
   const tc = getTheme(profile.themePreference).colors;
   const c = tc; // alias for the new Developer-logs block below
   const betaFullAccess = isBetaFullAccessEnabled();
+  const subscriptionTier = tierOf(profile);
   // Memoized — without this, every keystroke / state change in this
   // modal recreates the entire StyleSheet (40+ entries) and triggers
   // a re-mount of every styled child. Open felt sluggish.
@@ -2255,7 +2256,6 @@ function AccountInfoModal({
     legalAccepted?: boolean;
   } | null>(null);
   const [loading, setLoading]         = useState(true);
-  const [healthEnabled, setHealthEnabled] = useState(false);
   const [hasRecoveryQuestion, setHasRecoveryQuestion] = useState(false);
   const [showRecoveryModal, setShowRecoveryModal] = useState(false);
   const [showTierInfo, setShowTierInfo] = useState(false);
@@ -2265,7 +2265,6 @@ function AccountInfoModal({
   const [nameLast, setNameLast] = useState(profile.lastName ?? '');
   const [nameStatus, setNameStatus] = useState('');
   const [watchStatus, setWatchStatus] = useState<string>('No sync recorded yet');
-  const showHealthToggle = Platform.OS === 'ios';
   const cleanProfileText = (value: unknown): string => {
     const text = typeof value === 'string' ? value.trim() : '';
     return text && text.toLowerCase() !== 'undefined' && text.toLowerCase() !== 'null' ? text : '';
@@ -2299,41 +2298,58 @@ function AccountInfoModal({
   const ageValue = age != null && age > 0 ? String(Math.round(age)) : '—';
 
   useEffect(() => {
-    getMe(token)
+    let cancelled = false;
+    const applyIfMounted = (fn: () => void) => {
+      if (!cancelled) fn();
+    };
+
+    getMe(token, { timeoutMs: 8000, noRetry: true })
       .then((data: any) => {
-        setAccountData({
-          email: data.email,
-          username: data.username,
-          firstName: data.first_name ?? null,
-          lastName: data.last_name ?? null,
-          emailVerified: !!data.email_verified,
-          legalAccepted: !!data.legal_accepted,
+        applyIfMounted(() => {
+          setAccountData({
+            email: data.email,
+            username: data.username,
+            firstName: data.first_name ?? null,
+            lastName: data.last_name ?? null,
+            emailVerified: !!data.email_verified,
+            legalAccepted: !!data.legal_accepted,
+          });
+          setNameFirst(data.first_name ?? profile.firstName ?? '');
+          setNameLast(data.last_name ?? profile.lastName ?? '');
+          setHasRecoveryQuestion(!!data.has_recovery_question);
         });
-        setNameFirst(data.first_name ?? profile.firstName ?? '');
-        setNameLast(data.last_name ?? profile.lastName ?? '');
-        setHasRecoveryQuestion(!!data.has_recovery_question);
       })
-      .catch(() => setAccountData(null))
-      .finally(() => setLoading(false));
-    isAppleHealthEnabled().then(setHealthEnabled);
-    import('../src/utils/watchSync')
-      .then(async ({ getWatchSyncSnapshot, WatchBridge }) => {
-        const snap = await getWatchSyncSnapshot();
-        const availability = !WatchBridge.isAvailable()
-          ? 'bridge unavailable'
-          : WatchBridge.isReachable()
-            ? 'reachable'
-            : WatchBridge.isPaired()
-              ? 'paired, waiting'
-              : 'not paired';
-        if (!snap) {
-          setWatchStatus(`No sync recorded yet (${availability})`);
-          return;
-        }
-        const ageMin = Math.max(0, Math.round((Date.now() - snap.atMs) / 60000));
-        setWatchStatus(`${snap.ok ? 'Last sync ok' : 'Last sync failed'}: ${snap.surface}, ${ageMin}m ago (${availability})`);
-      })
-      .catch(() => setWatchStatus('Watch status unavailable'));
+      .catch(() => applyIfMounted(() => setAccountData(null)))
+      .finally(() => applyIfMounted(() => setLoading(false)));
+
+    const statusTask = InteractionManager.runAfterInteractions(() => {
+      // Native Watch bridge checks can hitch the sheet animation on open.
+      import('../src/utils/watchSync')
+        .then(async ({ getWatchSyncSnapshot, WatchBridge }) => {
+          const snap = await getWatchSyncSnapshot();
+          const availability = !WatchBridge.isAvailable()
+            ? 'bridge unavailable'
+            : WatchBridge.isReachable()
+              ? 'reachable'
+              : WatchBridge.isPaired()
+                ? 'paired, waiting'
+                : 'not paired';
+          applyIfMounted(() => {
+            if (!snap) {
+              setWatchStatus(`No sync recorded yet (${availability})`);
+              return;
+            }
+            const ageMin = Math.max(0, Math.round((Date.now() - snap.atMs) / 60000));
+            setWatchStatus(`${snap.ok ? 'Last sync ok' : 'Last sync failed'}: ${snap.surface}, ${ageMin}m ago (${availability})`);
+          });
+        })
+        .catch(() => applyIfMounted(() => setWatchStatus('Watch status unavailable')));
+    });
+
+    return () => {
+      cancelled = true;
+      statusTask.cancel();
+    };
   }, [token]);
 
   const Row = ({ label, value }: { label: string; value: string }) => (
@@ -2761,19 +2777,19 @@ function AccountInfoModal({
               </View>
               <View style={{
                 paddingVertical: 10, borderRadius: 10,
-                backgroundColor: tierOf(profile) === 'pro' ? tc.primary : tc.surface,
-                borderWidth: 1, borderColor: tierOf(profile) === 'pro' ? tc.primary : tc.border,
+                backgroundColor: subscriptionTier === 'pro' ? tc.primary : tc.surface,
+                borderWidth: 1, borderColor: subscriptionTier === 'pro' ? tc.primary : tc.border,
                 alignItems: 'center',
               }}>
                 <Text style={{
                   fontSize: 13, fontWeight: '800', letterSpacing: 0.6,
-                  color: tierOf(profile) === 'pro' ? tc.background : tc.textSecondary,
+                  color: subscriptionTier === 'pro' ? tc.background : tc.textSecondary,
                 }}>
-                  {tierOf(profile) === 'pro' ? 'PRO' : 'FREE'}
+                  {subscriptionTier === 'pro' ? 'PRO' : 'FREE'}
                 </Text>
               </View>
               <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 8, lineHeight: 15 }}>
-                {tierOf(profile) === 'free'
+                {subscriptionTier === 'free'
                   ? `Free: manual workout + meal logging, basic progress, and ${FREE_WORKOUT_TEMPLATE_LIMIT} saved workout templates.`
                   : 'Pro: generated PlanWeeks, AI meal help, coach chat, scan features, readiness, and weekly insights.'}
               </Text>

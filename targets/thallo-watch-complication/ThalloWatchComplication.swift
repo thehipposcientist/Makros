@@ -11,23 +11,33 @@
 // timeline + on every workout / meal push from the phone (the
 // watch app calls WidgetCenter.shared.reloadAllTimelines()).
 
+import Foundation
 import WidgetKit
 import SwiftUI
 
 // MARK: - Shared payload
 
 private struct ComplicationPayload: Codable {
-    let focus: String           // "Push" / "Rest" / "Run"
-    let readiness: Int?         // 0-100, optional
-    let sessionsPlanned: Int    // weekly target
-    let sessionsDone: Int       // count this week
+    let focus: String
+    let workoutStatus: String?
+    let durationMinutes: Int?
+    let exerciseCount: Int?
+    let readiness: Int?
+    let readinessLabel: String?
+    let hydrationOunces: Double?
+    let hydrationTargetOunces: Double?
+    let dateISO: String?
     let updatedAtMs: Double
 }
 
+private let kSuiteName = "group.com.thallo.app"
 private let kPayloadKey = "thallo.complication.payload"
+private let kOpenURL = URL(string: "thallowatch://open")!
+private let kStartWorkoutURL = URL(string: "thallowatch://start-workout")!
+private let kHydrationAddURL = URL(string: "thallowatch://hydration/add?oz=8")!
 
 private func loadPayload() -> ComplicationPayload {
-    let defaults = UserDefaults(suiteName: "group.com.thallo.app") ?? .standard
+    let defaults = UserDefaults(suiteName: kSuiteName) ?? .standard
     if let data = defaults.data(forKey: kPayloadKey),
        let decoded = try? JSONDecoder().decode(ComplicationPayload.self, from: data) {
         return decoded
@@ -37,9 +47,14 @@ private func loadPayload() -> ComplicationPayload {
     // is supposed to look "OK, nothing scheduled" not broken.
     return ComplicationPayload(
         focus: "Open Thallo",
+        workoutStatus: nil,
+        durationMinutes: nil,
+        exerciseCount: nil,
         readiness: nil,
-        sessionsPlanned: 0,
-        sessionsDone: 0,
+        readinessLabel: nil,
+        hydrationOunces: nil,
+        hydrationTargetOunces: nil,
+        dateISO: nil,
         updatedAtMs: 0,
     )
 }
@@ -78,11 +93,14 @@ private struct CircularView: View {
         ZStack {
             AccessoryWidgetBackground()
             VStack(spacing: 0) {
-                Text(p.focus.prefix(4).uppercased())
+                Text(shortFocus(p.focus))
                     .font(.system(size: 11, weight: .heavy))
                 if let r = p.readiness {
                     Text("\(r)")
                         .font(.system(size: 16, weight: .black, design: .rounded))
+                } else if let hydration = hydrationPercent(p) {
+                    Text("\(hydration)%")
+                        .font(.system(size: 13, weight: .black, design: .rounded))
                 }
             }
         }
@@ -100,15 +118,40 @@ private struct RectangularView: View {
             Text(p.focus)
                 .font(.system(size: 14, weight: .heavy))
                 .lineLimit(1)
-            HStack(spacing: 4) {
+            HStack(spacing: 5) {
                 if let r = p.readiness {
-                    Text("\(r) READY")
+                    Text("\(r) RDY")
                         .font(.system(size: 10, weight: .heavy))
                         .widgetAccentable()
                 }
-                Text("· \(p.sessionsDone)/\(p.sessionsPlanned)")
-                    .font(.system(size: 10))
+                if let hydration = hydrationPercent(p) {
+                    Text("\(hydration)% H2O")
+                        .font(.system(size: 10, weight: .heavy))
+                } else if let minutes = p.durationMinutes {
+                    Text("\(minutes) min")
+                        .font(.system(size: 10, weight: .heavy))
+                }
             }
+            HStack(spacing: 6) {
+                actionLink(title: startTitle(p), systemImage: "figure.strengthtraining.traditional", url: kStartWorkoutURL)
+                actionLink(title: "+8", systemImage: "drop.fill", url: kHydrationAddURL)
+            }
+            .padding(.top, 1)
+        }
+    }
+
+    private func actionLink(title: String, systemImage: String, url: URL) -> some View {
+        Link(destination: url) {
+            HStack(spacing: 2) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 8, weight: .heavy))
+                Text(title)
+                    .font(.system(size: 9, weight: .heavy))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(.quaternary, in: Capsule())
         }
     }
 }
@@ -116,12 +159,32 @@ private struct RectangularView: View {
 private struct InlineView: View {
     let p: ComplicationPayload
     var body: some View {
-        if let r = p.readiness {
-            Text("Thallo · \(p.focus) · \(r)")
+        if let hydration = hydrationPercent(p), let r = p.readiness {
+            Text("Thallo \(p.focus) \(r)R \(hydration)%H2O")
+        } else if let r = p.readiness {
+            Text("Thallo \(p.focus) \(r)R")
+        } else if let hydration = hydrationPercent(p) {
+            Text("Thallo \(p.focus) \(hydration)%H2O")
         } else {
-            Text("Thallo · \(p.focus)")
+            Text("Thallo \(p.focus)")
         }
     }
+}
+
+private func hydrationPercent(_ p: ComplicationPayload) -> Int? {
+    guard let ounces = p.hydrationOunces,
+          let target = p.hydrationTargetOunces,
+          target > 0
+    else { return nil }
+    return min(999, max(0, Int(((ounces / target) * 100).rounded())))
+}
+
+private func shortFocus(_ focus: String) -> String {
+    String(focus.prefix(4)).uppercased()
+}
+
+private func startTitle(_ p: ComplicationPayload) -> String {
+    p.workoutStatus == "active" ? "Rejoin" : "Start"
 }
 
 // MARK: - Widget
@@ -130,12 +193,15 @@ private struct ThalloComplicationView: View {
     let entry: ThalloEntry
     @Environment(\.widgetFamily) var family
     var body: some View {
-        switch family {
-        case .accessoryCircular: CircularView(p: entry.payload)
-        case .accessoryRectangular: RectangularView(p: entry.payload)
-        case .accessoryInline: InlineView(p: entry.payload)
-        default: InlineView(p: entry.payload)
+        Group {
+            switch family {
+            case .accessoryCircular: CircularView(p: entry.payload)
+            case .accessoryRectangular: RectangularView(p: entry.payload)
+            case .accessoryInline: InlineView(p: entry.payload)
+            default: InlineView(p: entry.payload)
+            }
         }
+        .widgetURL(kOpenURL)
     }
 }
 

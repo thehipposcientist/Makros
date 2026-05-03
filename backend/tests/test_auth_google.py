@@ -1,0 +1,128 @@
+"""Google account auth and linking."""
+from __future__ import annotations
+
+import os
+import sys
+
+os.environ.setdefault("SECRET_KEY", "test-secret-key-for-google-auth-123456")
+os.environ.setdefault("GOOGLE_CLIENT_IDS", "google-client-id.apps.googleusercontent.com")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from sqlmodel import SQLModel, Session, create_engine, select
+
+from app.models import User
+from app.routers import auth as auth_router
+
+
+class _Client:
+    host = "testclient"
+
+
+class _Request:
+    headers = {}
+    client = _Client()
+
+
+def _engine():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine, tables=[User.__table__])
+    return engine
+
+
+def _with_google_claims(claims: dict):
+    original = auth_router._verify_google_identity_token
+    auth_router._verify_google_identity_token = lambda _token: claims
+    return original
+
+
+def _login_with_google(body: auth_router.GoogleAuthRequest, session: Session):
+    handler = getattr(auth_router.login_with_google, "__wrapped__", auth_router.login_with_google)
+    return handler(body, _Request(), session)
+
+
+def test_google_login_creates_new_user():
+    engine = _engine()
+    original = _with_google_claims({
+        "sub": "google-sub-new",
+        "email": "new-google@example.com",
+        "email_verified": True,
+        "given_name": "Grace",
+        "family_name": "Hopper",
+    })
+    try:
+        with Session(engine) as session:
+            resp = _login_with_google(
+                auth_router.GoogleAuthRequest(
+                    identity_token="signed.google.jwt",
+                    legal_version="2026-04-29.2",
+                ),
+                session,
+            )
+            user = session.exec(select(User).where(User.google_sub == "google-sub-new")).first()
+            assert resp.is_new_user is True
+            assert resp.access_token
+            assert user is not None
+            assert user.email == "new-google@example.com"
+            assert user.first_name == "Grace"
+            assert user.last_name == "Hopper"
+            assert user.email_verified_at is not None
+            assert user.terms_version == "2026-04-29.2"
+            assert user.subscription_tier == "pro"
+    finally:
+        auth_router._verify_google_identity_token = original
+        engine.dispose()
+    print("PASS test_google_login_creates_new_user")
+
+
+def test_google_login_links_existing_email_user():
+    engine = _engine()
+    original = _with_google_claims({
+        "sub": "google-sub-link",
+        "email": "pilot@example.com",
+        "email_verified": "true",
+    })
+    try:
+        with Session(engine) as session:
+            session.add(User(email="pilot@example.com", username="pilot", hashed_password="x"))
+            session.commit()
+            resp = _login_with_google(
+                auth_router.GoogleAuthRequest(identity_token="signed.google.jwt", first_name="Pilot"),
+                session,
+            )
+            user = session.exec(select(User).where(User.email == "pilot@example.com")).first()
+            assert resp.is_new_user is False
+            assert resp.access_token
+            assert user is not None
+            assert user.google_sub == "google-sub-link"
+            assert user.email_verified_at is not None
+            assert user.first_name == "Pilot"
+    finally:
+        auth_router._verify_google_identity_token = original
+        engine.dispose()
+    print("PASS test_google_login_links_existing_email_user")
+
+
+def test_google_login_returns_existing_link_without_email_claim():
+    engine = _engine()
+    original = _with_google_claims({"sub": "google-sub-returning"})
+    try:
+        with Session(engine) as session:
+            session.add(User(
+                email="returning@example.com",
+                username="returning",
+                hashed_password="x",
+                google_sub="google-sub-returning",
+            ))
+            session.commit()
+            resp = _login_with_google(
+                auth_router.GoogleAuthRequest(identity_token="signed.google.jwt"),
+                session,
+            )
+            user_count = len(session.exec(select(User)).all())
+            assert resp.is_new_user is False
+            assert resp.access_token
+            assert user_count == 1
+    finally:
+        auth_router._verify_google_identity_token = original
+        engine.dispose()
+    print("PASS test_google_login_returns_existing_link_without_email_claim")

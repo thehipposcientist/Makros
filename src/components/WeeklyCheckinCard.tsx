@@ -10,6 +10,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { View, Text, TouchableOpacity, ActivityIndicator, Alert } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -26,6 +27,9 @@ import { maybeNotifyWeeklyCheckinDue } from '../utils/weeklyCheckinNotifications
 interface Props {
   authToken: string;
   themeName?: AppThemeName;
+  /** Allows completed/skipped recaps to be hidden on transient surfaces.
+   *  Progress leaves this off so the recap remains available there. */
+  dismissibleRecap?: boolean;
   /** Called after a successful check-in submission or skip so parent can
    *  reload check-in status and any day-state overlays. */
   onCheckinCompleted?: () => void;
@@ -38,7 +42,7 @@ function formatDateRange(start: string | null, end: string | null): string {
   return `${fmt(start)} – ${fmt(end)}`;
 }
 
-export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompleted }: Props) {
+export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRecap = false, onCheckinCompleted }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
 
@@ -47,6 +51,7 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
   const [skipping, setSkipping] = useState(false);
   const [modalVisible, setModalVisible] = useState(false);
   const [recapMode, setRecapMode] = useState(false);
+  const [recapDismissed, setRecapDismissed] = useState(false);
 
   const fetchStatus = useCallback(async () => {
     setLoading(true);
@@ -73,6 +78,22 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
     }).catch(() => {});
   }, [status?.status, status?.plan_week_id, status?.week_start, status?.week_end]);
 
+  const recapDismissKey = dismissibleRecap
+    && status?.plan_week_id
+    && (status.status === 'completed' || status.status === 'skipped')
+      ? `weeklyCheckinWorkoutRecapDismissed_${status.plan_week_id}`
+      : null;
+
+  useEffect(() => {
+    let alive = true;
+    setRecapDismissed(false);
+    if (!recapDismissKey) return () => { alive = false; };
+    AsyncStorage.getItem(recapDismissKey)
+      .then(value => { if (alive) setRecapDismissed(value === '1'); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [recapDismissKey]);
+
   if (loading) {
     return (
       <View style={{
@@ -95,6 +116,14 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
   const hasRecap = isCompleted || (isSkipped && !!checkin?.review_snapshot_json);
 
   if (isSkipped && !hasRecap) return null;
+  if (hasRecap && recapDismissed) return null;
+
+  const handleDismissRecap = async () => {
+    setRecapDismissed(true);
+    if (recapDismissKey) {
+      try { await AsyncStorage.setItem(recapDismissKey, '1'); } catch {}
+    }
+  };
 
   const handleSkip = async () => {
     if (!status.plan_week_id) return;
@@ -162,6 +191,17 @@ export default function WeeklyCheckinCard({ authToken, themeName, onCheckinCompl
               </Text>
             ) : null}
           </View>
+          {dismissibleRecap && hasRecap && (
+            <TouchableOpacity
+              onPress={handleDismissRecap}
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss weekly recap from Workout"
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              style={{ padding: 4 }}
+            >
+              <Ionicons name="close" size={18} color={tc.textMuted} />
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Completed recap preview */}

@@ -4,9 +4,12 @@ import {
   ScrollView, ActivityIndicator, KeyboardAvoidingView,
   Platform, Image, Dimensions, Alert,
 } from 'react-native';
+import Constants from 'expo-constants';
 import * as AppleAuthentication from 'expo-apple-authentication';
+import * as Google from 'expo-auth-session/providers/google';
+import * as WebBrowser from 'expo-web-browser';
 import { Ionicons } from '@expo/vector-icons';
-import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestion, loginWithApple } from '../services/api';
+import { login, register, resetPassword, getRecoveryQuestion, setRecoveryQuestion, loginWithApple, loginWithGoogle } from '../services/api';
 import { colors, radius } from '../constants/theme';
 import FadeInView from '../components/FadeInView';
 import LegalDisclosureModal from '../components/LegalDisclosureModal';
@@ -16,6 +19,29 @@ const { width: SCREEN_W } = Dimensions.get('window');
 const logo = require('../../assets/images/thallo-logo-white-transparent-New.png');
 
 const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
+const GOOGLE_CLIENT_ID_PLACEHOLDER = 'missing-google-client-id.apps.googleusercontent.com';
+
+WebBrowser.maybeCompleteAuthSession();
+
+function configured(value?: string | null): string | undefined {
+  const cleaned = (value ?? '').trim();
+  if (!cleaned || cleaned.includes('missing-google-client-id')) return undefined;
+  return cleaned;
+}
+
+function googleOAuthConfig() {
+  const extra = (Constants.expoConfig?.extra ?? {}) as {
+    googleWebClientId?: string;
+    googleIosClientId?: string;
+    googleAndroidClientId?: string;
+  };
+  const webClientId = configured(process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID) ?? configured(extra.googleWebClientId);
+  const iosClientId = configured(process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID) ?? configured(extra.googleIosClientId);
+  const androidClientId = configured(process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID) ?? configured(extra.googleAndroidClientId);
+  return { webClientId, iosClientId, androidClientId };
+}
+
+const GOOGLE_OAUTH = googleOAuthConfig();
 
 interface AuthScreenProps {
   onAuthenticated: (token: string, isNewUser: boolean) => void;
@@ -52,6 +78,23 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const showSocialSignIn = mode === 'login' || mode === 'signup';
   const showAppleSignIn = Platform.OS === 'ios' && showSocialSignIn;
   const socialVerb = mode === 'signup' ? 'Sign up' : 'Log in';
+  const googleClientId = GOOGLE_OAUTH.webClientId
+    ?? GOOGLE_OAUTH.iosClientId
+    ?? GOOGLE_OAUTH.androidClientId
+    ?? GOOGLE_CLIENT_ID_PLACEHOLDER;
+  const activeGoogleClientId = Platform.select({
+    ios: GOOGLE_OAUTH.iosClientId ?? GOOGLE_OAUTH.webClientId,
+    android: GOOGLE_OAUTH.androidClientId ?? GOOGLE_OAUTH.webClientId,
+    default: GOOGLE_OAUTH.webClientId ?? GOOGLE_OAUTH.iosClientId ?? GOOGLE_OAUTH.androidClientId,
+  });
+  const googleConfigured = !!activeGoogleClientId;
+  const [googleRequest, googleResponse, promptGoogleAsync] = Google.useIdTokenAuthRequest({
+    clientId: googleClientId,
+    webClientId: GOOGLE_OAUTH.webClientId ?? googleClientId,
+    iosClientId: GOOGLE_OAUTH.iosClientId ?? googleClientId,
+    androidClientId: GOOGLE_OAUTH.androidClientId ?? googleClientId,
+    selectAccount: true,
+  });
 
   const firstNameRef       = useRef<TextInput>(null);
   const lastNameRef        = useRef<TextInput>(null);
@@ -61,6 +104,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const confirmPasswordRef = useRef<TextInput>(null);
   const answerRef          = useRef<TextInput>(null);
   const scrollRef          = useRef<ScrollView>(null);
+  const handledGoogleTokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (Platform.OS !== 'ios') return;
@@ -87,13 +131,69 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     Alert.alert(title, message);
   };
 
-  const handleGoogleSignIn = () => {
+  useEffect(() => {
+    if (!googleResponse) return;
+    if (googleResponse.type === 'success') {
+      const identityToken = googleResponse.params.id_token || googleResponse.authentication?.idToken;
+      if (!identityToken) {
+        setLoading(false);
+        showProviderError('Google sign-in failed', 'Google did not return an identity token.');
+        return;
+      }
+      if (handledGoogleTokenRef.current === identityToken) return;
+      handledGoogleTokenRef.current = identityToken;
+      (async () => {
+        try {
+          const { access_token, is_new_user } = await loginWithGoogle(identityToken, {
+            legalVersion: LEGAL_VERSION,
+            acceptedTerms: true,
+            acceptedPrivacy: true,
+            acceptedHealthDisclaimer: true,
+            acceptedAiDisclaimer: true,
+          });
+          onAuthenticated(access_token, is_new_user);
+        } catch (e: any) {
+          showProviderError('Google sign-in failed', e?.message ?? 'Unable to continue with Google');
+        } finally {
+          setLoading(false);
+        }
+      })();
+      return;
+    }
+    if (googleResponse.type === 'error') {
+      setLoading(false);
+      showProviderError(
+        'Google sign-in failed',
+        googleResponse.error?.message ?? googleResponse.params?.error_description ?? 'Unable to continue with Google',
+      );
+    }
+  }, [googleResponse]);
+
+  const handleGoogleSignIn = async () => {
     if (loading) return;
-    const action = mode === 'signup' ? 'sign-up' : 'login';
-    showProviderError(
-      `Google ${action} unavailable`,
-      'Google account auth is not configured in this build yet. Use Apple or email for now.',
-    );
+    if (!googleConfigured) {
+      showProviderError(
+        'Google sign-in unavailable',
+        'Google OAuth client IDs are missing for this build.',
+      );
+      return;
+    }
+    if (!googleRequest) {
+      showProviderError('Google sign-in loading', 'Google sign-in is still getting ready. Try again in a moment.');
+      return;
+    }
+    setError('');
+    setLoading(true);
+    handledGoogleTokenRef.current = null;
+    try {
+      const result = await promptGoogleAsync();
+      if (result.type === 'cancel' || result.type === 'dismiss' || result.type === 'locked') {
+        setLoading(false);
+      }
+    } catch (e: any) {
+      setLoading(false);
+      showProviderError('Google sign-in failed', e?.message ?? 'Unable to continue with Google');
+    }
   };
 
   const handleAppleSignIn = async () => {

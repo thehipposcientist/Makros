@@ -62,6 +62,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         self.latestProgress = UserDefaults.standard.dictionary(forKey: Self.storedProgressKey)
         session?.delegate = self
         session?.activate()
+        syncComplicationSnapshot()
     }
 
     private static func loadStored<T: Decodable>(_ type: T.Type, key: String) -> T? {
@@ -136,6 +137,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         UserDefaults.standard.removeObject(forKey: Self.storedSleepKey)
         UserDefaults.standard.removeObject(forKey: Self.storedHydrationKey)
         UserDefaults.standard.removeObject(forKey: Self.storedProgressKey)
+        ThalloComplicationSync.clear()
     }
 
     // ─── WCSessionDelegate ──────────────────────────────────────────
@@ -279,6 +281,15 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                 }
             }
         }
+        syncComplicationSnapshot()
+    }
+
+    private func syncComplicationSnapshot() {
+        ThalloComplicationSync.update(
+            workout: workout,
+            hydration: hydration,
+            readiness: readiness
+        )
     }
 
     private func absorbTheme(_ raw: Any?) {
@@ -541,6 +552,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         )
         hydration = updated
         Self.saveStored(updated, key: Self.storedHydrationKey)
+        syncComplicationSnapshot()
     }
 
     func addHydrationLocal(deltaOz: Double) {

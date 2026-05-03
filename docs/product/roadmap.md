@@ -1,6 +1,6 @@
 # Roadmap + Next Improvements
 
-Last updated: 2026-04-29
+Last updated: 2026-05-03
 
 > See `docs/product/backlog-review.md` for items whose shipped status is ambiguous.
 
@@ -15,6 +15,7 @@ Last updated: 2026-04-29
   from history; today highlighted by date match. See
   `docs/architecture/plan-persistence.md`.
 - **Active workout recommendation cleanup (Apr 29, 2026)** — rest-time recommendations now refresh without waiting on a bottom "How did it feel?" prompt, that prompt was removed, RIR is only asked on significant overshoots, and the refreshed recommendation is pushed to Apple Watch during the rest window.
+- **Watch complication + Smart Stack widget (May 3, 2026)** — Watch app now mirrors workout / readiness / hydration state into App Group SharedDefaults, embeds `ThalloWatchComplication`, and supports widget links for Start/Rejoin Workout and +8 oz hydration.
 
 ---
 
@@ -106,7 +107,6 @@ These are built on the backend or partially built on the frontend but not connec
 ## Feature Work (not yet shipped)
 
 - **actual_rir trend surfacing** — per-set capture now exists; the next step is trend/history UI and clearer progress coaching based on the stored effort signal.
-- **Watch complication build pass** — finish SharedDefaults wiring + entitlements (#110).
 - **Siri intent build pass** — Intents extension target + deep-link handler (#111).
 - **Pre/post-workout time-aware fueling card** — fires when planned workout is in next 2–3h or just finished.
 - **Functional-pattern archetypes** — `HYBRID_KB_COMPLEX`, `HYBRID_CARRY_FOCUS` for kettlebell/sled users.

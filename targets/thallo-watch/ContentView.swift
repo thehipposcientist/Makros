@@ -26,6 +26,7 @@ struct ContentView: View {
     // Set to true when the user explicitly taps Start so onReceive can
     // accept the phone's first active echo without the age check.
     @State private var watchStartPending: Bool = false
+    @State private var selectedPage: Int = 0
     // Show a brief "← swipe →" hint on the first launch the user
     // sees, then never again (persisted in UserDefaults). Covers the
     // "I didn't know there were pages" discoverability gap.
@@ -108,34 +109,84 @@ struct ContentView: View {
         }
     }
 
+    private func startOrRejoinWorkout() {
+        selectedPage = 0
+        if let w = todayWorkout, w.status == .active {
+            HeartRateStore.saveDiag("Start shortcut → rejoin active")
+            openActiveWorkout()
+        } else {
+            HeartRateStore.saveDiag("Start shortcut → active + phone command")
+            ActiveWorkoutState.clearPersistedStore()
+            watchStartPending = true
+            openActiveWorkout()
+            conn.sendCommand("start_workout")
+        }
+    }
+
+    private func handleWidgetURL(_ url: URL) {
+        let route = ([url.host ?? ""] + url.pathComponents.filter { $0 != "/" })
+            .joined(separator: "/")
+            .lowercased()
+        if route.contains("start-workout") {
+            startOrRejoinWorkout()
+        } else if route.contains("hydration") {
+            selectedPage = 2
+            if route.contains("add") {
+                addHydrationFromShortcut(oz: queryDouble("oz", in: url) ?? 8)
+            }
+        } else {
+            selectedPage = 0
+            conn.requestPull()
+        }
+    }
+
+    private func addHydrationFromShortcut(oz: Double) {
+        let safeOz = max(1, min(64, oz))
+        let dateISO = conn.hydration?.dateISO ?? localDateISO()
+        let next = max(0, (((conn.hydration?.ounces ?? 0) + safeOz) * 10).rounded() / 10)
+        WKInterfaceDevice.current().play(.success)
+        conn.setHydrationLocal(ounces: next, dateISO: dateISO)
+        conn.sendCommand("log_hydration", payload: [
+            "dateISO": dateISO,
+            "ounces": next,
+        ])
+    }
+
+    private func queryDouble(_ name: String, in url: URL) -> Double? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .first(where: { $0.name == name })?
+            .value
+            .flatMap(Double.init)
+    }
+
+    private func localDateISO(_ date: Date = Date()) -> String {
+        let comps = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", comps.year ?? 1970, comps.month ?? 1, comps.day ?? 1)
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
                 theme.background.ignoresSafeArea()
-                TabView {
+                TabView(selection: $selectedPage) {
                     TodayView(workout: todayWorkout, onStart: {
-                        if let w = todayWorkout, w.status == .active {
-                            // Rejoin: phone already confirmed this session active.
-                            HeartRateStore.saveDiag("Rejoin tapped → active")
-                            openActiveWorkout()
-                        } else {
-                            // Fresh start: the watch owns its active UI immediately
-                            // and tells the phone to mirror/persist in the background.
-                            HeartRateStore.saveDiag("Start tapped → active + phone command")
-                            ActiveWorkoutState.clearPersistedStore()
-                            watchStartPending = true
-                            openActiveWorkout()
-                            conn.sendCommand("start_workout")
-                        }
+                        startOrRejoinWorkout()
                     }, onSkip: {
                         wlog("[watch] Skip tapped")
                         conn.sendCommand("skip_workout")
                     })
+                    .tag(0)
                     MealsView(meals: conn.meals)
+                        .tag(1)
                     HydrationView()
+                        .tag(2)
                     SupplementsView()
+                        .tag(3)
                     SleepView()
+                        .tag(4)
                     ReadinessView()
+                        .tag(5)
                     QuickStartView(onStartCustom: { category, subtype, label in
                         HeartRateStore.saveDiag("QuickStart tapped → phone command")
                         watchStartPending = true
@@ -144,9 +195,12 @@ struct ContentView: View {
                             "label": label, "source": "watch",
                         ])
                     })
+                    .tag(6)
                     WeightView()
+                        .tag(7)
                 }
                 .tabViewStyle(.page)
+                .onOpenURL { url in handleWidgetURL(url) }
                 .overlay(alignment: .top) {
                     if showSwipeHint {
                         SwipeHintPill()

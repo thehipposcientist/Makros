@@ -17,13 +17,9 @@ module.exports = {
   entitlements: {
     // HealthKit for live heart rate during workouts. WatchConnectivity
     // needs NO entitlement — it's enabled for every paired watch app
-    // automatically. App Groups intentionally omitted: would require
-    // registering the App Group capability against the watch + widget
-    // app IDs in Apple Developer Portal first, otherwise EAS signing
-    // fails with "provisioning profile doesn't support App Group".
-    // We don't actually share data via SharedDefaults today — all
-    // phone↔watch traffic is WCSession. Re-add when the watch
-    // complication ships and uses SharedDefaults.
+    // automatically. App Groups powers the WidgetKit complication /
+    // Smart Stack snapshot shared with ThalloWatchComplication.
     'com.apple.developer.healthkit': true,
+    'com.apple.security.application-groups': ['group.com.thallo.app'],
   },
 };

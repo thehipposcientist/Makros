@@ -6556,6 +6556,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 key={`weekly-checkin-${planWeek?.id ?? 'none'}-${planWeek?.end_date ?? 'none'}-${planRefreshKey}`}
                 authToken={authToken}
                 themeName={userProfile.themePreference}
+                dismissibleRecap
                 onCheckinCompleted={() => {
                   loadDayStatus();
                   if (userProfile) loadPlans(userProfile);

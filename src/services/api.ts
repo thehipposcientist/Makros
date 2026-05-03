@@ -253,6 +253,35 @@ export async function loginWithApple(
   return result;
 }
 
+export async function loginWithGoogle(
+  identityToken: string,
+  opts?: {
+    firstName?: string | null;
+    lastName?: string | null;
+    legalVersion?: string;
+    acceptedTerms?: boolean;
+    acceptedPrivacy?: boolean;
+    acceptedHealthDisclaimer?: boolean;
+    acceptedAiDisclaimer?: boolean;
+  },
+): Promise<{ access_token: string; is_new_user: boolean }> {
+  const result = await request<{ access_token: string; is_new_user: boolean }>('/auth/google', {
+    method: 'POST',
+    body: JSON.stringify({
+      identity_token: identityToken,
+      first_name: opts?.firstName ?? undefined,
+      last_name: opts?.lastName ?? undefined,
+      legal_version: opts?.legalVersion,
+      accepted_terms: opts?.acceptedTerms ?? true,
+      accepted_privacy: opts?.acceptedPrivacy ?? true,
+      accepted_health_disclaimer: opts?.acceptedHealthDisclaimer ?? true,
+      accepted_ai_disclaimer: opts?.acceptedAiDisclaimer ?? true,
+    }),
+  });
+  recordTelemetryEvent('google_login_completed', { is_new_user: result.is_new_user }, result.access_token);
+  return result;
+}
+
 /** Authenticated password change. Backend bumps `token_version` so every
  *  other existing JWT for this account is invalidated. The new token in
  *  the response is the only one that will continue to authenticate. */
@@ -346,10 +375,13 @@ export async function setRecoveryQuestion(token: string, question: string, answe
   });
 }
 
-export async function getMe(token: string) {
+export async function getMe(
+  token: string,
+  opts: { timeoutMs?: number; noRetry?: boolean } = {},
+) {
   return request('/auth/me', {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, opts.timeoutMs ?? 30000, opts.noRetry ?? false);
 }
 
 export async function updateEmail(token: string, email: string) {
