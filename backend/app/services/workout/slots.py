@@ -745,7 +745,7 @@ def density_adjust_slots(
     # extend without disrupting the recipe's primary/secondary
     # progression. Cap the additions so a runaway budget (180 min)
     # doesn't bloat lift days into 14-exercise marathons.
-    if total < budget - 4:
+    if total < budget - 4 and budget >= 75:
         # Lift / hybrid days fill with isolation; cardio fills with
         # secondary cardio blocks; mobility/recovery don't expand
         # (those days have qualitative pacing, not exercise count).
@@ -775,7 +775,7 @@ def density_adjust_slots(
                 extras_cap -= 1
             return kept
         return list(slots)
-    if total <= budget:
+    if total <= budget + 4:
         return list(slots)
 
     kept = list(slots)

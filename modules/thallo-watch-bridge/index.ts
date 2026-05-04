@@ -14,7 +14,8 @@
 //
 // Watch → Phone commands arrive via `addCommandListener`:
 //   "start_workout", "skip_workout", "end_workout", "start_rest",
-//   "skip_rest", "log_set", "swap_exercise", "log_hydration",
+//   "skip_rest", "log_set" ({weightLbs, reps, durationSeconds?, rir?}),
+//   "swap_exercise", "log_hydration",
 //   "toggle_meal", "toggle_supplement", "log_weight".
 
 import { requireOptionalNativeModule } from 'expo';

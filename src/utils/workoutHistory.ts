@@ -112,12 +112,36 @@ export async function loadWorkoutHistory(): Promise<WorkoutSession[]> {
   }
 }
 
+export function normalizeExerciseHistoryName(raw: string): string {
+  return String(raw ?? '')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\b(?:barbell|dumbbell|dumbbells|machine|cable|smith|bodyweight|weighted)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function exerciseHistoryNamesMatch(a: string, b: string): boolean {
+  const exactA = String(a ?? '').trim().toLowerCase();
+  const exactB = String(b ?? '').trim().toLowerCase();
+  if (!exactA || !exactB) return false;
+  if (exactA === exactB) return true;
+
+  const normA = normalizeExerciseHistoryName(a);
+  const normB = normalizeExerciseHistoryName(b);
+  if (!normA || !normB) return false;
+  if (normA === normB) return true;
+
+  const shorter = normA.length <= normB.length ? normA : normB;
+  const longer = normA.length > normB.length ? normA : normB;
+  return shorter.split(' ').length >= 2 && longer.includes(shorter);
+}
+
 export async function getLastSetsForExercise(exerciseName: string): Promise<CompletedSet[] | null> {
   const history = await loadWorkoutHistory();
   for (const session of history) {
-    const ex = session.exercises.find(
-      e => e.name.toLowerCase() === exerciseName.toLowerCase()
-    );
+    const ex = session.exercises.find(e => exerciseHistoryNamesMatch(e.name, exerciseName));
     if (ex && ex.sets.length > 0) {
       return ex.sets;
     }

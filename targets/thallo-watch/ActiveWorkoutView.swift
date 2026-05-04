@@ -512,6 +512,13 @@ private struct StartCountdownOverlay: View {
 
 // ─── Exercise tab ──────────────────────────────────────────────────
 
+private struct WatchPendingRirLog {
+    let exerciseIndex: Int
+    let setNumber: Int
+    let weightLbs: Double
+    let reps: Int
+}
+
 private struct ExerciseTab: View {
     let workout: WatchWorkout
     @ObservedObject var state: ActiveWorkoutState
@@ -529,6 +536,7 @@ private struct ExerciseTab: View {
     @State private var showMenu: Bool = false
     @State private var showSwapSheet: Bool = false
     @State private var pendingSwapName: String? = nil
+    @State private var pendingRirLog: WatchPendingRirLog? = nil
 
     enum CrownTarget { case weight, reps }
 
@@ -561,6 +569,23 @@ private struct ExerciseTab: View {
             of: "stretch|foam.?roll|cat.?cow|pigeon|child.?s pose|spinal.?twist|world.?s greatest|90.?90|thoracic|downward.?dog|cobra|butterfly|savasana|yoga|vinyasa|yin|flow|mobility|pose\\b|breathwork|breathing|meditation",
             options: .regularExpression
         ) != nil
+    }
+
+    private func targetRepMax(_ raw: String) -> Int? {
+        let regex = try? NSRegularExpression(pattern: "\\d+")
+        let nsRange = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+        let values = regex?.matches(in: raw, range: nsRange).compactMap { match -> Int? in
+            guard let range = Range(match.range, in: raw) else { return nil }
+            return Int(raw[range])
+        } ?? []
+        guard let first = values.first else { return nil }
+        let hasRange = raw.range(of: "\\d+\\s*[-–—]\\s*\\d+", options: .regularExpression) != nil
+        return hasRange && values.count >= 2 ? values[1] : first
+    }
+
+    private func shouldPromptRir(actualReps: Int, targetReps: String) -> Bool {
+        guard actualReps > 0, let maxReps = targetRepMax(targetReps) else { return false }
+        return actualReps >= maxReps + 2
     }
 
     var isLastExercise: Bool {
@@ -677,6 +702,7 @@ private struct ExerciseTab: View {
             if pendingSwapName == newName {
                 pendingSwapName = nil
             }
+            pendingRirLog = nil
         }
     }
 
@@ -814,6 +840,10 @@ private struct ExerciseTab: View {
     private func logSetCard(_ ex: WatchExercise) -> some View {
         if isGuideExercise(ex) {
             guideSetCard(ex)
+        } else if let pending = pendingRirLog,
+                  pending.exerciseIndex == state.exerciseIndex,
+                  pending.setNumber == displaySetNumber(for: ex) {
+            rirPromptCard(pending)
         } else {
             VStack(alignment: .leading, spacing: 10) {
                 recommendedWeightRow(ex)
@@ -912,6 +942,59 @@ private struct ExerciseTab: View {
                 isHapticFeedbackEnabled: true
             )
         }
+    }
+
+    private func rirPromptCard(_ pending: WatchPendingRirLog) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 6) {
+                Image(systemName: "target")
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundColor(theme.primary)
+                Text("REPS IN RESERVE")
+                    .font(.system(size: 9, weight: .heavy))
+                    .tracking(0.8)
+                    .foregroundColor(theme.primary)
+            }
+            Text("How many more reps could you have done?")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(theme.textPrimary)
+                .lineLimit(2)
+            HStack(spacing: 4) {
+                ForEach([0, 1, 2, 3, 4], id: \.self) { rir in
+                    Button {
+                        commitLoggedSet(rir: rir, pendingLog: pending)
+                    } label: {
+                        Text(rir == 4 ? "4+" : "\(rir)")
+                            .font(.system(size: 12, weight: .black))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.plain)
+                    .background(theme.primary)
+                    .foregroundColor(theme.background)
+                    .cornerRadius(8)
+                }
+            }
+            Button {
+                commitLoggedSet(rir: nil, pendingLog: pending)
+            } label: {
+                Text("Skip")
+                    .font(.system(size: 11, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 7)
+            }
+            .buttonStyle(.plain)
+            .background(theme.surfaceRaised)
+            .foregroundColor(theme.textMuted)
+            .cornerRadius(8)
+        }
+        .padding(10)
+        .background(theme.surface)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(theme.primary.opacity(0.45), lineWidth: 1)
+        )
+        .cornerRadius(12)
     }
 
     private func guideSetCard(_ ex: WatchExercise) -> some View {
@@ -1131,6 +1214,22 @@ private struct ExerciseTab: View {
     private func logSet() {
         guard let ex = currentExercise else { return }
         let guide = isGuideExercise(ex)
+        if !guide, shouldPromptRir(actualReps: state.pendingReps, targetReps: ex.reps) {
+            pendingRirLog = WatchPendingRirLog(
+                exerciseIndex: state.exerciseIndex,
+                setNumber: displaySetNumber(for: ex),
+                weightLbs: state.pendingWeight,
+                reps: state.pendingReps
+            )
+            WKInterfaceDevice.current().play(.click)
+            return
+        }
+        commitLoggedSet(rir: nil)
+    }
+
+    private func commitLoggedSet(rir: Int?, pendingLog: WatchPendingRirLog? = nil) {
+        guard let ex = currentExercise else { return }
+        let guide = isGuideExercise(ex)
         // Haptic click — different from the rest-end notification so
         // the two are distinguishable by feel.
         WKInterfaceDevice.current().play(.click)
@@ -1138,21 +1237,27 @@ private struct ExerciseTab: View {
         // Ship the log to the phone so history + recommendations stay
         // aligned. Phone handler parses and feeds the deterministic
         // weight-rec engine for the next set.
-        let setNumber = displaySetNumber(for: ex)
+        let setNumber = pendingLog?.setNumber ?? displaySetNumber(for: ex)
+        let loggedWeight = pendingLog?.weightLbs ?? state.pendingWeight
+        let loggedReps = pendingLog?.reps ?? state.pendingReps
         var payload: [String: Any] = [
             "sessionId": workout.sessionId ?? "",
             "exerciseIndex": state.exerciseIndex,
             "setNumber": setNumber,
-            "weightLbs": guide ? 0 : state.pendingWeight,
-            "reps": guide ? 0 : state.pendingReps,
+            "weightLbs": guide ? 0 : loggedWeight,
+            "reps": guide ? 0 : loggedReps,
             "exerciseName": ex.name,
         ]
+        if let rir, !guide {
+            payload["rir"] = max(0, min(4, rir))
+        }
         if let durationSeconds = plannedDurationSeconds(for: ex) {
             payload["durationSeconds"] = durationSeconds
         }
         conn.sendCommand("log_set", payload: payload)
-        state.lastLoggedWeight = state.pendingWeight
-        state.lastLoggedReps = state.pendingReps
+        pendingRirLog = nil
+        state.lastLoggedWeight = loggedWeight
+        state.lastLoggedReps = loggedReps
 
         if setNumber >= ex.sets {
             // Last set of this exercise → advance to next exercise.
@@ -1182,6 +1287,7 @@ private struct ExerciseTab: View {
     }
 
     private func advanceExercise() {
+        pendingRirLog = nil
         if isLastExercise {
             // Finished the whole workout — auto-end. Phone owns the
             // authoritative Thallo completion.

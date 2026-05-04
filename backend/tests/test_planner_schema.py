@@ -244,7 +244,7 @@ def test_generated_core_circuits_use_mixed_categories() -> None:
     """Long fat-loss core circuits should use mixed categories instead
     of two loaded-carry variants back to back."""
     print("\n[test] generated core circuits use mixed categories")
-    inputs = _make_inputs(goal="fat_loss", days_per_week=6, session_minutes=60)
+    inputs = _make_inputs(goal="fat_loss", days_per_week=6, session_minutes=75)
     plan = generate_workout_plan(inputs, SEED_EXERCISES)
     core_days = []
     for day in plan.get("workout_plan", {}).get("days", []):

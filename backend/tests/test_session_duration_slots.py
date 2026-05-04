@@ -219,10 +219,12 @@ def test_bonus_slots_trimmed_first_when_over_budget():
         Slot("Iso B",         "isolation",        "triceps",   "isolation"),
         Slot("Bonus Isolation","isolation",        None,        "isolation"),  # bonus is last
     ]
-    # Total: 3×12 + 8 + 2×6 + 6 = 62 min → over 60 min budget
+    slots.append(Slot("Bonus Isolation 2", "isolation", None, "isolation"))
+    # Total: 3×12 + 8 + 2×6 + 2×6 = 68 min → over 60 min budget
     result = density_adjust_slots(slots, 60, category="lift")
     labels = [s.label for s in result]
     assert "Bonus Isolation" not in labels, "bonus slot should have been trimmed first"
+    assert "Bonus Isolation 2" not in labels, "bonus slot should have been trimmed first"
     assert "Iso A" in labels or "Iso B" in labels, "standard isolation should survive"
     _ok("bonus isolation trimmed before standard isolations at tight budget")
 
@@ -335,6 +337,43 @@ def test_plan_at_60_and_75_same_structure_different_count():
             )
 
     _ok("75-min plan: same split structure, more exercises on lift days")
+
+
+def test_body_recomp_ppl_60_min_does_not_stack_extended_density():
+    """45-60 min 7-day PPL should not look like a 75-90 min plan.
+
+    Regression guard for filler-accessory expansion followed by core
+    circuit injection, which produced 10-exercise Push/Pull days at a
+    60-minute setting.
+    """
+    print("\n[test] integration: 60-min body_recomp PPL avoids extended density")
+    from app.services.workout.planner import PlannerInputs, generate_workout_plan
+    from app.seed_exercises_data import SEED_EXERCISES
+
+    plan = generate_workout_plan(
+        PlannerInputs(
+            goal="body_recomp",
+            days_per_week=7,
+            preferred_split="ppl",
+            session_minutes=60,
+            experience="intermediate",
+            equipment_slugs=(
+                "barbell", "dumbbell", "cable", "bench", "squat_rack",
+                "pullup_bar", "resistance_bands", "jump_rope",
+            ),
+            rng_seed=37,
+        ),
+        SEED_EXERCISES,
+    )
+
+    dense_lift_days = [
+        (d.get("focus"), len(d.get("exercises", [])))
+        for d in plan["workout_plan"]["days"]
+        if d.get("category") == "lift" and len(d.get("exercises", [])) > 8
+    ]
+
+    assert not dense_lift_days, f"60-min lift days too dense: {dense_lift_days}"
+    _ok("60-min body_recomp PPL lift days stay at 8 exercises or fewer")
 
 
 # ─── Cardio Finisher duration scaling ────────────────────────────────────────
@@ -471,6 +510,7 @@ cases = [
     test_bonus_slot_survives_at_generous_budget,
     test_plan_has_more_exercises_at_90_than_60,
     test_plan_at_60_and_75_same_structure_different_count,
+    test_body_recomp_ppl_60_min_does_not_stack_extended_density,
     test_cardio_finisher_short_at_45_min,
     test_cardio_finisher_medium_at_60_min,
     test_cardio_finisher_extended_at_75_min,

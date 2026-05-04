@@ -92,6 +92,7 @@ def test_e2e_seed_creates_full_idempotent_personas() -> None:
         long_user = users_by_email["e2e_long@test.thallo"]
         ppl_open_user = users_by_email["e2e_ppl_open@test.thallo"]
         recovery_apply_user = users_by_email["e2e_recovery_apply@test.thallo"]
+        activity_nutrition_user = users_by_email["e2e_activity_nutrition@test.thallo"]
         free_user = users_by_email["e2e_free@test.thallo"]
         assert verify_password(password, returning.hashed_password)
         assert returning.subscription_tier == "pro"
@@ -195,6 +196,19 @@ def test_e2e_seed_creates_full_idempotent_personas() -> None:
 
         assert not session.exec(select(PlanWeek).where(PlanWeek.user_id == free_user.id)).first()
         assert session.exec(select(PlanWeek).where(PlanWeek.user_id == recovery_apply_user.id)).first()
+
+        activity_week = session.exec(
+            select(PlanWeek).where(PlanWeek.user_id == activity_nutrition_user.id)
+        ).first()
+        assert activity_week is not None
+        activity_today = session.exec(
+            select(PlanDay)
+            .where(PlanDay.plan_week_id == activity_week.id)
+            .where(PlanDay.day_index == 0)
+        ).first()
+        assert activity_today is not None
+        assert activity_today.is_rest is True
+        assert activity_today.workout_json is None
 
         ppl_open_week = session.exec(
             select(PlanWeek).where(PlanWeek.user_id == ppl_open_user.id)

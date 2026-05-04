@@ -55,6 +55,12 @@ open" regen is **removed**.
 - body_recomp/fat_loss use `_promote_same_day_cardio` (merges adjacent lift+cardio pairs).
 - Density trim: PLUS_CARDIO on SHORT session drops cardio finisher before any lift slot.
 
+## Session Duration Density
+
+- Duration picker values are the top of a 15-minute range: 45 = 30-45, 60 = 45-60, 75 = 60-75, 90 = 75-90.
+- 60-minute sessions do not receive extended-session filler accessories; filler starts at 75+.
+- Direct-core circuits treat 60 minutes as medium, not long, and are skipped on already-dense 60-minute days.
+
 ## Weekly Recipe Repair + Rotation
 
 - `PLANNER_VERSION` stamped on every `WorkoutPlan`. Format `YYYY.MM.DD.nn`. Bump on archetype/slot/rep/rest/adjacency rule changes.

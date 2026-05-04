@@ -265,7 +265,7 @@ def _day_type_for_archetype(archetype: DayArchetype) -> Optional[str]:
 def _duration_bucket(session_minutes: Optional[int]) -> str:
     m = int(session_minutes or 60)
     if m <= 30: return "short"
-    if m <= 45: return "medium"
+    if m <= 60: return "medium"
     return "long"
 
 
@@ -422,13 +422,13 @@ def _is_session_dense(slots_count: int, session_minutes: Optional[int]) -> bool:
     to fill its time budget. Adding core on top of a maxed-out
     template crowds out main work.
 
-    Thresholds are tuned ABOVE typical lift-day slot counts so a
-    normal Push (7 slots) or PUSH_PLUS_CARDIO (8 slots) still has
-    headroom for one core exercise — the whole point of this module
-    is to actually program core, not reject it on every day."""
+    Thresholds keep 45-60 minute lift days from stacking direct-core
+    on top of already full templates; longer sessions still have room
+    for the dedicated core pass."""
     m = int(session_minutes or 60)
     if m <= 30: return slots_count >= 6
     if m <= 45: return slots_count >= 8
+    if m <= 60: return slots_count >= 7
     return slots_count >= 10
 
 

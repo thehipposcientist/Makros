@@ -38,7 +38,7 @@ import * as Sharing from 'expo-sharing';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle } from 'react-native-svg';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity, SavedWorkoutTemplate, UserProfile } from '../types';
-import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests, loadWorkoutTemplates, upsertWorkoutTemplate } from '../utils/workoutHistory';
+import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests, loadWorkoutTemplates, upsertWorkoutTemplate, exerciseHistoryNamesMatch } from '../utils/workoutHistory';
 import {
   getAppleWorkoutCaloriesForWindow,
   getLatestHeartRate,
@@ -48,7 +48,7 @@ import {
 } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, type WorkoutPostSummary } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, listWorkoutSessions, type WorkoutPostSummary, type WorkoutSessionRecord, type WorkoutSessionExerciseRecord, type WorkoutSessionSetRecord } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
@@ -59,7 +59,7 @@ import FormVideoModal from '../components/FormVideoModal';
 import StartCountdownOverlay from '../components/StartCountdownOverlay';
 import WorkoutTimerModal, { TimerResult } from '../components/WorkoutTimerModal';
 import { isWatchReachable } from '../utils/watchSync';
-import { setActiveWatchSessionId } from '../utils/activeWatchSession';
+import { getActiveWatchSessionId, setActiveWatchSessionId } from '../utils/activeWatchSession';
 import { drainActiveWatchCommands, setActiveWatchCommandConsumerMounted } from '../utils/watchCommandBacklog';
 import { WatchBridge } from '../../modules/thallo-watch-bridge';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
@@ -189,6 +189,101 @@ function normalizeSwapText(raw: unknown): string {
 
 function exerciseHistoryKey(name: string): string {
   return normalizeSwapText(name);
+}
+
+type BackendLastSetsContext = {
+  workoutDate: string;
+  focus?: string;
+};
+
+function workoutSessionHistoryTime(session: WorkoutSessionRecord): number {
+  const raw = session.completed_at ?? session.created_at ?? `${session.workout_date}T00:00:00Z`;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isCurrentWorkoutSession(session: WorkoutSessionRecord, context: BackendLastSetsContext): boolean {
+  const sessionDate = String(session.workout_date ?? '').slice(0, 10);
+  if (!sessionDate || sessionDate !== context.workoutDate) return false;
+  if (!context.focus) return true;
+  return normalizeSwapText(session.focus) === normalizeSwapText(context.focus);
+}
+
+function canUseBackendHistorySession(session: WorkoutSessionRecord, context: BackendLastSetsContext): boolean {
+  if (isCurrentWorkoutSession(session, context)) return false;
+  const sessionDate = String(session.workout_date ?? '').slice(0, 10);
+  if (sessionDate === context.workoutDate && !session.completed_at) return false;
+  return true;
+}
+
+function backendExerciseMatches(exercise: SessionExercise, record: WorkoutSessionExerciseRecord): boolean {
+  const plannedSlug = String(exercise.slug ?? '').trim().toLowerCase();
+  const loggedSlug = String(record.exercise_slug_snapshot ?? '').trim().toLowerCase();
+  if (plannedSlug && loggedSlug && plannedSlug === loggedSlug) return true;
+  return exerciseHistoryNamesMatch(record.name, exercise.name);
+}
+
+function backendSetToCompletedSet(set: WorkoutSessionSetRecord, index: number): CompletedSet | null {
+  if (set.completed === false) return null;
+  const reps = Number(set.actual_reps ?? 0);
+  const weightLbs = Number(set.actual_weight_lbs ?? 0);
+  const durationSeconds = set.duration_seconds == null ? undefined : Number(set.duration_seconds);
+  const hasWork =
+    (Number.isFinite(reps) && reps > 0) ||
+    (Number.isFinite(weightLbs) && weightLbs > 0) ||
+    (durationSeconds != null && Number.isFinite(durationSeconds) && durationSeconds > 0);
+  if (!hasWork) return null;
+
+  const setNumber = Number(set.set_number);
+  const completed: CompletedSet = {
+    setNumber: Number.isFinite(setNumber) && setNumber > 0 ? setNumber : index + 1,
+    reps: Number.isFinite(reps) ? reps : 0,
+    weightLbs: Number.isFinite(weightLbs) ? weightLbs : 0,
+  };
+  if (durationSeconds != null && Number.isFinite(durationSeconds) && durationSeconds > 0) {
+    completed.durationSeconds = durationSeconds;
+  }
+  const rir = Number(set.actual_rir);
+  if (Number.isFinite(rir)) completed.rir = rir;
+  const comfortRating = Number(set.comfort_rating);
+  if (Number.isFinite(comfortRating) && comfortRating > 0) completed.comfortRating = comfortRating;
+  const actualDistance = Number(set.actual_distance);
+  if (Number.isFinite(actualDistance) && actualDistance > 0) completed.actualDistance = actualDistance;
+  if (set.actual_pace) completed.actualPace = set.actual_pace;
+  const heartRateAvg = Number(set.heart_rate_avg);
+  if (Number.isFinite(heartRateAvg) && heartRateAvg > 0) completed.heartRateAvg = heartRateAvg;
+  if (set.cardio_metrics) completed.cardioMetrics = set.cardio_metrics;
+  return completed;
+}
+
+function findLastSetsInBackendSessions(
+  exercise: SessionExercise,
+  sessions: WorkoutSessionRecord[],
+  context: BackendLastSetsContext,
+): CompletedSet[] | null {
+  const sorted = [...sessions].sort((a, b) => workoutSessionHistoryTime(b) - workoutSessionHistoryTime(a));
+  for (const session of sorted) {
+    if (!canUseBackendHistorySession(session, context)) continue;
+    for (const record of session.exercises ?? []) {
+      if (!backendExerciseMatches(exercise, record)) continue;
+      const sets = (record.sets ?? [])
+        .map((set, idx) => backendSetToCompletedSet(set, idx))
+        .filter((set): set is CompletedSet => !!set);
+      if (sets.length > 0) return sets;
+    }
+  }
+  return null;
+}
+
+async function loadLastSetsForExerciseAnySource(
+  exercise: SessionExercise,
+  backendSessions: () => Promise<WorkoutSessionRecord[]>,
+  context: BackendLastSetsContext,
+): Promise<CompletedSet[]> {
+  const localSets = await getLastSetsForExercise(exercise.name).catch(() => null);
+  if (localSets && localSets.length > 0) return localSets;
+  const sessions = await backendSessions().catch(() => []);
+  return findLastSetsInBackendSessions(exercise, sessions, context) ?? [];
 }
 
 function exerciseSlotRole(ex: Partial<SessionExercise> | any): string {
@@ -744,6 +839,104 @@ function buildWarmupPlan(workout: WorkoutDay): string[] {
 const SHARE_LOGO_LIGHT = require('../../assets/images/thallo-logo-black.png');
 const SHARE_LOGO_DARK  = require('../../assets/images/thallo-logo-white-transparent-New.png');
 
+function workoutExerciseToSessionExercise(ex: any): SessionExercise {
+  return {
+    name: ex.name,
+    targetSets: ex.sets,
+    targetReps: ex.reps,
+    targetRestSeconds: ex.restSeconds,
+    equipment: typeof ex.equipment === 'string' ? ex.equipment : String(ex.equipment),
+    sets: [],
+    aiRecommendation: undefined,
+    image_url: ex.image_url,
+    video_id: ex.video_id ?? null,
+    targetWeightLbs: ex.targetWeightLbs ?? null,
+    slug: ex.slug ?? ex.exerciseSlug ?? null,
+    primaryMuscle: ex.primary_muscle ?? ex.primaryMuscle ?? ex._primary_muscle ?? null,
+    secondaryMuscles: ex.secondary_muscles ?? ex.secondaryMuscles ?? ex._secondary_muscles ?? [],
+    muscles_targeted: ex.muscles_targeted ?? undefined,
+    isCompound: ex.is_compound ?? ex.isCompound ?? null,
+    slotRole: ex.slotRole ?? ex.slot_role ?? ex._role ?? null,
+    slotLabel: ex.slotLabel ?? ex.slot_label ?? ex._slot ?? null,
+    prescriptionType: ex.prescriptionType ?? ex.prescription_type ?? null,
+    weightRecommendationSource: ex.weightRecommendationSource ?? null,
+  };
+}
+
+function savedExerciseFallback(saved: any): SessionExercise {
+  return workoutExerciseToSessionExercise({
+    name: saved?.name ?? 'Exercise',
+    sets: saved?.targetSets ?? Math.max(1, Array.isArray(saved?.sets) ? saved.sets.length : 1),
+    reps: saved?.targetReps ?? '',
+    restSeconds: saved?.targetRestSeconds ?? 60,
+    equipment: saved?.equipment ?? 'bodyweight',
+    image_url: saved?.image_url,
+    video_id: saved?.video_id,
+    targetWeightLbs: saved?.targetWeightLbs,
+    slug: saved?.slug,
+    primaryMuscle: saved?.primaryMuscle ?? saved?.primary_muscle,
+    secondaryMuscles: saved?.secondaryMuscles ?? saved?.secondary_muscles,
+    muscles_targeted: saved?.muscles_targeted,
+    isCompound: saved?.isCompound ?? saved?.is_compound,
+    slotRole: saved?.slotRole,
+    slotLabel: saved?.slotLabel,
+    prescriptionType: saved?.prescriptionType,
+    weightRecommendationSource: saved?.weightRecommendationSource,
+  });
+}
+
+function restoreSavedSessionExercise(saved: any, fallback: SessionExercise): SessionExercise {
+  const targetSets = Number(saved?.targetSets ?? fallback.targetSets);
+  const targetRestSeconds = Number(saved?.targetRestSeconds ?? fallback.targetRestSeconds);
+  return {
+    ...fallback,
+    name: typeof saved?.name === 'string' && saved.name.trim() ? saved.name : fallback.name,
+    targetSets: Number.isFinite(targetSets) && targetSets > 0 ? targetSets : fallback.targetSets,
+    targetReps: typeof saved?.targetReps === 'string' ? saved.targetReps : fallback.targetReps,
+    targetRestSeconds: Number.isFinite(targetRestSeconds) && targetRestSeconds > 0 ? targetRestSeconds : fallback.targetRestSeconds,
+    equipment: typeof saved?.equipment === 'string' && saved.equipment.trim() ? saved.equipment : fallback.equipment,
+    sets: Array.isArray(saved?.sets) ? saved.sets.filter(Boolean) : fallback.sets,
+    aiRecommendation: typeof saved?.aiRecommendation === 'string' ? saved.aiRecommendation : fallback.aiRecommendation,
+    image_url: saved?.image_url ?? fallback.image_url,
+    video_id: saved?.video_id ?? fallback.video_id ?? null,
+    targetWeightLbs: saved?.targetWeightLbs ?? fallback.targetWeightLbs ?? null,
+    slug: saved?.slug ?? fallback.slug ?? null,
+    primaryMuscle: saved?.primaryMuscle ?? saved?.primary_muscle ?? fallback.primaryMuscle ?? null,
+    secondaryMuscles: saved?.secondaryMuscles ?? saved?.secondary_muscles ?? fallback.secondaryMuscles ?? [],
+    muscles_targeted: saved?.muscles_targeted ?? fallback.muscles_targeted,
+    isCompound: saved?.isCompound ?? saved?.is_compound ?? fallback.isCompound ?? null,
+    slotRole: saved?.slotRole ?? fallback.slotRole ?? null,
+    slotLabel: saved?.slotLabel ?? fallback.slotLabel ?? null,
+    prescriptionType: saved?.prescriptionType ?? fallback.prescriptionType ?? null,
+    weightRecommendationSource: saved?.weightRecommendationSource ?? fallback.weightRecommendationSource ?? null,
+  };
+}
+
+function serializeActiveWorkoutExercise(ex: SessionExercise, exerciseIndex: number): Record<string, any> {
+  return {
+    exerciseIndex,
+    name: ex.name,
+    targetSets: ex.targetSets,
+    targetReps: ex.targetReps,
+    targetRestSeconds: ex.targetRestSeconds,
+    equipment: ex.equipment,
+    sets: ex.sets,
+    aiRecommendation: ex.aiRecommendation,
+    image_url: ex.image_url,
+    video_id: ex.video_id,
+    targetWeightLbs: ex.targetWeightLbs,
+    slug: ex.slug,
+    primaryMuscle: ex.primaryMuscle ?? ex.primary_muscle ?? null,
+    secondaryMuscles: ex.secondaryMuscles ?? ex.secondary_muscles ?? [],
+    muscles_targeted: ex.muscles_targeted,
+    isCompound: ex.isCompound ?? null,
+    slotRole: ex.slotRole,
+    slotLabel: ex.slotLabel,
+    prescriptionType: ex.prescriptionType,
+    weightRecommendationSource: ex.weightRecommendationSource,
+  };
+}
+
 export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, onFinish, onCancel, onDislikeExercise }: ActiveWorkoutScreenProps) {
     // Warm-up state
     const [warmupDone, setWarmupDone] = useState(true);
@@ -774,6 +967,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const profile = await loadCachedProfile();
       return tierOf(profile) === 'pro';
     }, [loadCachedProfile]);
+    const backendWorkoutHistoryRef = useRef<WorkoutSessionRecord[] | null>(null);
+    const backendWorkoutHistoryPromiseRef = useRef<Promise<WorkoutSessionRecord[]> | null>(null);
+    useEffect(() => {
+      backendWorkoutHistoryRef.current = null;
+      backendWorkoutHistoryPromiseRef.current = null;
+    }, [authToken]);
+    const loadBackendWorkoutHistory = useCallback(async (): Promise<WorkoutSessionRecord[]> => {
+      if (!authToken) return [];
+      if (backendWorkoutHistoryRef.current) return backendWorkoutHistoryRef.current;
+      if (!backendWorkoutHistoryPromiseRef.current) {
+        backendWorkoutHistoryPromiseRef.current = listWorkoutSessions(authToken, 100).catch(() => []);
+      }
+      backendWorkoutHistoryRef.current = await backendWorkoutHistoryPromiseRef.current;
+      return backendWorkoutHistoryRef.current;
+    }, [authToken]);
     useEffect(() => {
       let cancelled = false;
       const loadWarmup = async () => {
@@ -840,13 +1048,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // reports reachable (i.e., the user opened it).
   const [showOpenWatchPrompt, setShowOpenWatchPrompt] = useState(false);
   const [watchStatus, setWatchStatus] = useState<{ paired: boolean; reachable: boolean } | null>(null);
-  const watchSessionId = useRef(`${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const watchSessionId = useRef(getActiveWatchSessionId() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const [watchSessionHydrated, setWatchSessionHydrated] = useState(false);
+  const [activeWorkoutStateRestored, setActiveWorkoutStateRestored] = useState(false);
   const watchWorkoutEndedRef = useRef(false);
   const buildWatchWorkoutSnapshotRef = useRef<() => any>(() => workout as any);
-  // Write session ID synchronously to the module-level store so HomeScreen's
-  // pull_state / reachability handlers can read it immediately without waiting
-  // for AsyncStorage (which is async and loses the race against pull_state).
-  setActiveWatchSessionId(watchSessionId.current);
   // Persist start time so elapsed timer survives app restart
   useEffect(() => {
     AsyncStorage.getItem('activeWorkoutStartTime').then(saved => {
@@ -858,20 +1064,33 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           if (sid) {
             watchSessionId.current = sid;
             setActiveWatchSessionId(sid);
+          } else {
+            setActiveWatchSessionId(watchSessionId.current);
           }
-        }).catch(() => {});
+          setWatchSessionHydrated(true);
+        }).catch(() => {
+          setActiveWatchSessionId(watchSessionId.current);
+          setWatchSessionHydrated(true);
+        });
       } else {
+        setActiveWatchSessionId(watchSessionId.current);
         AsyncStorage.setItem('activeWorkoutStartTime', String(startTime.current)).catch(() => {});
         AsyncStorage.setItem('activeWatchSessionId', watchSessionId.current).catch(() => {});
+        setWatchSessionHydrated(true);
         // Fresh start — play the countdown.
         setShowStartCountdown(true);
       }
+    }).catch(() => {
+      setActiveWatchSessionId(watchSessionId.current);
+      setWatchSessionHydrated(true);
     });
     // Pre-load the rest-timer chime so the first set's countdown
     // end fires the audio without a few-hundred-ms decode delay.
     // Idempotent across remounts.
     import('../utils/feedback').then(f => f.preloadRestTimerSound()).catch(() => {});
-    return () => { setActiveWatchSessionId(null); };
+    return () => {
+      if (watchWorkoutEndedRef.current) setActiveWatchSessionId(null);
+    };
   }, []);
   // Fetch HR zones for cardio prescription display
   useEffect(() => {
@@ -904,6 +1123,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // iOS only delivers the latest applicationContext once, when the
   // watch app next opens — and even that delivery can race the UI.
   useEffect(() => {
+    if (!watchSessionHydrated || !activeWorkoutStateRestored) return;
     // Ref-token cleanup: the async import below can resolve AFTER
     // React has already torn this effect down (e.g. workout swap mid-
     // mount). A plain `let unsubscribe` was null at cleanup time, so
@@ -922,7 +1142,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           warmupSteps: warmupStepsRef.current,
           reason: 'active_snapshot',
         })
-          .then(() => pushRestProgressToWatchRef.current())
+          .then(async () => {
+            await pushRestProgressToWatchRef.current();
+            reassertRestProgressToWatchRef.current();
+          })
           .catch(() => {});
         // Initial push on mount.
         pushActive();
@@ -953,7 +1176,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       token.cancelled = true;
       if (token.unsub) { try { token.unsub(); } catch {} }
     };
-  }, [workout]);
+  }, [activeWorkoutStateRestored, watchSessionHydrated, workout]);
 
   // Watch→phone command handler. The watch is a remote control for the
   // phone's workout state — log_set commits weight/reps into the same
@@ -973,6 +1196,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     overrideWeight?: string,
     overrideReps?: string,
     sourceActionAtMs?: number,
+    overrideRir?: number,
   ) => Promise<void> | void>(() => {});
   const exercisesRef = useRef<SessionExercise[]>([]);
   const startRestTimerRef = useRef<(seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string; startedAtMs?: number }) => void>(() => {});
@@ -985,6 +1209,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     includeStartAlert?: boolean;
   }) => Promise<void>>(async () => {});
   const pushRestProgressToWatchRef = useRef<() => Promise<void>>(async () => {});
+  const reassertRestProgressToWatchRef = useRef<(delaysMs?: number[]) => void>(() => {});
   const watchHandlersRef = useRef<{
     finish: () => void;
     cancel: () => void;
@@ -1042,6 +1267,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   reason: 'pull_state',
                 });
                 await pushRestProgressToWatchRef.current();
+                reassertRestProgressToWatchRef.current();
               } catch { /* bridge optional */ }
             })();
             return;
@@ -1051,6 +1277,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             const exIdx = Number(payload?.exerciseIndex ?? -1);
             const weight = payload?.weightLbs;
             const reps = payload?.reps;
+            const rir = Number(payload?.rir ?? NaN);
             const durationSeconds = Number(payload?.durationSeconds ?? NaN);
             const actionAtMs = Number(payload?.tsMs ?? NaN);
             watchLogSetChainRef.current = watchLogSetChainRef.current
@@ -1071,6 +1298,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   weight != null ? String(weight) : undefined,
                   reps != null ? String(reps) : undefined,
                   Number.isFinite(actionAtMs) && actionAtMs > 0 ? actionAtMs : undefined,
+                  Number.isFinite(rir) ? Math.max(0, Math.min(4, Math.round(rir))) : undefined,
                 );
               });
             watchLogSetChainRef.current.catch(() => undefined);
@@ -1168,29 +1396,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [exercises, setExercisesRaw] = useState<SessionExercise[]>(() => {
     // Try to restore in-progress session from AsyncStorage
     // (synchronous initializer can't be async, so we override in useEffect below)
-    return workout.exercises.map(ex => ({
-      name: ex.name,
-      targetSets: ex.sets,
-      targetReps: ex.reps,
-      targetRestSeconds: ex.restSeconds,
-      equipment: typeof ex.equipment === 'string' ? ex.equipment : String(ex.equipment),
-      sets: [],
-      aiRecommendation: undefined,
-      image_url: (ex as any).image_url,
-      video_id: (ex as any).video_id ?? null,
-      // Preserve planner-propagated targets + slug so weight-rec calls can
-      // use them as anchors (tier 2 in the backend's layered pipeline).
-      targetWeightLbs: (ex as any).targetWeightLbs ?? null,
-      slug: (ex as any).slug ?? (ex as any).exerciseSlug ?? null,
-      primaryMuscle: (ex as any).primary_muscle ?? (ex as any).primaryMuscle ?? (ex as any)._primary_muscle ?? null,
-      secondaryMuscles: (ex as any).secondary_muscles ?? (ex as any).secondaryMuscles ?? (ex as any)._secondary_muscles ?? [],
-      muscles_targeted: (ex as any).muscles_targeted ?? undefined,
-      isCompound: (ex as any).is_compound ?? (ex as any).isCompound ?? null,
-      slotRole: (ex as any).slotRole ?? (ex as any).slot_role ?? (ex as any)._role ?? null,
-      slotLabel: (ex as any).slotLabel ?? (ex as any).slot_label ?? (ex as any)._slot ?? null,
-      prescriptionType: (ex as any).prescriptionType ?? (ex as any).prescription_type ?? null,
-      weightRecommendationSource: (ex as any).weightRecommendationSource ?? null,
-    }));
+    return workout.exercises.map(ex => workoutExerciseToSessionExercise(ex));
   });
   exercisesRef.current = exercises;
   // Debounced backend sync of the in-progress workout. Fires 1.5s after the
@@ -1244,7 +1450,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     exercisesRef.current = next;
     // Auto-save session state so it survives app backgrounding/kill.
     AsyncStorage.setItem('activeWorkoutSets', JSON.stringify(
-      next.map(ex => ({ name: ex.name, sets: ex.sets }))
+      next.map((ex, exerciseIndex) => serializeActiveWorkoutExercise(ex, exerciseIndex))
     )).catch(() => {});
     // Also debounce-sync to the backend so per-set detail isn't local-only.
     syncPartialToBackend(next);
@@ -1260,21 +1466,40 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // the user can resume. It's cleared explicitly on Finish or Cancel.
   useEffect(() => {
     AsyncStorage.getItem('activeWorkoutSets').then(raw => {
-      if (!raw) return;
+      if (!raw) {
+        setActiveWorkoutStateRestored(true);
+        return;
+      }
       try {
-        const saved: Array<{ name: string; sets: any[] }> = JSON.parse(raw);
-        if (!saved?.length) return;
+        const saved: Array<Record<string, any>> = JSON.parse(raw);
+        if (!saved?.length) {
+          setActiveWorkoutStateRestored(true);
+          return;
+        }
         setExercisesRaw(prev => {
-          const next = prev.map(ex => {
-            const match = saved.find(s => s.name === ex.name);
-            return match && match.sets.length > 0 ? { ...ex, sets: match.sets } : ex;
+          const usedSaved = new Set<number>();
+          const next = prev.map((ex, idx) => {
+            const byIndex = saved.findIndex(s => Number(s.exerciseIndex) === idx);
+            const matchIdx = byIndex >= 0
+              ? byIndex
+              : saved.findIndex((s, savedIdx) => !usedSaved.has(savedIdx) && s.name === ex.name);
+            if (matchIdx < 0) return ex;
+            usedSaved.add(matchIdx);
+            return restoreSavedSessionExercise(saved[matchIdx], ex);
+          });
+          saved.forEach((row, savedIdx) => {
+            if (usedSaved.has(savedIdx)) return;
+            const savedIndex = Number(row.exerciseIndex);
+            if (Number.isFinite(savedIndex) && savedIndex >= 0 && savedIndex < next.length) return;
+            next.push(restoreSavedSessionExercise(row, savedExerciseFallback(row)));
           });
           exercisesRef.current = next;
           return next;
         });
-        console.log(`[ActiveWorkout] restored ${saved.filter(s => s.sets.length > 0).length} exercises with logged sets`);
+        console.log(`[ActiveWorkout] restored ${saved.filter(s => Array.isArray(s.sets) && s.sets.length > 0).length} exercises with logged sets`);
       } catch {}
-    }).catch(() => {});
+      setActiveWorkoutStateRestored(true);
+    }).catch(() => { setActiveWorkoutStateRestored(true); });
   }, []);
 
   // ── Lazy AI weight refresh on workout start ─────────────────────────
@@ -1441,7 +1666,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     let cancelled = false;
     (async () => {
       try {
-        const lastSets = (await getLastSetsForExercise(ex.name).catch(() => null)) ?? [];
+        const lastSets = await loadLastSetsForExerciseAnySource(ex, loadBackendWorkoutHistory, {
+          workoutDate: dateKey(new Date()),
+          focus: workout.focus,
+        });
         const plannedSets = Array.from({ length: getTargetSetCount(ex.targetSets) }, (_, n) => ({
           setNumber: n + 1,
           setType: 'working',
@@ -1478,7 +1706,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
     })();
     return () => { cancelled = true; };
-  }, [activeExIdx, exercises, authToken, goal, weightLbs, workout.focus, workout.stimulus]);
+  }, [activeExIdx, exercises, authToken, goal, weightLbs, workout.focus, workout.stimulus, loadBackendWorkoutHistory]);
 
   // Inline set inputs: keyed by "exIdx-setSlot" (0-based slot index)
   const [setInputs, setSetInputs] = useState<Record<string, { weight: string; reps: string; duration: string }>>({});
@@ -1673,6 +1901,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       restDurationSec: totalSeconds,
       restEndsAtMs: endAtMs,
       recommendation: restNextTargetRef.current,
+    });
+  };
+  reassertRestProgressToWatchRef.current = (delaysMs = [650, 1400]) => {
+    delaysMs.forEach(delay => {
+      setTimeout(() => {
+        pushRestProgressToWatchRef.current().catch(() => undefined);
+      }, delay);
     });
   };
 
@@ -2265,13 +2500,22 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // the last session's duration IS pre-filled because users typically
   // repeat the same time block (25 min Zone 2). Only the
   // weight/reps inputs for strength work are intentionally left blank.
+  const lastSessionPreloadStartedRef = useRef(false);
   useEffect(() => {
+    if (!activeWorkoutStateRestored) return;
+    if (lastSessionPreloadStartedRef.current) return;
+    lastSessionPreloadStartedRef.current = true;
+    let cancelled = false;
     Promise.all(
-      workout.exercises.map(async ex => {
-        const sets = await getLastSetsForExercise(ex.name);
-        return { name: ex.name, sets: sets ?? [] };
+      exercises.map(async ex => {
+        const sets = await loadLastSetsForExerciseAnySource(ex, loadBackendWorkoutHistory, {
+          workoutDate: dateKey(new Date()),
+          focus: workout.focus,
+        });
+        return { name: ex.name, sets };
       })
     ).then(results => {
+      if (cancelled) return;
       const map: Record<string, CompletedSet[]> = {};
       results.forEach(r => { if (r.sets.length > 0) map[r.name] = r.sets; });
       setLastExerciseSets(map);
@@ -2280,10 +2524,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       // holds). Weight + reps stay empty so the user always commits to
       // a specific number for today's set.
       const inputs: Record<string, { weight: string; reps: string; duration: string }> = {};
-      workout.exercises.forEach((ex, exIdx) => {
+      exercises.forEach((ex, exIdx) => {
         const lastSets = map[ex.name] ?? [];
-        if (!isTimedExercise(ex.name, ex.reps)) return;
-        for (let slot = 0; slot < ex.sets; slot++) {
+        if (!isTimedExercise(ex.name, ex.targetReps)) return;
+        for (let slot = 0; slot < getTargetSetCount(ex.targetSets); slot++) {
           const last = lastSets[slot] ?? lastSets[lastSets.length - 1];
           if (last && last.durationSeconds != null) {
             inputs[`${exIdx}-${slot}`] = { weight: '', reps: '', duration: formatDurationForInput(last.durationSeconds) };
@@ -2292,7 +2536,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       });
       setSetInputs(inputs);
     });
-  }, []);
+    return () => { cancelled = true; };
+  }, [activeWorkoutStateRestored, exercises, loadBackendWorkoutHistory, workout.focus]);
 
   // Modal opens with EMPTY inputs — the user explicitly enters
   // today's values. Last session's set is shown via `lastExerciseSets`
@@ -2393,6 +2638,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     overrideWeight?: string,
     overrideReps?: string,
     sourceActionAtMs?: number,
+    overrideRir?: number,
   ) => {
     const key = `${exIdx}-${setSlot}`;
     const input = setInputs[key];
@@ -2449,6 +2695,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const skipReps   = shouldHideReps(exMeta);
       const weightNum  = skipWeight ? 0 : parseFloat(effectiveWeight ?? '');
       const repsNum    = skipReps   ? 0 : parseInt(effectiveReps ?? '', 10);
+      const rirNum = typeof overrideRir === 'number' && Number.isFinite(overrideRir)
+        ? Math.max(0, Math.min(4, Math.round(overrideRir)))
+        : undefined;
       if (!skipWeight && (!effectiveWeight || isNaN(weightNum))) {
         if (!silent) Alert.alert('Enter values', 'Fill in weight before logging this set.');
         return;
@@ -2457,7 +2706,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         if (!silent) Alert.alert('Enter values', 'Fill in reps before logging this set.');
         return;
       }
-      newSet = { setNumber: setSlot + 1, reps: repsNum, weightLbs: weightNum };
+      newSet = { setNumber: setSlot + 1, reps: repsNum, weightLbs: weightNum, ...(rirNum != null ? { rir: rirNum } : {}) };
     }
 
     // Haptic feedback on set log
@@ -2580,6 +2829,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               restEndsAtMs,
               recommendation: nextSetLabel,
             });
+            reassertRestProgressToWatchRef.current();
           } catch { /* watch bridge optional */ }
         })();
         await rescheduleRestNotificationsRef.current({
@@ -2598,13 +2848,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
     const setsLogged = cleanSets.length;
     if (!timed && !guide && setsLogged < effectiveTotal) {
-      if (shouldPromptRir(newSet.reps, ex.targetReps)) {
+      const needsRirPrompt = shouldPromptRir(newSet.reps, ex.targetReps) && newSet.rir == null;
+      if (needsRirPrompt) {
         setPendingRir({ exIdx, setIdx: cleanSets.length - 1 });
       } else if (pendingRir?.exIdx === exIdx) {
         setPendingRir(null);
       }
       clearLiveRecommendationState(exIdx, { preserveNextTarget: true });
-      if (shouldPromptRir(newSet.reps, ex.targetReps)) {
+      if (needsRirPrompt) {
         console.log('[AI] Recommendation deferred until significant-overage RIR is logged.');
       } else {
         maybeRefreshRecommendationForExerciseRef.current?.(exIdx, cleanSets);
@@ -3191,6 +3442,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             restEndsAtMs: startedAtMs + restSeconds * 1000,
             recommendation: nextSetLabel,
           });
+          reassertRestProgressToWatchRef.current();
         } catch { /* watch bridge optional */ }
       })();
       await rescheduleRestNotifications({

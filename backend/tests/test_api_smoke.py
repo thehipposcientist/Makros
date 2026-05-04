@@ -37,6 +37,9 @@ _RUN_ID = uuid.uuid4().hex[:8]
 EMAIL = f"smoke_{_RUN_ID}@test.thallo"
 USERNAME = f"smoke_{_RUN_ID}"
 PASSWORD = "SmokeTest1234"   # ≥10 chars + digit satisfies the policy
+PASSWORD_RESET_HEADERS = {
+    "X-Forwarded-For": f"2001:db8::{_RUN_ID[:4]}:{_RUN_ID[4:]}",
+}
 
 # Shared across tests in the module. Populated by `_register_and_login`
 # (invoked as the first test case below).
@@ -364,6 +367,7 @@ def test_15_password_reset_email_request_is_generic():
     r = _http.post(
         f"{BASE_URL}/auth/password-reset/request",
         json={"email": EMAIL},
+        headers=PASSWORD_RESET_HEADERS,
         timeout=10,
     )
     body = _check(r, 200, "POST /auth/password-reset/request")

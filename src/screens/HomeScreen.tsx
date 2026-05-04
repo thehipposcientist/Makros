@@ -39,7 +39,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
 import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, getMealHistory, updateMeal, deleteLoggedMeal } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, getMealHistory, updateMeal, deleteLoggedMeal, syncInProgressWorkout } from '../services/api';
 import type { ApplyActionResult, HydrationStatus, MealHistoryEntry } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
@@ -57,6 +57,7 @@ import { workoutFromTemplateForToday } from '../utils/workoutTemplates';
 import { workoutSessionToLoggedPayload } from '../utils/workoutLogPayload';
 import { HYDRATION_QUICK_ADD_OUNCES, formatHydrationQuickAddLabel } from '../utils/hydration';
 import { enqueueActiveWatchCommand, hasActiveWatchCommandConsumer, isActiveWorkoutWatchCommand } from '../utils/watchCommandBacklog';
+import { applyWatchLogSetToActiveWorkoutStorage } from '../utils/watchWorkoutMirror';
 import { coachApplyNeedsDayStatusRefresh, skippedDayBadgeLabel, skippedDayTitle, skippedDayUndoLabel } from '../utils/coachApplyState';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
@@ -103,7 +104,7 @@ import { aggregateDailyFromHistory } from './progressData';
 import type { DailyRowShape } from './progressData';
 import { computeNutritionScore } from '../utils/nutritionScore';
 import ErrorBoundary from '../components/ErrorBoundary';
-import { getActiveWatchSessionId, setActiveWatchSessionId } from '../utils/activeWatchSession';
+import { setActiveWatchSessionId } from '../utils/activeWatchSession';
 import { dynamicCompactTextProps, dynamicTextProps } from '../utils/dynamicType';
 import { effectiveAge } from '../utils/age';
 import {
@@ -2436,6 +2437,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         if (Date.now() - startedAt > 24 * 3600 * 1000) {
           await AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
           await AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
+          await AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
+          await AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
           setResumeInfo(null);
           return;
         }
@@ -2646,12 +2649,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }
           } catch { /* keep the last displayed readiness score */ }
         }
-        const activeSessionId = status === 'active' ? getActiveWatchSessionId() : null;
-        if (!(status === 'active' && activeSessionId)) {
+        if (status !== 'active') {
           await pushWorkoutToWatch(todayWorkout, {
             dateISO: todayISO,
             status,
-            sessionId: activeSessionId,
+            sessionId: null,
             readiness: unifiedPrepScore,
             readinessLabel: unifiedPrepLabel,
             reason: 'home_snapshot',
@@ -2902,13 +2904,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               : s.skippedDates.has(todayKey()) ? 'skipped'
               : todayItem?.isRest ? 'rest'
               : 'scheduled';
-            const reachSid = status === 'active' ? getActiveWatchSessionId() : null;
             console.log('[watch] reachable — re-pushing full home snapshot', { status });
-            if (!(status === 'active' && reachSid)) {
+            if (status !== 'active') {
               await pushWorkoutToWatch(todayWorkout, {
                 dateISO: todayISO,
                 status,
-                sessionId: reachSid,
+                sessionId: null,
                 readiness: s.readinessScore?.score ?? null,
                 readinessLabel: s.readinessScore?.label ?? null,
                 reason: 'reachability',
@@ -3058,6 +3059,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     skip: (_focus: string) => {},
     toggleMeal: (_date: string, _mealType: string) => {},
   });
+  const homeWatchLogSetChainRef = useRef(Promise.resolve());
   useEffect(() => {
     watchCmdHandlersRef.current = {
       start: (today: any) => { onStartWorkout?.(today); },
@@ -3207,16 +3209,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   : s.skippedDates.has(todayKey()) ? 'skipped'
                   : todayItem?.isRest ? 'rest'
                   : 'scheduled';
-                const pullSid = status === 'active' ? getActiveWatchSessionId() : null;
                 // SEQUENTIAL awaits — each call merges into applicationContext
                 // before the next reads it. Concurrent fire-and-forget causes
                 // a race where all three read the same stale applicationContext
                 // and only the last writer's keys survive (dropping workout).
-                if (!(status === 'active' && pullSid)) {
+                if (status !== 'active') {
                   await pushWorkoutToWatch(todayWorkout, {
                     dateISO: todayISO,
                     status,
-                    sessionId: pullSid,
+                    sessionId: null,
                     readiness: s.readinessScore?.score ?? null,
                     readinessLabel: s.readinessScore?.label ?? null,
                     reason: 'pull_state',
@@ -3597,7 +3598,35 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             })();
           } else if (isActiveWorkoutWatchCommand(command)) {
             if (!hasActiveWatchCommandConsumer()) {
-              enqueueActiveWatchCommand(command, payload).catch(() => undefined);
+              if (command === 'log_set') {
+                const mirrorLogSet = async () => {
+                  const refState = rePushStateRef.current;
+                  const todayScheduleItem = resolveTodayScheduleItem(refState.schedule, refState.workoutPlan, refState.planWeek);
+                  const today = todayScheduleItem?.workout ?? refState.workoutPlan?.days?.[0] ?? null;
+                  const mirrored = await applyWatchLogSetToActiveWorkoutStorage(today, payload).catch(() => null);
+                  if (!mirrored) {
+                    await enqueueActiveWatchCommand(command, payload).catch(() => undefined);
+                    return;
+                  }
+                  setResumeInfo({
+                    focus: today?.focus ?? 'workout',
+                    setsLogged: mirrored.totalSets,
+                    startedAt: mirrored.startedAt,
+                  });
+                  if (authToken && today?.focus && mirrored.loggedPayload.length > 0) {
+                    await syncInProgressWorkout(
+                      authToken,
+                      todayKey(),
+                      today.focus,
+                      mirrored.loggedPayload,
+                    ).catch(e => console.warn('[watch] in-progress sync failed:', e?.message ?? e));
+                  }
+                };
+                homeWatchLogSetChainRef.current = homeWatchLogSetChainRef.current.then(mirrorLogSet, mirrorLogSet);
+                homeWatchLogSetChainRef.current.catch(() => undefined);
+              } else {
+                enqueueActiveWatchCommand(command, payload).catch(() => undefined);
+              }
             }
           }
         });
@@ -6930,6 +6959,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           onPress: async () => {
                             await AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
                             await AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
+                            await AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
+                            await AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
                             setResumeInfo(null);
                           },
                         },
@@ -8442,7 +8473,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       {/* Weekly budget adjustment — only on today's card, only
                           when the shift is >15 kcal so on-target days are quiet. */}
                       {isToday && adjustedDailyTarget && Math.abs(adjustedDailyTarget.adjustment_applied) > 15 && (
-                        <Text style={{ fontSize: 10, color: adjustedDailyTarget.adjustment_applied > 0 ? themeColors.success : themeColors.warning, marginTop: 2, fontWeight: '600' }}>
+                        <Text testID="today-nutrition-target-adjustment" style={{ fontSize: 10, color: adjustedDailyTarget.adjustment_applied > 0 ? themeColors.success : themeColors.warning, marginTop: 2, fontWeight: '600' }}>
                           {adjustedDailyTarget.adjustment_applied > 0 ? '↑' : '↓'}{' '}
                           {Math.abs(Math.round(adjustedDailyTarget.adjustment_applied))} kcal {((adjustedDailyTarget.activity_adjustment_applied ?? 0) > 0) ? 'today adjustment' : 'weekly adjustment'}
                           {adjustedDailyTarget.note ? ` · ${adjustedDailyTarget.note}` : ''}
@@ -9249,6 +9280,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           const { saveWorkoutSession, dateKey: dk } = await import('../utils/workoutHistory');
           await saveWorkoutSession(session);
           const sessionDate = dk(new Date(session.date));
+          try {
+            const [freshHistory, freshSummaries] = await Promise.all([
+              loadWorkoutHistory(),
+              loadWorkoutSummaries(),
+            ]);
+            setWorkoutHistoryList(freshHistory);
+            setWorkoutHistorySummaries(freshSummaries);
+          } catch { /* non-fatal; persisted history will hydrate on next load */ }
           if (sessionDate === dk(new Date())) {
             import('../utils/workoutReminders')
               .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
@@ -12292,7 +12331,7 @@ function HydrationTodayPanel({
           borderColor: guidanceTone + '2E',
         }}>
           <Ionicons name="information-circle-outline" size={13} color={guidanceTone} style={{ marginTop: 1 }} />
-          <Text style={{ flex: 1, fontSize: 10.5, lineHeight: 15, color: colors.textSecondary, fontWeight: '600' }}>
+          <Text testID="hydration-guidance-message" style={{ flex: 1, fontSize: 10.5, lineHeight: 15, color: colors.textSecondary, fontWeight: '600' }}>
             {guidanceMessage}
           </Text>
         </View>

@@ -238,6 +238,7 @@ smoke-mobile-state: seed-e2e
 	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
 	  exit 1; }
 	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
+	@$(MAESTRO) test .maestro/flows/activity-nutrition-hydration.yaml
 	@$(MAESTRO) test .maestro/flows/meals-supplements-state.yaml
 	@$(MAESTRO) test .maestro/flows/meal-history-facts-alignment.yaml
 
@@ -282,6 +283,8 @@ smoke-mobile-preflight:
 	@$(MAESTRO) test .maestro/flows/workout-templates.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/activity-nutrition-hydration.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/meals-supplements-state.yaml
 	@$(MAKE) seed-e2e

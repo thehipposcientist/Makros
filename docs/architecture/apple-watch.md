@@ -18,9 +18,15 @@ Active workout exercise rows can include `plannedTargetWeightLbs` and up to five
 **Inbound (watch → phone):**
 `start_workout`, `skip_workout`, `cancel_workout`, `end_workout`, `log_set`, `swap_exercise`, `toggle_meal`, `log_hydration`, `toggle_supplement`, `take_all_supplements`, `pull_state`.
 
+`log_set` includes weight/reps/duration and, when the watch user overshoots the target rep range, an optional `rir` value captured on-watch before the command is sent.
+
 Watch commands carry a `commandId`; the phone bridge de-dupes recent IDs so `sendMessage` fallback to `transferUserInfo` cannot double-apply a set log or end command.
 
 When the native phone bridge receives a mutating watch command before JS listeners are attached, it stores the command in a durable `UserDefaults` queue (bounded + TTL-filtered). Home drains general commands on mount; active-workout commands that arrive during the Home → ActiveWorkout handoff are also stashed in a small AsyncStorage backlog and replayed by `ActiveWorkoutScreen` so queued set logs do not disappear during navigation.
+
+If `log_set` arrives while `ActiveWorkoutScreen` is not mounted, Home mirrors it into `activeWorkoutSets`, updates the resume banner, and calls `/workouts/sync` so watch-only sessions are backed up to `WorkoutSession` rows mid-workout. Home does not push a replacement workout snapshot while a workout is active; progress and active snapshots remain owned by `ActiveWorkoutScreen` or the watch's local state to avoid resetting the watch session.
+
+Rest timers are synced as live progress with an absolute `restEndsAtMs`. The native bridge preserves the newest `progress` payload when unrelated context updates (theme, meals, hydration, supplements) merge into `applicationContext`, and `ActiveWorkoutScreen` reasserts rest progress after watch wake/pull so a stale context cannot clear an active rest timer.
 
 **Pull-on-wake handshake:**
 Watch fires `pull_state` on `WCSession.activate` + `sessionReachabilityDidChange(reachable=true)` + SwiftUI `scenePhase == .active`. Phone responds with fresh full snapshot.

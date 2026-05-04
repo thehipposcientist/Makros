@@ -156,6 +156,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     private var queuedCommands: [[String: Any]] = []
     private var pendingContext: [String: Any] = [:]
     private var pendingMessages: [[String: Any]] = []
+    private var latestProgressContext: [String: Any]?
     private var recentCommandIds: [String] = []
     private var recentCommandIdSet: Set<String> = []
     private var recentCommandIdsLoaded = false
@@ -266,6 +267,11 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         do {
             var merged = s.applicationContext
             for (k, v) in cleaned { merged[k] = v }
+            if let progress = cleaned["progress"] as? [String: Any] {
+                rememberLatestProgress(progress)
+            } else {
+                preserveLatestProgress(in: &merged)
+            }
             if let uid = userId, !uid.isEmpty {
                 merged["userId"] = uid
             } else {
@@ -347,12 +353,14 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         guard s.activationState == .activated else {
             pendingContext["progress"] = cleaned
             pendingMessages.append(cleaned)
+            rememberLatestProgress(cleaned)
             s.activate()
             return true
         }
 
         var stamped = cleaned
         stampUserId(&stamped)
+        rememberLatestProgress(stamped)
         flushPendingOutbound()
         do {
             var merged = s.applicationContext
@@ -372,6 +380,25 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             logDiag("sendProgress.contextFailed", ["error": error.localizedDescription])
         }
         return sendMessageActivated(stamped, session: s)
+    }
+
+    private func rememberLatestProgress(_ progress: [String: Any]) {
+        guard !progress.isEmpty else { return }
+        let incomingRevision = numericMs(progress["progressRevision"]) ?? 0
+        let currentRevision = numericMs(latestProgressContext?["progressRevision"]) ?? -1
+        if latestProgressContext == nil || incomingRevision >= currentRevision {
+            latestProgressContext = progress
+        }
+    }
+
+    private func preserveLatestProgress(in merged: inout [String: Any]) {
+        guard let latest = latestProgressContext else { return }
+        let latestRevision = numericMs(latest["progressRevision"]) ?? 0
+        let mergedProgress = merged["progress"] as? [String: Any]
+        let mergedRevision = numericMs(mergedProgress?["progressRevision"]) ?? -1
+        if latestRevision >= mergedRevision {
+            merged["progress"] = latest
+        }
     }
 
     @discardableResult

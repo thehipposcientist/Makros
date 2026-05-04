@@ -622,6 +622,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                       <View style={s.advRow}>
                         <Text style={[s.advLabel, { color: tc.textSecondary }]}>Distance (mi)</Text>
                         <TextInput
+                          testID="activity-distance-input"
                           style={[s.advInput, { backgroundColor: tc.surfaceRaised, borderColor: tc.border, color: tc.textPrimary }]}
                           value={distance} onChangeText={setDistance} keyboardType="decimal-pad" placeholder="—" placeholderTextColor={tc.textMuted}
                         />
@@ -630,6 +631,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                     <View style={s.advRow}>
                       <Text style={[s.advLabel, { color: tc.textSecondary }]}>Calories burned</Text>
                       <TextInput
+                        testID="activity-calories-input"
                         style={[s.advInput, { backgroundColor: tc.surfaceRaised, borderColor: tc.border, color: tc.textPrimary }]}
                         value={calories} onChangeText={setCalories} keyboardType="number-pad" placeholder="—" placeholderTextColor={tc.textMuted}
                       />
@@ -637,6 +639,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
                     <View style={s.advRow}>
                       <Text style={[s.advLabel, { color: tc.textSecondary }]}>Avg heart rate</Text>
                       <TextInput
+                        testID="activity-heart-rate-input"
                         style={[s.advInput, { backgroundColor: tc.surfaceRaised, borderColor: tc.border, color: tc.textPrimary }]}
                         value={heartRate} onChangeText={setHeartRate} keyboardType="number-pad" placeholder="—" placeholderTextColor={tc.textMuted}
                       />

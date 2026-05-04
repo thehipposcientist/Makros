@@ -62,10 +62,12 @@ def test_density_expands_when_budget_has_room():
     """If a lift template underfills a larger budget, add bounded accessories."""
     print("\n[test] density: lift template expands when budget has room")
     slots = _make_slots(["primary", "primary", "secondary", "isolation", "core"])
-    result = density_adjust_slots(slots, 60, category="lift")
-    assert len(result) == 8, f"expected 8, got {len(result)}"
-    assert [s.role for s in result[-3:]] == ["isolation", "isolation", "isolation"]
-    _ok("60 min budget adds bounded isolation slots")
+    result = density_adjust_slots(slots, 75, category="lift")
+    assert len(result) == 9, f"expected 9, got {len(result)}"
+    assert [s.role for s in result[-4:]] == [
+        "isolation", "isolation", "isolation", "isolation",
+    ]
+    _ok("75 min budget adds bounded isolation slots")
 
 
 def test_density_trims_warmup_first():
@@ -319,16 +321,18 @@ def test_day_type_for_never_core_returns_none():
 
 
 def test_duration_bucket_thresholds():
-    """short=<=30, medium=31-45, long=46+."""
+    """short=<=30, medium=31-60, long=61+."""
     print("\n[test] core: duration bucket thresholds")
     assert _duration_bucket(25) == "short"
     assert _duration_bucket(30) == "short"
     assert _duration_bucket(31) == "medium"
     assert _duration_bucket(45) == "medium"
-    assert _duration_bucket(46) == "long"
+    assert _duration_bucket(46) == "medium"
+    assert _duration_bucket(60) == "medium"
+    assert _duration_bucket(61) == "long"
     assert _duration_bucket(90) == "long"
-    assert _duration_bucket(None) == "long"  # default 60 → long
-    _ok("bucket: <=30→short, 31-45→medium, 46+→long")
+    assert _duration_bucket(None) == "medium"  # default 60 → medium
+    _ok("bucket: <=30→short, 31-60→medium, 61+→long")
 
 
 def test_decide_core_skips_heavy_lower():
@@ -413,7 +417,7 @@ def test_decide_core_long_metabolic_uses_mixed_circuit():
     print("\n[test] core: long metabolic circuit uses mixed categories")
     decision = decide_core_for_day(
         archetype=DayArchetype.LIFT_PUSH,
-        slots_count=5, session_minutes=60, goal="fat_loss",
+        slots_count=5, session_minutes=75, goal="fat_loss",
         recent_core_categories=[], hip_flexor_recent=False,
         is_recovery_day=False, remaining_weekly_budget=3,
     )
@@ -431,7 +435,7 @@ def test_decide_core_does_not_repeat_recent_carry_when_alternatives_exist():
     print("\n[test] core: recent carry is pushed behind alternatives")
     decision = decide_core_for_day(
         archetype=DayArchetype.LIFT_PULL,
-        slots_count=5, session_minutes=60, goal="fat_loss",
+        slots_count=5, session_minutes=75, goal="fat_loss",
         recent_core_categories=[
             CAT_ANTI_EXTENSION,
             CAT_FLEXION,
@@ -622,7 +626,7 @@ def test_program_core_across_week_does_not_duplicate_carry_slots():
     ]
     result = program_core_across_week(
         templates=templates, goal="fat_loss",
-        days_per_week=4, session_minutes=60, seed=42,
+        days_per_week=4, session_minutes=75, seed=42,
     )
     slots = result[0][1] or []
     core_labels = [s.label for s in slots if s.role == "core"]

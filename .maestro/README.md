@@ -105,6 +105,7 @@ State-mutation coverage for meals, hydration, and supplements:
 
 ```bash
 make seed-e2e
+maestro test .maestro/flows/activity-nutrition-hydration.yaml
 maestro test .maestro/flows/meals-supplements-state.yaml
 maestro test .maestro/flows/meal-history-facts-alignment.yaml
 ```
@@ -162,6 +163,8 @@ Seeded credentials:
   Push/Pull history leaves Legs most open for plan-order assertions.
 - `e2e_recovery_apply@test.thallo` / `SeedTest1234` — pro PPL user for
   recovery-recommendation apply/render assertions.
+- `e2e_activity_nutrition@test.thallo` / `SeedTest1234` — pro rest-today user
+  for live activity-driven nutrition and hydration assertions.
 - `e2e_free@test.thallo` / `SeedTest1234` — free entitlement control.
 
 ## iOS simulator vs device vs Android

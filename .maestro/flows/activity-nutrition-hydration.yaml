@@ -1,0 +1,141 @@
+# Activity-driven nutrition + hydration E2E coverage.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: activity-nutrition-hydration
+tags:
+  - e2e
+  - seeded
+  - workouts
+  - meals
+  - hydration
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_activity_nutrition@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- runFlow:
+    when:
+      visible: "Welcome to Thallo Pro"
+    commands:
+      - tapOn:
+          id: "tutorial-skip"
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+# Log unplanned same-day activity with explicit calorie burn. This persona's
+# today is seeded as a rest day, so the hydration/nutrition changes below are
+# caused by the logged activity, not by a planned workout.
+- tapOn:
+    id: "bottom-tab-workouts"
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 30000
+- scrollUntilVisible:
+    element:
+      id: "extra-workout-log"
+    direction: DOWN
+    timeout: 20000
+    visibilityPercentage: 50
+- tapOn:
+    id: "extra-workout-log"
+- extendedWaitUntil:
+    visible:
+      id: "activity-category-cardio"
+    timeout: 15000
+- tapOn:
+    id: "activity-category-cardio"
+- extendedWaitUntil:
+    visible:
+      id: "activity-subtype-cardio-run"
+    timeout: 15000
+- tapOn:
+    id: "activity-subtype-cardio-run"
+- scrollUntilVisible:
+    element:
+      id: "activity-advanced-toggle"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "activity-advanced-toggle"
+- scrollUntilVisible:
+    element:
+      id: "activity-calories-input"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "activity-calories-input"
+- inputText: "600"
+- pressKey: Enter
+- scrollUntilVisible:
+    element:
+      id: "activity-save"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "activity-save"
+- extendedWaitUntil:
+    visible: "Run"
+    timeout: 20000
+- assertVisible: "Manual · 45m · 600 kcal"
+
+# Meals should immediately use the live adjusted target and explain why water
+# increased. The exact 24 oz comes from 45 min × 16 oz / 30 min.
+- tapOn:
+    id: "bottom-tab-meals"
+- extendedWaitUntil:
+    visible: "Meal week"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "hydration-guidance-message"
+    timeout: 30000
+- assertVisible: "Water goal raised 24 oz for 45 min of training today."
+- extendedWaitUntil:
+    visible:
+      id: "today-nutrition-target-adjustment"
+    timeout: 30000
+- assertVisible:
+    text: ".*today adjustment.*"
+- assertVisible:
+    text: ".*Training today added.*"
