@@ -1,0 +1,70 @@
+# Open Workout History tab and tap a row to verify the detail view
+# renders. The seeded e2e_returning user has 2+ weeks of workout
+# history so a row always exists. Detail-view crashes were a recent
+# class of bug after the WorkoutSession schema changes.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: workout-history-row-detail
+tags:
+  - e2e
+  - seeded
+  - workouts
+  - history
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-workouts"
+
+- tapOn:
+    id: "workout-subtab-history"
+
+- extendedWaitUntil:
+    visible:
+      id: "workout-history-screen"
+    timeout: 30000
+
+# At least one row should be visible — text-based since rows aren't
+# uniquely testID'd. The seed includes "Push" / "Pull" / "Legs" focus
+# strings that always appear at least once.
+- assertVisible: "Push"

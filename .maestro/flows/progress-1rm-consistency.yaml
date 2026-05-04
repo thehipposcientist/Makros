@@ -1,0 +1,86 @@
+# Verifies that for a seeded user with workout history, the Progress
+# tab renders both the "Estimated 1 Rep Max" showcase tile and at
+# least one PR card. After the rolling-e1RM overlay change, both
+# surfaces share the same compute path — this flow catches the case
+# where one renders empty while the other shows numbers (the bug
+# users reported when the chart and PR cards drifted from the
+# showcase before the overlay landed).
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: progress-1rm-consistency
+tags:
+  - e2e
+  - seeded
+  - progress
+  - workouts
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+# Switch to the Progress tab.
+- tapOn:
+    id: "bottom-tab-progress"
+
+# Find the showcase tile. Seeded user has 4 weeks of compound-lift
+# history, so the showcase must render.
+- scrollUntilVisible:
+    element:
+      id: "progress-1rm-showcase"
+    direction: DOWN
+    timeout: 30000
+    visibilityPercentage: 30
+
+- assertVisible: "Estimated 1 Rep Max"
+
+# A PR card with the rolling-e1RM overlay should also be visible.
+# (The seeded user has logged enough sets that at least one card
+# renders. We don't assert the actual lbs number — that varies
+# with the seed — only that the card structure is intact, since
+# the bug we're guarding against is "card disappears or shows 0".)
+- scrollUntilVisible:
+    element:
+      id: "progress-pr-card-0"
+    direction: DOWN
+    timeout: 30000
+    visibilityPercentage: 30

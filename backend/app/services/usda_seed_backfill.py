@@ -174,14 +174,16 @@ def _canonical_panel(nutrients: dict[str, float]) -> dict[str, float]:
         "vitamin_e_mg": "vitamin_e",
         "vitamin_a_mcg": "vitamin_a",
         "saturated_fat": "saturated_fat",
+        "monounsaturated_fat": "monounsaturated_fat",
+        "polyunsaturated_fat": "polyunsaturated_fat",
+        "omega_3": "omega_3",
+        "omega_6": "omega_6",
         "cholesterol_mg": "cholesterol",
     }
     for source, target in key_map.items():
         value = nutrients.get(source)
         if value is not None:
             panel[target] = value
-    if nutrients.get("omega_3_mg") is not None:
-        panel["omega_3"] = round(nutrients["omega_3_mg"] / 1000, 4)
     return panel
 
 

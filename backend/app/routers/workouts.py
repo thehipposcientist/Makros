@@ -999,6 +999,9 @@ def generate_full_week(
         from app.services.workout.switch_day import (
             _focus_family, _canonical_cycle_for_split, SPLIT_FOR_FOCUS,
         )
+        from app.services.workout.change_day_type import (
+            pick_generated_lift_day_for_change,
+        )
         lift_needed: list[tuple[int, str, str]] = []  # (idx, proposed_focus, base_focus)
         for ex_idx in cdt_result.exercises_needed:
             proposed_focus = cdt_result.proposed_days[ex_idx].get("focus", "")
@@ -1048,20 +1051,28 @@ def generate_full_week(
                 recent_muscle_exercises=recent_muscle_exercises,
             )
             alt_days = alt_plan.get("workout_plan", {}).get("days", [])
+            used_alt_indexes: set[int] = set()
 
             for ex_idx, proposed_focus, base in lift_needed:
-                target_fam = _focus_family(base)
-                matched = False
-                for ad in alt_days:
-                    af = (ad.get("focus") or "").lower().strip()
-                    if _focus_family(af) == target_fam:
-                        cdt_result.proposed_days[ex_idx] = {
-                            **ad,
-                            "focus": proposed_focus,
-                        }
-                        matched = True
-                        break
-                if not matched:
+                picked_idx, picked_day = pick_generated_lift_day_for_change(
+                    cdt_result.proposed_days,
+                    alt_days,
+                    used_alt_indexes,
+                    ex_idx,
+                    proposed_focus,
+                    focus_readiness=(
+                        fatigue_snapshot.focus_readiness
+                        if fatigue_snapshot else None
+                    ),
+                )
+                if picked_day is not None:
+                    if picked_idx is not None:
+                        used_alt_indexes.add(picked_idx)
+                    cdt_result.proposed_days[ex_idx] = {
+                        **picked_day,
+                        "focus": proposed_focus,
+                    }
+                else:
                     cdt_result.proposed_days[ex_idx]["focus"] = proposed_focus
 
         result_days = cdt_result.proposed_days

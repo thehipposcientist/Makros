@@ -1,0 +1,74 @@
+# Verify workout day cards start COLLAPSED (recent UX change).
+# Previously the day-strip onSelect handler auto-expanded the card,
+# which caused users to land on a wall of exercise rows. The fix
+# changed expandedDay default from `selectedEntry.origIdx` to -2
+# (collapsed sentinel). This flow guards against regression.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: workout-cards-collapsed-default
+tags:
+  - e2e
+  - seeded
+  - workouts
+  - ux
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-workouts"
+
+# When cards are collapsed, the workout-estimated-duration label
+# IS visible (header summary), but the per-exercise rows are NOT.
+# We assert the duration is visible — it lives on every collapsed
+# card header. If the card auto-expanded, the duration moves and
+# individual exercise names dominate the viewport.
+- extendedWaitUntil:
+    visible:
+      id: "workout-estimated-duration"
+    timeout: 30000
+
+# Sanity: Start Workout CTA is rendered (it lives below the card
+# strip and is reachable when cards are collapsed because the page
+# isn't dominated by exercise rows).
+- assertVisible:
+    id: "start-workout-cta"

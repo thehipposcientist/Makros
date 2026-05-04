@@ -619,6 +619,76 @@ def test_ppl_ul_mid_week_change():
         assert_ne(d["focus"].lower(), "full_body", f"day{i} not full_body")
 
 
+def test_pick_generated_lift_day_avoids_second_heavy_legs():
+    """Exercise regen should not duplicate heavy legs when a heavy lower
+    day already exists in the proposed week."""
+    print("[change_day_type] generated lift picker avoids second heavy legs")
+    from app.services.workout.change_day_type import pick_generated_lift_day_for_change
+
+    proposed = [
+        {"focus": "Push", "archetype": "lift_push_heavy", "stimulus": "strength"},
+        {"focus": "Pull", "archetype": "lift_pull", "stimulus": "hypertrophy"},
+        {"focus": "Legs", "archetype": "lift_legs_heavy", "stimulus": "strength"},
+        {"focus": "Legs"},
+    ]
+    generated = [
+        {"focus": "Legs", "archetype": "lift_legs_heavy", "stimulus": "strength"},
+        {"focus": "Legs", "archetype": "lift_legs_volume", "stimulus": "volume"},
+    ]
+    _, picked = pick_generated_lift_day_for_change(
+        proposed, generated, set(), 3, "Legs",
+    )
+    assert_eq(picked["archetype"], "lift_legs_volume", "picks lighter legs variant")
+
+
+def test_pick_generated_lift_day_low_readiness_prefers_lighter_legs():
+    """Recent lower-body fatigue should steer a changed Legs day away
+    from the heavy generated variant when a lighter one exists."""
+    print("[change_day_type] generated lift picker respects low legs readiness")
+    from app.services.workout.change_day_type import pick_generated_lift_day_for_change
+
+    proposed = [
+        {"focus": "Push", "archetype": "lift_push_heavy", "stimulus": "strength"},
+        {"focus": "Legs"},
+        {"focus": "Pull", "archetype": "lift_pull", "stimulus": "hypertrophy"},
+    ]
+    generated = [
+        {"focus": "Legs", "archetype": "lift_legs_heavy", "stimulus": "strength"},
+        {"focus": "Legs", "archetype": "lift_legs_volume", "stimulus": "volume"},
+    ]
+    _, picked = pick_generated_lift_day_for_change(
+        proposed, generated, set(), 1, "Legs",
+        focus_readiness={"legs": 0.35},
+    )
+    assert_eq(picked["archetype"], "lift_legs_volume", "low readiness picks volume")
+
+
+def test_pick_generated_lift_day_consumes_distinct_variants():
+    """Multiple regenerated slots from the same family should consume
+    different generated variants before reusing the first match."""
+    print("[change_day_type] generated lift picker consumes variants")
+    from app.services.workout.change_day_type import pick_generated_lift_day_for_change
+
+    proposed = [
+        {"focus": "Legs"},
+        {"focus": "Legs"},
+    ]
+    generated = [
+        {"focus": "Legs", "archetype": "lift_legs_heavy", "stimulus": "strength"},
+        {"focus": "Legs", "archetype": "lift_legs_volume", "stimulus": "volume"},
+    ]
+    used: set[int] = set()
+    first_idx, first = pick_generated_lift_day_for_change(
+        proposed, generated, used, 0, "Legs",
+    )
+    used.add(first_idx)
+    proposed[0] = first
+    _, second = pick_generated_lift_day_for_change(
+        proposed, generated, used, 1, "Legs",
+    )
+    assert_ne(second["archetype"], first["archetype"], "second pick uses another variant")
+
+
 # ── Test: full_body split smart adjust ────────────────────────────────
 
 def test_full_body_smart_adjust():
@@ -685,6 +755,9 @@ cases = [
     test_ppl_ul_smart_adjust_no_full_body_fallback,
     test_ppl_ul_smart_adjust_preserves_all_families,
     test_ppl_ul_mid_week_change,
+    test_pick_generated_lift_day_avoids_second_heavy_legs,
+    test_pick_generated_lift_day_low_readiness_prefers_lighter_legs,
+    test_pick_generated_lift_day_consumes_distinct_variants,
     test_full_body_smart_adjust,
     test_canonical_cycles_exist,
 ]

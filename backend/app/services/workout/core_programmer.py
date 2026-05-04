@@ -388,7 +388,11 @@ def core_slot_score_bonus(slot: Slot, exercise: dict) -> float:
         return 0.0
 
     if category == CAT_FLEXION:
-        if any(term in name for term in ("leg raise", "knee raise", "reverse crunch", "sit-up", "v-up", "toes-to-bar", "crunch", "flutter", "scissor")):
+        if any(term in name for term in (
+            "leg raise", "leg lower", "knee raise", "reverse crunch",
+            "sit-up", "v-up", "toes-to-bar", "crunch", "curl-up",
+            "flutter", "scissor", "heel tap", "toe touch",
+        )):
             return 2.5
         return 1.0
 

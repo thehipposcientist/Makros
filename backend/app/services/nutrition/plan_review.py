@@ -269,8 +269,8 @@ Look for:
   eggs with `vitamin_d: 0` or `vitamin_b12: 0`, black beans with `fiber: 0`. \
   Also flag impossibly-high values (e.g. `sodium: 9000 mg` for plain chicken). \
   Use USDA values for the corrected numbers, scaled to the item's qty/unit. \
-  Micro units: grams for fiber/sugar/saturated_fat/mono/poly fat, milligrams for \
-  sodium/cholesterol/omega_3/omega_6/potassium/calcium/iron/magnesium/vitamin_c, \
+  Micro units: grams for fiber/sugar/saturated_fat/mono/poly fat/omega_3/omega_6, \
+  milligrams for sodium/cholesterol/potassium/calcium/iron/magnesium/vitamin_c, \
   micrograms for vitamin_d and vitamin_b12.
 - **Meal totals that don't match their items.** If a meal claims 600 cal but its items \
   sum to 300, patch the meal-level totals via `adjust_meal_macros` to match the items.

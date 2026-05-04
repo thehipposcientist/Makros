@@ -280,3 +280,61 @@ maestro test \
 - `flows/free-vs-pro-gates.yaml` — true free tier vs pro gate assertions
   (requires `EXPO_PUBLIC_DISABLE_FREE_BETA_FULL_ACCESS=1`)
 - `flows/login.yaml` — helper flow for logging in an existing user
+- `flows/progress-1rm-consistency.yaml` — verifies the rolling-e1RM
+  showcase tile and per-PR cards both render after the overlay change
+  (guards against the chart/showcase/PR-card drift the user reported)
+- `flows/meal-search-thallo-badge.yaml` — verifies food search in the
+  meal-edit modal renders the THALLO badge for stored foods (label
+  was unified across seed + user-added custom foods on 2026-05-04)
+
+### Theme + UI invariants
+
+- `flows/theme-onyx-contrast.yaml` — switch to Onyx theme, verify
+  Start Workout button still visible (guards same-color-on-same-color)
+- `flows/theme-paper-contrast.yaml` — switch to Paper theme, verify
+  AI coach send button stays reachable
+- `flows/workout-cards-collapsed-default.yaml` — workout day cards
+  start collapsed (recent UX change; previously auto-expanded)
+- `flows/tutorial-replay.yaml` — Settings → Replay tutorial mounts the
+  tutorial overlay with a working skip button
+- `flows/onboarding-equipment-toggle.yaml` — fresh signup gets through
+  the equipment toggle step without errors
+
+### Settings / reminders / auth
+
+- `flows/meal-reminder-schedule-edit.yaml` — meal reminder schedule
+  selector persists across screen round-trip (every_day/training_days)
+- `flows/workout-reminder-schedule-edit.yaml` — workout reminder time
+  +/- adjuster + skip-completed toggle work
+- `flows/quiet-hours-toggle.yaml` — quiet-hours toggle + endpoint
+  +/- controls render and remain mounted
+- `flows/account-details-fast-open.yaml` — Account Details opens
+  within 5s (SWR-cache hit; previously took 10+s)
+- `flows/logout-and-relogin.yaml` — sign out routes to AuthScreen,
+  re-login lands back on Plan without ghost state
+
+### Workout flows
+
+- `flows/switch-day-rest-to-workout.yaml` — pick a workout for a
+  rest day (fix for short-circuit guard on null item.workout)
+- `flows/start-workout-active-screen.yaml` — Start Workout CTA
+  mounts ActiveWorkoutScreen with reachable live controls
+- `flows/workout-history-row-detail.yaml` — Workout History tab
+  renders rows for the seeded user
+- `flows/workout-subtab-navigation.yaml` — cycle Plan/Library/
+  History/Settings without error boundaries
+- `flows/workout-template-build.yaml` — build a custom template,
+  add an exercise, save, verify it appears in the listing
+
+### Meals / Progress / Social
+
+- `flows/hydration-large-bottles.yaml` — +40oz quick-add button
+  (recent feature) wires through state
+- `flows/nutrition-trend-renders.yaml` — Progress Nutrition Trend
+  card renders + at least one logged-cal pip is visible
+- `flows/nutrition-gut-facts-toggle.yaml` — Gut/Nutrition facts
+  toggle stays mounted across switches
+- `flows/progress-weight-card.yaml` — Progress weight card renders
+  with a current value and unit suffix
+- `flows/social-friend-detail-back.yaml` — friend detail screen
+  navigation: open from list → assert content → back-nav

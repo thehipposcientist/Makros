@@ -1,0 +1,71 @@
+# Account Details should open within 5 seconds. Recently this screen
+# took 10+ seconds to mount because it ran a synchronous backend roundtrip
+# inside the modal mount path. The fix swapped to stale-while-revalidate
+# from AsyncStorage. This flow uses a 5s extendedWaitUntil — if the screen
+# fails to mount in time the flow fails, catching a regression.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: account-details-fast-open
+tags:
+  - e2e
+  - seeded
+  - account
+  - perf
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-you"
+- extendedWaitUntil:
+    visible:
+      id: "you-tab-screen"
+    timeout: 30000
+
+- tapOn:
+    id: "profile-account-open"
+
+# 5-second budget: covers the SWR cache hit. Without the SWR fix,
+# this would have to be 15s+ to be reliable.
+- extendedWaitUntil:
+    visible: "Account"
+    timeout: 5000

@@ -119,8 +119,8 @@ def _ai_enrich_batch(client, foods: list[tuple[Food, FoodNutrition]]) -> dict[in
         "  polyunsaturated_fat→ GRAMS     (0-60, e.g. walnuts 47, salmon 4)\n"
         "  sodium             → MILLIGRAMS (0-5000, e.g. salt 38758, soy sauce 5493, chicken 74)\n"
         "  cholesterol        → MILLIGRAMS (0-700, e.g. egg 373, chicken 85, salmon 60)\n"
-        "  omega_3            → MILLIGRAMS (0-3000, e.g. SALMON 2260, chia seeds 17552, walnuts 9080, chicken 40)\n"
-        "  omega_6            → MILLIGRAMS (0-40000, e.g. chicken 1520, salmon 172, walnuts 38093)\n"
+        "  omega_3            → GRAMS     (0-20, e.g. SALMON 2.26, chia seeds 17.55, walnuts 9.08, chicken 0.04)\n"
+        "  omega_6            → GRAMS     (0-40, e.g. chicken 1.52, salmon 0.17, walnuts 38.09)\n"
         "  potassium          → MILLIGRAMS (0-700, e.g. banana 358, spinach 558, chicken 256)\n"
         "  calcium            → MILLIGRAMS (0-1200, e.g. milk 113, cheese 720, chicken 11)\n"
         "  iron               → MILLIGRAMS (0-20, e.g. spinach 2.7, beef 2.6, chicken 0.9)\n"
@@ -128,9 +128,8 @@ def _ai_enrich_batch(client, foods: list[tuple[Food, FoodNutrition]]) -> dict[in
         "  vitamin_c          → MILLIGRAMS (0-250, e.g. orange 53, bell pepper 128, chicken 0)\n"
         "  vitamin_d          → MICROGRAMS (0-25,  e.g. SALMON 20, egg 2, chicken 0.2)\n"
         "  vitamin_b12        → MICROGRAMS (0-20,  e.g. beef 2.6, salmon 3.2, chicken 0.3)\n\n"
-        "NEVER return grams for a mg field. If you're unsure about a value, "
-        "multiply by 1000 before returning (e.g. 2.26 g → 2260 mg). omega_3 for "
-        "salmon MUST be around 2260, never 2.3.\n\n"
+        "NEVER return milligrams for omega_3 or omega_6; those two fields are grams. "
+        "omega_3 for salmon MUST be around 2.3, never 2260.\n\n"
         f"Foods to enrich:\n{json.dumps(items_payload, indent=2)}"
     )
     try:
@@ -160,11 +159,9 @@ def _ai_enrich_batch(client, foods: list[tuple[Food, FoodNutrition]]) -> dict[in
     # food that has the nutrient at all:
     #   - sodium: seasoned foods start at 50+ mg; a bare meat is ~70
     #   - potassium: even low-K foods are 100+ mg/100g
-    #   - omega_3 / omega_6: values come back in grams often; real mg
-    #     range starts at ~20 for meats and goes to 10000+ for seeds
     #   - cholesterol: animal foods 50-700 mg, plant foods 0
     UPCONVERT_MG_FIELDS = {
-        "sodium", "potassium", "omega_3", "omega_6", "cholesterol",
+        "sodium", "potassium", "cholesterol",
     }
 
     out: dict[int, dict[str, float]] = {}
@@ -186,6 +183,8 @@ def _ai_enrich_batch(client, foods: list[tuple[Food, FoodNutrition]]) -> dict[in
             # for these fields are almost certainly grams-returns.
             if k in UPCONVERT_MG_FIELDS and 0 < fv < 10:
                 fv = fv * 1000.0
+            if k in {"omega_3", "omega_6"} and fv > 50:
+                fv = fv / 1000.0
             complete[k] = fv
         out[fid] = complete
     return out

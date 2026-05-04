@@ -1,0 +1,99 @@
+# Sign out from Settings and re-login. Verifies:
+#   1. Sign-out routes back to AuthScreen.
+#   2. Auth screen accepts the same credentials.
+#   3. App lands back on Plan after re-login (no stuck loading).
+# Catches the regression where logout left ghost state in AsyncStorage
+# and the re-login path crashed pulling the wrong user's plan.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: logout-and-relogin
+tags:
+  - e2e
+  - seeded
+  - auth
+  - lifecycle
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+# Sign out from Settings.
+- tapOn:
+    id: "bottom-tab-you"
+- tapOn:
+    id: "profile-settings-open"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 15000
+
+- scrollUntilVisible:
+    element:
+      id: "settings-sign-out"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "settings-sign-out"
+
+# A confirm modal can appear — accept it.
+- runFlow:
+    when:
+      visible: "Sign out"
+    commands:
+      - tapOn: "Sign out"
+
+# Back at AuthScreen.
+- extendedWaitUntil:
+    visible:
+      id: "auth-mode-login"
+    timeout: 30000
+
+# Re-login.
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000

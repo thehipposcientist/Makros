@@ -30,6 +30,9 @@ const tests = [
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/gearSessionMatching.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/swapScoring.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/customFoodSearch.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/mealItems.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/workoutLogPayload.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/eatingWindow.test.ts'],
 ];
 
 for (const args of tests) {

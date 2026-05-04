@@ -857,6 +857,48 @@ _ONE_RM_SHOWCASE_SLUGS: tuple[str, ...] = (
 )
 
 
+def _build_showcase_lifts(profiles: dict, sets_by_name: dict, showcase_slugs: tuple[str, ...] = _ONE_RM_SHOWCASE_SLUGS) -> list[dict]:
+    """Pure helper: overlay rolling-e1RM on top of Epley `estimated_1rm_lbs`
+    so the showcase tile matches the chart + PR cards.
+
+    Args:
+      profiles: ``{slug: ExercisePerformance}`` from ``build_performance_profile``.
+      sets_by_name: ``{exercise_name_lower: [UsableSet, ...]}`` aggregated
+        from the user's logged sets. Empty dict is fine.
+      showcase_slugs: ordered tuple of slugs to render. Defaults to the
+        canonical showcase list.
+
+    Returns the list of lift dicts the route ships in ``{"lifts": [...]}``.
+    Extracted from the route handler so the rolling overlay is directly
+    unit-testable without seeding ``Exercise`` rows.
+    """
+    from app.services.workout.rolling_e1rm import compute_rolling_e1rm
+
+    out: list[dict] = []
+    for slug in showcase_slugs:
+        p = profiles.get(slug)
+        if p is None or p.estimated_1rm_lbs <= 0:
+            continue
+        rolling_lbs: float | None = None
+        sets_for_lift = sets_by_name.get((p.name or "").strip().lower())
+        if sets_for_lift:
+            est = compute_rolling_e1rm(sets_for_lift, role="primary")
+            if est is not None and est.e1rm_lbs > 0:
+                rolling_lbs = est.e1rm_lbs
+        display_1rm = rolling_lbs if rolling_lbs is not None else p.estimated_1rm_lbs
+        out.append({
+            "slug": p.slug,
+            "name": p.name,
+            "oneRepMaxLbs": round(display_1rm, 1),
+            "topWeightLbs": round(p.recent_top_weight_lbs, 1),
+            "topReps": int(p.recent_top_reps),
+            "sessionCount": int(p.session_count),
+            "confidence": round(p.confidence, 2),
+            "lastPerformedOn": p.last_performed_on.isoformat() if p.last_performed_on else None,
+        })
+    return out
+
+
 @router.get("/strength/one-rep-max")
 def one_rep_max_showcase(
     current_user: User = Depends(require_pro_feature("Workout analytics")),
@@ -897,10 +939,10 @@ def one_rep_max_showcase(
     # Pull rolling-e1RM map so the showcase number matches the chart and
     # the per-PR cards. Without this, three places on the screen show
     # three different numbers for the same lift (Epley single-set vs.
-    # rolling RIR-adjusted weighted-median). Falling back to the Epley
-    # `estimated_1rm_lbs` only when rolling has too few usable sets.
+    # rolling RIR-adjusted weighted-median). The actual overlay logic
+    # lives in `_build_showcase_lifts` for testability.
     from app.models import ExerciseSet, WorkoutExercise, WorkoutSession
-    from app.services.workout.rolling_e1rm import UsableSet, compute_rolling_e1rm
+    from app.services.workout.rolling_e1rm import UsableSet
     rows = db.exec(
         select(ExerciseSet, WorkoutExercise, WorkoutSession)
         .join(WorkoutExercise, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
@@ -924,31 +966,7 @@ def one_rep_max_showcase(
             set_type=es.set_type,
         ))
 
-    # Preserve showcase order so the card always renders the same
-    # sequence. Anything without a profile gets dropped silently.
-    out: list[dict] = []
-    for slug in _ONE_RM_SHOWCASE_SLUGS:
-        p = profiles.get(slug)
-        if p is None or p.estimated_1rm_lbs <= 0:
-            continue
-        rolling_lbs: float | None = None
-        sets_for_lift = sets_by_name.get((p.name or "").strip().lower())
-        if sets_for_lift:
-            est = compute_rolling_e1rm(sets_for_lift, role="primary")
-            if est is not None and est.e1rm_lbs > 0:
-                rolling_lbs = est.e1rm_lbs
-        display_1rm = rolling_lbs if rolling_lbs is not None else p.estimated_1rm_lbs
-        out.append({
-            "slug": p.slug,
-            "name": p.name,
-            "oneRepMaxLbs": round(display_1rm, 1),
-            "topWeightLbs": round(p.recent_top_weight_lbs, 1),
-            "topReps": int(p.recent_top_reps),
-            "sessionCount": int(p.session_count),
-            "confidence": round(p.confidence, 2),
-            "lastPerformedOn": p.last_performed_on.isoformat() if p.last_performed_on else None,
-        })
-    return {"lifts": out}
+    return {"lifts": _build_showcase_lifts(profiles, sets_by_name)}
 
 
 @router.get("/fitness/composite-score")
@@ -1864,8 +1882,8 @@ def enrich_food_db(
         prompt = (
             "Return USDA per-100g micronutrient values for each food. Use snake_case "
             "keys exactly as shown. Be accurate — USDA reference data only.\n"
-            "Units: fiber/sugar/saturated_fat/monounsaturated_fat/polyunsaturated_fat "
-            "in g; sodium/cholesterol/omega_3/omega_6/potassium/calcium/iron/magnesium/"
+            "Units: fiber/sugar/saturated_fat/monounsaturated_fat/polyunsaturated_fat/"
+            "omega_3/omega_6 in g; sodium/cholesterol/potassium/calcium/iron/magnesium/"
             "vitamin_c in mg; vitamin_d and vitamin_b12 in mcg.\n\n"
             f"Foods:\n{json.dumps(items_payload, indent=2)}\n\n"
             "Return JSON:\n"

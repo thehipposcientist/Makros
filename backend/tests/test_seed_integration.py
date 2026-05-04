@@ -226,10 +226,21 @@ def test_usda_seed_backfill_survives_reseed_and_meta_stays_curated() -> None:
     _ok("USDA-backed seed nutrition is preserved and /meta/foods stays curated")
 
 
+def test_food_seed_validator_has_no_actionable_warnings() -> None:
+    print("\n[test] seed integration: food seed validator clean")
+    from app.seed_foods_data import SEED_FOODS
+    from app.seed_validation import validate_seed
+
+    report = validate_seed(SEED_FOODS)
+    assert report.total() == 0, report.warnings
+    _ok("food seed data has no validator warnings")
+
+
 cases = [
     test_equipment_and_exercise_seed_is_idempotent_and_meta_ready,
     test_food_seed_default_servings_hydrate_into_meal_lookup,
     test_usda_seed_backfill_survives_reseed_and_meta_stays_curated,
+    test_food_seed_validator_has_no_actionable_warnings,
 ]
 
 

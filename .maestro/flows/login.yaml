@@ -31,7 +31,8 @@ tags:
 # already signed in and skip straight to asserting the home tab.
 - runFlow:
     when:
-      visible: "Sign Up"
+      visible:
+        id: "auth-email-input"
     commands:
       # AuthScreen default mode is login. Use stable testIDs so copy changes
       # like "Login" vs "Log In" do not break returning-user flows.

@@ -1,0 +1,73 @@
+# Toggle the Gut Facts <-> Nutrition Facts switch on the Progress tab.
+# The toggle is a recent UX addition (single card, two views). The
+# rolling-aggregate inside this card is the same source as the trend
+# card so both should agree — this flow only proves the toggle works,
+# not the math.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: nutrition-gut-facts-toggle
+tags:
+  - e2e
+  - seeded
+  - progress
+  - nutrition
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-progress"
+
+- scrollUntilVisible:
+    element:
+      id: "nutrition-gut-facts-card"
+    direction: DOWN
+    timeout: 30000
+    visibilityPercentage: 30
+
+- tapOn:
+    id: "nutrition-gut-facts-toggle"
+
+# After the toggle, the card stays mounted (toggling shouldn't
+# unmount/remount) — assertVisible would fail if it did.
+- assertVisible:
+    id: "nutrition-gut-facts-card"

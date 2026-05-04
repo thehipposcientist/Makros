@@ -40,6 +40,7 @@ import {
   readHealthSummary, isHealthKitAvailable, summarizeWorkoutZone2,
 } from './appleHealth';
 import type { HealthSummary } from '../types';
+import { loadAuthToken } from '../utils/authTokenStorage';
 
 export interface HealthWeeklyRollup {
   avgSteps: number | null;
@@ -136,7 +137,7 @@ export async function refreshHealthDataSummary(
 
 async function pushSnapshotToBackend(_s: HealthDataSummary): Promise<void> {
   try {
-    const token = await AsyncStorage.getItem('authToken');
+    const token = await loadAuthToken();
     if (!token) return;
     // The aggregator's flat fields are 7-day averages, not today's
     // totals — pulling per-day numbers requires a separate HK read.
@@ -191,7 +192,7 @@ function _hasAnyValue(d: { steps: number | null; activeEnergyKcal: number | null
  *  backend upsert is idempotent. */
 export async function backfillSnapshotsToBackend(days: number = 30): Promise<{ pushed: number }> {
   try {
-    const token = await AsyncStorage.getItem('authToken');
+    const token = await loadAuthToken();
     if (!token) return { pushed: 0 };
     const { readDailySnapshot } = await import('./appleHealth');
     const now = new Date();

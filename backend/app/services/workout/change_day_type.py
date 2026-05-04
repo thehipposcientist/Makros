@@ -77,6 +77,12 @@ _ADJACENCY_COLLAPSE = {
 }
 _EMPTY_FOCUSES = {"empty"}
 _REST_FOCUSES = {"rest", ""}
+_LOWER_FAMILIES = {"legs", "lower"}
+_HIGH_LOWER_ARCHETYPES = {
+    "lift_legs_heavy",
+    "lift_lower_heavy",
+    "hybrid_lower_power",
+}
 
 
 def _is_lifting_focus(nf: str) -> bool:
@@ -90,6 +96,130 @@ def _is_lifting_focus(nf: str) -> bool:
 def _collapsed_family(focus: str) -> str:
     fam = _focus_family(focus)
     return _ADJACENCY_COLLAPSE.get(fam, fam)
+
+
+def _readiness_01(
+    focus_readiness: dict[str, float] | None,
+    family: str,
+) -> float | None:
+    if not focus_readiness:
+        return None
+    candidates = [family]
+    if family == "legs":
+        candidates.append("lower")
+    elif family == "lower":
+        candidates.append("legs")
+    values: list[float] = []
+    for key in candidates:
+        raw = focus_readiness.get(key)
+        if raw is None:
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 1.0:
+            value /= 100.0
+        values.append(max(0.0, min(1.0, value)))
+    return min(values) if values else None
+
+
+def _payload_family(day: dict | None) -> str:
+    if not isinstance(day, dict):
+        return "?"
+    return _focus_family(str(day.get("focus") or ""))
+
+
+def _is_high_lower_stress_payload(day: dict | None) -> bool:
+    """True for lower-body days whose archetype/stimulus is heavy.
+
+    Used when Change Focus regenerates exercises from a fresh week. The
+    generated plan may contain both `lift_legs_heavy` and
+    `lift_legs_volume`; blindly taking the first family match duplicates
+    heavy legs when another heavy lower day already exists.
+    """
+    if not isinstance(day, dict):
+        return False
+    if _payload_family(day) not in _LOWER_FAMILIES:
+        return False
+    archetype = str(day.get("archetype") or "").lower().strip()
+    stimulus = str(day.get("stimulus") or "").lower().strip()
+    if archetype in _HIGH_LOWER_ARCHETYPES:
+        return True
+    if archetype.endswith("_heavy") and (
+        "legs" in archetype or "lower" in archetype
+    ):
+        return True
+    return stimulus in {"strength", "power"}
+
+
+def pick_generated_lift_day_for_change(
+    proposed_days: list[dict],
+    generated_days: list[dict],
+    used_generated_indexes: set[int],
+    target_index: int,
+    proposed_focus: str,
+    *,
+    focus_readiness: dict[str, float] | None = None,
+) -> tuple[int | None, dict | None]:
+    """Pick the best generated day for a Change Focus lift slot.
+
+    Matching is family-based so "Legs", "Legs Volume", and similar
+    labels can share exercise candidates. Unlike the old router loop,
+    this consumes generated variants and avoids selecting another heavy
+    lower-body archetype when the proposed week already has one, or when
+    lower-body readiness is low.
+    """
+    target_family = _focus_family(proposed_focus)
+    candidates = [
+        (idx, day)
+        for idx, day in enumerate(generated_days)
+        if _payload_family(day) == target_family
+    ]
+    if not candidates:
+        return None, None
+
+    target_is_lower = target_family in _LOWER_FAMILIES
+    existing_high_lower = False
+    same_family_archetypes: set[str] = set()
+    for idx, day in enumerate(proposed_days):
+        if idx == target_index:
+            continue
+        if _payload_family(day) == target_family:
+            archetype = str(day.get("archetype") or "").lower().strip()
+            if archetype:
+                same_family_archetypes.add(archetype)
+        if _is_high_lower_stress_payload(day):
+            existing_high_lower = True
+
+    readiness = _readiness_01(focus_readiness, target_family)
+    lower_readiness_low = (
+        target_is_lower
+        and readiness is not None
+        and readiness < 0.60
+    )
+    has_lighter_lower_option = any(
+        not _is_high_lower_stress_payload(day)
+        for _, day in candidates
+    )
+    prefer_lighter_lower = (
+        target_is_lower
+        and has_lighter_lower_option
+        and (existing_high_lower or lower_readiness_low)
+    )
+
+    def _score(item: tuple[int, dict]) -> tuple[int, int, int, int]:
+        idx, day = item
+        archetype = str(day.get("archetype") or "").lower().strip()
+        return (
+            1 if prefer_lighter_lower and _is_high_lower_stress_payload(day) else 0,
+            1 if idx in used_generated_indexes else 0,
+            1 if archetype and archetype in same_family_archetypes else 0,
+            idx,
+        )
+
+    picked_idx, picked_day = min(candidates, key=_score)
+    return picked_idx, picked_day
 
 
 def detect_conflicts(

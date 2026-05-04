@@ -1,0 +1,90 @@
+# Switch to the Paper (white) theme and verify the AI coach send
+# button renders with readable contrast — the bug we fixed where it
+# was rendering black-on-black / white-on-white.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: theme-paper-contrast
+tags:
+  - e2e
+  - seeded
+  - theme
+  - ui-contrast
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-you"
+- extendedWaitUntil:
+    visible:
+      id: "you-tab-screen"
+    timeout: 30000
+- tapOn:
+    id: "profile-settings-open"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 15000
+
+- scrollUntilVisible:
+    element: "Paper"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn: "Paper"
+
+- tapOn:
+    id: "settings-back"
+
+# Open AI coach and verify the send button is reachable + tappable
+# (would not be if it rendered transparent / same-on-same color).
+- tapOn:
+    id: "open-ai-coach"
+- extendedWaitUntil:
+    visible:
+      id: "ai-coach-input"
+    timeout: 30000
+- tapOn:
+    id: "ai-coach-input"
+- inputText: "ping"
+- assertVisible:
+    id: "ai-coach-send"

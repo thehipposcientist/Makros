@@ -3,9 +3,9 @@ import { View, Text, Modal, TouchableOpacity, StyleSheet, ScrollView, ActivityIn
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as SecureStore from 'expo-secure-store';
 import * as KeepAwake from 'expo-keep-awake';
 import { FREE_WORKOUT_TEMPLATE_LIMIT, isBetaFullAccessEnabled, tierOf } from '../src/utils/subscription';
+import { clearAuthToken, loadAuthToken, saveAuthToken } from '../src/utils/authTokenStorage';
 
 /** Keep the device awake while plan generation is in flight. iOS suspends
  *  JS execution ~30s after the app backgrounds or the screen locks, which
@@ -60,13 +60,8 @@ const PLAN_GEN_MAX_ATTEMPTS = 3;
  *  session or a version the user has since abandoned. */
 const PLAN_GEN_MARKER_STALE_MS = 15 * 60 * 1000;
 
-/** iOS Keychain / Android KeyStore-backed token storage. Falls back to
- *  AsyncStorage on platforms where SecureStore isn't available (web, some
- *  simulators). Kept here instead of a separate util file because auth is
- *  the only consumer. */
-const AUTH_TOKEN_KEY = 'auth_token';
 // Sentinel that lives in AsyncStorage. AsyncStorage is wiped on app delete,
-// but iOS Keychain (used by SecureStore) is NOT — so a stale JWT can
+// but iOS Keychain (used by SecureStore inside authTokenStorage) is NOT — so a stale JWT can
 // auto-log the user in with an empty local profile after reinstall. This
 // marker lets us detect a fresh install and purge the Keychain token.
 const INSTALL_MARKER_KEY = 'install_marker_v1';
@@ -74,25 +69,10 @@ async function ensureFreshInstall(): Promise<void> {
   try {
     const marker = await AsyncStorage.getItem(INSTALL_MARKER_KEY);
     if (!marker) {
-      try { await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY); } catch {}
+      await clearAuthToken();
       await AsyncStorage.setItem(INSTALL_MARKER_KEY, '1');
     }
   } catch {}
-}
-
-async function saveAuthToken(token: string): Promise<void> {
-  try { await SecureStore.setItemAsync(AUTH_TOKEN_KEY, token); return; } catch {}
-  try { await AsyncStorage.setItem(AUTH_TOKEN_KEY, token); } catch {}
-}
-async function loadAuthToken(): Promise<string | null> {
-  try { const t = await SecureStore.getItemAsync(AUTH_TOKEN_KEY); if (t) return t; } catch {}
-  try { return await AsyncStorage.getItem(AUTH_TOKEN_KEY); } catch { return null; }
-}
-async function clearAuthToken(): Promise<void> {
-  try { await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY); } catch {}
-  try { await AsyncStorage.removeItem(AUTH_TOKEN_KEY); } catch {}
-  // Legacy key name — clean it up too so upgraded users don't end up with two tokens.
-  try { await AsyncStorage.removeItem('authToken'); } catch {}
 }
 
 /** Detect auth-failure errors from `request()`. The backend throws
@@ -121,7 +101,7 @@ function isAuthFailureError(err: any): boolean {
 async function hardResetSession(): Promise<void> {
   await clearAuthToken();
   try { await AsyncStorage.removeItem(LAST_USER_ID_KEY); } catch {}
-  try { await AsyncStorage.multiRemove(USER_SCOPED_KEYS); } catch {}
+  await clearUserScopedStorage();
 }
 
 /** Track the last signed-in user id so we can detect a user switch on the
@@ -141,6 +121,7 @@ const USER_SCOPED_KEYS = [
   'weekStartDate', 'mealEdits', 'mealChecks',
   'workoutHistory', 'userLog', 'skippedWorkouts',
   'mealRoutines', 'workoutTemplates', 'planChangeHistory', 'goalHistory',
+  'user_username',
   // ── Per-user keys previously missing from sign-out wipe ─────────────
   // Without these, signing out + signing into a different account on
   // the same device left the prior user's workout summaries, checked
@@ -160,7 +141,72 @@ const USER_SCOPED_KEYS = [
   // AccountInfoModal /auth/me cache — must be wiped on user-switch so
   // the new account never briefly sees the prior user's email/username.
   'accountModal.meCache.v1',
+  'weightHistory',
+  'bodyScanHistory',
+  'healthDataSummary_v2',
+  'sleepHistory_v1',
+  'activeWorkoutSets',
+  'activeWorkoutRest',
+  'activeWorkoutStartTime',
+  'activeWatchSessionId',
+  'activeWorkoutSession',
+  'groceryChecked_v2',
+  'groceryRemoved_v2',
+  'mealCheckTimestamps',
+  'periodSymptomLogs_v1',
+  'injury_checkins_v1',
+  'plateauDismissedAt',
+  'emailBannerDismissedAt',
+  'birthdateBackfill_dismissed_v1',
+  'hkImportDismissed_v1',
+  'watch_sync_status_v1',
+  'watch_active_command_backlog_v1',
+  'onboardingDraft_v1',
+  'manualWorkoutOverrides',
+  'tutorial_v1_completed',
+  'meal_reminder_settings',
+  'meal_reminder_notification_id',
+  'meal_reminder_ids',
+  'workout_reminder_settings',
+  'workout_reminder_ids',
+  'notification_quiet_hours',
+  'weekly_checkin_notification_sent_ids',
 ];
+
+const USER_SCOPED_KEY_PREFIXES = [
+  'mealPlan_',
+  'preservedMeal_',
+  'mealChecks_',
+  'freshDayGenerated_',
+  'workoutDayState_',
+  'workoutStartTime_',
+  'routineOverlayShown_',
+  'unloggedMealsPromptShown_',
+  'birthday_dismissed_',
+  'lastDigestDismissedWeek_',
+  'weeklyReviewDismissed_v1_',
+  'incompleteDayDismissed_',
+];
+
+const USER_SCOPED_KEY_SET = new Set(USER_SCOPED_KEYS);
+
+function isUserScopedStorageKey(key: string): boolean {
+  if (USER_SCOPED_KEY_SET.has(key)) return true;
+  return USER_SCOPED_KEY_PREFIXES.some(prefix => key.startsWith(prefix));
+}
+
+async function clearUserScopedStorage(): Promise<void> {
+  try {
+    const keys = await AsyncStorage.getAllKeys();
+    const scopedKeys = Array.from(new Set([
+      ...USER_SCOPED_KEYS,
+      ...keys.filter(isUserScopedStorageKey),
+    ]));
+    await AsyncStorage.multiRemove(scopedKeys);
+  } catch {
+    try { await AsyncStorage.multiRemove(USER_SCOPED_KEYS); } catch {}
+  }
+}
 
 /** Keys that get pushed to the backend for cross-device sync. Subset of
  *  USER_SCOPED_KEYS that excludes device-only / transient state (meta
@@ -1102,13 +1148,7 @@ export default function Index() {
       && String(incomingUserId) !== String(previousUserId);
     // For NEW users we hold off writing user-scoped storage until
     // onboarding completes — keeps signup ACID. For existing users
-    // we persist now so username/last-user are available immediately.
-    if (!isNewUser) {
-      if (incomingUsername) await AsyncStorage.setItem('user_username', incomingUsername);
-      if (incomingUserId != null) {
-        await AsyncStorage.setItem(LAST_USER_ID_KEY, String(incomingUserId));
-      }
-    }
+    // username/last-user are written after any previous-user wipe below.
     // Stamp userId on the watch bridge so applicationContext carries it.
     try {
       const { WatchBridge } = await import('../modules/thallo-watch-bridge');
@@ -1123,7 +1163,7 @@ export default function Index() {
     if (isNewUser) {
       // Brand new account — wipe any leftover state, then fall into the
       // onboarding flow (userProfile stays null).
-      await AsyncStorage.multiRemove(USER_SCOPED_KEYS);
+      await clearUserScopedStorage();
       setUserProfile(null);
       setTrainerNote(null);
       setNutritionistNote(null);
@@ -1135,7 +1175,7 @@ export default function Index() {
     if (userSwitched) {
       // Different user on same device — clear the previous user's state
       // before hydrating this one so nothing leaks across accounts.
-      await AsyncStorage.multiRemove(USER_SCOPED_KEYS);
+      await clearUserScopedStorage();
       // Clear transient active-workout keys so the watch pull_state handler
       // doesn't see a stale isWorkoutInProgress flag for the new account.
       await AsyncStorage.multiRemove([
@@ -1151,6 +1191,11 @@ export default function Index() {
         const { clearWatchData } = await import('../src/utils/watchSync');
         await clearWatchData();
       } catch { /* bridge optional */ }
+    }
+
+    if (incomingUsername) await AsyncStorage.setItem('user_username', incomingUsername);
+    if (incomingUserId != null) {
+      await AsyncStorage.setItem(LAST_USER_ID_KEY, String(incomingUserId));
     }
 
     // Same user (or user-switched) — pull from backend first, then load
@@ -1328,11 +1373,7 @@ export default function Index() {
       // a proper wipe) rather than arriving without a userId key at all.
       WatchBridge.setUserId(null);
     } catch { /* watch bridge optional */ }
-    // Clear transient active-workout keys so a stale session doesn't bleed
-    // into the next login (e.g. next user's pull_state sees isWorkoutInProgress).
-    await AsyncStorage.multiRemove([
-      'activeWorkoutStartTime', 'activeWatchSessionId', 'activeWorkoutSession',
-    ]).catch(() => {});
+    await clearUserScopedStorage();
     try { await AsyncStorage.removeItem('pending_plan_job'); } catch {}
     await clearAuthToken();
     setAuthToken(null);
@@ -1716,7 +1757,7 @@ export default function Index() {
         // Abandoning signup — wipe local state, clear in-memory token, and
         // send the user back to the auth screen. The backend account
         // lingers (they can sign in later), but nothing is left on device.
-        try { await AsyncStorage.multiRemove(USER_SCOPED_KEYS); } catch {}
+        await clearUserScopedStorage();
         try { await AsyncStorage.removeItem(LAST_USER_ID_KEY); } catch {}
         try { await clearAuthToken(); } catch {}
         setAuthToken(null);

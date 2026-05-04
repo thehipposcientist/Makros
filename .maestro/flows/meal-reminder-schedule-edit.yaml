@@ -1,0 +1,108 @@
+# Verifies the meal-reminder schedule selector persists a change.
+# Recent feature: scheduleType (every_day / training_days / custom)
+# was added as a pluggable selector. This flow toggles the reminder
+# on, taps a non-default schedule chip, and verifies it survives a
+# trip out and back.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: meal-reminder-schedule-edit
+tags:
+  - e2e
+  - seeded
+  - settings
+  - reminders
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-you"
+- extendedWaitUntil:
+    visible:
+      id: "you-tab-screen"
+    timeout: 30000
+- tapOn:
+    id: "profile-settings-open"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 15000
+
+# Toggle meal reminders on if not already.
+- scrollUntilVisible:
+    element:
+      id: "settings-meal-reminder-toggle"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "settings-meal-reminder-toggle"
+
+# Tap a non-default schedule chip — "Every day" is a stable target.
+- scrollUntilVisible:
+    element:
+      id: "settings-meal-reminder-schedule-every_day"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "settings-meal-reminder-schedule-every_day"
+
+# Round-trip: leave the screen and come back. The schedule chip must
+# still read "Every day" (state persisted to AsyncStorage on save).
+- tapOn:
+    id: "settings-back"
+- tapOn:
+    id: "profile-settings-open"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 15000
+
+- scrollUntilVisible:
+    element:
+      id: "settings-meal-reminder-schedule-every_day"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- assertVisible:
+    id: "settings-meal-reminder-schedule-every_day"

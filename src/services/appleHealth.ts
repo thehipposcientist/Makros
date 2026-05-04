@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { HealthSummary, SleepScore, SleepStages } from '../types';
 import { scoreSleep, minutesFromMidnight } from './sleepScore';
 import { recordTelemetryEvent } from './api';
+import { loadAuthToken } from '../utils/authTokenStorage';
 
 let _module: any = null;
 let _moduleChecked = false;
@@ -975,7 +976,7 @@ async function pushNightlySleepToBackend(input: {
   lastNightSleep: SleepSample[];
 }): Promise<void> {
   try {
-    const token = await AsyncStorage.getItem('authToken');
+    const token = await loadAuthToken();
     if (!token) return;
     // Waking date — use today's local date if we have any sleep total.
     if (!input.stages || (input.stages.total ?? 0) <= 0) return;

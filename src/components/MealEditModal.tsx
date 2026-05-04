@@ -405,8 +405,15 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     return Array.from(byName.values());
   }, [foodCategories, allFoods]);
 
-  const kitchenSearchResults = (): FoodSearchResult[] =>
-    searchUserFoodCategories(foodCategories as any, search) as unknown as FoodSearchResult[];
+  const localSearchResults = useMemo<FoodSearchResult[]>(
+    () => searchUserFoodCategories(foodCategories as any, search) as unknown as FoodSearchResult[],
+    [foodCategories, search],
+  );
+  const remoteSearchResults = useMemo(() => {
+    if (localSearchResults.length === 0) return aiResults;
+    const localKeys = new Set(localSearchResults.map(r => `${r.name.trim().toLowerCase()}|${r.serving.trim().toLowerCase()}`));
+    return aiResults.filter(r => !localKeys.has(`${r.name.trim().toLowerCase()}|${String(r.serving ?? '').trim().toLowerCase()}`));
+  }, [aiResults, localSearchResults]);
 
   useEffect(() => {
     if (!foodSearchActive) return;
@@ -414,7 +421,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       scrollRef.current?.scrollToEnd({ animated: true });
     }, Platform.OS === 'ios' ? 120 : 180);
     return () => clearTimeout(timer);
-  }, [foodSearchActive, aiResults.length, aiSearchLoading]);
+  }, [foodSearchActive, aiResults.length, localSearchResults.length, aiSearchLoading]);
 
   const requireStoredPro = async (feature: ProFeature): Promise<boolean> => {
     try {
@@ -850,13 +857,6 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     if (opts?.forceAi) {
       if (!(await requireStoredPro('ai_food_enrichment'))) return;
     }
-    if (!opts?.forceAi) {
-      const kitchenResults = kitchenSearchResults();
-      if (kitchenResults.length > 0) {
-        setAiResults(kitchenResults);
-        return;
-      }
-    }
     if (!authToken) return;
     setAiSearchLoading(true);
     try {
@@ -917,17 +917,18 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
         return next;
       });
     }
-    // Persist to user's custom food library
-    onAddCustomFood?.({
-      name: aiItem.name,
-      unit: aiItem.serving ?? '1 serving',
-      calories: Math.round(aiItem.calories),
-      protein: Math.round(aiItem.protein),
-      carbs: Math.round(aiItem.carbs),
-      fat: Math.round(aiItem.fat),
-      verificationStatus: aiItem.source === 'ai' ? 'ai_estimated' : aiItem.is_verified ? 'seed_verified' : undefined,
-      ...(aiItem.micronutrients ? { micronutrients: aiItem.micronutrients } : {}),
-    });
+    if (aiItem.source !== 'seed' && aiItem.source !== 'user') {
+      onAddCustomFood?.({
+        name: aiItem.name,
+        unit: aiItem.serving ?? '1 serving',
+        calories: Math.round(aiItem.calories),
+        protein: Math.round(aiItem.protein),
+        carbs: Math.round(aiItem.carbs),
+        fat: Math.round(aiItem.fat),
+        verificationStatus: aiItem.source === 'ai' ? 'ai_estimated' : aiItem.is_verified ? 'seed_verified' : undefined,
+        ...(aiItem.micronutrients ? { micronutrients: aiItem.micronutrients } : {}),
+      });
+    }
     setAiResults(prev => prev.filter(r => r.name !== aiItem.name));
   };
 
@@ -1569,6 +1570,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
 
             <View style={s.searchRow}>
               <TextInput
+                testID="meal-edit-food-search"
                 style={[s.searchInput, { flex: 1, marginBottom: 0 }]}
                 value={search}
                 onChangeText={(t) => { setSearch(t); setAiResults([]); if (barcodeFallback) setBarcodeFallback(null); }}
@@ -1599,22 +1601,58 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             {/* Hint when search has text but the user hasn't tapped Search yet
                 (or the AI returned nothing). Replaces the old "No local matches"
                 copy from when there was an inline category list to filter. */}
-            {search.length > 1 && !aiSearchLoading && aiResults.length === 0 && (
+            {localSearchResults.length > 0 && (
+              <View style={{ marginBottom: 16 }}>
+                <Text style={s.sectionLabel}>From Your Foods</Text>
+                {localSearchResults.map((item, idx) => {
+                  const badgeLabel = badgeLabelForSource(item.source);
+                  return (
+                    <TouchableOpacity testID={`meal-edit-local-search-result-${idx}`} key={`${item.source ?? ''}-${item.name}-${idx}`} style={s.aiResultRow} onPress={() => addAiFood(item)}>
+                      <View style={{ flex: 1 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <Text style={s.aiResultName}>{item.name}</Text>
+                          {item.source && (
+                            <View style={[s.sourceBadge, s.sourceBadgeLocal]}>
+                              <Text style={[s.sourceBadgeText, s.sourceBadgeTextLocal]}>{badgeLabel}</Text>
+                            </View>
+                          )}
+                        </View>
+                        <Text style={s.aiResultServing}>{item.serving}</Text>
+                        <Text style={s.aiResultMacros}>
+                          {Math.round(item.calories)} cal · {Math.round(item.protein)}g pro · {Math.round(item.carbs)}g carbs · {Math.round(item.fat)}g fat
+                        </Text>
+                      </View>
+                      <Text style={s.aiResultAdd}>+ Add</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+                {authToken && search.trim().length > 1 && remoteSearchResults.length === 0 && !aiSearchLoading && (
+                  <TouchableOpacity
+                    style={s.alsoAskAiBtn}
+                    onPress={() => handleAiSearch()}>
+                    <Ionicons name="search-outline" size={14} color={colors.primary} />
+                    <Text style={s.alsoAskAiText}>Search USDA and AI</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            )}
+
+            {search.length > 1 && !aiSearchLoading && localSearchResults.length === 0 && remoteSearchResults.length === 0 && (
               <Text style={s.emptyText}>Tap Search to look up "{search.trim()}"</Text>
             )}
 
-            {aiResults.length > 0 && (() => {
-              const hasVerified = aiResults.some(r => r.source !== 'ai');
-              const hasAi = aiResults.some(r => r.source === 'ai');
+            {remoteSearchResults.length > 0 && (() => {
+              const hasVerified = remoteSearchResults.some(r => r.source !== 'ai');
+              const hasAi = remoteSearchResults.some(r => r.source === 'ai');
               return (
               <View style={{ marginBottom: 16 }}>
-                <Text style={s.sectionLabel}>Search Results</Text>
-                {aiResults.map((item, idx) => {
+                <Text style={s.sectionLabel}>{localSearchResults.length > 0 ? 'More Results' : 'Search Results'}</Text>
+                {remoteSearchResults.map((item, idx) => {
                   const isUsda = item.source === 'usda';
                   const isAi = item.source === 'ai';
                   const badgeLabel = badgeLabelForSource(item.source);
                   return (
-                    <TouchableOpacity key={`${item.source ?? ''}-${item.name}-${idx}`} style={s.aiResultRow} onPress={() => addAiFood(item)}>
+                    <TouchableOpacity testID={`meal-edit-search-result-${idx}`} key={`${item.source ?? ''}-${item.name}-${idx}`} style={s.aiResultRow} onPress={() => addAiFood(item)}>
                       <View style={{ flex: 1 }}>
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                           <Text style={s.aiResultName}>{item.name}</Text>

@@ -1,0 +1,96 @@
+# Cycle through every workouts sub-tab (Plan / Library / History /
+# Settings) to ensure each mounts without an error boundary. Cheap
+# regression catcher — these tabs share a single mount tree and a
+# bug in any one of them takes down the whole tab strip.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: workout-subtab-navigation
+tags:
+  - e2e
+  - seeded
+  - workouts
+  - navigation
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-workouts"
+
+# Plan tab is default — already mounted.
+- extendedWaitUntil:
+    visible:
+      id: "workout-subtab-plan"
+    timeout: 30000
+
+# Library
+- tapOn:
+    id: "workout-subtab-library"
+- extendedWaitUntil:
+    visible:
+      id: "workout-subtab-library"
+    timeout: 30000
+
+# History
+- tapOn:
+    id: "workout-subtab-history"
+- extendedWaitUntil:
+    visible:
+      id: "workout-history-screen"
+    timeout: 30000
+
+# Settings
+- tapOn:
+    id: "workout-subtab-settings"
+- extendedWaitUntil:
+    visible:
+      id: "workout-subtab-settings"
+    timeout: 30000
+
+# Back to Plan — verify cycling works (this catches state retention
+# bugs that only fire on the second visit to the same tab).
+- tapOn:
+    id: "workout-subtab-plan"
+- extendedWaitUntil:
+    visible:
+      id: "start-workout-cta-visible"
+    timeout: 30000

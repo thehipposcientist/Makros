@@ -760,7 +760,7 @@ GRAINS_CARBS = [
             {"label": "1 medium (45g)", "grams": 45, "is_default": True},
             {"label": "1 large burrito (64g)", "grams": 64},
         ],
-        "aliases": ["flour tortilla", "tortilla", "wrap", "burrito tortilla"],
+        "aliases": ["flour tortilla", "tortilla", "tortilla wrap", "burrito tortilla"],
     },
     {
         "name": "Granola",

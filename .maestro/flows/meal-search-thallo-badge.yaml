@@ -1,0 +1,101 @@
+# Verifies the food-search results in the meal-edit modal display
+# the THALLO badge on local seed foods (and on user-added custom
+# foods, which now share the same badge).
+#
+# Background: until 2026-05-04, custom foods showed a "MINE" badge
+# while seed foods showed "THALLO". Users perceive both as "stored
+# Thallo data", so we unified the label. This flow guards against
+# a regression where one of the two stops rendering THALLO.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: meal-search-thallo-badge
+tags:
+  - e2e
+  - seeded
+  - meals
+  - foods
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+# Get to a meal modal — easiest path is the Add Meal CTA on today's
+# meal card.
+- tapOn:
+    id: "bottom-tab-meals"
+- extendedWaitUntil:
+    visible: "Meal week"
+    timeout: 30000
+
+- tapOn:
+    id: "today-meal-card-header"
+- extendedWaitUntil:
+    visible:
+      id: "today-add-meal"
+    timeout: 30000
+- tapOn:
+    id: "today-add-meal"
+
+# Modal opens — search input is now testable by id.
+- extendedWaitUntil:
+    visible:
+      id: "meal-edit-food-search"
+    timeout: 15000
+
+- tapOn:
+    id: "meal-edit-food-search"
+- inputText: "egg"
+
+# Trigger the search. The seeded user has eggs in their pantry, so
+# results come back from the local kitchen path with source="seed".
+- pressKey: Enter
+
+- extendedWaitUntil:
+    visible:
+      id: "meal-edit-search-result-0"
+    timeout: 30000
+
+# THALLO badge must be present somewhere in the results. The label
+# unification means this single assertion covers both seed and user
+# foods (both render THALLO).
+- assertVisible: "THALLO"

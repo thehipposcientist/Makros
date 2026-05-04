@@ -454,6 +454,87 @@ def test_food_search_does_not_leak_other_users_private_foods() -> None:
     _ok("user-owned foods only appear for their owner")
 
 
+def test_food_search_supports_out_of_order_tokens() -> None:
+    print("\n[test] food search: out-of-order token matching")
+    from app.enums import FoodSource
+    from app.routers import foods as food_router
+
+    engine = make_seed_test_engine()
+    with Session(engine) as session:
+        u = _user(session, email="food-token-search@example.com")
+        _food(session, name="Greek Yogurt Plain Nonfat", source=FoodSource.SEED)
+
+        response = food_router.search_food_catalog(
+            q="greek nonfat",
+            limit=10,
+            include_remote=False,
+            force_ai=False,
+            current_user=u,
+            db=session,
+        )
+
+        assert [r["name"] for r in response["results"]] == ["Greek Yogurt Plain Nonfat"], response
+    _ok("multi-token searches match foods even when tokens are not contiguous")
+
+
+def test_short_food_queries_do_not_hit_remote_or_ai() -> None:
+    print("\n[test] food search: short queries stay local-only")
+    from app.routers import foods as food_router
+
+    engine = make_seed_test_engine()
+    original_usda = food_router._search_usda
+    original_ai = food_router._search_ai
+    calls: list[str] = []
+
+    def fake_remote(query: str, *args, **kwargs) -> list[dict]:
+        calls.append(query)
+        return []
+
+    food_router._search_usda = fake_remote
+    food_router._search_ai = fake_remote
+    try:
+        with Session(engine) as session:
+            u = _user(session, email="short-food-search@example.com")
+
+            response = food_router.search_food_catalog(
+                q="zz",
+                limit=10,
+                include_remote=True,
+                force_ai=False,
+                current_user=u,
+                db=session,
+            )
+
+            assert response["results"] == [], response
+            assert calls == [], f"short query should not call USDA or AI: {calls}"
+            assert response["sources"] == {"local": 0, "usda": 0, "ai": 0}, response
+    finally:
+        food_router._search_usda = original_usda
+        food_router._search_ai = original_ai
+    _ok("1-2 character searches avoid remote latency and AI gating")
+
+
+def test_usda_fatty_acid_mapping_uses_real_nutrients() -> None:
+    print("\n[test] food search: USDA fatty acid mapping")
+    from app.services.usda_fdc import _extract_nutrients
+
+    nutrients = _extract_nutrients({
+        "foodNutrients": [
+            {"nutrientId": 1292, "value": 7.3},
+            {"nutrientId": 1293, "value": 1.8},
+            {"nutrientId": 851, "value": 0.4},
+            {"nutrientId": 629, "value": 0.2},
+            {"nutrient": {"id": 621}, "amount": 0.3},
+        ],
+    })
+
+    assert nutrients["monounsaturated_fat"] == 7.3, nutrients
+    assert nutrients["polyunsaturated_fat"] == 1.8, nutrients
+    assert nutrients["omega_3"] == 0.9, nutrients
+    assert "omega_3_mg" not in nutrients, nutrients
+    _ok("USDA 1292 is mono fat, not omega-3, and omega-3 components sum in grams")
+
+
 cases = [
     test_food_search_prefers_kitchen_local_and_skips_usda,
     test_food_search_force_ai_returns_ai_only,
@@ -463,6 +544,9 @@ cases = [
     test_selected_ai_result_imports_private_user_food,
     test_kitchen_custom_food_searches_thallo_without_remote,
     test_food_search_does_not_leak_other_users_private_foods,
+    test_food_search_supports_out_of_order_tokens,
+    test_short_food_queries_do_not_hit_remote_or_ai,
+    test_usda_fatty_acid_mapping_uses_real_nutrients,
 ]
 
 

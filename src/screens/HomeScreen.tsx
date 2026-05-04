@@ -39,7 +39,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
 import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, getMealHistory, updateMeal, deleteLoggedMeal, syncInProgressWorkout } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, logHydrationDelta, getMealHistory, updateMeal, deleteLoggedMeal, syncInProgressWorkout } from '../services/api';
 import type { ApplyActionResult, HydrationStatus, MealHistoryEntry } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
@@ -133,6 +133,7 @@ import {
   type InjuryCheckinState,
 } from '../utils/injuryCheckins';
 import { formatDistance, formatWeight, resolveDistanceUnit, resolveWeightUnit } from '../utils/units';
+import { estimateWorkoutMinutes } from '../utils/workoutDurationEstimate';
 
 interface HomeScreenProps {
   authToken: string;
@@ -1530,11 +1531,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
   // and never disappears no matter which tab is active.
   const [activeTab, setActiveTabRaw]      = useState<'friends' | 'workout' | 'meals' | 'progress' | 'you'>('workout');
+  const [progressTabMounted, setProgressTabMounted] = useState(false);
   const progressFade = useRef(new Animated.Value(0)).current;
   const bottomNavFloat = useRef(new Animated.Value(1)).current;
   const setActiveTab = useCallback((tab: typeof activeTab) => {
     onHomeTabNavigate?.();
     if (tab === activeTab) return;
+    if (tab === 'progress') setProgressTabMounted(true);
     bottomNavFloat.setValue(0);
     Animated.spring(bottomNavFloat, {
       toValue: 1,
@@ -2144,45 +2147,63 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   const handleHydrationDelta = useCallback(async (deltaOz: number, dateISO: string = todayKey()) => {
     if (!authToken) return;
-    const currentRow = hydrationByDate[dateISO] ?? (dateISO === todayKey() ? hydration : null);
-    const current = currentRow?.ounces ?? 0;
-    const next = Math.max(0, Math.round((current + deltaOz) * 10) / 10);
     setHydrationLoading(true);
-    const optimistic = currentRow
-      ? { ...currentRow, ounces: next }
-      : { date: dateISO, ounces: next, target_ounces: 64 };
-    setHydrationByDate(prev => ({ ...prev, [dateISO]: optimistic }));
-    if (dateISO === todayKey()) setHydration(optimistic);
+    // Optimistic update via functional setState so rapid taps compose
+    // off the LATEST state instead of a stale closure snapshot. The
+    // delta itself goes to the backend, which atomically increments
+    // under a row lock — concurrent +8oz taps now sum to +24oz on the
+    // server even if their POSTs interleave.
+    const todayISO = todayKey();
+    const fallbackTarget = hydration?.target_ounces ?? 64;
+    setHydrationByDate(prev => {
+      const row = prev[dateISO] ?? (dateISO === todayISO ? hydration : null);
+      const current = row?.ounces ?? 0;
+      const next = Math.max(0, Math.round((current + deltaOz) * 10) / 10);
+      const optimistic = row
+        ? { ...row, ounces: next }
+        : { date: dateISO, ounces: next, target_ounces: fallbackTarget };
+      return { ...prev, [dateISO]: optimistic };
+    });
+    if (dateISO === todayISO) {
+      setHydration(prev => {
+        const current = prev?.ounces ?? 0;
+        const next = Math.max(0, Math.round((current + deltaOz) * 10) / 10);
+        return prev
+          ? { ...prev, ounces: next }
+          : { date: dateISO, ounces: next, target_ounces: fallbackTarget };
+      });
+    }
     try {
-      const result = await logHydration(authToken, next, dateISO);
+      const result = await logHydrationDelta(authToken, deltaOz, dateISO);
       const fresh = await getHydration(authToken, result.date).catch(() => null);
-      const saved = fresh
-        ? fresh
-        : {
-          date: result.date,
-          ounces: result.ounces,
-          target_ounces: currentRow?.target_ounces ?? hydration?.target_ounces ?? 64,
+      const saved = fresh ?? {
+        date: result.date,
+        ounces: result.ounces,
+        target_ounces: fallbackTarget,
       };
       setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
-      if (saved.date === todayKey()) setHydration(saved);
-      if (saved.date === todayKey()) pushHydrationSnapshotToWatch(saved.date, saved).catch(() => {});
+      if (saved.date === todayISO) setHydration(saved);
+      if (saved.date === todayISO) pushHydrationSnapshotToWatch(saved.date, saved).catch(() => {});
     } catch {
-      if (currentRow) {
-        setHydrationByDate(prev => ({ ...prev, [dateISO]: { ...currentRow, ounces: current } }));
-        if (dateISO === todayKey()) setHydration({ ...currentRow, ounces: current });
-      } else {
-        setHydrationByDate(prev => {
-          const nextRows = { ...prev };
-          delete nextRows[dateISO];
-          return nextRows;
-        });
-        if (dateISO === todayKey()) setHydration(null);
+      // Revert by applying the inverse delta off whatever state the
+      // user is now looking at. Safer than restoring a captured value
+      // because other taps may have committed in between.
+      setHydrationByDate(prev => {
+        const row = prev[dateISO];
+        if (!row) return prev;
+        const reverted = Math.max(0, Math.round((row.ounces - deltaOz) * 10) / 10);
+        return { ...prev, [dateISO]: { ...row, ounces: reverted } };
+      });
+      if (dateISO === todayISO) {
+        setHydration(prev => prev
+          ? { ...prev, ounces: Math.max(0, Math.round((prev.ounces - deltaOz) * 10) / 10) }
+          : prev);
       }
       Alert.alert('Hydration not saved', 'Could not update water intake right now.');
     } finally {
       setHydrationLoading(false);
     }
-  }, [authToken, hydration, hydrationByDate, pushHydrationSnapshotToWatch]);
+  }, [authToken, hydration, pushHydrationSnapshotToWatch]);
 
   const handleHydrationSet = useCallback(async (ounces: number, dateISO: string = todayKey()) => {
     if (!authToken) return;
@@ -9052,27 +9073,30 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </ErrorBoundary>
       )}
 
-      {/* ── Progress tab — kept mounted to avoid white flash on tab switch */}
-      <Animated.View
-        testID="progress-tab-screen"
-        style={{ flex: 1, display: activeTab === 'progress' ? 'flex' : 'none', opacity: progressFade }}>
-        <ErrorBoundary>
-          <ProgressScreen
-            authToken={authToken}
-            userProfile={userProfile}
-            themeName={userProfile.themePreference}
-            noHeader
-            nutritionPlan={nutritionPlansByDate[todayKey()] ?? null}
-            nutritionLogRefreshKey={mealLogRefreshKey}
-            onBack={() => setActiveTab('workout')}
-            onCancelScheduledPlanChange={onCancelScheduledPlanChange}
-            onUpdateWeight={(weightLbs) => {
-              onProfileUpdate?.({ physicalStats: { ...userProfile.physicalStats, weightLbs } } as any, true);
-              import('../utils/weightHistory').then(({ saveWeightEntry }) => saveWeightEntry(weightLbs, 'manual')).catch(() => {});
-            }}
-          />
-        </ErrorBoundary>
-      </Animated.View>
+      {/* ── Progress tab — mounted on first visit, then kept warm without background refetches */}
+      {progressTabMounted && (
+        <Animated.View
+          testID="progress-tab-screen"
+          style={{ flex: 1, display: activeTab === 'progress' ? 'flex' : 'none', opacity: progressFade }}>
+          <ErrorBoundary>
+            <ProgressScreen
+              authToken={authToken}
+              userProfile={userProfile}
+              themeName={userProfile.themePreference}
+              noHeader
+              isActive={activeTab === 'progress'}
+              nutritionPlan={nutritionPlansByDate[todayKey()] ?? null}
+              nutritionLogRefreshKey={mealLogRefreshKey}
+              onBack={() => setActiveTab('workout')}
+              onCancelScheduledPlanChange={onCancelScheduledPlanChange}
+              onUpdateWeight={(weightLbs) => {
+                onProfileUpdate?.({ physicalStats: { ...userProfile.physicalStats, weightLbs } } as any, true);
+                import('../utils/weightHistory').then(({ saveWeightEntry }) => saveWeightEntry(weightLbs, 'manual')).catch(() => {});
+              }}
+            />
+          </ErrorBoundary>
+        </Animated.View>
+      )}
 
       {/* ── You tab ─────────────────────────────────────────────────── */}
       {activeTab === 'you' && (<ErrorBoundary>{(() => {
@@ -13184,6 +13208,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
   const cardBg = isToday ? tc.surfaceRaised : tc.surface;
   const todayAccentHeight = isToday ? 4 : 3;
   const completedDashed = isCompleted && !isToday;
+  const collapsedEstimateMinutes = estimateWorkoutMinutes(item.workout!, sessionMinutes);
 
   return (
     <View
@@ -13262,28 +13287,28 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           {(() => {
             const focusLower = (item.workout!.focus || '').toLowerCase();
             const stim = item.workout?.stimulus;
-            const countText = `${item.workout!.exercises.length} exercises`;
+            const countText = `~${collapsedEstimateMinutes} min · ${item.workout!.exercises.length} exercises`;
             // Mobility / recovery / stretch / flow days get a single
             // collapsed label instead of a list of stretched muscles.
             // Use the structured stimulus field when available, fall back
             // to focus keywords for old cached plans.
             if (stim === 'mobility' || (!stim && ['mobility', 'stretch', 'yoga', 'flow'].some(kw => focusLower.includes(kw)))) {
               return (
-                <Text style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
+                <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
                   {countText} · Mobility
                 </Text>
               );
             }
             if (stim === 'recovery' || (!stim && ['recover', 'rest'].some(kw => focusLower.includes(kw)))) {
               return (
-                <Text style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
+                <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
                   {countText} · Recovery
                 </Text>
               );
             }
             if (stim === 'conditioning' || (!stim && ['cardio', 'zone2', 'zone 2', 'interval'].some(kw => focusLower.includes(kw)))) {
               return (
-                <Text style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
+                <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
                   {countText} · Cardio
                 </Text>
               );
@@ -13343,7 +13368,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
             const muscles = labels.slice(0, 3);
             const muscleText = muscles.length ? ` · ${muscles.join(', ')}` : '';
             return (
-              <Text style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
+              <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
                 {countText}{muscleText}
               </Text>
             );

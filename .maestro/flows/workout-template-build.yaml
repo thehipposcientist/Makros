@@ -1,0 +1,107 @@
+# Build a custom workout template from the Library tab. Adjacent
+# test workout-templates.yaml exercises the launching of an existing
+# template; this flow exercises CREATING one. Validates:
+#   - template name input mounts
+#   - exercise search inside the template builder works
+#   - save persists (new template appears on the listing)
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: workout-template-build
+tags:
+  - e2e
+  - seeded
+  - workouts
+  - templates
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-workouts"
+
+- tapOn:
+    id: "workout-subtab-library"
+
+- scrollUntilVisible:
+    element:
+      id: "workout-template-new"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "workout-template-new"
+
+- extendedWaitUntil:
+    visible:
+      id: "workout-template-name-input"
+    timeout: 15000
+
+- tapOn:
+    id: "workout-template-name-input"
+- inputText: "E2E Smoke Template"
+
+# Add an exercise via the template's search.
+- tapOn:
+    id: "workout-template-exercise-search"
+- inputText: "bench"
+
+# A row should match — text-driven since rows in the search list are
+# numerically indexed with shifting positions.
+- extendedWaitUntil:
+    visible: "Bench Press"
+    timeout: 15000
+- tapOn: "Bench Press"
+
+# Save the template.
+- scrollUntilVisible:
+    element:
+      id: "workout-template-save"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "workout-template-save"
+
+# Listing should now contain the new template name.
+- extendedWaitUntil:
+    visible: "E2E Smoke Template"
+    timeout: 30000

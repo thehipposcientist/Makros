@@ -1,0 +1,74 @@
+# Verify the Nutrition Trend card renders on the Progress tab.
+# The card pulls from /meals/history and sums client-side via
+# aggregateDailyFromHistory — a recent rewrite (the user reported
+# numbers were way off before). This flow guards the render path,
+# not the math (math is unit-tested in progressData.test.ts).
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: nutrition-trend-renders
+tags:
+  - e2e
+  - seeded
+  - progress
+  - nutrition
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-progress"
+
+- scrollUntilVisible:
+    element:
+      id: "nutrition-trend-card"
+    direction: DOWN
+    timeout: 30000
+    visibilityPercentage: 30
+
+- assertVisible:
+    id: "nutrition-trend-card"
+
+# Sanity: at least one logged-calorie pip is rendered. The pip ID
+# pattern is nutrition-trend-logged-calories-<value>. We can't
+# bind a value, so we use a wildcard via assertVisible on the
+# common bridge text.
+- assertVisible: "Logged"

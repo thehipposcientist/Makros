@@ -25,6 +25,10 @@ function getBaseUrl(): string {
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
+function requestMethod(options: RequestInit = {}): string {
+  return String(options.method ?? 'GET').toUpperCase();
+}
+
 function tokenFromHeaders(headers: RequestInit['headers'] | undefined): string | undefined {
   if (!headers || Array.isArray(headers)) return undefined;
   if (headers instanceof Headers) {
@@ -67,6 +71,7 @@ export async function recordTelemetryEvent(
 async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 30000, noRetry = false): Promise<T> {
   const maxRetries = noRetry ? 0 : 2;
   let lastError: Error | undefined;
+  const method = requestMethod(options);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (attempt > 0) {
@@ -109,6 +114,7 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
           recordTelemetryEvent('api_error', { path, status: res.status, detail: `HTTP ${res.status}` }, tokenFromHeaders(options.headers));
           throw new Error(`HTTP ${res.status}`);
         }
+        invalidateReadCacheAfterMutation(method, tokenFromHeaders(options.headers));
         return undefined as unknown as T;
       }
 
@@ -132,6 +138,7 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
         recordTelemetryEvent('api_error', { path, status: res.status, detail }, tokenFromHeaders(options.headers));
         throw new Error(detail);
       }
+      invalidateReadCacheAfterMutation(method, tokenFromHeaders(options.headers));
       return data as T;
     } catch (e: any) {
       clearTimeout(timer);
@@ -155,9 +162,22 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
 
 const readInflight = new Map<string, Promise<any>>();
 const readCache = new Map<string, { expiresAt: number; value: any }>();
+let readCacheEpoch = 0;
+
+function invalidateReadCacheAfterMutation(method: string, token?: string): void {
+  if (method === 'GET' || method === 'HEAD') return;
+  readCacheEpoch += 1;
+  const tokenPrefix = token != null ? `${token}::` : null;
+  for (const key of Array.from(readCache.keys())) {
+    if (!tokenPrefix || key.startsWith(tokenPrefix)) readCache.delete(key);
+  }
+  for (const key of Array.from(readInflight.keys())) {
+    if (!tokenPrefix || key.startsWith(tokenPrefix)) readInflight.delete(key);
+  }
+}
 
 function readRequestKey(path: string, options: RequestInit = {}): string | null {
-  const method = String(options.method ?? 'GET').toUpperCase();
+  const method = requestMethod(options);
   if (method !== 'GET') return null;
   return `${tokenFromHeaders(options.headers) ?? ''}::${path}`;
 }
@@ -175,9 +195,12 @@ async function requestRead<T>(
   if (cached && cached.expiresAt > now) return cached.value as T;
   const existing = readInflight.get(key);
   if (existing) return existing as Promise<T>;
+  const startedEpoch = readCacheEpoch;
   const promise = request<T>(path, options, timeoutMs)
     .then(value => {
-      readCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+      if (readCacheEpoch === startedEpoch) {
+        readCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+      }
       return value;
     })
     .finally(() => {
@@ -3202,6 +3225,17 @@ export async function logHydration(token: string, ounces: number, logDate?: stri
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ ounces, ...(logDate ? { log_date: logDate } : {}) }),
+  });
+}
+
+// Atomic delta for quick-add buttons. Backend reads the row, adds the
+// delta, and writes back in one transaction so rapid taps compose
+// correctly (three +8oz taps = +24oz, not +8oz from the last write).
+export async function logHydrationDelta(token: string, deltaOz: number, logDate?: string): Promise<{ date: string; ounces: number }> {
+  return request('/meals/hydration', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ delta_oz: deltaOz, ...(logDate ? { log_date: logDate } : {}) }),
   });
 }
 

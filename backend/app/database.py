@@ -81,6 +81,39 @@ def _ensure_food_nutrition_extras_column() -> None:
         print(f"[migration] food_nutrition extras column add failed (non-fatal): {e}")
 
 
+def _ensure_food_search_indexes() -> None:
+    """Add trigram/composite indexes for fast local food search.
+
+    The app's broad catalog grows as users select USDA/barcode foods. Plain
+    `%term%` lookups on normalized names and aliases do not use the default
+    btree indexes, so Postgres needs pg_trgm indexes to keep search feeling
+    instant once the catalog is no longer just the curated seed set.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_foods_normalized_name_trgm "
+                "ON foods USING GIN (normalized_name gin_trgm_ops)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_food_aliases_alias_normalized_trgm "
+                "ON food_aliases USING GIN (alias_normalized gin_trgm_ops)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_foods_search_visibility "
+                "ON foods (is_active, owner_user_id, source, normalized_name)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_user_recent_foods_user_last_used "
+                "ON user_recent_foods (user_id, last_used_at DESC)"
+            ))
+    except Exception as e:
+        print(f"[migration] food search indexes ensure failed (non-fatal): {e}")
+
+
 def _ensure_user_recovery_columns() -> None:
     """Add recovery_question / recovery_answer_hash columns to `user` if missing."""
     if engine.dialect.name != "postgresql":
@@ -1696,6 +1729,7 @@ def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
     _ensure_food_nutrition_extras_column()
+    _ensure_food_search_indexes()
     _ensure_workout_completion_stimulus_column()
     _ensure_workout_completion_health_columns()
     _ensure_workout_history_source_columns()

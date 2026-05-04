@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone
 
 from sqlmodel import Session, select, col, or_
-from sqlalchemy import func
+from sqlalchemy import and_
 
 from app.models import (
     Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood,
@@ -37,6 +37,17 @@ def _normalize(name: str) -> str:
 def normalize_food_name(name: str) -> str:
     """Public normalizer for food search/result de-duping."""
     return _normalize(name)
+
+
+def _search_match_clauses(column, norm: str) -> list:
+    """Build local-search clauses for contiguous and out-of-order tokens."""
+    tokens = [token for token in norm.split() if token]
+    if not tokens:
+        return []
+    clauses = [col(column).contains(norm)]
+    if len(tokens) > 1:
+        clauses.append(and_(*(col(column).contains(token) for token in tokens)))
+    return clauses
 
 
 def _serving_grams_estimate(unit: str) -> float:
@@ -179,29 +190,33 @@ def search_foods(
     if not norm:
         return []
 
-    pattern = f"%{norm}%"
     visibility_filter = (
         Food.owner_user_id == None  # noqa: E711
         if user_id is None
         else or_(Food.owner_user_id == None, Food.owner_user_id == user_id)  # noqa: E711
     )
+    candidate_limit = max(limit * 8, 50)
+    name_clauses = _search_match_clauses(Food.normalized_name, norm)
+    alias_clauses = _search_match_clauses(FoodAlias.alias_normalized, norm)
 
     # Find food_ids matching by name or alias
     name_matches = db.exec(
         select(Food.id).where(
             Food.is_active == True,
             visibility_filter,
-            col(Food.normalized_name).contains(norm),
-        )
+            or_(*name_clauses),
+        ).limit(candidate_limit)
     ).all()
 
     alias_matches = db.exec(
         select(FoodAlias.food_id).where(
-            col(FoodAlias.alias_normalized).contains(norm),
-        )
+            or_(*alias_clauses),
+        ).limit(candidate_limit)
     ).all()
 
-    food_ids = list(set(name_matches) | set(alias_matches))
+    name_match_ids = set(name_matches)
+    alias_match_ids = set(alias_matches)
+    food_ids = list(name_match_ids | alias_match_ids)
     if not food_ids:
         return []
 
@@ -246,9 +261,21 @@ def search_foods(
             tier = 5
         else:
             tier = 4
-        # Within tier, prefer exact prefix match
-        is_prefix = 0 if f.normalized_name.startswith(norm) else 1
-        return (tier, is_prefix, f.name.lower())
+        # Within tier, prefer exact/prefix name matches, then name token
+        # matches, then alias-only matches. This makes "greek nonfat" and
+        # "protein whey" feel closer to consumer food-database search.
+        normalized = f.normalized_name or _normalize(f.name)
+        if normalized == norm:
+            match_rank = 0
+        elif normalized.startswith(norm):
+            match_rank = 1
+        elif f.id in name_match_ids:
+            match_rank = 2
+        elif f.id in alias_match_ids:
+            match_rank = 3
+        else:
+            match_rank = 4
+        return (tier, match_rank, f.name.lower())
 
     foods.sort(key=_sort_key)
 

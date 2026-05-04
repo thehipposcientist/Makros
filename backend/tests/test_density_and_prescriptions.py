@@ -556,7 +556,12 @@ def test_bodyweight_floor_core_candidates_survive_planner_filter():
         CAT_ANTI_EXTENSION: {"dead_bug_heel_tap", "long_lever_plank", "bear_plank_hold", "hollow_rocks"},
         CAT_ANTI_ROTATION: {"plank_reach"},
         CAT_LATERAL_STABILITY: {"side_plank_hip_dip", "side_plank_reach_through"},
-        CAT_FLEXION: {"floor_crunch", "lying_leg_raise", "flutter_kicks", "scissor_kicks", "bicycle_crunch"},
+        CAT_FLEXION: {
+            "floor_crunch", "lying_leg_raise", "flutter_kicks", "scissor_kicks",
+            "bicycle_crunch", "heel_taps", "toe_touch_crunch",
+            "cross_body_crunch", "double_crunch", "bent_knee_leg_raise",
+            "alternating_leg_lower", "mcgill_curl_up",
+        },
     }
     for category, expected_slugs in expected_by_category.items():
         slot = build_core_slot(category)

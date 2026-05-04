@@ -1,0 +1,78 @@
+# Tap Start Workout from the Plan tab and verify ActiveWorkoutScreen
+# mounts. The Start Workout CTA is the most-used button in the app
+# and a regression here is catastrophic. Adjacent test:
+# active-workout-completion.yaml drives the full session; this flow
+# is the cheap mount-only smoke that runs in a fraction of the time.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: start-workout-active-screen
+tags:
+  - e2e
+  - seeded
+  - workouts
+  - smoke
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-workouts"
+- extendedWaitUntil:
+    visible:
+      id: "start-workout-cta-visible"
+    timeout: 30000
+
+- tapOn:
+    id: "start-workout-cta"
+
+# ActiveWorkoutScreen must mount within 15s. The screen carries
+# active-workout-screen testID at its root.
+- extendedWaitUntil:
+    visible:
+      id: "active-workout-screen"
+    timeout: 30000
+
+# Sanity: live controls are reachable. live-pause is a critical
+# button that's been a regression target before (the WatchKit hook
+# broke its enabled state on dev builds).
+- assertVisible:
+    id: "live-pause"

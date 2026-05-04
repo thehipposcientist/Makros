@@ -183,16 +183,26 @@ EXERCISES = []  # kept as empty list so any imports don't break
 #   proteins | plant_proteins | grains_carbs | vegetables | fruits | dairy | fats_oils
 
 def _validate_macros(name: str, n: dict) -> None:
-    """Warn if calories don't roughly match protein*4 + carbs*4 + fat*9."""
-    expected = n.get("protein", 0) * 4 + n.get("carbs", 0) * 4 + n.get("fat", 0) * 9
+    """Warn if calories don't roughly match Atwater macros."""
     actual = n.get("calories", 0)
+    if actual < 10:
+        return
+    fiber = n.get("fiber") or 0
+    digestible_carbs = max(n.get("carbs", 0) - fiber, 0)
+    expected = (
+        n.get("protein", 0) * 4
+        + digestible_carbs * 4
+        + fiber * 2
+        + n.get("fat", 0) * 9
+    )
     if actual == 0 and expected == 0:
         return
     if expected == 0:
         return  # e.g. creatine has 0 macros
-    diff_pct = abs(actual - expected) / expected * 100
-    if diff_pct > 15:
-        print(f"[seed] WARNING: {name} — calories={actual} but P*4+C*4+F*9={expected:.0f} (off by {diff_pct:.0f}%)")
+    abs_diff = abs(actual - expected)
+    diff_pct = abs_diff / expected * 100
+    if diff_pct > 15 and abs_diff > 6:
+        print(f"[seed] WARNING: {name} — calories={actual} but Atwater={expected:.0f} (off by {diff_pct:.0f}%)")
 
 
 def _compute_serving_macros(nutrition: dict, serving_grams: float, ref_grams: float) -> dict:

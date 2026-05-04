@@ -281,15 +281,15 @@ def _ai_backfill_micros(
         "Return USDA micronutrient values for each food at its STATED serving "
         "size. Use snake_case keys, match the exact units below, omit a field only "
         "if it is truly zero for that food.\n\n"
-        "Units: fiber/sugar/saturated_fat/monounsaturated_fat/polyunsaturated_fat "
-        "in grams; sodium/cholesterol/omega_3/omega_6/potassium/calcium/iron/"
+        "Units: fiber/sugar/saturated_fat/monounsaturated_fat/polyunsaturated_fat/"
+        "omega_3/omega_6 in grams; sodium/cholesterol/potassium/calcium/iron/"
         "magnesium/vitamin_c in milligrams; vitamin_d and vitamin_b12 in micrograms.\n\n"
         f"Foods:\n{json.dumps(prompt_items, indent=2)}\n\n"
         "Return JSON with this exact shape:\n"
         '{"foods": [\n'
         '  {"name": "chicken breast", "micros": {"fiber": 0, "sugar": 0, "sodium": 120, '
         '"cholesterol": 140, "saturated_fat": 1.5, "monounsaturated_fat": 2, '
-        '"polyunsaturated_fat": 1, "omega_3": 40, "omega_6": 600, "potassium": 440, '
+        '"polyunsaturated_fat": 1, "omega_3": 0.04, "omega_6": 0.6, "potassium": 440, '
         '"calcium": 12, "iron": 1.5, "magnesium": 50, "vitamin_c": 0, "vitamin_d": 0.2, '
         '"vitamin_b12": 0.5}},\n'
         '  ...\n'

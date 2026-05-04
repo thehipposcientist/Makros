@@ -1,0 +1,93 @@
+# Open a friend detail screen and verify the back navigation works.
+# The seeded e2e_returning user has a populated friend graph
+# (e2e_social_a/b are friends). This guards the friend detail screen
+# render + the back-nav behavior — the navigation stack on the
+# social tab has been a regression hotspot.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: social-friend-detail-back
+tags:
+  - e2e
+  - seeded
+  - social
+  - navigation
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-social"
+- extendedWaitUntil:
+    visible:
+      id: "social-tab-friends"
+    timeout: 30000
+
+- tapOn:
+    id: "social-tab-friends"
+- extendedWaitUntil:
+    visible:
+      id: "social-friends-list"
+    timeout: 30000
+
+# Tap the first friend card in the list. The seeded graph guarantees
+# at least one entry.
+- tapOn:
+    id: "social-friend-profile-card"
+
+- extendedWaitUntil:
+    visible:
+      id: "social-friend-detail-screen"
+    timeout: 30000
+
+# Friend stats card renders.
+- assertVisible:
+    id: "social-friend-stats-card"
+
+# Back-nav.
+- tapOn:
+    id: "social-friend-detail-back"
+
+# We're back at the friends list.
+- extendedWaitUntil:
+    visible:
+      id: "social-friends-list"
+    timeout: 15000

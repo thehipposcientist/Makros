@@ -710,7 +710,15 @@ def daily_macros_for_day(
 
 
 class HydrationLogBody(BaseModel):
-    ounces: float
+    # Absolute set: caller computes the new total client-side. Used by
+    # explicit "set to N oz" UI. Loses increments under concurrent taps
+    # because the client may compute `next` from a stale snapshot.
+    ounces: Optional[float] = None
+    # Atomic increment: server reads the current row, adds the delta,
+    # writes back in one transaction. Use this for quick-add buttons so
+    # rapid taps compose correctly (the client otherwise sends three
+    # POSTs that all reference the same pre-tap value).
+    delta_oz: Optional[float] = None
     log_date: Optional[str] = None   # YYYY-MM-DD, defaults to today
 
 
@@ -721,26 +729,53 @@ def log_hydration(
     db: Session = Depends(get_session),
 ):
     """Log hydration for a given day. Stored on UserDayState.nutrition_plan
-    under _hydration_oz — lightweight, survives app kill via existing sync."""
+    under _hydration_oz — lightweight, survives app kill via existing sync.
+
+    Two modes:
+      - delta_oz: atomic increment. Reads current value under a row lock,
+        adds the delta, writes back. Concurrent +8oz taps compose to +24
+        because each request reads the prior request's committed value.
+      - ounces: absolute set. Client owns the math. Use only for explicit
+        "set to N" UI, never for quick-add buttons.
+
+    Exactly one of delta_oz / ounces must be set. If both are provided
+    we honor delta_oz (the additive operation is the safer default)."""
     from datetime import date as _date
     try:
         d = _date.fromisoformat(body.log_date) if body.log_date else _date.today()
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid log_date")
 
+    if body.delta_oz is None and body.ounces is None:
+        raise HTTPException(status_code=422, detail="Provide either delta_oz or ounces")
+
+    # SELECT FOR UPDATE locks the row in Postgres so the read+write below
+    # is atomic across concurrent requests. SQLite serializes writes at
+    # the connection level so the lock is a no-op there but the semantics
+    # still hold.
     state = db.exec(
         select(UserDayState)
         .where(UserDayState.user_id == current_user.id)
         .where(UserDayState.day_key == d)
+        .with_for_update()
     ).first()
     if state is None:
         state = UserDayState(user_id=current_user.id, day_key=d)
         db.add(state)
+        db.flush()
     plan = dict(state.nutrition_plan or {})
-    plan["_hydration_oz"] = max(0.0, float(body.ounces))
+    try:
+        prior = float(plan.get("_hydration_oz", 0) or 0)
+    except (TypeError, ValueError):
+        prior = 0.0
+    if body.delta_oz is not None:
+        new_total = max(0.0, round((prior + float(body.delta_oz)) * 10) / 10)
+    else:
+        new_total = max(0.0, float(body.ounces))
+    plan["_hydration_oz"] = new_total
     state.nutrition_plan = plan
     db.commit()
-    return {"date": str(d), "ounces": plan["_hydration_oz"]}
+    return {"date": str(d), "ounces": new_total}
 
 
 def _compute_hydration_target_oz(

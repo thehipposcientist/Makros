@@ -46,7 +46,7 @@ import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
-import { estimate1RM, ONE_RM_REP_LIMIT } from '../utils/oneRepMax';
+import { estimate1RM } from '../utils/oneRepMax';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord, listWorkoutSessions, WorkoutSessionRecord, getWeightEntries } from '../services/api';
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -77,6 +77,7 @@ interface ProgressScreenProps {
   noHeader?: boolean;
   nutritionPlan?: import('../types').DailyNutritionPlan | null;
   nutritionLogRefreshKey?: number;
+  isActive?: boolean;
 }
 
 function sentenceLabel(value: unknown): string {
@@ -1243,7 +1244,7 @@ function AnimatedChartBar({
   return <Animated.View style={[style, { height }]} />;
 }
 
-export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0 }: ProgressScreenProps) {
+export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
   const styles = useMemo(() => createStyles(tc), [themeName]);
   const primaryButtonTextColor = getContrastingTextColor(tc.primary);
@@ -1298,7 +1299,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
   const [oneRepMaxLifts, setOneRepMaxLifts] = useState<import('../services/api').OneRepMaxLift[]>([]);
-  const [bulkE1RMMap, setBulkE1RMMap] = useState<Record<string, number>>({});
   // 1RM history for the top lift — fetched lazily after `oneRepMaxLifts`
   // resolves so the bars render immediately. Used to draw the trend chart
   // below the bar list.
@@ -1346,7 +1346,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // (primaryMuscle, isCompound) over regex heuristics.
   const workoutHistoryIndex = useMemo(() => buildWorkoutHistoryIndex(history), [history]);
   const exerciseMuscleMap = workoutHistoryIndex.muscleMap;
-  const exerciseCompoundMap = workoutHistoryIndex.compoundMap;
   const exerciseTrendMap = workoutHistoryIndex.trendMap;
   const chartExerciseOptions = useMemo(() => {
     const prNameByKey = new Map(prs.map(pr => [pr.exerciseName.toLowerCase(), pr.exerciseName] as const));
@@ -1469,13 +1468,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   }, [filteredChartExercises, selectedExercise, tab]);
 
   useEffect(() => {
+    if (!isActive) return;
     if ((tab === 'trends' || tab === 'history') && authToken && !paceLoadedRef.current) {
       paceLoadedRef.current = true;
       getPaceHistory(authToken).then(r => setPaceHistory(r.points)).catch(() => {});
     }
-  }, [tab, authToken]);
+  }, [tab, authToken, isActive]);
 
   useEffect(() => {
+    if (!isActive) return;
     Promise.all([
       loadWorkoutHistory(),
       loadWorkoutSummaries(),
@@ -1558,11 +1559,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               }
             })
             .catch(() => setOneRepMaxLifts([]))
-        );
-        import('../services/api').then(({ getAllE1RM }) =>
-          getAllE1RM(authToken)
-            .then(r => setBulkE1RMMap(r?.exercises ?? {}))
-            .catch(() => setBulkE1RMMap({}))
         );
         import('../services/api').then(({ getPlateaus }) =>
           getPlateaus(authToken, 4)
@@ -1683,10 +1679,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       setAppleHealthZone2Minutes(null);
       setZone2DetectedWorkouts([]);
     }
-  }, [authToken, isProTier, nutritionPlan, userProfile.goal, userProfile.mealsPerDay, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
+  }, [authToken, isActive, isProTier, nutritionPlan, userProfile.goal, userProfile.mealsPerDay, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
 
   useEffect(() => {
-    if (tab !== 'body' || !isProTier || bodyScanHistoryLoadedRef.current) return;
+    if (!isActive || tab !== 'body' || !isProTier || bodyScanHistoryLoadedRef.current) return;
     bodyScanHistoryLoadedRef.current = true;
     let cancelled = false;
     AsyncStorage.getItem('bodyScanHistory').then(async raw => {
@@ -1712,10 +1708,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       }
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [authToken, isProTier, tab]);
+  }, [authToken, isActive, isProTier, tab]);
 
   useEffect(() => {
-    if (tab !== 'health' || !isProTier || healthLiveLoadedRef.current) return;
+    if (!isActive || tab !== 'health' || !isProTier || healthLiveLoadedRef.current) return;
     healthLiveLoadedRef.current = true;
     let cancelled = false;
     (async () => {
@@ -1754,7 +1750,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       } catch {}
     })();
     return () => { cancelled = true; };
-  }, [isProTier, tab, userProfile.physicalStats?.age]);
+  }, [isActive, isProTier, tab, userProfile.physicalStats?.age]);
 
   const handleDeletePlanChange = (change: PlanChangeEntry) => {
     if (!change.id) return;
@@ -1807,6 +1803,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   };
 
   useEffect(() => {
+    if (!isActive) return;
     if (nutritionRefreshSeenRef.current === nutritionLogRefreshKey) return;
     nutritionRefreshSeenRef.current = nutritionLogRefreshKey;
     if (!authToken) return;
@@ -1841,7 +1838,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     })().catch(() => {});
 
     return () => { cancelled = true; };
-  }, [authToken, isProTier, nutritionLogRefreshKey]);
+  }, [authToken, isActive, isProTier, nutritionLogRefreshKey]);
 
   const handleShareBodyScan = async () => {
     try {
@@ -1965,7 +1962,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // show a skeleton while it's in flight instead of an empty flash.
   const [compositeFitnessLoading, setCompositeFitnessLoading] = useState(true);
   useEffect(() => {
-    if (!authToken || !isProTier || tab !== 'health') {
+    if (!isActive || !authToken || !isProTier || tab !== 'health') {
       setCompositeFitness(null);
       setCompositeFitnessLoading(false);
       return;
@@ -1982,10 +1979,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         .catch(() => setCompositeFitness(null))
         .finally(() => setCompositeFitnessLoading(false))
     );
-  }, [authToken, isProTier, tab, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length]);
+  }, [authToken, isActive, isProTier, tab, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length]);
 
   useEffect(() => {
-    if (!authToken || !selectedExercise) { setE1rmHistory([]); return; }
+    if (!isActive || !authToken || !selectedExercise) { setE1rmHistory([]); return; }
     let cancelled = false;
     setE1rmHistory([]);
     import('../services/api').then(({ getE1RMHistory }) =>
@@ -1994,7 +1991,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         .catch(() => { if (!cancelled) setE1rmHistory([]); })
     );
     return () => { cancelled = true; };
-  }, [authToken, selectedExercise]);
+  }, [authToken, isActive, selectedExercise]);
 
   const startWeight = userProfile.goalDetails.startWeightLbs ?? userProfile.physicalStats.weightLbs;
   const currentWeight = userProfile.physicalStats.weightLbs;
@@ -2713,7 +2710,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               from recent logged sessions for the main compound lifts.
               Hidden when the user has no recent compound-lift data. */}
           {oneRepMaxLifts.length > 0 && (
-            <View style={{ marginBottom: 16 }}>
+            <View testID="progress-1rm-showcase" style={{ marginBottom: 16 }}>
               <Text style={styles.sectionLabel}>Estimated 1 Rep Max</Text>
               {(() => {
                 const maxOneRepMax = Math.max(...oneRepMaxLifts.map(lift => lift.oneRepMaxLbs), 1);
@@ -2846,53 +2843,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Text style={styles.emptyBody}>No exercises match your search.</Text>
                   </View>
                 ) : visiblePrsForTab.map((pr, i) => {
-                  // Estimated 1RM only for compound lifts. Showing
-                  // an estimated 1RM on a 25 lb lateral raise or a
-                  // 12 lb cable curl is misleading — isolation work
-                  // doesn't really map to a "1RM" in any meaningful
-                  // way. Prefer the structured isCompound field from
-                  // history; fall back to regex heuristic for older
-                  // sessions that predate the field.
-                  //
-                  // Formula: averaged Epley + Brzycki via the shared
-                  // `estimate1RM` helper (src/utils/oneRepMax.ts) — same
-                  // math used everywhere a per-set 1RM displays. Returns
-                  // null beyond ONE_RM_REP_LIMIT (10 reps) since the
-                  // literature stops being usable past that.
-                  const lower = pr.exerciseName.toLowerCase();
-                  const _compoundField = exerciseCompoundMap[lower];
-                  const isCompound = _compoundField != null
-                    ? _compoundField
-                    : (
-                      /\b(squat|deadlift|bench|press|row|pull[-\s]?up|chin[-\s]?up|dip|clean|snatch|hip\s*thrust|lunge|good\s*morning)\b/.test(lower)
-                      && !/\b(curl|fly|raise|extension|kickback|pulldown|crunch|skullcrusher|crossover|pec\s*deck|leg\s*curl|leg\s*extension)\b/.test(lower)
-                    );
-                  // Prefer the server-side rolling-e1RM (RIR-adjusted,
-                  // 14-day half-life decayed weighted median over recent
-                  // sets) so this number matches the chart and the lift
-                  // showcase tile. Fall back to the single-set Epley+
-                  // Brzycki estimate only when the user has too few
-                  // usable sets for a rolling estimate.
-                  const _bulkE1RM = bulkE1RMMap[lower];
-                  const _est1rmRaw = _bulkE1RM != null && _bulkE1RM > 0
-                    ? _bulkE1RM
-                    : (isCompound && pr.reps <= ONE_RM_REP_LIMIT
-                      ? estimate1RM(pr.weightLbs, pr.reps)
-                      : null);
-                  const est1rm = _est1rmRaw != null ? Math.round(_est1rmRaw)
-                    : null;
                   const prWeightLabel = formatWeight(pr.weightLbs, weightUnit, { suffix: false });
                   return (
                     <FadeInView key={i} delay={Math.min(i * 35, 350)} duration={260} slideDistance={6}>
-                    <View style={styles.prCard}>
+                    <View testID={`progress-pr-card-${i}`} style={styles.prCard}>
                       <View style={styles.prLeft}>
                         <Text style={styles.prName}>{pr.exerciseName}</Text>
                         <Text style={styles.prMeta}>{pr.sessionFocus}  ·  {formatDate(pr.date)}</Text>
-                        {est1rm != null && (
-                          <Text style={[styles.prMeta, { marginTop: 2, fontWeight: '600', color: tc.textPrimary }]}>
-                            ~{formatWeight(est1rm, weightUnit)} est 1RM
-                          </Text>
-                        )}
                       </View>
                       <View style={styles.prRight}>
                         <Text style={styles.prWeight}>{prWeightLabel}</Text>

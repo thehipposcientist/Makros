@@ -1,0 +1,76 @@
+# Pick a workout for a rest day. Recent fix: the switch-day-on-rest
+# handler had an `if (!workoutPlan || !item.workout) return;` guard
+# that short-circuited rest days because rest days have item.workout
+# = null. Removing the guard made the flow work — patchPlanDayWorkout
+# now persists the swap. This flow guards the fix.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: switch-day-rest-to-workout
+tags:
+  - e2e
+  - seeded
+  - workouts
+  - plan
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-workouts"
+
+# The switch-to-workout-cta only appears on rest day cards. The
+# seeded user's PlanWeek includes at least one rest day.
+- extendedWaitUntil:
+    visible:
+      id: "switch-to-workout-cta"
+    timeout: 30000
+
+- tapOn:
+    id: "switch-to-workout-cta"
+
+# After tapping, the rest card must transition to a workout card —
+# the workout-estimated-duration label is rest-card-absent and
+# workout-card-present, so it acts as the post-state assertion.
+- extendedWaitUntil:
+    visible:
+      id: "workout-estimated-duration"
+    timeout: 30000

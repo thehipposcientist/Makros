@@ -57,6 +57,15 @@ _TEST_MODULES = (
     "tests.test_carb_distribution",
     "tests.test_quick_intents",
     "tests.test_rolling_e1rm",
+    # Bulk e1RM endpoint — single source of truth for displayed 1RM
+    # across the Progress screen (chart, showcase, PR cards).
+    "tests.test_e1rm_bulk",
+    # One-rep-max showcase rolling overlay — pure function that
+    # makes the showcase tile, the chart, and the PR cards agree.
+    "tests.test_one_rep_max_showcase",
+    # Hydration atomic delta — guards against the lost-increments bug
+    # where rapid quick-add taps overwrote each other on the server.
+    "tests.test_hydration_delta",
     "tests.test_live_workout_recommendations",
     "tests.test_social_digest",
     # Cardio prescription — modality detection, capability hierarchy, prescription_type tagging.

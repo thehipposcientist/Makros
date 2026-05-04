@@ -106,7 +106,7 @@ def _is_alias_broad(alias: str, canonical_name: str) -> tuple[bool, str]:
     words = lower.split()
     if len(words) == 1:
         w = words[0]
-        short_whitelist = {"pb", "oj", "evoo"}
+        short_whitelist = {"pb", "oj", "evoo", "yam"}
         if w in short_whitelist:
             return (False, "")
         if _matches_canonical(w):
@@ -262,8 +262,13 @@ def validate_seed(entries: list[dict]) -> ValidationReport:
         )
         if expected == 0:
             continue
-        diff_pct = abs(cal - expected) / expected * 100
-        if diff_pct > 15:
+        abs_diff = abs(cal - expected)
+        diff_pct = abs_diff / expected * 100
+        # USDA produce rows can land a few kcal away from simple Atwater math
+        # because of analytical rounding, moisture, and organic acids. Keep
+        # the warning aimed at material seed errors instead of low-calorie
+        # fruit/veg noise.
+        if diff_pct > 15 and abs_diff > 6:
             report.macro_mismatch += 1
             report.warn(
                 f"'{e.get('name')}' macro mismatch: stated {cal} cal vs "

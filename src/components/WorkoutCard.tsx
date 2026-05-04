@@ -6,7 +6,7 @@ import { elevations, getTheme, radius, typography } from '../constants/theme';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
 import { shouldHideWeight } from '../utils/exerciseDisplay';
-import { clampDisplayedSessionMinutes } from '../utils/sessionDuration';
+import { estimateWorkoutMinutes } from '../utils/workoutDurationEstimate';
 import FadeInView from './FadeInView';
 
 /** Turn a planner-emitted equipment string into a display label.
@@ -52,115 +52,7 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
 
   const totalSets        = workout.exercises.reduce((sum, ex) => sum + (Number(ex.sets) || 3), 0);
 
-  // Realistic duration estimate. Strength sets get ~45 s of working
-  // time + the prescribed rest; timed sets (cardio intervals, zone 2
-  // blocks, planks, carries) are parsed from the `reps` string so a
-  // "30-45 min" zone 2 session doesn't estimate as 4 minutes.
-  //
-  // Supported rep formats parsed as time-per-set:
-  //   "30s", "45 sec", "60 seconds"           → seconds
-  //   "30-45s", "30-45 sec"                   → seconds (midpoint)
-  //   "5 min", "5 minutes"                    → minutes
-  //   "30-45 min", "25-40 minutes"            → minutes (midpoint)
-  // A plain number or rep-range like "6-8" falls back to the
-  // 45s-per-set working estimate (normal strength set timing).
-  const parseWorkSecondsPerSet = (reps: unknown, exerciseName?: string, primaryMuscle?: string): number | null => {
-    if (reps == null) return null;
-    const s = String(reps).trim().toLowerCase();
-    if (!s) return null;
-    // Explicit seconds: "30s", "45 sec", "30-45s", "60s each side", "45s hold"
-    const secMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(s|sec|secs|second|seconds)\b/);
-    if (secMatch) {
-      const lo = parseInt(secMatch[1], 10);
-      const hi = secMatch[2] ? parseInt(secMatch[2], 10) : lo;
-      const base = Math.round((lo + hi) / 2);
-      return s.includes('each') ? base * 2 : base;
-    }
-    // Explicit minutes: "5 min", "30-45 min", "42-52 min".
-    // Do not treat bare "m" as minutes; carry prescriptions use meters
-    // ("30-40m or 40-60s").
-    const minMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(min|mins|minute|minutes)\b/);
-    if (minMatch) {
-      const lo = parseInt(minMatch[1], 10);
-      const hi = minMatch[2] ? parseInt(minMatch[2], 10) : lo;
-      return Math.round(((lo + hi) / 2) * 60);
-    }
-    // Rep-based with "each side" — treat as ~10s per rep per side
-    if (s.includes('each')) {
-      const repMatch = s.match(/^(\d+)/);
-      if (repMatch) return parseInt(repMatch[1], 10) * 10 * 2;
-    }
-    // "X reps slow" — treat as ~5s per rep
-    if (s.includes('slow')) {
-      const repMatch = s.match(/^(\d+)/);
-      if (repMatch) return parseInt(repMatch[1], 10) * 5;
-    }
-    // Bare number heuristic: if the value is a plain number ≥ 20 AND
-    // the exercise looks like cardio (name contains cardio keywords OR
-    // primary_muscle is 'cardio'), treat it as minutes.
-    // Below 20, it's almost certainly rep-based (squats × 15, etc.).
-    const bareNum = s.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
-    if (bareNum) {
-      const lo = parseInt(bareNum[1], 10);
-      const hi = bareNum[2] ? parseInt(bareNum[2], 10) : lo;
-      const mid = Math.round((lo + hi) / 2);
-      if (mid >= 20) {
-        // Structured field check first
-        const pm = (primaryMuscle ?? '').toLowerCase();
-        if (pm === 'cardio') return mid * 60;
-        // Regex fallback for old cached data
-        const name = (exerciseName ?? '').toLowerCase();
-        const isCardio = ['elliptical', 'treadmill', 'bike', 'cycling', 'running', 'jogging', 'walk', 'rowing', 'stair', 'swim', 'cardio', 'zone'].some(k => name.includes(k));
-        if (isCardio) return mid * 60; // treat as minutes
-      }
-    }
-    return null;
-  };
-
-  const { estimatedMinutes } = useMemo(() => {
-    // Per-exercise estimate accounts for THREE things the old formula missed:
-    //   1. Working time per set is ~55s on a real strength set (rack/unrack
-    //      + slower tempo on heavy lifts + form check). Was 45s.
-    //   2. Rest fudge factor of 1.10× — users rarely start the next set the
-    //      second the timer hits 0 (checking phone, breathing, etc).
-    //   3. Transition time between exercises (~45s for strength, ~15s for
-    //      mobility/stretch). Set up new equipment, walk to next station.
-    // Warmup is still NOT added here — the warmup exercise already exists
-    // as a line item in workout.exercises with its own timing.
-    const REST_FUDGE = 1.10;
-    const TRANSITION_STRENGTH_SEC = 45;
-    const TRANSITION_MOBILITY_SEC = 15;
-    const WORK_STRENGTH_SEC = 55;
-    const nonWarmupCount = workout.exercises.filter(e => (e as any)._role !== 'warmup').length;
-    const secs = workout.exercises.reduce((total, ex, idx) => {
-      const sets = Number(ex.sets) || 3;
-      const rest = Number((ex as any).restSeconds ?? (ex as any).rest_seconds) || 60;
-      const timedWorkSec = parseWorkSecondsPerSet((ex as any).reps, ex.name, (ex as any).primary_muscle ?? (ex as any)._primary_muscle);
-      const restTotal = Math.max(0, sets - 1) * rest * REST_FUDGE;
-      // Transition between exercises (only between, not after last)
-      const isLast = idx === workout.exercises.length - 1;
-      const exPrimaryMuscle = ((ex as any).primary_muscle ?? (ex as any)._primary_muscle ?? '').toLowerCase();
-      const exTrainingType = ((ex as any)._training_type ?? (ex as any).training_type ?? '').toLowerCase();
-      const exRole = ((ex as any)._role ?? '').toLowerCase();
-      const isMobility = exPrimaryMuscle === 'mobility'
-        || exTrainingType === 'mobility' || exTrainingType === 'recovery' || exTrainingType === 'stretch'
-        || exRole === 'warmup'
-        // Regex fallback for old cached data without structured fields
-        || /mobility|stretch|warm.?up|flow|pose|dog|cat|hip|shoulder.dis|dead hang/i.test(ex.name);
-      const transition = isLast ? 0 : (isMobility ? TRANSITION_MOBILITY_SEC : TRANSITION_STRENGTH_SEC);
-
-      if (timedWorkSec != null) {
-        return total + sets * timedWorkSec + restTotal + transition;
-      }
-      return total + sets * WORK_STRENGTH_SEC + restTotal + transition;
-    }, 0);
-    void nonWarmupCount;
-    const rawMinutes = Math.max(1, Math.round(secs / 60));
-    return {
-      estimatedSeconds: secs,
-      estimatedMinutes: clampDisplayedSessionMinutes(rawMinutes, sessionMinutes),
-    };
-  }, [workout.exercises, sessionMinutes]);
+  const estimatedMinutes = useMemo(() => estimateWorkoutMinutes(workout, sessionMinutes), [workout, sessionMinutes]);
 
   return (
     <View style={[styles.card, embedded && styles.cardEmbedded]}>

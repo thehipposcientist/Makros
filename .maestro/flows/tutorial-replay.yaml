@@ -1,0 +1,87 @@
+# Verify the tutorial-replay path from Settings → Account opens the
+# tutorial overlay and the skip button works. The Account screen
+# routing was a recent regression area (modal stacking issue), so
+# this flow guards both the navigation AND the tutorial render.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: tutorial-replay
+tags:
+  - e2e
+  - seeded
+  - account
+  - tutorial
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-you"
+- extendedWaitUntil:
+    visible:
+      id: "you-tab-screen"
+    timeout: 30000
+
+- tapOn:
+    id: "profile-settings-open"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 15000
+
+# Settings → Replay tutorial. Text-based since the row may not
+# always be testID'd, but the Replay tutorial copy is stable.
+- scrollUntilVisible:
+    element: "Replay tutorial"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn: "Replay tutorial"
+
+# The tutorial-skip testID is on the dismiss button inside the
+# tutorial modal — its presence proves the modal mounted.
+- extendedWaitUntil:
+    visible:
+      id: "tutorial-skip"
+    timeout: 15000
+
+- tapOn:
+    id: "tutorial-skip"

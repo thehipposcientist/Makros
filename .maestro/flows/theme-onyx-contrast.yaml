@@ -1,0 +1,87 @@
+# Switch to the Onyx (black) theme and verify high-contrast UI elements
+# remain readable. This guards against the regression we hit twice
+# (Start Workout button, AI coach send) where buttons render in their
+# theme's primary color on top of the same color, making them invisible.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: theme-onyx-contrast
+tags:
+  - e2e
+  - seeded
+  - theme
+  - ui-contrast
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+# Open profile → settings → theme picker.
+- tapOn:
+    id: "bottom-tab-you"
+- extendedWaitUntil:
+    visible:
+      id: "you-tab-screen"
+    timeout: 30000
+- tapOn:
+    id: "profile-settings-open"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 15000
+
+# Theme picker is text-driven — pick "Onyx".
+- scrollUntilVisible:
+    element: "Onyx"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn: "Onyx"
+
+# Back to Plan and verify the Start Workout CTA still has visible copy.
+- tapOn:
+    id: "settings-back"
+- tapOn:
+    id: "bottom-tab-workouts"
+- extendedWaitUntil:
+    visible:
+      id: "start-workout-cta-visible"
+    timeout: 30000
+- assertVisible: "Start Workout"

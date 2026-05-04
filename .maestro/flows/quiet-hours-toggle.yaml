@@ -1,0 +1,90 @@
+# Toggle quiet hours and adjust both endpoints via the +/- testIDs.
+# Quiet hours suppress reminder notifications during the user's
+# sleep window. The +/- adjusters are independent of the schedule
+# selectors above so this flow exercises a different state machine.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: quiet-hours-toggle
+tags:
+  - e2e
+  - seeded
+  - settings
+  - reminders
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-you"
+- tapOn:
+    id: "profile-settings-open"
+- extendedWaitUntil:
+    visible:
+      id: "settings-screen"
+    timeout: 15000
+
+- scrollUntilVisible:
+    element:
+      id: "settings-quiet-hours-toggle"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "settings-quiet-hours-toggle"
+
+# Adjust both endpoints. Each tap is 15 mins.
+- scrollUntilVisible:
+    element:
+      id: "settings-quiet-start-plus"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- tapOn:
+    id: "settings-quiet-start-plus"
+- tapOn:
+    id: "settings-quiet-end-minus"
+
+# Sanity: the controls are still mounted (no crash when both
+# endpoints get pushed). If the validator rejects the new range
+# (e.g., start > end), the controls hide — the assertion catches it.
+- assertVisible:
+    id: "settings-quiet-end-minus"

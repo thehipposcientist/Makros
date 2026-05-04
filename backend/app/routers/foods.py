@@ -20,6 +20,7 @@ from app.food_service import (
 from app.models import User, UserPreferences, UserState
 
 router = APIRouter(prefix="/foods", tags=["foods"])
+_REMOTE_SEARCH_MIN_CHARS = 3
 
 
 class PreferredFoodRequest(BaseModel):
@@ -258,7 +259,8 @@ def search_food_catalog(
     local_results = kitchen_results + [food_read_to_search_result(f, preferred_names=preferred) for f in local_reads]
     remote_results: list[dict] = []
     has_kitchen_hit = any(r.get("is_preferred") or r.get("source") == "user" for r in local_results)
-    if include_remote and len(local_results) < limit and not has_kitchen_hit:
+    can_search_remote = len(normalize_food_name(query)) >= _REMOTE_SEARCH_MIN_CHARS
+    if include_remote and can_search_remote and len(local_results) < limit and not has_kitchen_hit:
         remote_results = _search_usda(query, max_results=min(8, max(3, limit - len(local_results))))
 
     merged = merge_food_search_results(
@@ -269,7 +271,7 @@ def search_food_catalog(
     )
 
     ai_results: list[dict] = []
-    if include_remote and not merged:
+    if include_remote and can_search_remote and not merged:
         ensure_pro(current_user, "AI food lookup")
         ai_results = _search_ai(query)
         merged = merge_food_search_results(

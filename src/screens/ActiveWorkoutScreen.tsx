@@ -1831,7 +1831,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       Animated.spring(v, { toValue: 1.15, friction: 5, tension: 120, useNativeDriver: true }),
       Animated.spring(v, { toValue: 1.0,  friction: 8, tension: 140, useNativeDriver: true }),
     ]).start(() => {
-      // Prune accumulated Animated.Values for this exercise now that it's done.
       for (let slot = 0; slot < 20; slot++) {
         const base = `${idx}-${slot}`;
         delete setBadgeScales[base];
@@ -1840,8 +1839,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         delete inputFocusValues[`${base}-weight`];
         delete inputFocusValues[`${base}-reps`];
       }
-      delete exerciseCompleteScales[idx];
-      delete exerciseCompleteWasDone[idx];
     });
   };
   // Pulse animation values keyed by "exIdx-setSlot". Drives the green
@@ -1895,6 +1892,54 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const removed = removedSetCounts[exIdx] ?? 0;
     return Math.max(base + extras - removed, minCount);
   }, [exercises, extraSetCounts, removedSetCounts]);
+
+  useEffect(() => {
+    if (!warmupDone) return;
+    const activeExerciseIndexes = new Set<number>();
+    exercises.forEach((ex, i) => {
+      activeExerciseIndexes.add(i);
+      const totalSetCount = getEffectiveTargetSetCount(i, ex, ex.sets.length);
+      const isDone = ex.sets.length >= totalSetCount;
+      if (isDone && !exerciseCompleteWasDone[i]) {
+        exerciseCompleteWasDone[i] = true;
+        playExerciseCompleteStamp(i);
+      } else if (!isDone && exerciseCompleteWasDone[i]) {
+        exerciseCompleteWasDone[i] = false;
+        getExerciseCompleteScale(i).setValue(0);
+      }
+    });
+    for (const rawIdx of Object.keys(exerciseCompleteWasDone)) {
+      const idx = Number(rawIdx);
+      if (!activeExerciseIndexes.has(idx)) {
+        delete exerciseCompleteWasDone[idx];
+        delete exerciseCompleteScales[idx];
+      }
+    }
+  }, [exercises, getEffectiveTargetSetCount, warmupDone]);
+
+  useEffect(() => {
+    if (!warmupDone) return;
+    const activeBadgeKeys = new Set<string>();
+    exercises.forEach((ex, i) => {
+      const totalSetCount = getEffectiveTargetSetCount(i, ex, ex.sets.length);
+      for (let slot = 0; slot < totalSetCount; slot += 1) {
+        const badgeKey = `${i}-${slot}`;
+        activeBadgeKeys.add(badgeKey);
+        const isLogged = slot < ex.sets.length;
+        const badgeScale = getSetBadgeScale(badgeKey);
+        if (isLogged && !setBadgeWasLogged[badgeKey]) {
+          setBadgeWasLogged[badgeKey] = true;
+          popSetBadge(badgeKey);
+        } else if (!isLogged && setBadgeWasLogged[badgeKey]) {
+          setBadgeWasLogged[badgeKey] = false;
+          badgeScale.setValue(1);
+        }
+      }
+    });
+    for (const badgeKey of Object.keys(setBadgeWasLogged)) {
+      if (!activeBadgeKeys.has(badgeKey)) delete setBadgeWasLogged[badgeKey];
+    }
+  }, [exercises, getEffectiveTargetSetCount, warmupDone]);
 
   const clearLiveRecommendationState = useCallback((exIdx: number, opts?: { preserveNextTarget?: boolean }) => {
     setExercises(prev => prev.map((e, i) => i === exIdx ? { ...e, aiRecommendation: undefined } : e));
@@ -4867,15 +4912,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           const timed           = isTimedExercise(ex.name, ex.targetReps);
           const guide           = isGuideExercise(ex, workout);
           const isDone          = ex.sets.length >= totalSetCount;
-          // Fire the big check-stamp once on the false→true transition.
-          // Ref flag per-index prevents replays on every re-render.
-          if (isDone && !exerciseCompleteWasDone[i]) {
-            exerciseCompleteWasDone[i] = true;
-            playExerciseCompleteStamp(i);
-          } else if (!isDone && exerciseCompleteWasDone[i]) {
-            exerciseCompleteWasDone[i] = false;
-            getExerciseCompleteScale(i).setValue(0);
-          }
           const isActive        = activeExIdx === i;
           const isAiLoading     = aiLoadingIdx === i;
           const isAiError       = aiErrorIdx === i;
@@ -5638,18 +5674,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               )}
                               <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
                               {(() => {
-                                // Spring-pop the badge on the first render
-                                // after `isLogged` flips true. Flag is
-                                // per-set-key so re-renders don't retrigger.
                                 const badgeKey = `${i}-${slot}`;
                                 const badgeScale = getSetBadgeScale(badgeKey);
-                                if (isLogged && !setBadgeWasLogged[badgeKey]) {
-                                  setBadgeWasLogged[badgeKey] = true;
-                                  popSetBadge(badgeKey);
-                                } else if (!isLogged && setBadgeWasLogged[badgeKey]) {
-                                  setBadgeWasLogged[badgeKey] = false;
-                                  badgeScale.setValue(1);
-                                }
                                 return (
                                   <TouchableOpacity
                                     testID={`log-set-${i}-${slot}`}

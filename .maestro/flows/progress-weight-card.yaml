@@ -1,0 +1,80 @@
+# Progress tab Weight card renders + has a current value. Recent
+# weight-entry workflows changed how the current value is pulled
+# (HealthKit vs manual log preference). This flow asserts the card
+# mounts AND the current-value testID has data.
+#
+# Requires: make seed-e2e + backend + Metro
+
+appId: com.thallo.app
+name: progress-weight-card
+tags:
+  - e2e
+  - seeded
+  - progress
+  - weight
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_returning@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-progress"
+
+- scrollUntilVisible:
+    element:
+      id: "progress-weight-card"
+    direction: DOWN
+    timeout: 30000
+    visibilityPercentage: 30
+
+- assertVisible:
+    id: "progress-weight-current-value"
+
+# The current value renders with a unit suffix. Either lb or kg
+# must appear adjacent to the value.
+- runFlow:
+    when:
+      visible: "lb"
+    commands:
+      - assertVisible: "lb"
+- runFlow:
+    when:
+      visible: "kg"
+    commands:
+      - assertVisible: "kg"

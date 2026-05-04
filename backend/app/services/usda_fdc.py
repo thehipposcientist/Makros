@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 import re
+import copy
+import time
 import httpx
 from typing import Any
 
@@ -42,9 +44,20 @@ _NUTRIENT_MAP: dict[int, str] = {
     1109: "vitamin_e_mg",  # Vitamin E
     1106: "vitamin_a_mcg", # Vitamin A, RAE
     1258: "saturated_fat", # Fatty acids, total saturated
-    1292: "omega_3_mg",    # Fatty acids, total omega-3 (approximation)
+    1292: "monounsaturated_fat", # Fatty acids, total monounsaturated
+    1293: "polyunsaturated_fat", # Fatty acids, total polyunsaturated
     1253: "cholesterol_mg",  # Cholesterol
     1051: "water_g",       # Water
+}
+
+_OMEGA3_NUTRIENT_IDS = {
+    851,  # PUFA 18:3 n-3 c,c,c (ALA)
+    629,  # PUFA 20:5 n-3 (EPA)
+    631,  # PUFA 22:5 n-3 (DPA)
+    621,  # PUFA 22:6 n-3 (DHA)
+}
+_OMEGA6_NUTRIENT_IDS = {
+    618,  # PUFA 18:2 n-6 c,c (linoleic acid)
 }
 
 
@@ -53,11 +66,54 @@ def _extract_nutrients(food: dict) -> dict[str, float]:
     out: dict[str, float] = {}
     for nutrient in food.get("foodNutrients", []):
         nid = nutrient.get("nutrientId") or (nutrient.get("nutrient", {}).get("id"))
+        val = nutrient.get("value") or nutrient.get("amount", 0)
+        if not isinstance(val, (int, float)) or val <= 0:
+            continue
         if nid and nid in _NUTRIENT_MAP:
-            val = nutrient.get("value") or nutrient.get("amount", 0)
-            if isinstance(val, (int, float)) and val > 0:
-                out[_NUTRIENT_MAP[nid]] = round(val, 2)
+            out[_NUTRIENT_MAP[nid]] = round(val, 2)
+        if nid in _OMEGA3_NUTRIENT_IDS:
+            out["omega_3"] = round(out.get("omega_3", 0) + val, 2)
+        if nid in _OMEGA6_NUTRIENT_IDS:
+            out["omega_6"] = round(out.get("omega_6", 0) + val, 2)
     return out
+
+
+_SEARCH_CACHE: dict[tuple[str, int], tuple[float, list[dict[str, Any]]]] = {}
+
+
+def _search_cache_ttl_secs() -> int:
+    try:
+        return max(0, int(os.getenv("USDA_FDC_SEARCH_CACHE_TTL_SECS", "86400")))
+    except ValueError:
+        return 86400
+
+
+def _search_cache_key(query: str, max_results: int) -> tuple[str, int]:
+    normalized = re.sub(r"\s+", " ", query.lower()).strip()
+    return normalized, max_results
+
+
+def _get_cached_search(key: tuple[str, int]) -> list[dict[str, Any]] | None:
+    cached = _SEARCH_CACHE.get(key)
+    if not cached:
+        return None
+    expires_at, results = cached
+    if expires_at <= time.time():
+        _SEARCH_CACHE.pop(key, None)
+        return None
+    return copy.deepcopy(results)
+
+
+def _store_cached_search(key: tuple[str, int], results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    ttl = _search_cache_ttl_secs()
+    if ttl > 0:
+        _SEARCH_CACHE[key] = (time.time() + ttl, copy.deepcopy(results))
+        # This is an in-process cache for typeahead/search repeats, not a
+        # datastore. Keep it bounded even if users search a lot of prefixes.
+        if len(_SEARCH_CACHE) > 512:
+            for old_key in list(_SEARCH_CACHE.keys())[:128]:
+                _SEARCH_CACHE.pop(old_key, None)
+    return copy.deepcopy(results)
 
 
 _HOUSEHOLD_UNIT_GRAMS: dict[str, float] = {
@@ -155,6 +211,11 @@ def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
     if not key:
         return []
 
+    cache_key = _search_cache_key(query, max_results)
+    cached = _get_cached_search(cache_key)
+    if cached is not None:
+        return cached
+
     try:
         resp = httpx.post(
             f"{_BASE}/foods/search",
@@ -225,6 +286,10 @@ def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
             "vitamin_e_mg": "vitamin_e",
             "vitamin_a_mcg": "vitamin_a",
             "saturated_fat": "saturated_fat",
+            "monounsaturated_fat": "monounsaturated_fat",
+            "polyunsaturated_fat": "polyunsaturated_fat",
+            "omega_3": "omega_3",
+            "omega_6": "omega_6",
             "cholesterol_mg": "cholesterol",
         }
         micros = {}
@@ -254,7 +319,7 @@ def search_foods(query: str, max_results: int = 5) -> list[dict[str, Any]]:
         return (cal_penalty, 0 if starts else 1, -word_hits, dt_rank)
 
     results.sort(key=_relevance)
-    return [entry for _, entry in results[:max_results]]
+    return _store_cached_search(cache_key, [entry for _, entry in results[:max_results]])
 
 
 def get_food_by_fdc_id(fdc_id: int | str) -> dict[str, Any] | None:
@@ -277,9 +342,11 @@ def get_food_by_fdc_id(fdc_id: int | str) -> dict[str, Any] | None:
     if not nutrients.get("calories"):
         return None
 
+    serving_label, serving_grams = _extract_serving(food)
     return {
         "name": _clean_name(food.get("description", "")),
-        "serving": _extract_serving(food),
+        "serving": serving_label,
+        "serving_grams": serving_grams,
         "fdc_id": str(fdc_id),
         **nutrients,
     }
