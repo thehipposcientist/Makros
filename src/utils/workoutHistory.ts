@@ -7,6 +7,7 @@ import {
   saveWorkoutTemplatesToStorage,
   upsertWorkoutTemplateInStorage,
 } from './workoutTemplates';
+import { sanitizeWorkoutHistorySession } from './workoutCompletion';
 
 const HISTORY_KEY        = 'workoutHistory';
 const SKIPPED_KEY        = 'skippedWorkouts';
@@ -31,12 +32,13 @@ export function todayKey(): string {
 // ── Workout sessions ──────────────────────────────────────────────────────────
 
 export async function saveWorkoutSession(session: WorkoutSession): Promise<void> {
+  const cleanSession = sanitizeWorkoutHistorySession(session);
   const history = await loadWorkoutHistory();
-  const idx = history.findIndex(s => s.id === session.id);
+  const idx = history.findIndex(s => s.id === cleanSession.id);
   if (idx >= 0) {
-    history[idx] = session;
+    history[idx] = cleanSession;
   } else {
-    history.unshift(session);
+    history.unshift(cleanSession);
   }
   await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, 100)));
 
@@ -45,22 +47,22 @@ export async function saveWorkoutSession(session: WorkoutSession): Promise<void>
   // has real start/end timestamps. Best-effort + opt-in via the
   // user's existing isAppleHealthEnabled flag.
   try {
-    const fromHK = session.id?.startsWith('hk_');
+    const fromHK = cleanSession.id?.startsWith('hk_');
     if (fromHK) return;
-    if (!session.startedAt || !session.endedAt) return;
+    if (!cleanSession.startedAt || !cleanSession.endedAt) return;
     const enabled = await isAppleHealthEnabled().catch(() => false);
     if (!enabled) return;
     const { saveWorkoutToHealth, isHealthKitAvailable } = await import('../services/appleHealth');
     if (!isHealthKitAvailable()) return;
-    const tag = session.manualActivity?.subtype
-      || session.focus
+    const tag = cleanSession.manualActivity?.subtype
+      || cleanSession.focus
       || 'Workout';
     await saveWorkoutToHealth({
-      startedAt: new Date(session.startedAt),
-      endedAt: new Date(session.endedAt),
+      startedAt: new Date(cleanSession.startedAt),
+      endedAt: new Date(cleanSession.endedAt),
       activityTag: tag,
-      caloriesBurned: session.manualActivity?.caloriesBurned ?? null,
-      distanceMiles: session.manualActivity?.distanceMiles ?? null,
+      caloriesBurned: cleanSession.manualActivity?.caloriesBurned ?? null,
+      distanceMiles: cleanSession.manualActivity?.distanceMiles ?? null,
     });
   } catch { /* non-fatal — session is already in local history */ }
 }
@@ -106,7 +108,8 @@ export async function deleteWorkoutSession(sessionId: string): Promise<void> {
 export async function loadWorkoutHistory(): Promise<WorkoutSession[]> {
   try {
     const raw = await AsyncStorage.getItem(HISTORY_KEY);
-    return raw ? JSON.parse(raw) : [];
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.map(sanitizeWorkoutHistorySession) : [];
   } catch {
     return [];
   }

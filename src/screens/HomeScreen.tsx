@@ -59,6 +59,7 @@ import { HYDRATION_QUICK_ADD_OUNCES, formatHydrationQuickAddLabel } from '../uti
 import { enqueueActiveWatchCommand, hasActiveWatchCommandConsumer, isActiveWorkoutWatchCommand } from '../utils/watchCommandBacklog';
 import { applyWatchLogSetToActiveWorkoutStorage } from '../utils/watchWorkoutMirror';
 import { coachApplyNeedsDayStatusRefresh, skippedDayBadgeLabel, skippedDayTitle, skippedDayUndoLabel } from '../utils/coachApplyState';
+import { isExtraWorkoutActivitySession } from '../utils/workoutCompletion';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
 import { setMealCheckedInChecksByDate, upsertMealInPlansByDate } from '../utils/mealPlanState';
@@ -7602,7 +7603,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     <TodayWorkoutPlanActivityCards
                       themeName={userProfile.themePreference}
                       sessions={workoutHistoryList.filter((s) => {
-                        if (!s?.manualActivity || s.skipped) return false;
+                        if (!isExtraWorkoutActivitySession(s)) return false;
                         const d = (s.startedAt ?? s.date ?? '').slice(0, 10);
                         return d === key;
                       })}

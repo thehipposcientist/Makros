@@ -163,6 +163,22 @@ def test_fatigue_override_alias_map_routes_traps_to_back():
     _ok("traps → back alias confirmed")
 
 
+def test_fatigue_override_alias_map_routes_forearms_to_biceps():
+    """Forearms are represented in the seed catalog, but the fatigue
+    model rolls them into the arm/biceps bucket."""
+    print("\n[test] primary_muscle='forearms' routes to fatigue key 'biceps'")
+    adj = apply_fatigue_override(
+        weight_lbs=50.0,
+        base_confidence=0.80,
+        base_reason="x",
+        primary_muscle="forearms",
+        muscle_fatigue={"biceps": 0.7, "forearms": 0.0},
+    )
+    assert adj.fatigue_override is True
+    assert adj.weight_lbs == 45.0  # 50 × 0.9
+    _ok("forearms → biceps alias confirmed")
+
+
 # ─── Feature 2 — AI first-time branch ────────────────────────────────
 
 
@@ -403,6 +419,7 @@ def _run_all() -> int:
         test_fatigue_override_rounds_to_2_5_lb,
         test_fatigue_override_skips_when_fatigue_map_missing,
         test_fatigue_override_alias_map_routes_traps_to_back,
+        test_fatigue_override_alias_map_routes_forearms_to_biceps,
         # Feature 2
         test_ai_first_time_no_muscle_sessions_uses_profile_ai_path,
         test_ai_first_time_three_sessions_hits_ai_and_stamps_fields,
@@ -439,6 +456,7 @@ cases = [
     test_fatigue_override_rounds_to_2_5_lb,
     test_fatigue_override_skips_when_fatigue_map_missing,
     test_fatigue_override_alias_map_routes_traps_to_back,
+    test_fatigue_override_alias_map_routes_forearms_to_biceps,
     test_ai_first_time_no_muscle_sessions_uses_profile_ai_path,
     test_ai_first_time_three_sessions_hits_ai_and_stamps_fields,
     test_ai_first_time_malformed_json_falls_back_cleanly,

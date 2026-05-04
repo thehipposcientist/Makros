@@ -1646,10 +1646,14 @@ export interface WorkoutCompletionRecord {
   focus_label: string;
   duration_seconds: number;
   stimulus?: string | null;
+  source_context?: string | null;
+  template_id?: string | null;
+  plan_day_id?: number | null;
   completed_at?: string | null;
   activity_category?: string | null;
   activity_subtype?: string | null;
   activity_intensity?: string | null;
+  activity_source?: string | null;
   cardio_style?: string | null;
   distance_miles?: number | null;
   calories_burned?: number | null;

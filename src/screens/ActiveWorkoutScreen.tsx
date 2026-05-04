@@ -68,6 +68,7 @@ import { shouldHideWeight, shouldHideReps, formatDurationTarget, isGuideExercise
 import { startRestActivity, updateRestActivity, getRestActivityState, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
 import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, scoreSwapCandidate } from '../utils/swapScoring';
 import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate, tierOf } from '../utils/subscription';
+import { buildWorkoutBestSetHighlights } from '../utils/workoutBestSets';
 
 /** Parse the top (ceiling) of a target rep string. Handles ranges like
  *  "8-12", AMRAP markers like "12+", singletons like "6", and junk.
@@ -2053,6 +2054,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // PR celebration modal — populated after handleFinish when the backend
   // returns one or more PRs. Null = no modal shown.
   const [prModalData, setPrModalData] = useState<PRAchievement[] | null>(null);
+  const [sessionPrs, setSessionPrs] = useState<PRAchievement[]>([]);
 
   // Post-workout feedback. The step sequence is:
   //   'summary'      — AI-generated summary (achievements / recommendations)
@@ -3766,6 +3768,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setFeedbackSoreness([]);
     setFeedbackNotes('');
     setFeedbackResult(null);
+    setSessionPrs([]);
 
     const now = new Date();
     const startedAtIso = new Date(startTime.current).toISOString();
@@ -3939,12 +3942,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const sourceContext = (workout as any)._source_context ?? (workout as any).sourceContext ?? 'planned';
         const templateId = (workout as any)._template_id ?? (workout as any).templateId ?? null;
         const planDayId = (workout as any).plan_day_id ?? (workout as any).planDayId ?? null;
-        const completeResp = await logWorkoutDone(authToken, dateKey(now), workout.focus, actualDurationSeconds, exercisesPayload, {
+        const activityForCompletion = sourceContext === 'planned' ? undefined : {
           category: pureCardioFocus ? 'cardio' : 'strength',
           subtype: workout.focus.toLowerCase().replace(/\s+/g, '_'),
           intensity: workout.stimulus === 'strength' ? 'hard' : workout.stimulus === 'volume' ? 'easy' : 'moderate',
           cardioStyle: cardioLikeFocus ? (/interval|hiit/i.test(workout.focus) ? 'intervals' : 'steady') : undefined,
-        }, healthMetrics, undefined, gearIdsForLog, {
+        };
+        const completeResp = await logWorkoutDone(authToken, dateKey(now), workout.focus, actualDurationSeconds, exercisesPayload, activityForCompletion, healthMetrics, undefined, gearIdsForLog, {
           sourceContext,
           templateId,
           planDayId,
@@ -3967,6 +3971,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
         // PR toast + persist on session for Progress history to show "🏆 PR!"
         const prs: PRAchievement[] = completeResp?.prs ?? [];
+        setSessionPrs(prs);
         if (prs.length > 0) {
           try {
             // Stash on the saved summary so the Progress screen can render later.
@@ -4172,6 +4177,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       training_rating: (summaryData as any)?.trainingRating ?? null,
     };
   }, [exercises, finishedSession, summaryData, summaryDurationSeconds, summaryRepCount, summarySetCount, workout.focus]);
+  const shareBestSetHighlights = useMemo(
+    () => buildWorkoutBestSetHighlights(
+      finishedSession?.exercises ?? exercises,
+      sessionPrs,
+      4,
+      summaryData?.achievements ?? [],
+    ),
+    [exercises, finishedSession?.exercises, sessionPrs, summaryData?.achievements],
+  );
 
   const handleOpenFriendsShare = useCallback(() => {
     if (!authToken) {
@@ -6175,13 +6189,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     ) : null}
 
                     {/* Best sets */}
-                    {(summaryData?.achievements?.length ?? 0) > 0 && (
+                    {shareBestSetHighlights.length > 0 && (
                       <View style={styles.shareAchievements}>
                         <Text style={styles.shareAchievementsTitle}>Best Sets</Text>
-                        {summaryData!.achievements.slice(0, 4).map((a, i) => (
-                          <View key={i} style={styles.shareAchievementRow}>
+                        {shareBestSetHighlights.map((highlight) => (
+                          <View key={highlight.key} style={styles.shareAchievementRow}>
                             <Text style={styles.shareAchievementBullet}><Ionicons name="chevron-forward" size={12} /></Text>
-                            <Text style={styles.shareAchievementText}>{a}</Text>
+                            <Text style={styles.shareAchievementText}>{highlight.label}</Text>
                           </View>
                         ))}
                       </View>

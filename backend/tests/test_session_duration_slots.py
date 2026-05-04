@@ -394,6 +394,57 @@ def test_heavy_lower_archetypes_include_direct_calves():
     _ok("heavy lower/legs templates include direct calf slot")
 
 
+def test_all_lower_leg_archetypes_include_direct_calf_slot():
+    """Every lower-family lifting archetype should expose at least one
+    direct calf slot before density trimming."""
+    print("\n[test] calf coverage: all lower/legs archetypes include calf slot")
+    lower_leg_archetypes = (
+        DayArchetype.LIFT_LOWER,
+        DayArchetype.LIFT_LOWER_HEAVY,
+        DayArchetype.LIFT_LOWER_HYPERTROPHY,
+        DayArchetype.LIFT_LEGS,
+        DayArchetype.LIFT_LEGS_HEAVY,
+        DayArchetype.LIFT_LEGS_VOLUME,
+        DayArchetype.LIFT_BRO_LEGS,
+    )
+    missing = []
+    for arch in lower_leg_archetypes:
+        slots = archetype_to_slots(arch, 0, 5, session_minutes=60)
+        if not any(s.primary_muscle_hint == "calves" for s in slots):
+            missing.append((arch.value, [(s.label, s.primary_muscle_hint) for s in slots]))
+    assert not missing, f"lower/legs archetypes missing calf slot: {missing}"
+    _ok(f"{len(lower_leg_archetypes)} lower/legs archetypes include direct calf slot")
+
+
+def test_density_trim_preserves_calves_before_secondary_work():
+    """Calf slots should survive normal short-session trimming.
+
+    At 30 minutes we keep squat + hinge + direct calves and drop the
+    secondary lunge plus another isolation. At an impossible 20-minute
+    budget, the two primaries remain and calves may be sacrificed.
+    """
+    print("\n[test] calf coverage: density trim protects calves before secondary")
+    slots = [
+        Slot("Primary Squat", "squat", "quads", "primary"),
+        Slot("Primary Hinge", "hinge", "hamstrings", "primary"),
+        Slot("Secondary Lunge", "lunge", "quads", "secondary"),
+        Slot("Glute Isolation", "isolation", "glutes", "isolation"),
+        Slot("Calves", "isolation", "calves", "isolation"),
+    ]
+
+    at_30 = density_adjust_slots(slots, 30, category="lift")
+    labels_30 = [s.label for s in at_30]
+    assert "Calves" in labels_30, f"30-min trim dropped calves: {labels_30}"
+    assert "Secondary Lunge" not in labels_30, (
+        f"30-min trim should drop secondary before protected calves: {labels_30}"
+    )
+
+    at_20 = density_adjust_slots(slots, 20, category="lift")
+    labels_20 = [s.label for s in at_20]
+    assert labels_20 == ["Primary Squat", "Primary Hinge"], labels_20
+    _ok("30-min keeps calves; 20-min keeps only primaries")
+
+
 def test_short_ppl_leg_days_preserve_direct_calves():
     """At 45 minutes, lower days should trim duplicate leg volume before
     dropping the only direct calf exercise."""
@@ -439,6 +490,138 @@ def test_short_ppl_leg_days_preserve_direct_calves():
     ]
     assert not missing, f"lower/legs days missing direct calves: {missing}"
     _ok(f"{len(lower_days)} short lower/legs days include direct calf work")
+
+
+def test_lower_leg_calf_coverage_matrix_normal_durations():
+    """Representative split × goal × equipment sweep for normal short
+    and medium sessions.
+
+    Excludes 20-minute sessions by design: those are hard-budget days
+    where the planner must keep only the two main compounds.
+    """
+    print("\n[test] calf coverage: split/goal/equipment matrix at 30-75 min")
+    from app.services.workout.planner import PlannerInputs, generate_workout_plan
+    from app.seed_exercises_data import SEED_EXERCISES
+
+    equipment_profiles = {
+        "full_gym": (
+            "barbell", "dumbbells", "bench", "flat_bench", "adjustable_bench",
+            "squat_rack", "power_rack", "cable_machine", "leg_press_machine",
+            "leg_extension_machine", "leg_curl_machine", "standing_calf_raise_machine",
+            "seated_calf_raise_machine", "smith_machine", "pull_up_bar",
+        ),
+        "no_calf_machine": (
+            "barbell", "dumbbells", "bench", "flat_bench", "squat_rack",
+            "leg_press_machine", "leg_extension_machine", "leg_curl_machine",
+        ),
+        "dumbbell_home": ("dumbbells", "bench"),
+        "bodyweight": ("bodyweight",),
+    }
+    scenarios = (
+        ("ppl", "muscle_gain", 3, "intermediate"),
+        ("ppl", "muscle_gain", 4, "intermediate"),
+        ("ppl", "body_recomp", 7, "intermediate"),
+        ("ppl", "strength", 6, "intermediate"),
+        ("upper_lower", "muscle_gain", 4, "intermediate"),
+        ("upper_lower", "strength", 4, "intermediate"),
+        ("upper_lower", "fat_loss", 6, "intermediate"),
+        ("ppl_upper_lower", "muscle_gain", 5, "intermediate"),
+        ("ppl_upper_lower", "body_recomp", 7, "intermediate"),
+        ("lower_focused", "muscle_gain", 4, "intermediate"),
+        ("lower_focused", "body_recomp", 6, "intermediate"),
+        ("bro", "muscle_gain", 5, "advanced"),
+    )
+    lower_archetypes = {
+        DayArchetype.LIFT_LOWER.value,
+        DayArchetype.LIFT_LOWER_HEAVY.value,
+        DayArchetype.LIFT_LOWER_HYPERTROPHY.value,
+        DayArchetype.LIFT_LEGS.value,
+        DayArchetype.LIFT_LEGS_HEAVY.value,
+        DayArchetype.LIFT_LEGS_VOLUME.value,
+        DayArchetype.LIFT_BRO_LEGS.value,
+    }
+
+    checked = 0
+    failures = []
+    for equipment_name, equipment in equipment_profiles.items():
+        for split, goal, days_per_week, experience in scenarios:
+            for session_minutes in (30, 45, 60, 75):
+                plan = generate_workout_plan(
+                    PlannerInputs(
+                        goal=goal,
+                        days_per_week=days_per_week,
+                        preferred_split=split,
+                        session_minutes=session_minutes,
+                        experience=experience,
+                        equipment_slugs=equipment,
+                        rng_seed=17,
+                    ),
+                    SEED_EXERCISES,
+                )
+                for day in plan["workout_plan"]["days"]:
+                    if day.get("archetype") not in lower_archetypes:
+                        continue
+                    if day.get("category") != "lift":
+                        continue
+                    checked += 1
+                    if not any(ex.get("_primary_muscle") == "calves" for ex in day.get("exercises", [])):
+                        failures.append({
+                            "equipment": equipment_name,
+                            "split": split,
+                            "goal": goal,
+                            "days": days_per_week,
+                            "minutes": session_minutes,
+                            "archetype": day.get("archetype"),
+                            "exercises": [ex.get("name") for ex in day.get("exercises", [])],
+                        })
+
+    assert checked > 0, "matrix did not inspect any lower/legs days"
+    assert not failures, f"lower/legs calf coverage failures: {failures[:8]}"
+    _ok(f"{checked} lower/legs days across matrix include direct calves")
+
+
+def test_calf_focus_meets_direct_accessory_minimum():
+    """When calves are the explicit focus, the focus audit should meet
+    the direct-accessory floor even without calf machines."""
+    print("\n[test] calf coverage: focused calves meet direct accessory floor")
+    from app.services.workout.planner import PlannerInputs, generate_workout_plan
+    from app.seed_exercises_data import SEED_EXERCISES
+
+    equipment_profiles = (
+        (
+            "full_gym",
+            (
+                "barbell", "dumbbells", "bench", "flat_bench", "squat_rack",
+                "leg_press_machine", "leg_extension_machine", "leg_curl_machine",
+                "standing_calf_raise_machine", "seated_calf_raise_machine",
+            ),
+        ),
+        ("bodyweight", ("bodyweight",)),
+        ("dumbbell_home", ("dumbbells", "bench")),
+    )
+    for label, equipment in equipment_profiles:
+        plan = generate_workout_plan(
+            PlannerInputs(
+                goal="muscle_gain",
+                days_per_week=4,
+                preferred_split="upper_lower",
+                session_minutes=45,
+                experience="intermediate",
+                equipment_slugs=equipment,
+                focused_muscle="calves",
+                rng_seed=12,
+            ),
+            SEED_EXERCISES,
+        )["workout_plan"]
+        audit = plan.get("focus_audit") or {}
+        assert audit.get("muscle") == "calves", f"{label}: missing calf focus audit"
+        assert audit.get("direct_accessories", 0) >= audit.get("min_direct_accessories", 999), (
+            f"{label}: calf direct accessories below floor: {audit}"
+        )
+        assert audit.get("days_with_exposure", 0) >= audit.get("min_exposure_days", 999), (
+            f"{label}: calf exposure below floor: {audit}"
+        )
+    _ok("calf focus meets direct accessory and exposure floors across gear profiles")
 
 
 # ─── Cardio Finisher duration scaling ────────────────────────────────────────
@@ -577,7 +760,11 @@ cases = [
     test_plan_at_60_and_75_same_structure_different_count,
     test_body_recomp_ppl_60_min_does_not_stack_extended_density,
     test_heavy_lower_archetypes_include_direct_calves,
+    test_all_lower_leg_archetypes_include_direct_calf_slot,
+    test_density_trim_preserves_calves_before_secondary_work,
     test_short_ppl_leg_days_preserve_direct_calves,
+    test_lower_leg_calf_coverage_matrix_normal_durations,
+    test_calf_focus_meets_direct_accessory_minimum,
     test_cardio_finisher_short_at_45_min,
     test_cardio_finisher_medium_at_60_min,
     test_cardio_finisher_extended_at_75_min,

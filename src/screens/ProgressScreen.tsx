@@ -53,6 +53,7 @@ import { AppThemeName } from '../types';
 import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
 import { aggregateDailyFromHistory, dailyBarDenominator, headlineLoggedCalories, macrosHeadlineFromAverages, macrosHeadlineFromDailyRows, selectDailyRows } from './progressData';
 import { tierOf } from '../utils/subscription';
+import { manualActivityFromCompletion, mergeCompletionIntoWorkoutSession } from '../utils/workoutCompletion';
 
 interface ProgressScreenProps {
   onBack: () => void;
@@ -954,27 +955,8 @@ function summaryFromCompletion(completion: WorkoutCompletionRecord): StoredWorko
   }, completion);
 }
 
-function manualActivityFromCompletion(completion: WorkoutCompletionRecord): WorkoutSession['manualActivity'] | undefined {
-  if (!completion.activity_category) return undefined;
-  return {
-    category: completion.activity_category as any,
-    subtype: completion.activity_subtype ?? '',
-    intensity: (completion.activity_intensity ?? 'moderate') as any,
-    cardioStyle: completion.cardio_style as any,
-    distanceMiles: completion.distance_miles ?? undefined,
-    caloriesBurned: completion.calories_burned ?? undefined,
-    avgHeartRate: completion.hr_summary?.avgBpm != null ? Math.round(Number(completion.hr_summary.avgBpm)) : undefined,
-  };
-}
-
 function mergeCompletionIntoSession(session: WorkoutSession, completion: WorkoutCompletionRecord): WorkoutSession {
-  return {
-    ...session,
-    date: session.date || completion.completed_at || `${completion.workout_date}T12:00:00.000Z`,
-    durationSeconds: session.durationSeconds || completion.duration_seconds || 0,
-    completed: true,
-    manualActivity: session.manualActivity ?? manualActivityFromCompletion(completion),
-  };
+  return mergeCompletionIntoWorkoutSession(session, completion);
 }
 
 function targetRepsFromServerExercise(exercise: NonNullable<WorkoutSessionRecord['exercises']>[number]): string {
