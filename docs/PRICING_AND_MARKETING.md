@@ -18,7 +18,7 @@ Recommended launch pricing:
 
 Do not charge publicly until StoreKit/RevenueCat, server-side entitlements, restore purchases, and paywall analytics are implemented. The current subscription state should be treated as a dev/product tier simulation, not real monetization.
 
-Decision as of 2026-05-01: the external beta is free and should run with `expo.extra.freeBetaFullAccess=true` so testers can exercise the full guided plan, AI, readiness, and Watch loop without billing infrastructure.
+Decision as of 2026-05-01: the external beta is free and should run with `expo.extra.freeBetaFullAccess=true` plus backend `BETA_FULL_ACCESS_ENABLED=1` so testers can exercise the full guided plan, AI, readiness, and Watch loop without billing infrastructure.
 
 ## Product Reality That Changes Pricing
 

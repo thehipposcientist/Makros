@@ -339,6 +339,57 @@ def test_hyrox_recipe_has_hybrid_days():
     _ok(f"hyrox 5d → {hybrid_or_circuit} hybrid/circuit days")
 
 
+# ─── Strict split guard ─────────────────────────────────────────────────────
+
+def test_strict_split_rebuilds_bad_ppl_counts():
+    """A malformed PPL week must be repaired to the split contract."""
+    print("\n[test] strict split: rebuild malformed PPL counts")
+    from app.services.workout.weekly_recipe import _enforce_strict_split_composition
+    from app.services.workout.archetypes import archetype_to_focus_family
+
+    profile = goal_profile_for("muscle_gain", "intermediate", 6, 60)
+    malformed = [
+        DayArchetype.LIFT_PUSH,
+        DayArchetype.LIFT_PULL,
+        DayArchetype.LIFT_PULL,
+        DayArchetype.LIFT_PULL,
+        DayArchetype.LIFT_LEGS,
+        DayArchetype.LIFT_PUSH,
+    ]
+    rebuilt = _enforce_strict_split_composition(
+        malformed, "ppl", True, profile, 6,
+    )
+    families = [archetype_to_focus_family(a) for a in rebuilt]
+    assert families.count("push") == 2, f"push count: {families}"
+    assert families.count("pull") == 2, f"pull count: {families}"
+    assert families.count("legs") == 2, f"legs count: {families}"
+    _ok("malformed PPL repaired to 2×push, 2×pull, 2×legs")
+
+
+def test_strict_split_preserves_plus_cardio_count_when_rebuilding():
+    """The split repair may change lift families, but it must not erase
+    the number of hybrid cardio carriers the recipe already had."""
+    print("\n[test] strict split: preserve PLUS_CARDIO count")
+    from app.services.workout.weekly_recipe import _enforce_strict_split_composition
+
+    profile = goal_profile_for("body_recomp", "intermediate", 6, 60)
+    malformed = [
+        DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+        DayArchetype.LIFT_PULL,
+        DayArchetype.LIFT_PULL,
+        DayArchetype.LIFT_PULL,
+        DayArchetype.LIFT_LEGS,
+        DayArchetype.LIFT_PUSH,
+    ]
+    rebuilt = _enforce_strict_split_composition(
+        malformed, "ppl", True, profile, 6,
+    )
+    before = sum(1 for a in malformed if a.value.endswith("_plus_cardio"))
+    after = sum(1 for a in rebuilt if a.value.endswith("_plus_cardio"))
+    assert after == before, f"PLUS_CARDIO count changed {before} → {after}: {[a.value for a in rebuilt]}"
+    _ok("strict split rebuild preserved PLUS_CARDIO count")
+
+
 # ─── Main ──────────────────────────────────────────────────────────────────
 
 cases = [
@@ -360,6 +411,8 @@ cases = [
     test_endurance_recipe_mostly_conditioning,
     test_seven_day_always_has_recovery,
     test_hyrox_recipe_has_hybrid_days,
+    test_strict_split_rebuilds_bad_ppl_counts,
+    test_strict_split_preserves_plus_cardio_count_when_rebuilding,
 ]
 
 

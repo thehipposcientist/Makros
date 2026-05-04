@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sys
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.services.workout.set_programming import (
@@ -1200,6 +1201,84 @@ def test_callsite_http_metadata_preserves_cable_isolation_2_5lb_increment():
     _ok("Cable Pushdown metadata → increment 2.5")
 
 
+def test_callsite_live_scheme_preserves_top_set_to_backoff_transition():
+    print("\n[test] live setScheme maps heavy_top/backoff intent for progression router")
+    from app.routers.ai.progression import (
+        _planned_backoff_transition_weight,
+        _planned_sets_from_live_scheme,
+    )
+    from app.workout_progression import SetType as ProgressionSetType
+
+    scheme = [
+        {
+            "setNumber": 1,
+            "setType": "heavy_top",
+            "targetReps": "6-8",
+            "targetRir": 2,
+            "targetWeightLbs": 185,
+            "progressionMode": "load_first",
+        },
+        {
+            "setNumber": 2,
+            "setType": "backoff",
+            "targetReps": "6-8",
+            "targetRir": 2,
+            "targetWeightLbs": 170,
+            "progressionMode": "reps_first",
+        },
+    ]
+    planned = _planned_sets_from_live_scheme(
+        raw_scheme=scheme,
+        planned_set_count=2,
+        plan_rep_target="6-8",
+        fallback_set_type=ProgressionSetType.STRAIGHT,
+    )
+    assert planned[0].set_type == ProgressionSetType.TOP_SET
+    assert planned[1].set_type == ProgressionSetType.BACKOFF
+    assert planned[1].target_reps_override == "6-8"
+    assert _planned_backoff_transition_weight(
+        scheme,
+        completed_set_number=1,
+        next_set_number=2,
+    ) == 170.0
+    _ok("heavy_top set 1 → backoff set 2 keeps planned 170 lb target")
+
+
+def test_callsite_pre_set_endpoint_prefers_planned_target_over_last_session():
+    print("\n[test] /pre-set-recommendation uses PlanWeek target before stale last-session best")
+    from app.routers.ai.models import PreSetRecommendRequest
+    from app.routers.ai.progression import pre_set_recommendation
+
+    body = PreSetRecommendRequest(
+        exerciseName="Barbell Bench Press",
+        exerciseSlug="barbell_bench_press",
+        plannedSetNumber=1,
+        plannedSets=[
+            {
+                "setNumber": 1,
+                "setType": "heavy_top",
+                "targetReps": "6-8",
+                "targetRir": 2,
+                "targetWeightLbs": 185,
+                "progressionMode": "load_first",
+            }
+        ],
+        priorSetsThisSession=[],
+        lastSessionSets=[{"reps": 8, "weightLbs": 165}],
+        goal="muscle_gain",
+        equipment="barbell",
+        primaryMuscle="chest",
+    )
+    out = pre_set_recommendation(
+        body,
+        current_user=SimpleNamespace(id=1),
+        db=None,
+    )
+    assert out["recommendedWeightLbs"] == 185.0
+    assert "plan set" in out["rationaleShort"]
+    _ok("planned 185 lb target wins over last-session 165 lb")
+
+
 # ── Runner ──────────────────────────────────────────────────────────
 
 
@@ -1290,6 +1369,8 @@ def _run_all():
         test_callsite_full_review_pipeline_with_realistic_inputs,
         test_callsite_http_metadata_preserves_barbell_squat_10lb_increment,
         test_callsite_http_metadata_preserves_cable_isolation_2_5lb_increment,
+        test_callsite_live_scheme_preserves_top_set_to_backoff_transition,
+        test_callsite_pre_set_endpoint_prefers_planned_target_over_last_session,
     ]
     failed = 0
     for t in tests:

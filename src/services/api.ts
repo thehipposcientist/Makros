@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
 import { goalCategory } from '../constants/goalConfig';
 import { effectiveAge } from '../utils/age';
+import { resolveApiBaseUrl } from '../utils/apiBaseUrl';
 
 /** Exported for callers that need to hit the API outside the `request`
  *  helper (e.g. direct `fetch` for endpoints that return binary/large
@@ -11,51 +12,15 @@ export function getApiBaseUrl(): string {
   return getBaseUrl();
 }
 
-// Hard-stop list for placeholder values that must never reach a real
-// build. If any of these slip through `app.json.extra.apiBaseUrl` we
-// throw at first network call so the misconfiguration is obvious in
-// device logs instead of producing mysterious "network error" toasts.
-const PLACEHOLDER_API_HOSTS = [
-  'your-production-api.com',
-  'example.com',
-  'localhost',  // production builds should never point at localhost
-];
-
-function isPlaceholderApiUrl(url: string): boolean {
-  return PLACEHOLDER_API_HOSTS.some(p => url.includes(p));
-}
-
 function getBaseUrl(): string {
-  // Production / TestFlight build: read from app config extras. Set this
-  // via `app.json` → `expo.extra.apiBaseUrl` (or via EAS build secrets).
-  const configured = (Constants.expoConfig?.extra as { apiBaseUrl?: string } | undefined)?.apiBaseUrl;
-  if (!__DEV__) {
-    if (!configured || isPlaceholderApiUrl(configured)) {
-      // Hard fail with a loud, distinctive error. Easier to spot in
-      // crash reports than a silent 502 loop.
-      throw new Error(
-        '[Thallo] Production API URL is missing or set to a placeholder. ' +
-        'Set expo.extra.apiBaseUrl in app.json or via EAS build secrets.',
-      );
-    }
-    return configured;
-  }
-  // Dev: ignore the prod URL baked into app.json — that's for release builds.
-  // To point the dev client at a remote backend, set EXPO_PUBLIC_API_URL.
-  const devOverride = process.env.EXPO_PUBLIC_API_URL;
-  if (devOverride && devOverride.startsWith('http')) return devOverride;
-  const hostUri = Constants.expoConfig?.hostUri ?? '';
-  const isTunnel = hostUri.includes('ngrok') || hostUri.includes('exp.direct');
-  const host = !isTunnel ? hostUri.split(':')[0] : '';
-  if (host) return `http://${host}:8000`;
-
-  const isDevice = (Constants as { isDevice?: boolean }).isDevice === true;
-  if (Platform.OS === 'web' || !isDevice) return 'http://localhost:8000';
-
-  throw new Error(
-    '[Thallo] Dev API URL is missing for a physical device/tunnel session. ' +
-    'Set EXPO_PUBLIC_API_URL to your LAN or remote backend URL.',
-  );
+  return resolveApiBaseUrl({
+    configured: (Constants.expoConfig?.extra as { apiBaseUrl?: string } | undefined)?.apiBaseUrl,
+    devOverride: process.env.EXPO_PUBLIC_API_URL,
+    hostUri: Constants.expoConfig?.hostUri,
+    isDev: __DEV__,
+    isDevice: (Constants as { isDevice?: boolean }).isDevice === true,
+    platform: Platform.OS,
+  });
 }
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
@@ -1067,6 +1032,9 @@ export async function getWeightRecommendation(
     /** Primary muscle slug — used as a transfer target when the exact
      *  exercise has no direct history. */
     primaryMuscle?: string;
+    /** Planner-emitted per-set scheme. Lets live recs honor top-set →
+     *  backoff transitions instead of treating every set as straight work. */
+    setScheme?: import('../types').PlannedSet[] | null;
   },
 ): Promise<{ weightLbs: number; reps: number; tip: string }> {
   return request('/ai/recommend-weight', {
@@ -2727,6 +2695,7 @@ export async function getPreSetRecommendation(
     experienceLevel?: string;
     feelFromLastSet?: string;
     equipment?: string;
+    primaryMuscle?: string | null;
     weightLbs?: number;
   },
 ): Promise<{

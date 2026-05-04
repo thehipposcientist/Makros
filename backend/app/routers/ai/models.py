@@ -178,6 +178,10 @@ class WeightRecommendRequest(BaseModel):
     # Primary muscle slug from the exercise library — used as a transfer
     # target when the exact exercise has no direct history.
     primaryMuscle: str | None = None
+    # Planner-emitted per-set programming. Live recommendations use this
+    # to honor top-set/backoff transitions instead of treating all sets as
+    # straight work.
+    setScheme: list[dict] | None = None
 
 
 class TrainerQuestionRequest(BaseModel):
@@ -346,6 +350,7 @@ class PreSetRecommendRequest(BaseModel):
     experienceLevel: str | None = None
     feelFromLastSet: str | None = None      # easy|good|hard|failure|pain
     equipment: str | None = None
+    primaryMuscle: str | None = None
     weightLbs: float = 150.0
 
 

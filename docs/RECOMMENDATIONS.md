@@ -7,7 +7,7 @@ This is the running launch-readiness list for Thallo. The doc was originally wri
 
 The short version remains the same: Thallo has a real product foundation. The next work should not be a broad feature push. It should be a launch-readiness pass — legal/account basics, signed-build native reliability, production entitlements, observability, and performance cleanup around the biggest screens.
 
-Beta decision as of 2026-05-01: external beta is free. `app.json` now sets `expo.extra.freeBetaFullAccess=true` so external testers get the full guided plan, AI, readiness, and Watch loop without StoreKit/RevenueCat.
+Beta decision as of 2026-05-01: external beta is free. `app.json` sets `expo.extra.freeBetaFullAccess=true` for client UI gates, and the backend must explicitly set `BETA_FULL_ACCESS_ENABLED=1` if beta users should receive server-side Pro access without StoreKit/RevenueCat.
 
 ## Highest Priority Summary
 
@@ -22,7 +22,7 @@ Section A (Critical / Launch-Blocking) and section B (Legal, Privacy, Auth & Acc
 5. ~~Add an authenticated password-change endpoint for logged-in users~~ ✓ Done (A3).
 6. ~~Add session revocation / multi-device logout~~ ✓ Done (A4 — token_version column + bump on logout/change/reset).
 7. ~~Tighten Info.plist usage descriptions for Face ID, microphone, and photo library~~ ✓ Done (B1 — both app.json and raw plist).
-8. Keep the beta free/full-access; replace the beta access override with real StoreKit 2 or RevenueCat entitlements before charging.
+8. Keep the beta free/full-access only through explicit client + backend beta flags; replace the beta access override with real StoreKit 2 or RevenueCat entitlements before charging.
 9. Add crash reporting, analytics, native bridge logging, Watch sync metrics, and AI cost/error tracking.
 10. Split and lazy-load the largest screens, especially `HomeScreen` and `ActiveWorkoutScreen`.
 11. Audit ActiveWorkoutScreen setInterval cleanup — 17 timer instances with overlapping responsibilities risk leaks and double-fires on resume.
@@ -57,6 +57,9 @@ Implemented in the 2026-04-29 launch-readiness pass (current session) — comple
 - **B6 — Tighter rate limits.** `/auth/email-verification/request` lowered from `5/hour` to `3/hour`. `/auth/recovery-question` lowered from `20/hour` to `10/hour`. Reduces account-enumeration and email-bombing surface.
 - **B8 — DEV_EMAIL_TOKENS isolation test.** New `backend/tests/test_auth_dev_token_isolation.py` (4 cases) pins the gating logic so dev tokens never leak when the env var is unset, set to `0`, or set to a truthy-but-not-`1` value. Registered in `run_all.py`.
 - **B9 — Gear photo EXIF strip.** `pickGearPhoto` in `GearScreen.tsx` now passes `exif: false` to both `launchCameraAsync` and `launchImageLibraryAsync`. Matches the existing `MealEditModal` photo path. Uploaded gear photos no longer carry GPS coordinates or device metadata.
+- **C4 — Startup background data jobs gated.** Schema migrations still run on boot, but food micronutrient enrichment, exercise image refresh, muscle-fatigue backfill, and gut-health backfill now stay off unless explicitly enabled through startup env flags. The pure startup config helper is covered by `test_startup_maintenance`.
+- **D17 — Watch-selected custom activity handoff.** Watch quick-start payloads now pass their selected category/subtype into `LiveActivityTracker`, which auto-starts the matching phone tracker activity instead of making the user pick again.
+- **D20 — Per-session gear picker.** Active workout completion now prompts when multiple active gear items match a session and passes selected `gear_ids` through `/workouts/complete`, so the backend credits only chosen gear instead of double-counting keyword matches.
 
 Implemented in the 2026-04-29 feature-gap pass (current session, after launch-readiness pass):
 
@@ -145,7 +148,7 @@ The sections below are concrete punch-list items found by sweeping the codebase.
 | C1 | ActiveWorkoutScreen has 17 setInterval instances | `src/screens/ActiveWorkoutScreen.tsx:758-1471` (HK polling + rest timer + sync debounce) | Consolidate timers behind a single `useTimer` hook. Track owner refs explicitly. Comment at line 1207–1223 admits the intervals "pause when JS suspends" with timestamp fallback parallel logic. |
 | C2 | HomeScreen has 121 useState calls and is not memoized | `src/screens/HomeScreen.tsx` | Group state by domain (workout / meals / settings / social) into reducers or context providers. Wrap heavy children in `React.memo`. |
 | C3 | Backend startup re-seeds equipment/exercises/foods on every hot restart | `backend/app/database.py:1164-1169` | Idempotent already, but adds 5–15s to every container restart. Skip if marker row exists. |
-| C4 | OpenAI call in startup background thread | `backend/app/main.py:_startup_enrich_food_micros:134-210` | Move to a daily cron. Currently runs unbounded re-enrichment on every boot. |
+| C4 | OpenAI call in startup background thread | `backend/app/main.py:_startup_enrich_food_micros` | ✓ Done — default-off behind `STARTUP_ENRICH_FOODS_ENABLED=1`; startup background job config is tested. Run deliberately as maintenance/cron, not on every boot. |
 | C5 | N+1 queries on workout-detail fetch | `backend/app/routers/workouts.py:2406` (loop + `db.exec(select(ExerciseSet)…)` per exercise) | Single `IN` query then group by exercise id. ✓ Done — `_build_session_responses_batch` collapses list/detail to 3 queries; `progression_insights` collapses nested loop to 2; `delete_workout` uses bulk DELETE WHERE id IN(...). |
 | C6 | N+1 in social digest builder | `backend/app/services/social/digest.py:92-104` | ✓ Already batched (verified — uses `.in_(friend_ids)` for profiles, users, goals, completions). Doc was stale. |
 | C7 | N+1 in meal item fetch | `backend/app/routers/meals.py:743` (per-meal MealItem query) | ✓ Mostly batched (`day_summary` uses `.in_(meal_ids)`); only remaining per-row pattern is `delete_meal` cascade which is single-meal so not a true N+1. |
@@ -180,10 +183,10 @@ The sections below are concrete punch-list items found by sweeping the codebase.
 | D14 | No friend invite link / friend-code generation | `FriendsModal.tsx` only supports username search | Add deep-link invites with reusable per-user codes. |
 | D15 | No block/report UX | FriendsModal has remove-via-pending only | Add explicit Block + Report flows. App Review will ask. |
 | D16 | Watch complications and Siri Shortcuts disabled | `targets/thallo-watch-complication/` and `expo-target.config.js.disabled` | Defer until post-launch. Document the Xcode wiring needed. |
-| D17 | TODO: pass watch-selected activity through to LiveActivityTracker | `HomeScreen.tsx:2464` | Wire the watch-selected category/subtype into the activity picker so the user doesn't have to re-pick. |
+| D17 | TODO: pass watch-selected activity through to LiveActivityTracker | `HomeScreen.tsx` / `LiveActivityTracker.tsx` | ✓ Done — watch quick-start category/subtype resolves to the matching tracker option and starts it directly. |
 | D18 | TODO: persist protein preference once UserCoachingState supports it | `backend/app/services/nutrition/weekly_review.py:402` | Add `preferred_protein_g` to `UserCoachingState`. |
 | D19 | TODO: wire DayState.session_rpe_avg | `ProgressScreen.tsx:547` | Plumb the field through; surface RPE trend. |
-| D20 | Per-session gear picker | Gear auto-tracks via keyword matching, but two pairs of running shoes both match "run" → double-counting | Add an optional "which gear did you use?" prompt on session save. Default to keyword match. |
+| D20 | Per-session gear picker | Gear auto-tracks via keyword matching, but two pairs of running shoes both match "run" → double-counting | ✓ Done — matching gear prompts on completion; selected IDs bypass keyword auto-match and explicit "none today" credits nothing. |
 
 ## E. UX Rough Edges
 

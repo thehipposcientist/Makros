@@ -1,5 +1,7 @@
 import os
 from datetime import datetime, timezone
+from collections.abc import Mapping
+from dataclasses import dataclass
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +13,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from app.cors import resolve_cors_config
 from app.database import create_db_and_tables, engine
 from app.limiter import limiter
 from app.logging_setup import configure_logging, get_logger, new_request_id, set_request_context
@@ -23,18 +26,21 @@ logger = get_logger("app.main")
 app = FastAPI(title="Thallo API", version="0.1.0")
 
 # CORS is read from env so staging / prod can differ. `CORS_ORIGINS` is a
-# comma-separated list; leave it blank for dev to fall back to `*`.
-_cors_raw = os.getenv("CORS_ORIGINS", "").strip()
-_cors_origins = [o.strip() for o in _cors_raw.split(",") if o.strip()] or ["*"]
+# comma-separated list. Dev falls back to wildcard. Production defaults to
+# no browser origins unless explicit origins are configured; native apps do
+# not rely on CORS.
+_cors_config = resolve_cors_config()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=True,
+    allow_origins=_cors_config.allow_origins,
+    allow_credentials=_cors_config.allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-if _cors_origins == ["*"]:
-    logger.warning("cors_wildcard_in_use", extra={"hint": "set CORS_ORIGINS in prod"})
+if _cors_config.allow_origins == ["*"]:
+    logger.warning("cors_wildcard_in_use", extra={"hint": "dev only; set CORS_ORIGINS for browser clients"})
+elif _cors_config.is_production and not _cors_config.allow_origins:
+    logger.info("cors_disabled_for_browser_origins", extra={"hint": "native-app-only production mode"})
 
 
 class _RequestIdMiddleware(BaseHTTPMiddleware):
@@ -83,6 +89,28 @@ app.add_middleware(_SecurityHeadersMiddleware)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+
+@dataclass(frozen=True)
+class StartupBackgroundTasksConfig:
+    enrich_food_micros: bool
+    enrich_exercise_images: bool
+    backfill_muscle_fatigue: bool
+    backfill_gut_health: bool
+    purge_expired_soft_deletes: bool
+
+
+def startup_background_tasks_config(
+    env: Mapping[str, str] | None = None,
+) -> StartupBackgroundTasksConfig:
+    env = os.environ if env is None else env
+    return StartupBackgroundTasksConfig(
+        enrich_food_micros=env.get("STARTUP_ENRICH_FOODS_ENABLED", "0") == "1",
+        enrich_exercise_images=env.get("STARTUP_ENRICH_EXERCISE_IMAGES_ENABLED", "0") == "1",
+        backfill_muscle_fatigue=env.get("STARTUP_BACKFILL_MUSCLE_FATIGUE_ENABLED", "0") == "1",
+        backfill_gut_health=env.get("GUT_BACKFILL_ENABLED", "0") == "1",
+        purge_expired_soft_deletes=env.get("ACCOUNT_HARD_DELETE_ENABLED", "1") == "1",
+    )
 
 
 def _cleanup_orphaned_plan_jobs() -> None:
@@ -403,11 +431,27 @@ def on_startup():
     logger.info("app_startup", extra={"version": app.version})
     create_db_and_tables()
     _cleanup_orphaned_plan_jobs()
-    _startup_enrich_food_micros()
-    _startup_enrich_exercise_images()
-    _startup_backfill_muscle_fatigue()
-    _startup_backfill_gut_health()
-    _purge_expired_soft_deletes()
+    background_tasks = startup_background_tasks_config()
+    if background_tasks.enrich_food_micros:
+        _startup_enrich_food_micros()
+    else:
+        logger.info("food_enrichment_disabled", extra={"reason": "STARTUP_ENRICH_FOODS_ENABLED=0"})
+    if background_tasks.enrich_exercise_images:
+        _startup_enrich_exercise_images()
+    else:
+        logger.info("exercise_image_enrichment_disabled", extra={"reason": "STARTUP_ENRICH_EXERCISE_IMAGES_ENABLED=0"})
+    if background_tasks.backfill_muscle_fatigue:
+        _startup_backfill_muscle_fatigue()
+    else:
+        logger.info("fatigue_backfill_disabled", extra={"reason": "STARTUP_BACKFILL_MUSCLE_FATIGUE_ENABLED=0"})
+    if background_tasks.backfill_gut_health:
+        _startup_backfill_gut_health()
+    else:
+        logger.info("gut_backfill_disabled", extra={"reason": "GUT_BACKFILL_ENABLED=0"})
+    if background_tasks.purge_expired_soft_deletes:
+        _purge_expired_soft_deletes()
+    else:
+        logger.info("hard_delete_disabled", extra={"reason": "ACCOUNT_HARD_DELETE_ENABLED=0"})
     logger.info("app_startup_complete")
 
 

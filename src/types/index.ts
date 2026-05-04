@@ -717,6 +717,9 @@ export interface SessionExercise {
    *  history-aware). Forwarded to the weight-recommendation endpoint as
    *  `plannedTargetWeightLbs` so recs stay grounded in the session plan. */
   targetWeightLbs?: number | null;
+  /** Per-set programming emitted by the planner. Active workout keeps
+   *  this so live recommendations can honor top-set/backoff intent. */
+  setScheme?: PlannedSet[] | null;
   /** Canonical slug for this exercise (when known). Lets the weight-rec
    *  endpoint skip the name-based lookup and run the performance-profile
    *  pipeline directly. */

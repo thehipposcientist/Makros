@@ -180,7 +180,7 @@ def test_04_me_returns_current_user():
     body = _check(r, 200, "GET /auth/me")
     assert body.get("email") == EMAIL
     assert body.get("id") == _user_id
-    assert body.get("subscription_tier") == "pro"
+    assert body.get("subscription_tier") == "free"
 
 
 def test_05_meta_exercises_seeded():
@@ -198,11 +198,11 @@ def test_06_meta_goals_seeded():
 
 
 def test_07_pro_workout_analytics_work_for_beta_pro_then_gate_free():
-    # External beta is intentionally full-access: new users register as
-    # beta Pro. Verify the Pro endpoints work, then explicitly downgrade
-    # the smoke user to keep the free entitlement gate covered.
+    # New accounts fail closed to Free. Explicitly grant Pro, verify the
+    # Pro endpoints work, then downgrade to keep the free gate covered.
+    _set_subscription_tier("pro")
     r = _http.get(f"{BASE_URL}/workouts/fatigue", headers=_auth(), timeout=15)
-    body = _check(r, 200, "GET /workouts/fatigue beta pro")
+    body = _check(r, 200, "GET /workouts/fatigue pro")
     assert body.get("readiness_score") == 100, (
         f"fresh beta user should be at 100%% readiness, got {body.get('readiness_score')}"
     )

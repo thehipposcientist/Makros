@@ -2,6 +2,7 @@ from sqlmodel import SQLModel, create_engine, Session
 from sqlalchemy import bindparam, text
 from dotenv import load_dotenv
 import os
+from collections.abc import Mapping
 
 load_dotenv()
 
@@ -130,13 +131,18 @@ def _ensure_user_subscription_tier_column() -> None:
                 text("SELECT 1 FROM app_migrations WHERE name = :name"),
                 {"name": backfill_marker},
             ).first()
-            if applied is None:
+            if applied is None and os.getenv("BETA_BACKFILL_EXISTING_USERS_TO_PRO", "0") == "1":
                 conn.execute(text(
                     'UPDATE "user" SET subscription_tier = \'pro\' '
                     "WHERE subscription_tier IS NULL "
                     "OR subscription_tier = '' "
                     "OR lower(subscription_tier) = 'free'"
                 ))
+                conn.execute(
+                    text("INSERT INTO app_migrations (name) VALUES (:name)"),
+                    {"name": backfill_marker},
+                )
+            elif applied is None:
                 conn.execute(
                     text("INSERT INTO app_migrations (name) VALUES (:name)"),
                     {"name": backfill_marker},
@@ -1673,6 +1679,16 @@ def run_data_maintenance_tasks(
     _backfill_tricep_kickbacks_display_name()
 
 
+def startup_data_maintenance_settings(
+    env: Mapping[str, str] | None = None,
+) -> tuple[bool, bool, bool]:
+    env = os.environ if env is None else env
+    enabled = env.get("STARTUP_DATA_MAINTENANCE_ENABLED", "0") == "1"
+    include_backfills = env.get("STARTUP_BACKFILLS_ENABLED", "1") == "1"
+    include_seeds = env.get("STARTUP_SEEDS_ENABLED", "1") == "1"
+    return enabled, include_backfills, include_seeds
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
     from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, ClientTelemetryEvent, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, PlanWeek, PlanDay, UserEquipmentProfile, GearItem
@@ -1722,11 +1738,11 @@ def create_db_and_tables():
     _ensure_skip_reason_columns()
     _ensure_plan_week_checkins_table()
 
-    import os as _os
-    if _os.getenv("STARTUP_DATA_MAINTENANCE_ENABLED", "0") == "1":
+    maintenance_enabled, include_backfills, include_seeds = startup_data_maintenance_settings()
+    if maintenance_enabled:
         run_data_maintenance_tasks(
-            include_backfills=_os.getenv("STARTUP_BACKFILLS_ENABLED", "1") == "1",
-            include_seeds=_os.getenv("STARTUP_SEEDS_ENABLED", "1") == "1",
+            include_backfills=include_backfills,
+            include_seeds=include_seeds,
         )
     else:
         print("[maintenance] STARTUP_DATA_MAINTENANCE_ENABLED=0 — skipping data maintenance")

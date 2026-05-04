@@ -37,7 +37,7 @@ import ViewShot from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle } from 'react-native-svg';
-import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity, SavedWorkoutTemplate, UserProfile } from '../types';
+import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity, SavedWorkoutTemplate, UserProfile, PlannedSet } from '../types';
 import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests, loadWorkoutTemplates, upsertWorkoutTemplate, exerciseHistoryNamesMatch } from '../utils/workoutHistory';
 import {
   getAppleWorkoutCaloriesForWindow,
@@ -47,6 +47,7 @@ import {
   readHealthSummary,
 } from '../services/appleHealth';
 import { calculateHealthScore } from '../utils/healthScore';
+import { findMatchingGearForSession } from '../utils/gearSessionMatching';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, listWorkoutSessions, type WorkoutPostSummary, type WorkoutSessionRecord, type WorkoutSessionExerciseRecord, type WorkoutSessionSetRecord } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
@@ -480,6 +481,30 @@ function getTargetSetCount(targetSets: unknown): number {
   return 3;
 }
 
+function plannedSetsForLiveRecommendation(ex: SessionExercise): PlannedSet[] {
+  const fallbackReps = String(ex.targetReps ?? '8-12');
+  const fallbackWeight = ex.targetWeightLbs ?? null;
+  const scheme = Array.isArray(ex.setScheme) ? ex.setScheme : [];
+  if (scheme.length > 0) {
+    return scheme.map((set, index): PlannedSet => ({
+      setNumber: Number(set.setNumber) > 0 ? Number(set.setNumber) : index + 1,
+      setType: set.setType || 'volume',
+      targetReps: String(set.targetReps || fallbackReps),
+      targetRir: typeof set.targetRir === 'number' ? set.targetRir : 2,
+      progressionMode: set.progressionMode || 'reps_first',
+      targetWeightLbs: set.targetWeightLbs ?? fallbackWeight,
+    }));
+  }
+  return Array.from({ length: getTargetSetCount(ex.targetSets) }, (_, n): PlannedSet => ({
+    setNumber: n + 1,
+    setType: 'volume',
+    targetReps: fallbackReps,
+    targetRir: 2,
+    progressionMode: 'reps_first',
+    targetWeightLbs: fallbackWeight,
+  }));
+}
+
 function parseDisplaySetIndex(label: string | null | undefined): number {
   const match = String(label ?? '').match(/set\s+(\d+)/i);
   const parsed = match ? Number(match[1]) : 1;
@@ -873,6 +898,7 @@ function workoutExerciseToSessionExercise(ex: any): SessionExercise {
     image_url: ex.image_url,
     video_id: ex.video_id ?? null,
     targetWeightLbs: ex.targetWeightLbs ?? null,
+    setScheme: Array.isArray(ex.setScheme) ? ex.setScheme : Array.isArray(ex.set_scheme) ? ex.set_scheme : null,
     slug: ex.slug ?? ex.exerciseSlug ?? null,
     primaryMuscle: ex.primary_muscle ?? ex.primaryMuscle ?? ex._primary_muscle ?? null,
     secondaryMuscles: ex.secondary_muscles ?? ex.secondaryMuscles ?? ex._secondary_muscles ?? [],
@@ -895,6 +921,7 @@ function savedExerciseFallback(saved: any): SessionExercise {
     image_url: saved?.image_url,
     video_id: saved?.video_id,
     targetWeightLbs: saved?.targetWeightLbs,
+    setScheme: saved?.setScheme ?? saved?.set_scheme,
     slug: saved?.slug,
     primaryMuscle: saved?.primaryMuscle ?? saved?.primary_muscle,
     secondaryMuscles: saved?.secondaryMuscles ?? saved?.secondary_muscles,
@@ -922,6 +949,7 @@ function restoreSavedSessionExercise(saved: any, fallback: SessionExercise): Ses
     image_url: saved?.image_url ?? fallback.image_url,
     video_id: saved?.video_id ?? fallback.video_id ?? null,
     targetWeightLbs: saved?.targetWeightLbs ?? fallback.targetWeightLbs ?? null,
+    setScheme: Array.isArray(saved?.setScheme) ? saved.setScheme : Array.isArray(saved?.set_scheme) ? saved.set_scheme : fallback.setScheme ?? null,
     slug: saved?.slug ?? fallback.slug ?? null,
     primaryMuscle: saved?.primaryMuscle ?? saved?.primary_muscle ?? fallback.primaryMuscle ?? null,
     secondaryMuscles: saved?.secondaryMuscles ?? saved?.secondary_muscles ?? fallback.secondaryMuscles ?? [],
@@ -947,6 +975,7 @@ function serializeActiveWorkoutExercise(ex: SessionExercise, exerciseIndex: numb
     image_url: ex.image_url,
     video_id: ex.video_id,
     targetWeightLbs: ex.targetWeightLbs,
+    setScheme: ex.setScheme ?? null,
     slug: ex.slug,
     primaryMuscle: ex.primaryMuscle ?? ex.primary_muscle ?? null,
     secondaryMuscles: ex.secondaryMuscles ?? ex.secondary_muscles ?? [],
@@ -1689,14 +1718,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           workoutDate: dateKey(new Date()),
           focus: workout.focus,
         });
-        const plannedSets = Array.from({ length: getTargetSetCount(ex.targetSets) }, (_, n) => ({
-          setNumber: n + 1,
-          setType: 'working',
-          targetReps: String(ex.targetReps ?? '8-12'),
-          targetRir: 2,
-          progressionMode: 'load_first',
-          targetWeightLbs: null,
-        }));
+        const plannedSets = plannedSetsForLiveRecommendation(ex);
         const rec = await getPreSetRecommendation(authToken, {
           exerciseName: ex.name,
           exerciseSlug: ex.slug ?? undefined,
@@ -1706,6 +1728,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           lastSessionSets: (lastSets ?? []).map(s => ({ reps: s.reps, weightLbs: s.weightLbs })),
           goal,
           equipment: typeof ex.equipment === 'string' ? ex.equipment : undefined,
+          primaryMuscle: ex.primaryMuscle ?? undefined,
           weightLbs,
         });
         if (cancelled) return;
@@ -2386,6 +2409,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       isCompound: selected.is_compound ?? previous.isCompound ?? null,
       aiRecommendation: undefined,
       targetWeightLbs: null,
+      setScheme: null,
       weightRecommendationSource: null,
       targetSets: previous.targetSets,
       targetReps: previous.targetReps,
@@ -3607,6 +3631,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         lastSessionBestWeightLbs: bests?.lastSession?.weightLbs,
         lastSessionBestReps: bests?.lastSession?.reps,
         plannedTargetWeightLbs: ex.targetWeightLbs ?? undefined,
+        setScheme: plannedSetsForLiveRecommendation(ex),
         exerciseSlug: ex.slug ?? undefined,
         equipment: ex.equipment,
         primaryMuscle: ex.primaryMuscle ?? undefined,
@@ -3934,13 +3959,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         try {
           const { listGear } = await import('../services/api');
           const gear = await listGear(authToken);
-          const focusLower = workout.focus.toLowerCase();
-          const exerciseNamesLower = workout.exercises.map(ex => ex.name.toLowerCase());
-          const matches = gear.filter(g => {
-            const kws = (g.auto_track_keywords ?? []).map(k => k.toLowerCase());
-            if (kws.length === 0) return false;
-            return kws.some(kw => focusLower.includes(kw) || exerciseNamesLower.some(n => n.includes(kw)));
-          });
+          const matches = findMatchingGearForSession(
+            gear,
+            workout.focus,
+            workout.exercises.map(ex => ex.name),
+          );
           if (matches.length >= 2) {
             const picked = await new Promise<number[] | null>((resolve) => {
               setGearPickerCandidates(matches);

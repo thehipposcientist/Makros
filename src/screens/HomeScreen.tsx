@@ -87,7 +87,7 @@ import WeeklyDigestCard from '../components/WeeklyDigestCard';
 import WeeklyCheckinCard from '../components/WeeklyCheckinCard';
 import TrainingReadinessCard from '../components/TrainingReadinessCard';
 import BirthdateBackfillCard from '../components/BirthdateBackfillCard';
-import CycleGuidanceCard from '../components/PeriodSupportCard';
+import CycleGuidanceSection from '../components/home/CycleGuidanceSection';
 import GroceryListModal from '../components/GroceryListModal';
 import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
 import BirthdayBanner from '../components/BirthdayBanner';
@@ -109,6 +109,8 @@ import { setActiveWatchSessionId } from '../utils/activeWatchSession';
 import { dynamicCompactTextProps, dynamicTextProps } from '../utils/dynamicType';
 import { effectiveAge } from '../utils/age';
 import { reduceWorkoutForCycleSymptoms } from '../utils/cycleSupport';
+import type { LiveActivityInitialActivity } from '../utils/liveActivityQuickStart';
+import { workoutPlanFromPlanWeek } from '../utils/planWeekProjection';
 import { useManagedInterval } from '../hooks/useManagedInterval';
 import {
   FREE_MEAL_ROUTINE_LIMIT,
@@ -1381,14 +1383,6 @@ function resolveTodayScheduleItem(
     : null;
 }
 
-function workoutPlanFromPlanWeek(planWeek: import('../services/api').PlanWeekResponse): WorkoutPlan {
-  return {
-    name: 'Active Week',
-    totalDays: planWeek.days.length,
-    days: planWeek.days.map(d => (d.workout ?? { day: 'Rest', focus: 'Rest', exercises: [] }) as WorkoutDay),
-  };
-}
-
 // humanizeToken and buildExerciseGuide imported from '../utils/exerciseGuide'
 
 function compactGoalProgressText(
@@ -2087,6 +2081,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [showTrainerNote, setShowTrainerNote] = useState(false);
   const [showLogActivity, setShowLogActivity] = useState(false);
   const [showLiveTracker, setShowLiveTracker] = useState(false);
+  const [liveTrackerInitialActivity, setLiveTrackerInitialActivity] = useState<LiveActivityInitialActivity | null>(null);
   // Workout template builder modal — create a new template (or edit an
   // existing one) without having to start an active workout. Distinct
   // from the "Save as Template" button on the active-workout summary.
@@ -3170,12 +3165,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             // already started locally on the watch side; the phone
             // covers timer + log + HK write on finish.
             const subtype = String(payload?.subtype || 'run');
+            const category = typeof payload?.category === 'string' ? payload.category : undefined;
             console.log('[watch] start_custom_workout subtype=', subtype);
+            setLiveTrackerInitialActivity({ category, subtype });
             setShowLiveTracker(true);
-            // Note: the LiveActivityTracker doesn't currently accept
-            // a pre-selected activity prop — user still picks on phone.
-            // TODO: pass watch-selected activity through to skip the
-            // pick step. For now, opening the tracker is the win.
             return;
           }
           if (command === 'pull_state') {
@@ -3926,11 +3919,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           // existing rendering code (DayCard, get7DaySchedule consumers,
           // etc.) keeps working while we migrate them off the cycling
           // model. Each PlanDay's `workout` is already WorkoutDay-shaped.
-          const projected: WorkoutPlan = {
-            name: 'Active Week',
-            totalDays: pw.days.length,
-            days: pw.days.map(d => (d.workout ?? { day: 'Rest', focus: 'Rest', exercises: [] }) as any),
-          };
+          const projected = workoutPlanFromPlanWeek(pw);
           const serialized = JSON.stringify(projected);
           await AsyncStorage.setItem('aiWorkoutPlan', serialized).catch(() => {});
           aiWorkoutRaw = serialized;
@@ -5835,11 +5824,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         if (freshWeek?.days?.length) {
           planWeekRef.current = freshWeek;
           setPlanWeek(freshWeek);
-          const projected: WorkoutPlan = {
-            name: 'Active Week',
-            totalDays: freshWeek.days.length,
-            days: freshWeek.days.map(d => (d.workout ?? { day: 'Rest', focus: 'Rest', exercises: [] }) as any),
-          };
+          const projected = workoutPlanFromPlanWeek(freshWeek);
           setWorkoutPlan(projected);
           AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(projected)).catch(() => {});
         }
@@ -5895,11 +5880,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         if (freshWeek?.days?.length) {
           planWeekRef.current = freshWeek;
           setPlanWeek(freshWeek);
-          const projected: WorkoutPlan = {
-            name: 'Active Week',
-            totalDays: freshWeek.days.length,
-            days: freshWeek.days.map(d => (d.workout ?? { day: 'Rest', focus: 'Rest', exercises: [] }) as any),
-          };
+          const projected = workoutPlanFromPlanWeek(freshWeek);
           setWorkoutPlan(projected);
           AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(projected)).catch(() => {});
         }
@@ -6932,20 +6913,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
             {/* Health-linked cycle guidance with period-phase advice and
                 user-triggered today-only workout adjustments. */}
-            {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (() => {
-              const todayScheduleItem = schedule?.find(s => dateKey(s.date) === todayKey()) ?? schedule?.[0] ?? null;
-              return (
-                <CycleGuidanceCard
-                  themeName={userProfile.themePreference}
-                  todaysWorkout={todayScheduleItem?.workout ?? null}
-                  isWorkoutDone={todayDone}
-                  isWorkoutSkipped={skippedDates.has(todayKey())}
-                  onUseLighterWorkout={handlePeriodLighterWorkout}
-                  onUseRecoveryDay={handlePeriodRecoveryDay}
-                  onAddHydration={() => handleHydrationDelta(16, todayKey())}
-                />
-              );
-            })()}
+            <CycleGuidanceSection
+              visible={renderedWorkoutSubTab === 'plan' && !isFreeTier && !!authToken}
+              themeName={userProfile.themePreference}
+              todaysWorkout={(schedule?.find(s => dateKey(s.date) === todayKey()) ?? schedule?.[0] ?? null)?.workout ?? null}
+              todayDone={todayDone}
+              todaySkipped={skippedDates.has(todayKey())}
+              onUseLighterWorkout={handlePeriodLighterWorkout}
+              onUseRecoveryDay={handlePeriodRecoveryDay}
+              onAddHydration={() => handleHydrationDelta(16, todayKey())}
+            />
 
             {/* Weekly digest card — only renders Sunday / post-6pm (Feature 3) */}
             {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (
@@ -7734,7 +7711,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           },
                         ]);
                       }}
-                      onStartCustom={() => setShowLiveTracker(true)}
+                      onStartCustom={() => {
+                        setLiveTrackerInitialActivity(null);
+                        setShowLiveTracker(true);
+                      }}
                       onLogActivity={() => setShowLogActivity(true)}
                       onEditPlan={() => setWorkoutSubTab('equipment')}
                       onNewTemplate={() => {
@@ -7780,7 +7760,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           borderColor: themeColors.primary + '55',
                           backgroundColor: themeColors.primary + '0E',
                         }}
-                        onPress={() => setShowLiveTracker(true)}
+                        onPress={() => {
+                          setLiveTrackerInitialActivity(null);
+                          setShowLiveTracker(true);
+                        }}
                         activeOpacity={0.7}>
                         <Ionicons name="flash" size={14} color={themeColors.primary} />
                         <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.primary, letterSpacing: 0.3 }}>Custom</Text>
@@ -9452,7 +9435,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
       <LiveActivityTracker
         visible={showLiveTracker}
-        onClose={() => setShowLiveTracker(false)}
+        initialActivity={liveTrackerInitialActivity}
+        onClose={() => {
+          setShowLiveTracker(false);
+          setLiveTrackerInitialActivity(null);
+        }}
         themeName={userProfile.themePreference}
         enableHealthKit={!isFreeTier}
         onSave={async (session) => {

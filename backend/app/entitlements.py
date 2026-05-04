@@ -1,4 +1,5 @@
 from fastapi import Depends, HTTPException, status
+import os
 
 from app.auth import get_current_user
 from app.models import User
@@ -9,6 +10,17 @@ FREE_SAVED_MEAL_LIMIT = 5
 def tier_of(user: User | None) -> str:
     tier = (getattr(user, "subscription_tier", None) or "free").strip().lower()
     return "pro" if tier == "pro" else "free"
+
+
+def beta_full_access_enabled() -> bool:
+    return os.getenv("BETA_FULL_ACCESS_ENABLED", "0").strip() == "1"
+
+
+def default_subscription_tier() -> str:
+    """Fail closed for new accounts unless the backend explicitly opts
+    into free beta access. The client beta flag only affects local UI
+    gates; server entitlements must be explicit."""
+    return "pro" if beta_full_access_enabled() else "free"
 
 
 def is_pro(user: User | None) -> bool:

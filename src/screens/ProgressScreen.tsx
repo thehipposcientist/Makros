@@ -47,6 +47,7 @@ import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
+import { estimate1RM, ONE_RM_REP_LIMIT } from '../utils/oneRepMax';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord, listWorkoutSessions, WorkoutSessionRecord, getWeightEntries } from '../services/api';
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -2691,14 +2692,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Text style={styles.emptyBody}>No exercises match your search.</Text>
                   </View>
                 ) : filteredPrsForTab.map((pr, i) => {
-                  // Inline Epley 1RM only for compound lifts. Showing
+                  // Estimated 1RM only for compound lifts. Showing
                   // an estimated 1RM on a 25 lb lateral raise or a
-                  // 12 lb cable curl is misleading — Epley breaks
-                  // down badly above 10 reps and isolation work
+                  // 12 lb cable curl is misleading — isolation work
                   // doesn't really map to a "1RM" in any meaningful
                   // way. Prefer the structured isCompound field from
                   // history; fall back to regex heuristic for older
                   // sessions that predate the field.
+                  //
+                  // Formula: averaged Epley + Brzycki via the shared
+                  // `estimate1RM` helper (src/utils/oneRepMax.ts) — same
+                  // math used everywhere a per-set 1RM displays. Returns
+                  // null beyond ONE_RM_REP_LIMIT (10 reps) since the
+                  // literature stops being usable past that.
                   const lower = pr.exerciseName.toLowerCase();
                   const _compoundField = exerciseCompoundMap[lower];
                   const isCompound = _compoundField != null
@@ -2707,8 +2713,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       /\b(squat|deadlift|bench|press|row|pull[-\s]?up|chin[-\s]?up|dip|clean|snatch|hip\s*thrust|lunge|good\s*morning)\b/.test(lower)
                       && !/\b(curl|fly|raise|extension|kickback|pulldown|crunch|skullcrusher|crossover|pec\s*deck|leg\s*curl|leg\s*extension)\b/.test(lower)
                     );
-                  const est1rm = isCompound && pr.weightLbs > 0 && pr.reps > 0 && pr.reps <= 12
-                    ? Math.round(pr.weightLbs * (1 + pr.reps / 30))
+                  const _est1rmRaw = isCompound && pr.reps <= ONE_RM_REP_LIMIT
+                    ? estimate1RM(pr.weightLbs, pr.reps)
+                    : null;
+                  const est1rm = _est1rmRaw != null ? Math.round(_est1rmRaw)
                     : null;
                   return (
                     <FadeInView key={i} delay={Math.min(i * 35, 350)} duration={260} slideDistance={6}>

@@ -9,9 +9,11 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
+    "check:deps": "node scripts/check-dependency-policy.mjs",
+    "audit:prod": "npm audit --omit=dev --audit-level=high",
     "test:frontend": "node scripts/run-frontend-tests.mjs",
     "test:backend": "make test",
-    "verify:beta": "npm run typecheck && npm run test:frontend && npx expo-doctor && npm run test:backend"
+    "verify:beta": "npm run check:deps && npm run typecheck && npm run test:frontend && npx expo-doctor && npm run test:backend"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",

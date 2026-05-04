@@ -20,8 +20,12 @@ const tests = [
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/planChangeBehavior.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/injuryCheckins.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/coachApplyState.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/apiBaseUrl.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/birthday.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/cycleSupport.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/oneRepMax.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/liveActivityQuickStart.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/gearSessionMatching.test.ts'],
 ];
 
 for (const args of tests) {

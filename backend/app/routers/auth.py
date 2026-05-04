@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.database import get_session
+from app.entitlements import default_subscription_tier
 from app.limiter import limiter
 from app.logging_setup import get_logger, set_request_context
 from app.models import User, UserCreate, UserRead, LoginRequest, Token
@@ -355,13 +356,7 @@ def register(body: UserCreate, request: Request, session: Session = Depends(get_
         ai_disclaimer_version=legal_version,
         email_verification_token_hash=hash_password(email_token),
         email_verification_expires_at=_token_expiry(),
-        # Beta default: every new sign-up starts on Pro so plan
-        # generation, AI features, and coach chat work out of the box.
-        # The frontend `freeBetaFullAccess` flag handles client-side
-        # gates; this aligns the BACKEND so `require_pro_feature`
-        # endpoints (plan_weeks, /ai/*, /coach/*) don't 403 fresh users.
-        # Flip back to "free" once paid tiers ship.
-        subscription_tier="pro",
+        subscription_tier=default_subscription_tier(),
     )
     session.add(user)
     session.commit()
@@ -512,7 +507,7 @@ def login_with_apple(
         ai_disclaimer_accepted_at=now,
         ai_disclaimer_version=legal_version,
         email_verified_at=now,
-        subscription_tier="pro",
+        subscription_tier=default_subscription_tier(),
     )
     session.add(user)
     session.commit()
@@ -595,7 +590,7 @@ def login_with_google(
         ai_disclaimer_accepted_at=now,
         ai_disclaimer_version=legal_version,
         email_verified_at=now,
-        subscription_tier="pro",
+        subscription_tier=default_subscription_tier(),
     )
     session.add(user)
     session.commit()

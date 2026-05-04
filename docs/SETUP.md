@@ -41,11 +41,17 @@ MODEL_IMAGE=gpt-5.4-mini
 PLAN_REVIEW_ENABLED=0
 NUTRITION_REVIEW_ENABLED=0
 STARTUP_ENRICH_FOODS_ENABLED=0
+STARTUP_ENRICH_EXERCISE_IMAGES_ENABLED=0
+STARTUP_BACKFILL_MUSCLE_FATIGUE_ENABLED=0
+GUT_BACKFILL_ENABLED=0
+BETA_FULL_ACCESS_ENABLED=0
+STARTUP_DATA_MAINTENANCE_ENABLED=0
 ```
 
 Run `make maintenance` for explicit backend data backfills/seed refreshes, and
 `make maintenance-food-micros` when you intentionally want food micronutrient
-enrichment to call OpenAI.
+enrichment to call OpenAI. Startup should stay schema-only by default; enable
+the startup enrichment/backfill flags only for a deliberate maintenance deploy.
 
 ## Expo Go Troubleshooting
 
@@ -57,6 +63,6 @@ enrichment to call OpenAI.
 ## Database
 
 - PostgreSQL 16 in Docker (`thallo-pg` container, port 5433)
-- Schema auto-created on startup via `create_db_and_tables()`
-- Food/exercise seed data runs on every boot (idempotent)
-- Micronutrient enrichment runs as background thread on boot
+- Schema auto-created and idempotent `_ensure_*` migrations run on startup via `create_db_and_tables()`
+- Data backfills/seed refreshes are default-off at startup. Run `make maintenance` intentionally.
+- Micronutrient enrichment is default-off. Run `make maintenance-food-micros` intentionally.

@@ -1,12 +1,14 @@
 # Database Migrations
 
-Last updated: 2026-05-03
+Last updated: 2026-05-04
 
 ## Pattern
 
 SQLModel `create_all` creates tables but does NOT ALTER existing columns. Idempotent `ADD COLUMN IF NOT EXISTS` helpers live in `backend/app/database.py` and run on every startup.
 
-**Rule**: Never use Alembic or raw SQL migration files. Always add a new `_ensure_*` helper function to `database.py`.
+**Rule**: Never use Alembic or raw SQL migration files in this project. Always add a new idempotent `_ensure_*` helper function to `database.py`.
+
+Startup is for schema readiness only. Data scans, seed refreshes, enrichments, and historical backfills are default-off unless `STARTUP_DATA_MAINTENANCE_ENABLED=1`; prefer `python -m app.maintenance_jobs --all` / `make maintenance`.
 
 ## Existing Migration Helpers
 
@@ -15,7 +17,7 @@ SQLModel `create_all` creates tables but does NOT ALTER existing columns. Idempo
 | `_ensure_food_category_enum_values` | Food category enum extension. |
 | `_ensure_food_nutrition_extras_column` | `FoodNutrition.extra_nutrients` JSONB. |
 | `_ensure_user_recovery_columns` | `recovery_question` + `recovery_answer_hash`. |
-| `_ensure_user_subscription_tier_column` | `User.subscription_tier` plus one-shot existing-user Pro backfill marker in `app_migrations`. |
+| `_ensure_user_subscription_tier_column` | `User.subscription_tier`, default `free`; existing-user Pro backfill only runs when `BETA_BACKFILL_EXISTING_USERS_TO_PRO=1`. |
 | `_ensure_user_oauth_columns` | `User.apple_sub` plus a unique non-null index for Sign in with Apple account links. |
 | `_ensure_workout_completion_stimulus_column` | Stimulus tracking on completions. |
 | `_ensure_workout_completion_health_columns` | Health signals on completions. |
@@ -30,7 +32,7 @@ SQLModel `create_all` creates tables but does NOT ALTER existing columns. Idempo
 | `_ensure_exercise_set_actual_rir_column` | `ExerciseSet.actual_rir DOUBLE PRECISION`. |
 | `_ensure_skip_reason_columns` | `UserDayState.skip_reason` + `PlanDay.skip_reason` for manual skips. |
 | `_backfill_user_preferences_preferred_split` | Fills missing `UserPreferences.preferred_split` from synced `user_state.userProfile.preferredSplit`, then explicit `PlanWeek.preferred_split`; does not infer from day labels. |
-| `_backfill_custom_food_micronutrients` | One-shot backfill on startup. |
+| `_backfill_custom_food_micronutrients` | Explicit maintenance backfill; no longer runs on default startup. |
 
 ## PlanWeek + PlanDay Tables
 
@@ -54,7 +56,7 @@ Lifecycle managed by `backend/app/services/workout/week_manager.py`:
 
 ## Adding a New Migration
 
-1. Add `async def _ensure_my_new_column(engine)` to `database.py` with an `ADD COLUMN IF NOT EXISTS` statement.
-2. Call it inside `run_startup_migrations()` after the existing calls.
+1. Add `def _ensure_my_new_column()` to `database.py` with an `ADD COLUMN IF NOT EXISTS` statement.
+2. Call it inside `create_db_and_tables()` after related existing calls.
 3. Also add the column to the `SQLModel` class in `models.py` with `Optional[type] = None`.
 4. Test by restarting the backend with a running DB — no errors = migration idempotent.

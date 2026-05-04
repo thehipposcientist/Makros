@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from typing import Any
 
 import openai
 from openai import OpenAI
@@ -254,6 +255,118 @@ def _set_programming_exercise_metadata(
     )
 
 
+def _target_reps_hint(raw: Any, fallback: str | None) -> str | None:
+    if not isinstance(raw, dict):
+        return fallback
+    value = raw.get("targetReps") or raw.get("target_reps") or fallback
+    return str(value).strip() if value is not None and str(value).strip() else None
+
+
+def _live_scheme_set_type(raw_type: Any, target_reps: str | None) -> SetType:
+    text = str(raw_type or "").strip().lower()
+    if text in ("heavy_top", "top_set"):
+        return SetType.TOP_SET
+    if text == "backoff":
+        return SetType.BACKOFF
+    if text == "warmup":
+        return SetType.WARMUP
+    if text in ("straight", "volume", "working", "technique"):
+        return SetType.STRAIGHT
+    if target_reps:
+        try:
+            hi = int(str(target_reps).split("-", 1)[-1].strip())
+            if hi <= 6:
+                return SetType.TOP_SET
+        except (ValueError, TypeError):
+            pass
+    return SetType.STRAIGHT
+
+
+def _planned_sets_from_live_scheme(
+    *,
+    raw_scheme: list[dict] | None,
+    planned_set_count: int,
+    plan_rep_target: str | None,
+    fallback_set_type: SetType,
+) -> list[PlannedSet]:
+    rows = [row for row in (raw_scheme or []) if isinstance(row, dict)]
+    planned: list[PlannedSet] = []
+    for idx, row in enumerate(rows[:planned_set_count]):
+        target_reps = _target_reps_hint(row, plan_rep_target)
+        planned.append(
+            PlannedSet(
+                set_number=int(row.get("setNumber") or row.get("set_number") or idx + 1),
+                set_type=_live_scheme_set_type(row.get("setType") or row.get("set_type"), target_reps),
+                target_reps_override=target_reps,
+            )
+        )
+
+    if not planned:
+        planned = [
+            PlannedSet(
+                set_number=idx + 1,
+                set_type=fallback_set_type,
+                target_reps_override=plan_rep_target,
+            )
+            for idx in range(planned_set_count)
+        ]
+
+    existing_numbers = {p.set_number for p in planned}
+    for idx in range(planned_set_count):
+        set_number = idx + 1
+        if set_number in existing_numbers:
+            continue
+        planned.append(
+            PlannedSet(
+                set_number=set_number,
+                set_type=fallback_set_type,
+                target_reps_override=plan_rep_target,
+            )
+        )
+
+    return sorted(planned, key=lambda s: s.set_number)
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def _scheme_row_by_number(raw_scheme: list[dict] | None, set_number: int | None) -> dict | None:
+    if set_number is None:
+        return None
+    for idx, row in enumerate(raw_scheme or []):
+        if not isinstance(row, dict):
+            continue
+        raw_number = row.get("setNumber") or row.get("set_number") or idx + 1
+        try:
+            if int(raw_number) == int(set_number):
+                return row
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _planned_backoff_transition_weight(
+    raw_scheme: list[dict] | None,
+    *,
+    completed_set_number: int | None,
+    next_set_number: int | None,
+) -> float | None:
+    current = _scheme_row_by_number(raw_scheme, completed_set_number)
+    upcoming = _scheme_row_by_number(raw_scheme, next_set_number)
+    if not current or not upcoming:
+        return None
+    current_type = str(current.get("setType") or current.get("set_type") or "").lower()
+    next_type = str(upcoming.get("setType") or upcoming.get("set_type") or "").lower()
+    if current_type not in ("heavy_top", "top_set") or next_type not in ("backoff", "volume"):
+        return None
+    return _positive_float(upcoming.get("targetWeightLbs") or upcoming.get("target_weight_lbs"))
+
+
 @router.post("/recommend-weight")
 def recommend_weight(
     body: WeightRecommendRequest,
@@ -322,14 +435,12 @@ def recommend_weight(
                     inferred_set_type = SetType.TOP_SET
             except ValueError:
                 pass
-        planned_sets = [
-            PlannedSet(
-                set_number=idx + 1,
-                set_type=inferred_set_type,
-                target_reps_override=plan_rep_target,
-            )
-            for idx in range(planned_set_count)
-        ]
+        planned_sets = _planned_sets_from_live_scheme(
+            raw_scheme=body.setScheme,
+            planned_set_count=planned_set_count,
+            plan_rep_target=plan_rep_target,
+            fallback_set_type=inferred_set_type,
+        )
 
         sets_completed = [
             SetResult(
@@ -669,6 +780,25 @@ def recommend_weight(
         else:
             tip = rec.coach_message
 
+        response_action = rec.action.value
+        planned_backoff_weight = _planned_backoff_transition_weight(
+            body.setScheme,
+            completed_set_number=last_logged.setNumber if last_logged else None,
+            next_set_number=rec.next_set_number,
+        )
+        if planned_backoff_weight is not None and last_logged is not None:
+            rec_weight = float(planned_backoff_weight)
+            response_action = (
+                "decrease"
+                if rec_weight < float(last_logged.weightLbs or 0.0)
+                else "hold"
+            )
+            rep_target = f"{rep_min}-{rep_max}"
+            tip = (
+                f"Backoff set: drop to {int(rec_weight) if rec_weight.is_integer() else rec_weight} "
+                f"lb for {rep_target}. The lighter load is intentional after your top set."
+            )
+
         if snap_load_lbs is not None and rec_weight > 0:
             snapped_rec = snap_load_lbs(
                 rec_weight,
@@ -683,7 +813,7 @@ def recommend_weight(
             "weightLbs": rec_weight,
             "reps": rec_reps,
             "tip": tip,
-            "action": rec.action.value,
+            "action": response_action,
             "repRange": f"{rep_min}-{rep_max}",
             "debug": rec.debug,
             # Null when the anchor came from current-session sets — the
@@ -1471,6 +1601,7 @@ def pre_set_recommendation(
         body.exerciseName,
         body.exerciseSlug,
         body.equipment,
+        body.primaryMuscle,
     )
 
     prior = body.priorSetsThisSession or []
@@ -1514,6 +1645,16 @@ def pre_set_recommendation(
             actual_weight_lbs=float(last.get("weightLbs") or 0.0),
             actual_rir=last.get("rir"),
             rep_range=parse_rep_range(planned.target_reps),
+        )
+    elif planned.target_weight_lbs and planned.target_weight_lbs > 0:
+        det = NextSetRecommendation(
+            next_set_weight_lbs=planned.target_weight_lbs,
+            next_set_rep_target=planned.target_reps,
+            action="hold_load",
+            explanation=(
+                f"Opening at {int(planned.target_weight_lbs)} lb — this is the "
+                "target your plan set for today."
+            ),
         )
     elif last_session:
         # Infer a plausible opening weight from the best comparable last-session set.

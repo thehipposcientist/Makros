@@ -24,13 +24,19 @@ import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import {
   AppThemeName, WorkoutSession,
-  ActivityCategory, CardioStyle,
 } from '../types';
 import { isHealthKitAvailable, getLatestHeartRate, getWorkoutHrSummary, getAppleWorkoutCaloriesForWindow } from '../services/appleHealth';
 import LogActivityModal, { LogActivityPrefill } from './LogActivityModal';
 import { saveWorkoutSession } from '../utils/workoutHistory';
 import { startRestActivity, updateRestActivity, endRestActivity } from '../services/liveActivity';
 import { clearManagedInterval, useManagedInterval } from '../hooks/useManagedInterval';
+import {
+  LIVE_ACTIVITY_QUICK_START,
+  liveActivityQuickStartKey,
+  resolveLiveActivityQuickStart,
+  type LiveActivityInitialActivity,
+  type LiveActivityQuickStartOption,
+} from '../utils/liveActivityQuickStart';
 
 interface Props {
   visible: boolean;
@@ -51,45 +57,8 @@ interface Props {
    *  when omitted. */
   onStartStrengthWorkout?: (focus: string) => void;
   enableHealthKit?: boolean;
+  initialActivity?: LiveActivityInitialActivity | null;
 }
-
-// Minimal category + subtype picker — mirrors LogActivityModal's
-// taxonomy but trimmed to live-trackable activities. Sport + strength
-// could be supported later; start with the obvious ones.
-const QUICK_START: {
-  category: ActivityCategory;
-  subtype: string;
-  label: string;
-  icon: string;
-  cardioStyle?: CardioStyle;
-}[] = [
-  // Strength entries first — most users opening "Custom Workout" want
-  // a free-form lift session (the planned plan handles structured days).
-  { category: 'strength', subtype: 'lift',         label: 'Strength',  icon: 'barbell-outline' },
-  { category: 'strength', subtype: 'push',         label: 'Push',      icon: 'barbell-outline' },
-  { category: 'strength', subtype: 'pull',         label: 'Pull',      icon: 'barbell-outline' },
-  { category: 'strength', subtype: 'legs',         label: 'Legs',      icon: 'barbell-outline' },
-  { category: 'strength', subtype: 'upper',        label: 'Upper',     icon: 'barbell-outline' },
-  { category: 'strength', subtype: 'lower',        label: 'Lower',     icon: 'barbell-outline' },
-  { category: 'strength', subtype: 'full_body',    label: 'Full Body', icon: 'barbell-outline' },
-  { category: 'strength', subtype: 'powerlifting', label: 'Powerlifting', icon: 'barbell-outline' },
-  { category: 'strength', subtype: 'crossfit',     label: 'CrossFit',  icon: 'flame-outline' },
-  { category: 'cardio', subtype: 'run',    label: 'Run',    icon: 'walk-outline', cardioStyle: 'steady' },
-  { category: 'cardio', subtype: 'walk',   label: 'Walk',   icon: 'footsteps-outline', cardioStyle: 'easy' },
-  { category: 'cardio', subtype: 'hike',   label: 'Hike',   icon: 'trail-sign-outline', cardioStyle: 'steady' },
-  { category: 'cardio', subtype: 'ride',   label: 'Ride',   icon: 'bicycle-outline', cardioStyle: 'steady' },
-  { category: 'cardio', subtype: 'swim',   label: 'Swim',   icon: 'water-outline', cardioStyle: 'steady' },
-  { category: 'cardio', subtype: 'row',    label: 'Row',    icon: 'boat-outline', cardioStyle: 'steady' },
-  { category: 'cardio', subtype: 'spin',   label: 'Spin',   icon: 'fitness-outline', cardioStyle: 'intervals' },
-  { category: 'cardio', subtype: 'stair',  label: 'Stair',  icon: 'trending-up-outline', cardioStyle: 'steady' },
-  { category: 'cardio', subtype: 'bootcamp', label: 'HIIT', icon: 'flame-outline', cardioStyle: 'intervals' },
-  { category: 'sport',  subtype: 'basketball', label: 'Basketball', icon: 'basketball-outline' },
-  { category: 'sport',  subtype: 'tennis', label: 'Tennis', icon: 'tennisball-outline' },
-  { category: 'sport',  subtype: 'pickleball', label: 'Pickleball', icon: 'tennisball-outline' },
-  { category: 'sport',  subtype: 'golf',  label: 'Golf',   icon: 'golf-outline' },
-  { category: 'mobility', subtype: 'yoga', label: 'Yoga',  icon: 'body-outline' },
-  { category: 'mobility', subtype: 'stretching', label: 'Stretch', icon: 'resize-outline' },
-];
 
 type Phase = 'pick' | 'running' | 'paused' | 'finishing';
 
@@ -102,12 +71,12 @@ function fmtElapsed(seconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
-export default function LiveActivityTracker({ visible, onClose, themeName, onSaved, onSave, onStartStrengthWorkout, enableHealthKit = true }: Props) {
+export default function LiveActivityTracker({ visible, onClose, themeName, onSaved, onSave, onStartStrengthWorkout, enableHealthKit = true, initialActivity = null }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const insets = useSafeAreaInsets();
   const [phase, setPhase] = useState<Phase>('pick');
-  const [choice, setChoice] = useState<typeof QUICK_START[number] | null>(null);
+  const [choice, setChoice] = useState<LiveActivityQuickStartOption | null>(null);
   const [startedAtMs, setStartedAtMs] = useState<number | null>(null);
   const [pausedAccum, setPausedAccum] = useState<number>(0); // seconds
   const [pauseStartMs, setPauseStartMs] = useState<number | null>(null);
@@ -123,6 +92,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   const hrIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const liveActivityIdRef = useRef<string | null>(null);
   const liveActivityGenerationRef = useRef(0);
+  const autoStartKeyRef = useRef<string | null>(null);
 
   const endWorkoutLiveActivity = useCallback(() => {
     liveActivityGenerationRef.current += 1;
@@ -151,7 +121,10 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   // On close from outside (e.g. swipe down without saving) clean up
   // the timers so they don't leak into the next open.
   useEffect(() => {
-    if (!visible) reset();
+    if (!visible) {
+      autoStartKeyRef.current = null;
+      reset();
+    }
     return () => {
       clearManagedInterval(timerRef);
       clearManagedInterval(hrIntervalRef);
@@ -190,7 +163,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   }, [shouldPollHr, tickHeartRate]);
   useManagedInterval(tickHeartRate, 10_000, shouldPollHr, hrIntervalRef);
 
-  const handleStart = (c: typeof QUICK_START[number]) => {
+  const handleStart = (c: LiveActivityQuickStartOption) => {
     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
     // Strength picks don't belong in the stopwatch path — they need
     // an exercise picker + per-set logging. Hand off to the parent's
@@ -241,6 +214,16 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
       liveActivityIdRef.current = id;
     }).catch(() => undefined);
   };
+
+  useEffect(() => {
+    if (!visible || phase !== 'pick') return;
+    const option = resolveLiveActivityQuickStart(initialActivity);
+    if (!option) return;
+    const key = liveActivityQuickStartKey(option);
+    if (autoStartKeyRef.current === key) return;
+    autoStartKeyRef.current = key;
+    handleStart(option);
+  }, [visible, phase, initialActivity?.category, initialActivity?.subtype]);
 
   const handlePause = () => {
     import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
@@ -383,7 +366,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                   : "Pick a type. We'll time it and save the activity to your log."}
               </Text>
               <ScrollView contentContainerStyle={{ padding: 16, gap: 10 }}>
-                {QUICK_START.map((c) => (
+                {LIVE_ACTIVITY_QUICK_START.map((c) => (
                   <TouchableOpacity
                     key={`${c.category}-${c.subtype}`}
                     testID={`live-quickstart-${c.category}-${c.subtype}`}

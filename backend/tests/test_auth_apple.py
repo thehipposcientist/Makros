@@ -43,8 +43,25 @@ def _login_with_apple(body: auth_router.AppleAuthRequest, session: Session):
     return handler(body, _Request(), session)
 
 
+def _set_beta_full_access(value: str | None):
+    previous = os.environ.get("BETA_FULL_ACCESS_ENABLED")
+    if value is None:
+        os.environ.pop("BETA_FULL_ACCESS_ENABLED", None)
+    else:
+        os.environ["BETA_FULL_ACCESS_ENABLED"] = value
+    return previous
+
+
+def _restore_beta_full_access(previous: str | None) -> None:
+    if previous is None:
+        os.environ.pop("BETA_FULL_ACCESS_ENABLED", None)
+    else:
+        os.environ["BETA_FULL_ACCESS_ENABLED"] = previous
+
+
 def test_apple_login_creates_new_user():
     engine = _engine()
+    previous_beta = _set_beta_full_access(None)
     original = _with_apple_claims({
         "sub": "apple-sub-new",
         "email": "new-user@privaterelay.appleid.com",
@@ -70,11 +87,39 @@ def test_apple_login_creates_new_user():
             assert user.last_name == "Lovelace"
             assert user.email_verified_at is not None
             assert user.terms_version == "2026-04-29.2"
+            assert user.subscription_tier == "free"
+    finally:
+        auth_router._verify_apple_identity_token = original
+        _restore_beta_full_access(previous_beta)
+        engine.dispose()
+    print("PASS test_apple_login_creates_new_user")
+
+
+def test_apple_login_beta_flag_creates_pro_user():
+    engine = _engine()
+    previous_beta = _set_beta_full_access("1")
+    original = _with_apple_claims({
+        "sub": "apple-sub-beta",
+        "email": "beta-user@privaterelay.appleid.com",
+        "email_verified": "true",
+    })
+    try:
+        with Session(engine) as session:
+            _login_with_apple(
+                auth_router.AppleAuthRequest(
+                    identity_token="signed.apple.jwt",
+                    legal_version="2026-04-29.2",
+                ),
+                session,
+            )
+            user = session.exec(select(User).where(User.apple_sub == "apple-sub-beta")).first()
+            assert user is not None
             assert user.subscription_tier == "pro"
     finally:
         auth_router._verify_apple_identity_token = original
+        _restore_beta_full_access(previous_beta)
         engine.dispose()
-    print("PASS test_apple_login_creates_new_user")
+    print("PASS test_apple_login_beta_flag_creates_pro_user")
 
 
 def test_apple_login_links_existing_email_user():

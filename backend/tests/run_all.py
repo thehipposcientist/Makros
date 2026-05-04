@@ -73,10 +73,16 @@ _TEST_MODULES = (
     "tests.test_plan_week_goal_change",
     # Auth: DEV_EMAIL_TOKENS gating — dev tokens must not leak in prod.
     "tests.test_auth_dev_token_isolation",
+    # Entitlements: unknown/default users fail closed to Free; beta is explicit.
+    "tests.test_entitlements",
+    # CORS: prod must fail closed instead of wildcard+credentials.
+    "tests.test_cors_config",
     # Native account sign-in: Apple identity links and account creation.
     "tests.test_auth_apple",
     # Native account sign-in: Google identity links and account creation.
     "tests.test_auth_google",
+    # Startup gates: schema startup remains light; data jobs explicit.
+    "tests.test_startup_maintenance",
     # PlanWeekCheckin: status, gate, idempotency, skip, recap.
     "tests.test_plan_week_checkin",
     # Workout start marker: in-progress session, never phantom completion.
