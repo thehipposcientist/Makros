@@ -380,6 +380,27 @@ def test_legacy_checkin_snapshot_backfills_new_review_fields():
     assert db._committed
 
 
+def test_legacy_checkin_snapshot_backfills_recommendation_actions():
+    """Old snapshots with recommendation text but no action get recomputed."""
+    from app.routers.plan_weeks import _plan_week_review_snapshot_needs_backfill
+
+    snapshot = {
+        "headline": "Saved recap",
+        "workout_adherence_pct": 80.0,
+        "nutrition_logging_pct": 85.7,
+        "avg_calories": 2100.0,
+        "calorie_target_adherence_pct": None,
+        "protein_target_adherence_pct": None,
+        "nutrition_summary": "Nutrition: 6/7 days logged.",
+        "nutrition_notes": [],
+        "recommendations": [
+            {"key": "add_volume_chest", "title": "Add 2-3 chest sets"},
+        ],
+    }
+
+    assert _plan_week_review_snapshot_needs_backfill(snapshot)
+
+
 def test_week_needs_renewal_for_expired_week():
     """week_needs_renewal returns True for a week whose end_date is in the past."""
     from app.services.workout.week_manager import week_needs_renewal
@@ -425,6 +446,7 @@ if __name__ == "__main__":
         test_checkin_record_stores_ratings,
         test_recap_returns_saved_ai_message,
         test_legacy_checkin_snapshot_backfills_new_review_fields,
+        test_legacy_checkin_snapshot_backfills_recommendation_actions,
         test_week_needs_renewal_for_expired_week,
         test_week_needs_renewal_false_for_active_week,
     ]

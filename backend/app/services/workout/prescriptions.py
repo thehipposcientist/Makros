@@ -157,7 +157,7 @@ def _apply_lifting_session_density(prescription: Prescription, slot, inputs) -> 
         session_minutes = int(getattr(inputs, "session_minutes", None) or 45)
     except (TypeError, ValueError):
         session_minutes = 45
-    if session_minutes < 60:
+    if session_minutes < 75:
         return prescription
 
     bonus = 2 if session_minutes >= 90 else 1

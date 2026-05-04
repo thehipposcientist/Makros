@@ -118,7 +118,11 @@ async function scheduleOneShotWorkoutReminder(dow: number, settings: ReminderSet
   const date = nextOccurrenceDate(dow, settings);
   return Notifications.scheduleNotificationAsync({
     content: workoutReminderContent(dow),
-    trigger: { date, repeats: false } as any,
+    trigger: {
+      type: Notifications.SchedulableTriggerInputTypes.DATE,
+      date,
+      channelId: 'default',
+    },
   });
 }
 

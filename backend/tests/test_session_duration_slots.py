@@ -430,6 +430,32 @@ def test_cardio_finisher_scales_monotonically():
     _ok(f"midpoints monotonic: {mids}")
 
 
+def test_lifting_set_density_starts_at_75_min():
+    """The 45-60 min picker stores 60 as the upper bound; it should not
+    receive the extended-session set bump reserved for 60-75+ min."""
+    print("\n[test] lifting set density: 60 min has no extended-set bump")
+    from types import SimpleNamespace
+    from app.services.workout.prescriptions import _prescribe_by_stimulus
+
+    slot = Slot("Primary Press", "horizontal_press", "chest", "primary")
+    exercise = {"name": "Bench Press", "movement_pattern": "horizontal_press"}
+
+    at_60 = _prescribe_by_stimulus(
+        "strength", slot, exercise, SimpleNamespace(session_minutes=60)
+    )
+    at_75 = _prescribe_by_stimulus(
+        "strength", slot, exercise, SimpleNamespace(session_minutes=75)
+    )
+    at_90 = _prescribe_by_stimulus(
+        "strength", slot, exercise, SimpleNamespace(session_minutes=90)
+    )
+
+    assert at_60.sets == 4, f"60 min should keep base primary sets, got {at_60.sets}"
+    assert at_75.sets == 5, f"75 min should add one primary set, got {at_75.sets}"
+    assert at_90.sets == 6, f"90 min should add two primary sets, got {at_90.sets}"
+    _ok("60/75/90 min lifting density tiers are distinct")
+
+
 cases = [
     test_inject_bonus_no_op_at_60,
     test_inject_bonus_one_at_75,
@@ -450,6 +476,7 @@ cases = [
     test_cardio_finisher_extended_at_75_min,
     test_cardio_finisher_long_at_90_min,
     test_cardio_finisher_scales_monotonically,
+    test_lifting_set_density_starts_at_75_min,
 ]
 
 if __name__ == "__main__":

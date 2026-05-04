@@ -57,6 +57,7 @@ import { workoutFromTemplateForToday } from '../utils/workoutTemplates';
 import { workoutSessionToLoggedPayload } from '../utils/workoutLogPayload';
 import { HYDRATION_QUICK_ADD_OUNCES, formatHydrationQuickAddLabel } from '../utils/hydration';
 import { enqueueActiveWatchCommand, hasActiveWatchCommandConsumer, isActiveWorkoutWatchCommand } from '../utils/watchCommandBacklog';
+import { coachApplyNeedsDayStatusRefresh, skippedDayBadgeLabel, skippedDayTitle, skippedDayUndoLabel } from '../utils/coachApplyState';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
 import { setMealCheckedInChecksByDate, upsertMealInPlansByDate } from '../utils/mealPlanState';
@@ -7203,10 +7204,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const done = completedDates.has(dayKey) || (dayKey === todayKey() && todayDone);
                 const isPast = s.date < new Date(new Date().setHours(0, 0, 0, 0));
                 const skipped = skippedDates.has(dayKey) || (isPast && !s.isRest && !done);
+                const skipReason = skipReasonsByDate[dayKey];
                 return {
                   key: dayKey,
                   date: s.date,
-                  title: s.isRest ? 'Rest day' : (s.workout?.focus ?? 'Workout'),
+                  title: skipped
+                    ? skippedDayTitle(s.workout?.focus, skipReason)
+                    : s.isRest ? 'Rest day' : (s.workout?.focus ?? 'Workout'),
                   state: done ? 'done' : skipped ? 'skipped' : s.isRest ? 'rest' : dayKey === todayKey() ? 'today' : 'planned',
                 };
               });
@@ -7279,7 +7283,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     const idx = workoutPlan ? workoutPlan.days.indexOf(item.workout as any) : -1;
                     return idx >= 0 && regeneratingDayIdxs.has(idx);
                   })()}
-                  sessionMinutes={userProfile.workoutDurationMinutes ?? 60}
+                  sessionMinutes={planWeek?.session_minutes ?? userProfile.workoutDurationMinutes ?? 60}
                   onSwapExercise={async (workout, exIdx, exName) => {
                     // The picker reads from `exerciseLibrary` state.
                     // If we open the modal BEFORE the library is
@@ -10199,6 +10203,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                   try {
                                     const { applyRecommendationAction } = await import('../services/api');
                                     const undo = await applyRecommendationAction(authToken, m.undoAction!, `undo_${m.intent ?? 'coach_action'}`);
+                                    if (coachApplyNeedsDayStatusRefresh(undo.changed_fields)) {
+                                      await loadDayStatus();
+                                    }
                                     setWorkoutChat(prev => prev.map((x, i) => i === fullIndex ? {
                                       ...x,
                                       undoAction: null,
@@ -10229,6 +10236,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                 try {
                                   const { applyRecommendationAction } = await import('../services/api');
                                   const r = await applyRecommendationAction(authToken, m.action!, m.intent ?? undefined);
+                                  if (coachApplyNeedsDayStatusRefresh(r.changed_fields)) {
+                                    await loadDayStatus();
+                                  }
                                   setWorkoutChat(prev => prev.map((x, i) => i === fullIndex ? {
                                     ...x,
                                     applied: true,
@@ -12861,6 +12871,9 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
 
   // Skipped day
   if (isSkipped) {
+    const skippedTitle = skippedDayTitle(item.workout?.focus, skipReason);
+    const skippedBadge = skippedDayBadgeLabel(skipReason);
+    const skippedUndo = skippedDayUndoLabel(skipReason);
     return (
       <View style={[styles.dayCard, styles.dayCardSkipped, { backgroundColor: tc.surface, borderColor: tc.border }]}>
         <View style={[styles.dayCardRow, { paddingTop: 16 }]}>
@@ -12870,7 +12883,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           </View>
           <View style={styles.dayCardRight}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <Text style={[styles.focusLabel, { color: tc.textPrimary }]}>{item.workout!.focus}</Text>
+              <Text style={[styles.focusLabel, { color: tc.textPrimary }]}>{skippedTitle}</Text>
               {(() => {
                 const stim = item.workout?.stimulus || (() => {
                   // Infer stimulus from focus name for old cached plans
@@ -12908,12 +12921,12 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
             ) : null}
           </View>
           <View style={[styles.skippedBadge, { backgroundColor: tc.warning + '22', borderColor: tc.warning }]}>
-            <Text style={[styles.skippedBadgeText, { color: tc.warning }]}>Skipped</Text>
+            <Text style={[styles.skippedBadgeText, { color: tc.warning }]}>{skippedBadge}</Text>
           </View>
         </View>
         <View style={styles.actionRow}>
           <TouchableOpacity style={[styles.unskipBtn, { backgroundColor: tc.surface, borderColor: tc.primary }]} onPress={onUnskip}>
-            <Text style={[styles.unskipBtnText, { color: tc.primary }]}>Unskip Workout</Text>
+            <Text style={[styles.unskipBtnText, { color: tc.primary }]}>{skippedUndo}</Text>
           </TouchableOpacity>
         </View>
       </View>

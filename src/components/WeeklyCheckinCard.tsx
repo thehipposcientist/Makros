@@ -23,6 +23,7 @@ import {
 import CoachCheckinModal from './CoachCheckinModal';
 import WeeklyCheckinModal from './WeeklyCheckinModal';
 import { maybeNotifyWeeklyCheckinDue } from '../utils/weeklyCheckinNotifications';
+import { humanizeToken } from '../utils/exerciseGuide';
 
 interface Props {
   authToken: string;
@@ -40,6 +41,25 @@ function formatDateRange(start: string | null, end: string | null): string {
   const fmt = (s: string) =>
     new Date(s + 'T00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   return `${fmt(start)} – ${fmt(end)}`;
+}
+
+function recapChangePreview(checkin: PlanWeekCheckinRecord | null): string | null {
+  const snap = checkin?.review_snapshot_json;
+  if (!snap || typeof snap !== 'object') return null;
+  const applied = Array.isArray(snap.structured_applied) ? snap.structured_applied : [];
+  if (applied.length > 0) {
+    const summaries = applied
+      .map((item: any) => String(item?.summary ?? humanizeToken(String(item?.type ?? 'Applied'))))
+      .filter(Boolean)
+      .slice(0, 2);
+    return summaries.length ? `Applied: ${summaries.join(' · ')}` : null;
+  }
+  const recs = Array.isArray(snap.recommendations) ? snap.recommendations : [];
+  const titles = recs
+    .map((rec: any) => String(rec?.title ?? humanizeToken(String(rec?.key ?? 'Recommendation'))))
+    .filter(Boolean)
+    .slice(0, 2);
+  return titles.length ? `Recommended: ${titles.join(' · ')}` : null;
 }
 
 export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRecap = false, onCheckinCompleted }: Props) {
@@ -110,6 +130,7 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
 
   const dateRange = formatDateRange(status.week_start, status.week_end);
   const checkin: PlanWeekCheckinRecord | null = status.checkin ?? null;
+  const changePreview = recapChangePreview(checkin);
   const isPending = status.status === 'pending';
   const isCompleted = status.status === 'completed';
   const isSkipped = status.status === 'skipped';
@@ -250,6 +271,12 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
               </View>
             )}
           </View>
+        ) : null}
+
+        {hasRecap && changePreview ? (
+          <Text style={{ fontSize: 11, color: tc.textSecondary, lineHeight: 16, marginBottom: 10 }}>
+            {changePreview}
+          </Text>
         ) : null}
 
         {/* CTA buttons */}

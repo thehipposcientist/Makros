@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timedelta, timezone
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -74,6 +75,7 @@ class PlanWeekResponse(BaseModel):
     planner_version: str
     goal: str
     days_per_week: int
+    session_minutes: int | None = None
     preferred_split: str | None = None
     paused_until: str | None = None
     pause_reason: str | None = None
@@ -185,11 +187,22 @@ def _plan_week_to_response(pw: PlanWeek, days: list[PlanDay]) -> PlanWeekRespons
         planner_version=pw.planner_version,
         goal=pw.goal,
         days_per_week=pw.days_per_week,
+        session_minutes=getattr(pw, "session_minutes", None),
         preferred_split=pw.preferred_split,
         paused_until=paused_until_str,
         pause_reason=getattr(pw, "pause_reason", None) if paused_until_str else None,
         days=[_plan_day_to_response(d) for d in days],
     )
+
+
+def _human_label(value: object, *, lower: bool = False) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    text = re.sub(r"[_\-]+", " ", text)
+    text = " ".join(text.split())
+    return text.lower() if lower else text.title()
 
 
 def _checkin_prompt_active(pw: PlanWeek, *, today: date | None = None) -> bool:
@@ -290,7 +303,14 @@ def _review_snapshot_from_review(review, *, history_context: dict | None = None)
         "nutrition_notes": getattr(review, "nutrition_notes", []),
         "weight_trend_direction": review.weight_trend_direction,
         "recommendations": [
-            {"key": r.key, "title": r.title, "priority": r.priority, "area": r.area, "detail": r.detail}
+            {
+                "key": r.key,
+                "title": r.title,
+                "priority": r.priority,
+                "area": r.area,
+                "detail": r.detail,
+                "action": r.action,
+            }
             for r in review.recommendations[:5]
         ],
     }
@@ -382,7 +402,12 @@ def _plan_week_review_snapshot_needs_backfill(snapshot: dict | None) -> bool:
         "nutrition_summary",
         "nutrition_notes",
     )
-    return any(key not in snapshot for key in required_keys)
+    if any(key not in snapshot for key in required_keys):
+        return True
+    recommendations = snapshot.get("recommendations")
+    if isinstance(recommendations, list):
+        return any(isinstance(rec, dict) and "action" not in rec for rec in recommendations)
+    return False
 
 
 def _backfill_plan_week_checkin_review_snapshot(
@@ -1086,7 +1111,7 @@ def submit_plan_week_checkin(
                     db.add(prefs)
                     structured_applied.append({
                         "type": "injury_flag",
-                        "summary": f"Flagged {body.pain_area} for next week's planner.",
+                        "summary": f"Flagged {_human_label(body.pain_area)} for next week's planner.",
                         "changed_fields": {"injuries": existing},
                     })
                 db.add(CoachMemory(
@@ -1097,19 +1122,35 @@ def submit_plan_week_checkin(
                 ))
 
             if adj.preferred_cardio_modes:
+                mode_labels = [_human_label(m, lower=True) for m in adj.preferred_cardio_modes]
                 db.add(CoachMemory(
                     user_id=current_user.id,
                     event_type="preferred_cardio_mode",
-                    summary=f"User prefers: {', '.join(adj.preferred_cardio_modes)}",
+                    summary=f"Preferred cardio saved: {', '.join(mode_labels)}",
                     details={"modes": adj.preferred_cardio_modes, "source": "plan_week_checkin"},
                 ))
+                structured_applied.append({
+                    "type": "preferred_cardio_mode",
+                    "summary": f"Saved preferred cardio modes: {', '.join(mode_labels)}.",
+                    "changed_fields": {"preferred_cardio_modes": adj.preferred_cardio_modes},
+                    "descriptive_only": True,
+                    "verified": True,
+                })
             if adj.muscle_priorities:
+                muscle_labels = [_human_label(m, lower=True) for m in adj.muscle_priorities]
                 db.add(CoachMemory(
                     user_id=current_user.id,
                     event_type="muscle_priority",
-                    summary=f"Prioritize: {', '.join(adj.muscle_priorities)}",
+                    summary=f"Priority muscle saved: {', '.join(muscle_labels)}",
                     details={"muscles": adj.muscle_priorities, "source": "plan_week_checkin"},
                 ))
+                structured_applied.append({
+                    "type": "muscle_priority",
+                    "summary": f"Prioritized {', '.join(muscle_labels)} for next week's planner.",
+                    "changed_fields": {"muscle_priorities": adj.muscle_priorities},
+                    "descriptive_only": True,
+                    "verified": True,
+                })
             db.commit()
         except Exception as e:
             logger.warning(f"[week-checkin] structured adjustment failed: {e}")
@@ -1900,25 +1941,35 @@ def submit_week_checkin(
                     db.add(prefs)
                     applied_results.append({
                         "type": "injury_flag",
-                        "summary": f"Flagged {answers.pain_area} — planner will avoid high-risk patterns.",
+                        "summary": f"Flagged {_human_label(answers.pain_area)}. The planner will avoid high-risk patterns.",
                     })
 
         # Preferred cardio / muscle priorities → CoachMemory
         from app.models import CoachMemory
         if adj.preferred_cardio_modes:
+            mode_labels = [_human_label(m, lower=True) for m in adj.preferred_cardio_modes]
             db.add(CoachMemory(
                 user_id=current_user.id,
                 event_type="preferred_cardio_mode",
-                summary=f"User prefers: {', '.join(adj.preferred_cardio_modes)}",
+                summary=f"Preferred cardio saved: {', '.join(mode_labels)}",
                 details={"modes": adj.preferred_cardio_modes},
             ))
+            applied_results.append({
+                "type": "preferred_cardio_mode",
+                "summary": f"Saved preferred cardio modes: {', '.join(mode_labels)}.",
+            })
         if adj.muscle_priorities:
+            muscle_labels = [_human_label(m, lower=True) for m in adj.muscle_priorities]
             db.add(CoachMemory(
                 user_id=current_user.id,
                 event_type="muscle_priority",
-                summary=f"Prioritize: {', '.join(adj.muscle_priorities)}",
+                summary=f"Priority muscle saved: {', '.join(muscle_labels)}",
                 details={"muscles": adj.muscle_priorities},
             ))
+            applied_results.append({
+                "type": "muscle_priority",
+                "summary": f"Prioritized {', '.join(muscle_labels)} for next week's planner.",
+            })
 
         db.commit()
 

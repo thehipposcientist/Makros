@@ -1183,7 +1183,7 @@ TRICEPS = [
     },
     {
         "slug": "kickbacks",
-        "name": "Kickbacks",
+        "name": "Dumbbell Tricep Kickbacks",
         "primary_muscle": "triceps",
         "secondary_muscles": [],
         "equipment_bucket": "dumbbells",
@@ -1192,7 +1192,7 @@ TRICEPS = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": True,
-        "description": "Strict tricep lockout with dumbbell",
+        "description": "Strict dumbbell tricep kickback with a full elbow lockout",
         "equipment": [
             {"slug": "dumbbells", "role": "primary", "required": True},
         ],

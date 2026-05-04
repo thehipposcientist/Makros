@@ -33,7 +33,8 @@ def assert_in(actual, expected_set, label):
     print(f"  ✓ {label}")
 
 
-def _gen(goal, days, split, families=(), buckets=(), fatigue=None):
+def _gen(goal, days, split, families=(), buckets=(), fatigue=None,
+         user_chose_split=False, user_age=None):
     """Call generate_weekly_recipe and return list of focus families."""
     from app.services.workout.weekly_recipe import generate_weekly_recipe
     from app.services.workout.goal_profiles import goal_profile_for
@@ -45,6 +46,8 @@ def _gen(goal, days, split, families=(), buckets=(), fatigue=None):
         recent_focus_families=families,
         recent_focus_buckets=buckets,
         muscle_fatigue=fatigue,
+        user_chose_split=user_chose_split,
+        user_age=user_age,
     )
     return [archetype_to_focus_family(a) for a in recipe]
 
@@ -64,7 +67,7 @@ def test_ppl_continue_cycle_after_legs():
 
 
 def test_ppl_continue_cycle_after_push():
-    """History ends with Push → regen day0 = Pull."""
+    """Only Push is known recently → tie-break to Pull."""
     print("[integration] PPL: continue cycle after Push")
     fams = _gen("muscle_gain", 5, "ppl",
                 families=("push",), buckets=("upper_body",))
@@ -135,12 +138,38 @@ def test_ppl_mobility_between_lifts():
 def test_ppl_multiple_cardio_rest_days():
     """History: Cardio, Rest-skip, Cardio, Pull (newest first).
     Anchor digs through all the non-lift days to find Pull.
-    Single PPL entry → canonical fallback: pull→legs."""
+    Single PPL entry → tie-break after Pull starts Legs."""
     print("[integration] PPL: multiple non-lift days in history")
     fams = _gen("muscle_gain", 5, "ppl",
                 families=("cardio", "cardio", "pull"),
                 buckets=("cardio", "cardio", "upper_body"))
-    assert_eq(fams[0], "legs", "day0=legs (canonical pull→legs)")
+    assert_eq(fams[0], "legs", "day0=legs (tie-break after pull)")
+
+
+def test_ppl_starts_with_absent_or_oldest_family():
+    """Strict PPL should start with the most-open family, not fixed Push.
+    If recent history is Push/Pull-heavy and Legs is absent, day0 should
+    be Legs, then the other PPL families follow."""
+    print("[integration] PPL: absent Legs starts the next block")
+    fams = _gen("muscle_gain", 5, "ppl",
+                families=("push", "pull", "push", "pull"),
+                buckets=("upper_body", "upper_body", "upper_body", "upper_body"))
+    lift_fams = [f for f in fams if f in ("push", "pull", "legs")]
+    assert_eq(lift_fams[:3], ["legs", "pull", "push"], "open-order block starts Legs")
+
+
+def test_ppl_masters_recovery_does_not_stack_legs():
+    """Age-adjusted recovery may reduce a 5-day PPL week to 4 lifts.
+    The strict split rebuild must preserve PPL counts without placing
+    Legs next to Legs."""
+    print("[integration] PPL: masters recovery does not stack Legs")
+    fams = _gen("muscle_gain", 5, "ppl", user_chose_split=True, user_age=55)
+    for i in range(1, len(fams)):
+        if fams[i] not in ("push", "pull", "legs"):
+            continue
+        if fams[i - 1] not in ("push", "pull", "legs"):
+            continue
+        assert_ne(fams[i], fams[i - 1], f"no adjacent PPL duplicate at {i-1},{i}")
 
 
 # ===================================================================
@@ -495,6 +524,8 @@ cases = [
     test_ppl_recovery_between_lifts,
     test_ppl_mobility_between_lifts,
     test_ppl_multiple_cardio_rest_days,
+    test_ppl_starts_with_absent_or_oldest_family,
+    test_ppl_masters_recovery_does_not_stack_legs,
     # U/L same-split
     test_ul_continue_after_upper,
     test_ul_continue_after_lower,

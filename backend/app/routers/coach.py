@@ -234,6 +234,7 @@ def post_checkin(
                     "priority": r.priority,
                     "area": r.area,
                     "detail": r.detail,
+                    "action": r.action,
                 }
                 for r in review.recommendations[:5]  # cap so prompt stays small
             ],

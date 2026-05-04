@@ -289,13 +289,13 @@ def test_body_recomp_ul_upper_today():
 # ===================================================================
 
 def test_no_completed_today_still_advances():
-    """Without completed_today_family, anchor advances as before."""
-    print("[overlay] No completed_today: single-day path still advances")
+    """Without completed_today_family, anchor starts the most-open PPL family."""
+    print("[overlay] No completed_today: single-day path starts open family")
     fams = _gen("muscle_gain", 5, "ppl",
                 families=("push", "pull", "legs"),
                 buckets=("upper_body", "upper_body", "lower_body"),
                 completed_today=None)
-    assert_eq(fams[0], "pull", "day0=pull (advanced past push)")
+    assert_eq(fams[0], "legs", "day0=legs (least recently trained)")
 
 
 # ===================================================================
@@ -304,7 +304,9 @@ def test_no_completed_today_still_advances():
 
 def test_user_scenario_push_cardio_today_pull_yesterday_rest_legs():
     """Exact scenario: Push+Cardio today, Pull yesterday, Rest, Legs.
-    Regen should give today=Push (preserved), tomorrow=Pull, then Legs."""
+    Regen should keep today=Push preserved. On 5-day muscle-gain weeks,
+    intensity spacing may keep Pull before Legs to avoid stacking two
+    heavy lift days immediately after today's overlay."""
     print("[overlay] User scenario: Push+Cardio today → regen")
     fams = _gen("muscle_gain", 5, "ppl",
                 families=("push", "pull", "legs"),
@@ -312,7 +314,7 @@ def test_user_scenario_push_cardio_today_pull_yesterday_rest_legs():
                 completed_today="push")
     after = _overlay(fams, "push")
     assert_eq(after[0], "push", "today=Push (preserved)")
-    assert_eq(after[1], "pull", "tomorrow=Pull (next in PPL)")
+    assert_eq(after[1], "pull", "tomorrow=Pull (intensity-spaced)")
     assert_eq(after[2], "legs", "day after=Legs")
     print(f"  full plan after overlay: {after}")
 

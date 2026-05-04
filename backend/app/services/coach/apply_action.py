@@ -20,7 +20,7 @@ and `quick_intents.IntentResponse.action.type`):
                                        adaptive_macros pass: don't move)
   • shorten_workout                 → UserPreferences.workout_duration_minutes
                                        (one new column — see migration)
-  • swap_to_recovery                → UserDayState.skipped_focus on tomorrow
+  • swap_to_recovery                → UserDayState recovery override on tomorrow
   • schedule_deload                 → UserCoachingState.deload_until_date
   • set_core_frequency              → UserPreferences.core_frequency_per_week
   • carb_bump_today                 → UserDayState (one-day macro override
@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+import re
 from typing import Any
 
 from sqlmodel import select
@@ -58,6 +59,83 @@ from app.models import (
 _MAX_KCAL_DELTA = 250          # per single apply
 _MAX_DAYS_DELTA = 1            # never jump >1 day at once
 _KCAL_FLOOR_DEFAULT = 1500     # absolute minimum kcal target post-apply
+
+
+def _human_label(value: Any, *, lower: bool = True) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    text = re.sub(r"[_\-]+", " ", text)
+    text = " ".join(text.split())
+    return text.lower() if lower else text.title()
+
+
+def _descriptive_summary(action_type: str, action: dict[str, Any]) -> str:
+    muscle = _human_label(action.get("muscle"))
+    muscle_prefix = f"{muscle} " if muscle else ""
+
+    if action_type == "reduce_muscle_volume":
+        pct = action.get("pct")
+        pct_text = f" by about {int(pct)}%" if isinstance(pct, (int, float)) and pct > 0 else ""
+        return f"The next generated week will reduce {muscle_prefix}volume{pct_text}."
+
+    if action_type == "add_muscle_volume":
+        sets = action.get("sets")
+        sets_text = f"{int(sets)} " if isinstance(sets, (int, float)) and sets > 0 else ""
+        return f"The next generated week will add {sets_text}{muscle_prefix}sets."
+
+    if action_type == "hold_muscle_volume":
+        return f"The next generated week will hold {muscle_prefix}volume steady."
+
+    if action_type == "reduce_cardio":
+        minutes = action.get("minutes")
+        minutes_text = f" by about {int(minutes)} min" if isinstance(minutes, (int, float)) and minutes > 0 else ""
+        return f"The next generated week will trim cardio{minutes_text}."
+
+    if action_type == "reduce_intensity":
+        return "Intensity reduction noted. Drop top-set loads about 10-15% today."
+
+    if action_type == "raise_protein_target":
+        grams = action.get("grams") or action.get("protein_g")
+        grams_text = f" around {int(grams)}g/day" if isinstance(grams, (int, float)) and grams > 0 else ""
+        return f"Protein target preference noted{grams_text}."
+
+    if action_type == "raise_fiber_target":
+        grams = action.get("grams") or action.get("fiber_g")
+        grams_text = f" around {int(grams)}g/day" if isinstance(grams, (int, float)) and grams > 0 else ""
+        return f"Fiber target preference noted{grams_text}."
+
+    if action_type == "rebalance_week":
+        return "Week rebalance noted. Your active week stays fixed; this will inform the next review."
+
+    if action_type == "strength_preservation":
+        return "Strength-preservation priority noted while calories or volume change."
+
+    if action_type == "swap_to_recovery_or_reduce":
+        return "Recovery option noted. Use Workout > Plan > Change Focus for this week, or go lighter today."
+
+    if action_type == "increase_meal_logging":
+        return "Meal-logging target noted. Aim for 4+ logged days next week."
+
+    if action_type == "adjust_meal_timing":
+        return "Meal-timing target noted for steadier energy and satiety."
+
+    if action_type == "improve_protein_consistency":
+        return "Protein consistency noted. Anchor protein earlier in the day."
+
+    if action_type == "adjust_protein_target":
+        return "Protein target preference noted for next week's plan."
+
+    return f"{_human_label(action_type, lower=False)} recommendation noted."
+
+
+def _accepted_memory_summary(action_type: str, action: dict[str, Any], fallback_summary: str | None = None) -> str:
+    summary = (fallback_summary or _descriptive_summary(action_type, action)).strip().rstrip(".")
+    if summary.startswith("The next generated week will "):
+        summary = summary.replace("The next generated week will ", "", 1)
+        return f"Accepted recommendation: {summary} next generated week."
+    return f"Accepted recommendation: {summary[0].lower() + summary[1:] if summary else _human_label(action_type)}."
 
 
 @dataclass
@@ -120,7 +198,7 @@ def _descriptive_ack(
     summary: str,
 ) -> ApplyResult:
     _record_memory(db, user_id, "recommendation_acked",
-        f"User accepted recommendation: {action_type}",
+        _accepted_memory_summary(action_type, action, summary),
         {"action": action, "rec_key": rec_key})
     db.commit()
     return ApplyResult(
@@ -290,12 +368,14 @@ def apply_action(
     # ── swap_to_recovery (one tomorrow) ─────────────────────────────
     if action_type == "swap_to_recovery":
         # Mark tomorrow as a recovery focus via UserDayState. The
-        # planner already reads UserDayState.skipped_focus on the
-        # day card to override the planned archetype.
+        # active PlanWeek stays fixed; the app reads this day-state
+        # overlay the same way it reads a user-initiated skip.
         tomorrow = date.today() + timedelta(days=1)
         state = _day_state(db, user_id, tomorrow)
         old = state.skipped_focus
+        old_reason = state.skip_reason
         state.skipped_focus = "recovery"
+        state.skip_reason = "Coach swapped to recovery"
         state.updated_at = datetime.now(timezone.utc)
         db.add(state)
         _record_memory(db, user_id, "ai_apply",
@@ -304,10 +384,18 @@ def apply_action(
         db.commit()
         return ApplyResult(
             applied=True,
-            summary="Marked tomorrow as recovery guidance. Your active PlanWeek stays fixed; use Workout > Plan if you want a visible day change.",
+            summary="Tomorrow is set as a recovery day.",
             needs_regen=False,
-            changed_fields={"skipped_focus": {"date": str(tomorrow), "from": old, "to": "recovery"}},
-            undo_action={"type": "set_day_focus", "date": str(tomorrow), "skipped_focus": old},
+            changed_fields={
+                "skipped_focus": {"date": str(tomorrow), "from": old, "to": "recovery"},
+                "skip_reason": {"date": str(tomorrow), "from": old_reason, "to": state.skip_reason},
+            },
+            undo_action={
+                "type": "set_day_focus",
+                "date": str(tomorrow),
+                "skipped_focus": old,
+                "skip_reason": old_reason,
+            },
         )
 
     # ── set_day_focus / clear_day_state_focuses (undo helpers) ───────
@@ -315,18 +403,30 @@ def apply_action(
         target_date = _parse_date(action.get("date"), date.today())
         state = _day_state(db, user_id, target_date)
         old = state.skipped_focus
+        old_reason = state.skip_reason
         state.skipped_focus = action.get("skipped_focus")
+        if "skip_reason" in action:
+            state.skip_reason = action.get("skip_reason")
         state.updated_at = datetime.now(timezone.utc)
         db.add(state)
         _record_memory(db, user_id, "ai_apply_undo",
             f"Day focus override restored for {target_date}",
             {"action": action, "from": old, "to": state.skipped_focus})
         db.commit()
+        changed_fields = {
+            "skipped_focus": {"date": str(target_date), "from": old, "to": state.skipped_focus},
+        }
+        if "skip_reason" in action:
+            changed_fields["skip_reason"] = {
+                "date": str(target_date),
+                "from": old_reason,
+                "to": state.skip_reason,
+            }
         return ApplyResult(
             applied=True,
             summary=f"Restored day override for {target_date}.",
             needs_regen=False,
-            changed_fields={"skipped_focus": {"date": str(target_date), "from": old, "to": state.skipped_focus}},
+            changed_fields=changed_fields,
         )
 
     if action_type == "clear_day_state_focuses":
@@ -657,30 +757,23 @@ def apply_action(
     # existing volume / focus rotation logic. We log them so the
     # coach AI can reference them and the user gets a confirmation.
     descriptive = {
-        "reduce_muscle_volume": "The next generated week will dial back that muscle's volume.",
-        "add_muscle_volume": "The next generated week will add sets for that muscle.",
-        "hold_muscle_volume": "Holding the current volume; the next generated week will keep it stable.",
-        "reduce_cardio": "Logged. The next generated week will trim cardio days.",
-        "reduce_intensity": "Today's intensity will dial back. Drop top-set loads ~10-15%.",
-        "raise_protein_target": "Protein target preference noted.",
-        "raise_fiber_target": "Fiber target preference noted.",
-        "rebalance_week": "Acknowledged. Your active week stays fixed; this note will inform the next review.",
-        "strength_preservation": "Logged. We'll protect strength while you adjust calories + volume.",
-        "swap_to_recovery_or_reduce": "Use Workout > Plan > Change Focus for a recovery day, or go lighter today.",
-        # Nutrition review advisory actions — no persistent state yet.
-        "increase_meal_logging": "Logged. Tracking 4+ days/week gives you the most accurate nutrition coaching.",
-        "adjust_meal_timing": "Logged. Spreading meals evenly through the day can help with energy and satiety.",
-        "improve_protein_consistency": "Logged. Try anchoring protein at breakfast — it makes hitting targets easier.",
-        "adjust_protein_target": "Logged. Your protein preference has been noted for next week's plan.",
+        "reduce_muscle_volume", "add_muscle_volume", "hold_muscle_volume",
+        "reduce_cardio", "reduce_intensity", "raise_protein_target",
+        "raise_fiber_target", "rebalance_week", "strength_preservation",
+        "swap_to_recovery_or_reduce",
+        # Nutrition review advisory actions - no persistent state yet.
+        "increase_meal_logging", "adjust_meal_timing",
+        "improve_protein_consistency", "adjust_protein_target",
     }
     if action_type in descriptive:
+        summary = _descriptive_summary(action_type, action)
         _record_memory(db, user_id, "recommendation_acked",
-            f"User accepted recommendation: {action_type}",
+            _accepted_memory_summary(action_type, action, summary),
             {"action": action, "rec_key": rec_key})
         db.commit()
         return ApplyResult(
             applied=True,
-            summary=descriptive[action_type],
+            summary=summary,
             needs_regen=False,
             changed_fields={},
             descriptive_only=True,

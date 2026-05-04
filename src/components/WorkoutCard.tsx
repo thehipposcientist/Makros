@@ -153,7 +153,7 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
     }, 0);
     void nonWarmupCount;
     const rawMinutes = Math.max(1, Math.round(secs / 60));
-    const cap = sessionMinutes ? Math.round(sessionMinutes * 1.25) : 120;
+    const cap = sessionMinutes ? Math.round(sessionMinutes) : 120;
     return { estimatedSeconds: secs, estimatedMinutes: Math.min(rawMinutes, cap) };
   }, [workout.exercises, sessionMinutes]);
 

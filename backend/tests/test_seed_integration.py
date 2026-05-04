@@ -61,6 +61,13 @@ def test_equipment_and_exercise_seed_is_idempotent_and_meta_ready() -> None:
         meta_required = {gear["slug"] for gear in meta_entry["gear"] if gear["required"]}
         assert meta_required == {"dumbbells", "swiss_ball"}, meta_entry["gear"]
 
+        kickbacks = session.exec(
+            select(Exercise).where(Exercise.slug == "kickbacks")
+        ).first()
+        assert kickbacks is not None, "kickbacks did not seed"
+        assert kickbacks.name == "Dumbbell Tricep Kickbacks"
+        assert kickbacks.primary_muscle == "triceps"
+
     _ok("reseed preserves counts and /meta/exercises exposes required gear")
 
 
@@ -124,9 +131,105 @@ def test_food_seed_default_servings_hydrate_into_meal_lookup() -> None:
     _ok("seeded serving -> /meta/foods -> DB hydrate -> meal lookup all agree")
 
 
+def test_usda_seed_backfill_survives_reseed_and_meta_stays_curated() -> None:
+    print("\n[test] seed integration: USDA backfill + curated meta foods")
+    from app.enums import FoodCategory, FoodSource
+    from app.food_service import normalize_food_name
+    from app.models import Food, FoodNutrition, FoodServing
+    from app.routers.meta import list_foods
+    from app.seed import seed_foods
+
+    engine = make_seed_test_engine()
+    with Session(engine) as session:
+        seed_foods(session)
+
+        chicken = session.exec(select(Food).where(Food.name == "Chicken Breast")).first()
+        assert chicken is not None
+        chicken.external_id = "usda-test-chicken"
+        chicken.calories = 123
+        chicken.protein = 29
+        chicken.carbs = 0
+        chicken.fat = 2
+        session.add(chicken)
+        chicken_nutrition = session.exec(
+            select(FoodNutrition).where(FoodNutrition.food_id == chicken.id)
+        ).first()
+        assert chicken_nutrition is not None
+        chicken_nutrition.calories = 123
+        chicken_nutrition.protein = 29
+        chicken_nutrition.carbs = 0
+        chicken_nutrition.fat = 2
+        session.add(chicken_nutrition)
+
+        session.add(Food(
+            name="USDA Catalog Apple",
+            normalized_name=normalize_food_name("USDA Catalog Apple"),
+            category=FoodCategory.FRUITS,
+            source=FoodSource.USDA,
+            external_id="usda-test-apple",
+            is_verified=True,
+            unit="100 g",
+            calories=52,
+            protein=0.3,
+            carbs=14,
+            fat=0.2,
+        ))
+        session.flush()
+        usda_food = session.exec(select(Food).where(Food.name == "USDA Catalog Apple")).first()
+        assert usda_food is not None
+        session.add(FoodNutrition(
+            food_id=usda_food.id,
+            reference_unit="100g",
+            reference_grams=100,
+            calories=52,
+            protein=0.3,
+            carbs=14,
+            fat=0.2,
+        ))
+        session.add(FoodServing(
+            food_id=usda_food.id,
+            label="100 g",
+            grams=100,
+            is_default=True,
+            calories=52,
+            protein=0.3,
+            carbs=14,
+            fat=0.2,
+        ))
+        session.commit()
+
+        seed_foods(session)
+
+        refreshed = session.exec(select(Food).where(Food.name == "Chicken Breast")).first()
+        assert refreshed is not None
+        refreshed_nutrition = session.exec(
+            select(FoodNutrition).where(FoodNutrition.food_id == refreshed.id)
+        ).first()
+        assert refreshed_nutrition is not None
+        assert refreshed.external_id == "usda-test-chicken"
+        assert refreshed_nutrition.calories == 123
+        assert refreshed_nutrition.protein == 29
+
+        default_serving = session.exec(
+            select(FoodServing)
+            .where(FoodServing.food_id == refreshed.id)
+            .where(FoodServing.is_default == True)  # noqa: E712
+        ).first()
+        assert default_serving is not None
+        assert default_serving.calories == 123
+        assert default_serving.protein == 29
+
+        meta_names = {row["name"] for row in list_foods(db=session)}
+        assert "Chicken Breast" in meta_names
+        assert "USDA Catalog Apple" not in meta_names
+
+    _ok("USDA-backed seed nutrition is preserved and /meta/foods stays curated")
+
+
 cases = [
     test_equipment_and_exercise_seed_is_idempotent_and_meta_ready,
     test_food_seed_default_servings_hydrate_into_meal_lookup,
+    test_usda_seed_backfill_survives_reseed_and_meta_stays_curated,
 ]
 
 

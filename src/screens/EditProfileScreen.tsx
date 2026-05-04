@@ -40,6 +40,7 @@ import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
 import SearchInput from '../components/SearchInput';
 import { ExerciseLibraryItem, humanizeToken, buildExerciseGuide } from '../utils/exerciseGuide';
 import { tierOf } from '../utils/subscription';
+import { groupKitchenFoodsByCategory } from '../utils/foodGrouping';
 import {
   DEFAULT_ADJUSTABLE_DUMBBELLS,
   DEFAULT_PLATE_PAIRS_LBS,
@@ -1516,13 +1517,11 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const selectedFoodNames = foods.filter(f => !f.startsWith('__supp__'));
   const selectedFoodNameSet = new Set(selectedFoodNames.map(f => f.toLowerCase()));
   const customFoodSelected = customFoods.filter(f => !standardFoodNames.has(f.name));
-  const foodLibraryByName = new Map<string, any>();
-  for (const f of meta.allFoods) foodLibraryByName.set(f.name.toLowerCase(), f);
-  for (const f of customFoods) foodLibraryByName.set(f.name.toLowerCase(), f);
-  const selectedKitchenFoods = selectedFoodNames.map(name => ({
-    name,
-    item: foodLibraryByName.get(name.toLowerCase()),
-  }));
+  const selectedKitchenFoodGroups = groupKitchenFoodsByCategory(
+    selectedFoodNames,
+    meta.foodCategories,
+    customFoods,
+  );
   const foodSearchLower = foodSearch.trim().toLowerCase();
   const filteredFoodCategories = foodSearchLower ? meta.foodCategories
     .filter(category => foodCategoryFilter === 'all' || category.key === foodCategoryFilter)
@@ -2919,17 +2918,27 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
               <>
                 <View style={styles.chipGroup}>
                   <Text style={styles.chipGroupLabel}>In Your Kitchen</Text>
-                  {selectedKitchenFoods.length > 0 ? (
-                    <View style={styles.chips}>
-                      {selectedKitchenFoods.map(({ name, item }) => (
-                        <TouchableOpacity
-                          key={name}
-                          style={[styles.chip, styles.chipActive]}
-                          onPress={() => toggleFood(name)}>
-                          <Text style={[styles.chipText, styles.chipTextActive]}>
-                            {name}{item?.calories ? ` (${Math.round(item.calories)} cal)` : ''} <Ionicons name="close" size={12} />
-                          </Text>
-                        </TouchableOpacity>
+                  {selectedKitchenFoodGroups.length > 0 ? (
+                    <View style={{ gap: 12 }}>
+                      {selectedKitchenFoodGroups.map(group => (
+                        <View key={group.key}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                            {group.icon.includes('-') ? <Ionicons name={group.icon as any} size={15} color={colors.textSecondary} /> : <Text style={{ fontSize: 15 }}>{group.icon}</Text>}
+                            <Text style={styles.chipGroupLabel}>{group.label}</Text>
+                          </View>
+                          <View style={styles.chips}>
+                            {group.foods.map(({ name, item }) => (
+                              <TouchableOpacity
+                                key={name}
+                                style={[styles.chip, styles.chipActive]}
+                                onPress={() => toggleFood(name)}>
+                                <Text style={[styles.chipText, styles.chipTextActive]}>
+                                  {name}{item?.calories ? ` (${Math.round(item.calories)} cal)` : ''} <Ionicons name="close" size={12} />
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        </View>
                       ))}
                     </View>
                   ) : (

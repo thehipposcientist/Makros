@@ -10,6 +10,7 @@ Coverage:
   - Excessive volume per muscle → deload_volume rec
   - Volume spike per muscle → spike rec
   - Poor recovery (low sleep) → suppresses "add volume" recs
+  - 6+ strength days with low Zone 2 → recovery-day rec
   - Weight up vs goal weight loss → calorie adjust rec
   - Headline string non-empty
 """
@@ -232,6 +233,41 @@ def test_zone2_cardio_focus_uses_hr_zone_minutes_when_present():
     review = compute_weekly_review(s, u.id)
     assert review.cardio_minutes == 45.0, review.cardio_minutes
     assert review.zone2_minutes == 18.0, review.zone2_minutes
+
+
+def test_six_strength_days_low_zone2_recommends_recovery_swap():
+    """A week with six strength sessions and almost no easy cardio should
+    produce the actionable recovery-day recommendation."""
+    print("\n[test] 6 strength days + low Zone 2 → swap_to_recovery rec")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    s, u = _setup_user_with_goal("muscle_gain")
+    _seed_active_workout_plan(
+        s,
+        u.id,
+        days_per_week=6,
+        days=[
+            {"focus": "Push"},
+            {"focus": "Pull"},
+            {"focus": "Legs"},
+            {"focus": "Push"},
+            {"focus": "Pull"},
+            {"focus": "Legs"},
+        ],
+    )
+    today = date.today()
+    for i, focus in enumerate(["Push", "Pull", "Legs", "Push", "Pull", "Legs"]):
+        _seed_completions(
+            s,
+            u.id,
+            dates=[today - timedelta(days=i)],
+            focus=focus,
+            activity_category="strength",
+            duration_min=55,
+        )
+    review = compute_weekly_review(s, u.id)
+    rec = next((r for r in review.recommendations if r.key == "add_recovery_day"), None)
+    assert rec is not None, f"expected add_recovery_day, got {[r.key for r in review.recommendations]}"
+    assert rec.action == {"type": "swap_to_recovery", "count": 1}
 
 
 # ── Headline ─────────────────────────────────────────────────

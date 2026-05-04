@@ -48,6 +48,7 @@ import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal, getMe } from '../service
 import { requirePro, type ProFeature } from '../utils/subscription';
 import { APPLE_HEALTH_PERMISSION_COPY, isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistHealthEnabled } from '../utils/workoutHistory';
+import { groupKitchenFoodsByCategory } from '../utils/foodGrouping';
 import {
   DEFAULT_ADJUSTABLE_DUMBBELLS,
   DEFAULT_PLATE_PAIRS_LBS,
@@ -1902,6 +1903,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     const foodSearchTerm = foodSearch.trim();
     const foodSearchLower = foodSearchTerm.toLowerCase();
     const selectedFoodNameSet = new Set(foodsAvailable.map(f => f.toLowerCase()));
+    const selectedKitchenGroups = groupKitchenFoodsByCategory(foodsAvailable, meta.foodCategories);
     const filteredFoodCategories = foodSearchLower ? meta.foodCategories
       .map(category => ({
         ...category,
@@ -2066,16 +2068,26 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
       <Text style={styles.sectionHeading}>In your kitchen</Text>
       {foodsAvailable.length > 0 ? (
-        <View style={[styles.foodChips, { marginBottom: 18 }]}>
-          {foodsAvailable.map(f => (
-            <TouchableOpacity
-              key={f}
-              style={[styles.foodChip, styles.foodChipActive]}
-              onPress={() => toggleFood(f)}>
-              <Text style={[styles.foodChipText, styles.foodChipTextActive]}>
-                {f} <Ionicons name="close" size={12} />
-              </Text>
-            </TouchableOpacity>
+        <View style={{ marginBottom: 18, gap: 12 }}>
+          {selectedKitchenGroups.map(group => (
+            <View key={group.key} style={styles.foodCategory}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                {group.icon.includes('-') ? <Ionicons name={group.icon as any} size={16} color={colors.textSecondary} /> : <Text style={{ fontSize: 16 }}>{group.icon}</Text>}
+                <Text style={styles.foodCategoryLabel}>{group.label}</Text>
+              </View>
+              <View style={styles.foodChips}>
+                {group.foods.map(({ name }) => (
+                  <TouchableOpacity
+                    key={name}
+                    style={[styles.foodChip, styles.foodChipActive]}
+                    onPress={() => toggleFood(name)}>
+                    <Text style={[styles.foodChipText, styles.foodChipTextActive]}>
+                      {name} <Ionicons name="close" size={12} />
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
           ))}
         </View>
       ) : (

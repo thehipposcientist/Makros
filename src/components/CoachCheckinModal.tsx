@@ -13,6 +13,8 @@ import {
 } from 'react-native';
 import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { cleanAiText } from '../utils/aiText';
+import { coachApplyNeedsDayStatusRefresh } from '../utils/coachApplyState';
+import { humanizeToken } from '../utils/exerciseGuide';
 import type { AppThemeName } from '../types';
 import {
   submitCoachCheckin,
@@ -97,6 +99,82 @@ const PAIN_OPTIONS: Array<{ value: PainArea; label: string }> = [
   { value: 'foot_ankle', label: 'Foot/ankle' },
   { value: 'other', label: 'Other' },
 ];
+
+const FIELD_LABELS: Record<string, string> = {
+  kcal: 'Calories',
+  protein_g: 'Protein',
+  calorie_adjustment: 'Calorie adjustment',
+  volume_adjustment_pct: 'Volume adjustment',
+  workout_duration_minutes: 'Workout duration',
+  days_per_week: 'Days per week',
+  core_frequency_per_week: 'Core frequency',
+};
+
+function sentenceLabel(value: unknown): string {
+  return humanizeToken(String(value ?? '')).toLowerCase();
+}
+
+function coachFieldLabel(key: string): string {
+  return FIELD_LABELS[key] ?? humanizeToken(key);
+}
+
+function formatCoachValue(key: string, value: unknown): string {
+  if (typeof value === 'number') {
+    const sign = value > 0 ? '+' : '';
+    if (key === 'kcal' || key.includes('calorie')) return `${sign}${value} kcal/day`;
+    if (key.includes('protein')) return `${sign}${value}g/day`;
+    if (key.includes('pct') || key.includes('percent')) return `${sign}${value}%`;
+    return `${sign}${value}`;
+  }
+  if (Array.isArray(value)) return value.map(sentenceLabel).join(', ');
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, any>;
+    if ('from' in obj || 'to' in obj) {
+      return `${obj.from ?? 'none'} -> ${obj.to ?? 'none'}`;
+    }
+  }
+  return String(value ?? '');
+}
+
+function describeRecommendationAction(action: any): string | null {
+  if (!action || typeof action !== 'object') return null;
+  const type = String(action.type ?? '');
+  const muscle = sentenceLabel(action.muscle);
+  const musclePrefix = muscle ? `${muscle} ` : '';
+  const sets = Number(action.sets);
+  const pct = Number(action.pct);
+  const minutes = Number(action.minutes);
+  switch (type) {
+    case 'add_muscle_volume':
+      return `Action: add ${Number.isFinite(sets) && sets > 0 ? `${sets} ` : ''}${musclePrefix}sets.`;
+    case 'reduce_muscle_volume':
+      return `Action: reduce ${musclePrefix}volume${Number.isFinite(pct) && pct > 0 ? ` about ${pct}%` : ''}.`;
+    case 'hold_muscle_volume':
+      return `Action: hold ${musclePrefix}volume steady.`;
+    case 'add_cardio_session':
+    case 'add_zone2_session':
+      return `Action: add ${Number.isFinite(minutes) && minutes > 0 ? `about ${minutes} min ` : ''}${type === 'add_zone2_session' ? 'Zone 2 ' : ''}cardio.`;
+    case 'raise_calories':
+      return `Action: raise calories${Number.isFinite(Number(action.kcal)) ? ` by ${Number(action.kcal)} kcal/day` : ''}.`;
+    case 'lower_calories':
+      return `Action: lower calories${Number.isFinite(Number(action.kcal)) ? ` by ${Number(action.kcal)} kcal/day` : ''}.`;
+    case 'change_days_per_week':
+      return action.value ? `Action: move to ${action.value} training days per week.` : null;
+    case 'noop':
+      return null;
+    default:
+      return type ? `Action: ${sentenceLabel(type)}.` : null;
+  }
+}
+
+function appliedSummary(item: any): string {
+  if (item?.summary) return cleanAiText(String(item.summary));
+  return item?.type ? humanizeToken(String(item.type)) : 'Applied.';
+}
+
+function commitmentLabel(item: any): string {
+  return item?.label ? String(item.label) : humanizeToken(String(item?.kind ?? 'Commitment'));
+}
 
 export default function CoachCheckinModal({
   visible, authToken, onClose, onCompleted, themeName,
@@ -280,6 +358,60 @@ export default function CoachCheckinModal({
     }
   };
 
+  const renderReviewChangeSections = (snapshot?: Record<string, any> | null) => {
+    if (!snapshot || typeof snapshot !== 'object') return null;
+    const applied = Array.isArray(snapshot.structured_applied) ? snapshot.structured_applied : [];
+    const recs = Array.isArray(snapshot.recommendations) ? snapshot.recommendations : [];
+    const adjustment = snapshot.structured_adjustment;
+    if (applied.length === 0 && recs.length === 0 && !adjustment?.summary) return null;
+    return (
+      <>
+        {adjustment?.summary ? (
+          <View style={styles.deltaBlock}>
+            <Text style={styles.deltaLabel}>Check-in recommendation</Text>
+            <Text style={styles.deltaLine}>{String(adjustment.summary)}</Text>
+          </View>
+        ) : null}
+
+        {applied.length > 0 && (
+          <View style={styles.deltaBlock}>
+            <Text style={styles.deltaLabel}>Applied changes</Text>
+            {applied.map((item, i) => (
+              <Text key={`${item?.type ?? 'applied'}-${i}`} style={styles.deltaLine}>
+                {'\u2022'} {appliedSummary(item)}
+              </Text>
+            ))}
+            <Text style={styles.deltaFootnote}>
+              Saved to preferences or coach state for the next generated week.
+            </Text>
+          </View>
+        )}
+
+        {recs.length > 0 && (
+          <View style={styles.deltaBlock}>
+            <Text style={styles.deltaLabel}>Recommended changes</Text>
+            {recs.slice(0, 4).map((rec: any, i: number) => {
+              const actionLine = describeRecommendationAction(rec.action);
+              return (
+                <View key={rec.key ?? `${rec.title ?? 'rec'}-${i}`} style={{ marginBottom: i === Math.min(recs.length, 4) - 1 ? 0 : 10 }}>
+                  <Text style={styles.deltaLine}>
+                    {'\u2022'} {rec.title ? String(rec.title) : humanizeToken(String(rec.key ?? 'Recommendation'))}
+                  </Text>
+                  {rec.detail ? (
+                    <Text style={styles.deltaFootnote}>{String(rec.detail)}</Text>
+                  ) : null}
+                  {actionLine ? (
+                    <Text style={styles.deltaFootnote}>{actionLine}</Text>
+                  ) : null}
+                </View>
+              );
+            })}
+          </View>
+        )}
+      </>
+    );
+  };
+
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={handleClose}>
       <View style={styles.container}>
@@ -365,12 +497,14 @@ export default function CoachCheckinModal({
                   </View>
                 )}
 
+                {renderReviewChangeSections(existingCheckin.review_snapshot_json)}
+
                 {existingCheckin.ai_delta && Object.keys(existingCheckin.ai_delta).length > 0 && (
                   <View style={styles.deltaBlock}>
                     <Text style={styles.deltaLabel}>Coaching adjustment</Text>
                     {Object.entries(existingCheckin.ai_delta).map(([k, v]) => (
                       <Text key={k} style={styles.deltaLine}>
-                        {k}: {typeof v === 'number' && v > 0 ? '+' : ''}{String(v)}
+                        {coachFieldLabel(k)}: {formatCoachValue(k, v)}
                       </Text>
                     ))}
                     <Text style={styles.deltaFootnote}>
@@ -383,7 +517,7 @@ export default function CoachCheckinModal({
                   <View style={styles.deltaBlock}>
                     <Text style={styles.deltaLabel}>Next week commitments</Text>
                     {existingCheckin.commitments_json.map((c, i) => (
-                      <Text key={i} style={styles.deltaLine}>• {c.label ?? c.kind}</Text>
+                      <Text key={i} style={styles.deltaLine}>{'\u2022'} {commitmentLabel(c)}</Text>
                     ))}
                   </View>
                 )}
@@ -512,12 +646,7 @@ export default function CoachCheckinModal({
                                       try {
                                         const applied = await applyRecommendationAction(authToken, rec.action, rec.key);
                                         const changed = applied.changed_fields ?? {};
-                                        if (
-                                          'paused_dates' in changed ||
-                                          'cleared_dates' in changed ||
-                                          'skipped_focus' in changed ||
-                                          'macro_overrides' in changed
-                                        ) {
+                                        if (coachApplyNeedsDayStatusRefresh(changed)) {
                                           onPlanUpdated?.();
                                         }
                                         // Show concise feedback then
@@ -642,23 +771,23 @@ export default function CoachCheckinModal({
                   const flags: any[] = r.flags ?? [];
                   const overrides: string[] = r.overrides ?? [];
                   const commitments: any[] = r.commitments_json ?? [];
-                  const structuredApplied: any[] = r.review_snapshot_json?.structured_applied ?? r.review_summary?.structured_applied ?? [];
-                  const structuredAdjustment = r.review_snapshot_json?.structured_adjustment ?? r.review_summary?.structured_adjustment ?? null;
                   return (
                     <>
                       <View style={[styles.responseHeader, { borderLeftColor: responseType ? responseColor(responseType) : colors.primary }]}>
                         {responseType && (
-                          <Text style={styles.responseType}>{responseType.replace('_', ' ')}</Text>
+                          <Text style={styles.responseType}>{humanizeToken(responseType)}</Text>
                         )}
                         <Text style={styles.responseMessage}>{cleanAiText(msg)}</Text>
                       </View>
+
+                      {renderReviewChangeSections(r.review_snapshot_json ?? r.review_summary)}
 
                       {delta && (
                         <View style={styles.deltaBlock}>
                           <Text style={styles.deltaLabel}>Coaching adjustment</Text>
                           {Object.entries(delta).map(([k, v]) => (
                             <Text key={k} style={styles.deltaLine}>
-                              {k}: {typeof v === 'number' && (v as number) > 0 ? '+' : ''}{String(v)}
+                              {coachFieldLabel(k)}: {formatCoachValue(k, v)}
                             </Text>
                           ))}
                           {r.applied_kcal_adjustment_total != null && (
@@ -679,25 +808,8 @@ export default function CoachCheckinModal({
                         <View style={styles.deltaBlock}>
                           <Text style={styles.deltaLabel}>Next week commitments</Text>
                           {commitments.map((c, i) => (
-                            <Text key={i} style={styles.deltaLine}>• {c.label ?? c.kind}</Text>
+                            <Text key={i} style={styles.deltaLine}>{'\u2022'} {commitmentLabel(c)}</Text>
                           ))}
-                        </View>
-                      )}
-
-                      {(structuredApplied.length > 0 || structuredAdjustment?.summary) && (
-                        <View style={styles.deltaBlock}>
-                          <Text style={styles.deltaLabel}>Check-in adjustments</Text>
-                          {structuredAdjustment?.summary ? (
-                            <Text style={styles.deltaLine}>{structuredAdjustment.summary}</Text>
-                          ) : null}
-                          {structuredApplied.map((item, i) => (
-                            <Text key={`${item.type ?? 'applied'}-${i}`} style={styles.deltaLine}>
-                              • {item.summary ?? item.type}
-                            </Text>
-                          ))}
-                          <Text style={styles.deltaFootnote}>
-                            These update your saved preferences and coach state for the next generated week.
-                          </Text>
                         </View>
                       )}
 
@@ -706,7 +818,7 @@ export default function CoachCheckinModal({
                           <Text style={styles.flagsLabel}>Active flags</Text>
                           {flags.map((f) => (
                             <View key={f.key} style={styles.flagRow}>
-                              <Text style={styles.flagKey}>{f.key.replace(/_/g, ' ')}</Text>
+                              <Text style={styles.flagKey}>{humanizeToken(f.key)}</Text>
                               <Text style={[styles.flagSeverity, {
                                 color: f.severity === 'high' ? '#ef4444' : f.severity === 'med' ? '#F59E0B' : colors.textMuted,
                               }]}>{f.severity}</Text>

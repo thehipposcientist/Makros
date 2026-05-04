@@ -10,8 +10,9 @@ Coverage:
   - raise_calories / lower_calories: success, kcal cap, accumulation
     across multiple applies, invalid kcal
   - hold_calorie_adjustment: writes memory, no state mutation
-  - swap_to_recovery: creates UserDayState row tomorrow with skipped_focus
+  - swap_to_recovery: creates UserDayState row tomorrow with skipped_focus + reason
   - swap_to_recovery: updates existing UserDayState row in place
+  - swap_to_recovery: does not rewrite the active PlanWeek row
   - noop: ack only, no DB writes
   - descriptive-only actions: write memory, never mutate
   - unknown action type: graceful fallback
@@ -34,7 +35,7 @@ def _make_mem_engine():
         WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet,
         UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState,
         DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob,
-        UserState, WorkoutPlan,
+        UserState, WorkoutPlan, PlanWeek, PlanDay,
     )
     from sqlalchemy.pool import StaticPool
     engine = create_engine(
@@ -199,13 +200,14 @@ def test_hold_calorie_adjustment_writes_memory_no_mutation():
 # ── swap_to_recovery ───────────────────────────────────────────────
 
 def test_swap_to_recovery_creates_tomorrow_day_state():
-    print("\n[test] swap_to_recovery: tomorrow's UserDayState gets skipped_focus")
+    print("\n[test] swap_to_recovery: tomorrow's UserDayState gets recovery override")
     from app.services.coach.apply_action import apply_action
     from app.models import UserDayState
     from sqlmodel import select
     _, s, u = _setup()
     res = apply_action(s, u.id, {"type": "swap_to_recovery"})
     assert res.applied
+    assert res.summary == "Tomorrow is set as a recovery day."
     tomorrow = date.today() + timedelta(days=1)
     row = s.exec(
         select(UserDayState)
@@ -213,6 +215,9 @@ def test_swap_to_recovery_creates_tomorrow_day_state():
     ).first()
     assert row is not None, "no UserDayState row created for tomorrow"
     assert row.skipped_focus == "recovery"
+    assert row.skip_reason == "Coach swapped to recovery"
+    assert res.changed_fields["skipped_focus"]["to"] == "recovery"
+    assert res.changed_fields["skip_reason"]["to"] == "Coach swapped to recovery"
 
 
 def test_swap_to_recovery_updates_existing_day_state():
@@ -234,6 +239,63 @@ def test_swap_to_recovery_updates_existing_day_state():
     ).all()
     assert len(rows) == 1, f"expected exactly 1 row, got {len(rows)}"
     assert rows[0].skipped_focus == "recovery"
+    assert rows[0].skip_reason == "Coach swapped to recovery"
+
+
+def test_swap_to_recovery_keeps_active_plan_week_fixed():
+    """Applying a recovery recommendation is a UserDayState overlay, not
+    a PlanDay rewrite. This preserves the fixed-week invariant while
+    still giving the UI a visible recovery state to render."""
+    print("\n[test] swap_to_recovery: active PlanDay remains fixed")
+    from app.services.coach.apply_action import apply_action
+    from app.models import PlanWeek, PlanDay, UserDayState
+    from sqlmodel import select
+    _, s, u = _setup()
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    pw = PlanWeek(
+        user_id=u.id,
+        start_date=today,
+        end_date=today + timedelta(days=6),
+        planner_version="test",
+        goal="muscle_gain",
+        days_per_week=4,
+        preferred_split="ppl",
+        status="active",
+    )
+    s.add(pw)
+    s.flush()
+    workout = {"day": "Day 2", "focus": "Legs", "stimulus": "hypertrophy", "exercises": [{"name": "Squat"}]}
+    pd = PlanDay(
+        plan_week_id=pw.id,
+        user_id=u.id,
+        day_date=tomorrow,
+        day_index=1,
+        status="planned",
+        is_rest=False,
+        workout_json=workout,
+        nutrition_json={"targets": {"calories": 2200}},
+        locked=False,
+        generation_source="initial",
+    )
+    s.add(pd)
+    s.commit()
+
+    res = apply_action(s, u.id, {"type": "swap_to_recovery"})
+    assert res.applied
+    s.refresh(pd)
+    assert pd.status == "planned"
+    assert pd.locked is False
+    assert pd.lock_reason is None
+    assert pd.is_rest is False
+    assert pd.workout_json == workout
+    row = s.exec(
+        select(UserDayState)
+        .where(UserDayState.user_id == u.id, UserDayState.day_key == tomorrow)
+    ).first()
+    assert row is not None
+    assert row.skipped_focus == "recovery"
+    assert row.skip_reason == "Coach swapped to recovery"
 
 
 # ── noop ───────────────────────────────────────────────────────────
@@ -277,8 +339,29 @@ def test_descriptive_actions_write_memory_no_state_mutation():
         assert prefs_after.days_per_week == days_before, f"{atype} mutated days_per_week"
         # Memory row recorded.
         mem = s.exec(select(CoachMemory).where(CoachMemory.user_id == u.id)).all()
-        assert any(atype in (m.summary or "") for m in mem), \
-            f"{atype} did not record a CoachMemory row"
+        assert any((m.details or {}).get("action", {}).get("type") == atype for m in mem), \
+            f"{atype} did not record a CoachMemory action detail"
+
+
+def test_descriptive_muscle_action_names_target_in_summary():
+    print("\n[test] descriptive muscle action names muscle and set count")
+    from app.services.coach.apply_action import apply_action
+    from app.models import CoachMemory
+    from sqlmodel import select
+    _, s, u = _setup()
+    res = apply_action(
+        s,
+        u.id,
+        {"type": "add_muscle_volume", "muscle": "chest", "sets": 3},
+        rec_key="add_volume_chest",
+    )
+    assert res.applied
+    assert res.descriptive_only
+    assert "chest" in res.summary.lower()
+    assert "3" in res.summary
+    mem = s.exec(select(CoachMemory).where(CoachMemory.user_id == u.id)).all()
+    assert any("chest" in (m.summary or "").lower() for m in mem)
+    assert not any("add_muscle_volume" in (m.summary or "") for m in mem)
 
 
 # ── Unknown action type ────────────────────────────────────────────

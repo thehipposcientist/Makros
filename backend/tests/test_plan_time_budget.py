@@ -21,42 +21,53 @@ def _ok(label: str) -> None:
 def _approx_minutes_for_day(day: dict) -> float:
     """Walk a generated day's exercises, sum estimated minutes.
 
-    Mirrors `_est_exercise_time` from planner.py: time-based exercises
-    use their second-count + rest, rep-based use ~3s per rep + rest.
-    Per-set rest is between sets (sets−1 gaps).
+    Mirrors the plan-card estimate: time-based exercises use their
+    second/minute target, strength sets use realistic working time,
+    and rest/transition slack is included.
     """
     import re
 
-    total = 0.0
-    for ex in day.get("exercises", []):
+    total_seconds = 0.0
+    exercises = day.get("exercises", [])
+    for idx, ex in enumerate(exercises):
         sets = int(ex.get("sets", 0) or 0)
         reps = str(ex.get("reps", "") or "")
         rest = int(ex.get("rest_seconds", ex.get("restSeconds", 60)) or 60)
-        # Min-based: "5 min", "8 min flow"
-        if "min" in reps:
-            match = re.search(r"(\d+(?:\.\d+)?)(?:\s*-\s*(\d+(?:\.\d+)?))?\s*min", reps)
-            if match:
-                mins = float(match.group(2) or match.group(1))
-                total += mins
-                continue
-        # Time-based: "30s", "45s hold", "60s flow"
-        if "s" in reps and reps.replace("s", "").replace(" hold", "").replace(" flow", "").replace(" each side", "").strip().split()[0:1]:
-            try:
-                seconds = int(reps.split()[0].replace("s", ""))
-                each_side = "each" in reps
-                per_set = seconds * (2 if each_side else 1)
-                total += (per_set * sets + rest * max(0, sets - 1)) / 60
-                continue
-            except ValueError:
-                pass
-        # Rep-based: "8-12", "6"
-        try:
-            rep_count = int(reps.split("-")[-1].split(" ")[0].strip())
-            per_set = rep_count * 3 * (2 if "each" in reps else 1)
-            total += (per_set * sets + rest * max(0, sets - 1)) / 60
-        except (ValueError, IndexError):
-            total += 2.0
-    return total
+        reps_lower = reps.lower().strip()
+        work_seconds: float | None = None
+        sec_match = re.match(r"^(\d+)(?:\s*-\s*(\d+))?\s*(s|sec|secs|second|seconds)\b", reps_lower)
+        if sec_match:
+            lo = int(sec_match.group(1))
+            hi = int(sec_match.group(2) or lo)
+            work_seconds = (lo + hi) / 2
+            if "each" in reps_lower:
+                work_seconds *= 2
+        else:
+            min_match = re.match(r"^(\d+)(?:\s*-\s*(\d+))?\s*(m|min|mins|minute|minutes)\b", reps_lower)
+            if min_match:
+                lo = int(min_match.group(1))
+                hi = int(min_match.group(2) or lo)
+                work_seconds = ((lo + hi) / 2) * 60
+            elif "each" in reps_lower:
+                rep_match = re.match(r"^(\d+)", reps_lower)
+                if rep_match:
+                    work_seconds = int(rep_match.group(1)) * 20
+
+        if work_seconds is None:
+            work_seconds = 55
+
+        role = str(ex.get("_role") or ex.get("slot_role") or "").lower()
+        primary = str(ex.get("_primary_muscle") or ex.get("primary_muscle") or "").lower()
+        training_type = str(ex.get("_training_type") or ex.get("training_type") or "").lower()
+        is_mobility = (
+            role == "warmup"
+            or primary == "mobility"
+            or training_type in {"mobility", "recovery", "stretch"}
+            or re.search(r"mobility|stretch|warm.?up|flow|pose|dog|cat|hip|shoulder.dis|dead hang", str(ex.get("name", "")), re.I)
+        )
+        transition = 0 if idx == len(exercises) - 1 else (15 if is_mobility else 45)
+        total_seconds += sets * work_seconds + (rest * max(0, sets - 1) * 1.10) + transition
+    return total_seconds / 60
 
 
 def _build_inputs(session_minutes: int, days_per_week: int = 4):

@@ -53,7 +53,7 @@ from typing import Optional
 #   - Adjacency / rotation rules change
 #   - Injury-pattern block list or dislike filter changes
 # Cosmetic copy / logging tweaks don't need a bump.
-PLANNER_VERSION = "2026.05.01.01"
+PLANNER_VERSION = "2026.05.04.01"
 
 logger = logging.getLogger(__name__)
 
@@ -2171,6 +2171,25 @@ def _ppl_cycle_breaks(lift_tokens: list[str], hybrid: bool) -> int:
     if len(ppl_only) < 2:
         return 0
 
+    if not hybrid:
+        breaks = 0
+        for i in range(len(ppl_only) - 1):
+            if ppl_only[i] == ppl_only[i + 1]:
+                breaks += 1
+
+        # Any full 3-lift block should cover Push, Pull, and Legs before
+        # repeating a family, unless the missing family has already been
+        # exhausted in an imbalanced week (common at 4/5 lift days).
+        for i in range(len(ppl_only) - 2):
+            window = ppl_only[i:i + 3]
+            if len(set(window)) == 3:
+                continue
+            missing = ppl_set - set(window)
+            future = ppl_only[i + 3:]
+            if any(fam in future for fam in missing):
+                breaks += 1
+        return breaks
+
     # Detect the rotation from the first 3 distinct PPL tokens. Build
     # a successor map from that observed pattern.
     observed_cycle: dict[str, str] = {}
@@ -2206,10 +2225,9 @@ def _ppl_cycle_breaks(lift_tokens: list[str], hybrid: bool) -> int:
                 break
 
     breaks = 0
-    n = len(lift_tokens)
-    for i in range(n):
+    for i in range(len(lift_tokens) - 1):
         cur = lift_tokens[i]
-        nxt = lift_tokens[(i + 1) % n]
+        nxt = lift_tokens[i + 1]
         if cur == nxt:
             breaks += 1
             continue
@@ -2221,6 +2239,153 @@ def _ppl_cycle_breaks(lift_tokens: list[str], hybrid: bool) -> int:
             else:
                 breaks += 1
     return breaks
+
+
+def _ppl_tie_order(anchor_after: str | None) -> list[str]:
+    """PPL tie-break order. Used only when two families are equally open."""
+    cycle = ("push", "pull", "legs")
+    if anchor_after not in cycle:
+        return list(cycle)
+    start = (cycle.index(anchor_after) + 1) % len(cycle)
+    return [cycle[(start + i) % len(cycle)] for i in range(len(cycle))]
+
+
+def _ppl_open_family_order(
+    recent_focus_families: tuple[str, ...] | list[str] = (),
+    *,
+    anchor_after: str | None = None,
+) -> list[str]:
+    """Rank PPL families by how open they are, most-open first.
+
+    `recent_focus_families` is newest-first. A family missing from the
+    recent window is considered more open than one seen in the window;
+    otherwise older entries are more open than newer entries. Ties use
+    the familiar PPL order after `anchor_after` so cold/sparse histories
+    stay deterministic without treating Push as the only valid start.
+    """
+    ppl_set = {"push", "pull", "legs"}
+    recent_ppl = [f for f in recent_focus_families if f in ppl_set]
+    if not recent_ppl:
+        return []
+
+    first_seen: dict[str, int] = {}
+    for idx, fam in enumerate(recent_ppl):
+        if fam not in first_seen:
+            first_seen[fam] = idx
+
+    missing_rank = len(recent_ppl) + 1
+    tie_rank = {fam: i for i, fam in enumerate(_ppl_tie_order(anchor_after))}
+    return sorted(
+        ppl_set,
+        key=lambda fam: (-(first_seen.get(fam, missing_rank)), tie_rank.get(fam, 99)),
+    )
+
+
+def _reorder_ppl_slots_by_open_order(
+    recipe: list[DayArchetype],
+    desired_order: list[str],
+) -> list[DayArchetype]:
+    """Reorder only PPL lift slots to follow `desired_order`.
+
+    This preserves the exact day count, non-lift placement, and existing
+    archetype/stimulus variants for each family. When a family is
+    exhausted in an imbalanced week (e.g. 5 lifts with only one Legs day),
+    the sequence skips to the next available family.
+    """
+    ppl_set = {"push", "pull", "legs"}
+    order = [f for f in desired_order if f in ppl_set]
+    if len(order) < 3:
+        return recipe
+
+    lift_indices: list[int] = []
+    by_family: dict[str, list[DayArchetype]] = {fam: [] for fam in ppl_set}
+    for idx, arch in enumerate(recipe):
+        try:
+            fam = archetype_to_focus_family(arch)
+        except KeyError:
+            continue
+        if fam not in ppl_set:
+            continue
+        lift_indices.append(idx)
+        by_family[fam].append(arch)
+
+    if len(lift_indices) < 3:
+        return recipe
+
+    def _greedy_sequence(counts: dict[str, int]) -> list[str]:
+        remaining = dict(counts)
+        seq: list[str] = []
+        cursor = 0
+        while len(seq) < len(lift_indices):
+            picked = None
+            for _ in range(len(order)):
+                fam = order[cursor % len(order)]
+                cursor += 1
+                if remaining.get(fam, 0) > 0:
+                    picked = fam
+                    break
+            if picked is None:
+                break
+            seq.append(picked)
+            remaining[picked] -= 1
+        return seq
+
+    def _sequence_breaks(seq: list[str]) -> int:
+        breaks = 0
+        for i in range(len(seq) - 1):
+            if seq[i] == seq[i + 1]:
+                breaks += 1
+        for i in range(len(seq) - 2):
+            window = seq[i:i + 3]
+            if len(set(window)) == 3:
+                continue
+            missing = ppl_set - set(window)
+            future = seq[i + 3:]
+            if any(fam in future for fam in missing):
+                breaks += 1
+        return breaks
+
+    counts = {fam: len(items) for fam, items in by_family.items()}
+    ideal = _greedy_sequence(counts)
+    if len(ideal) != len(lift_indices):
+        return recipe
+
+    tie_rank = {fam: i for i, fam in enumerate(order)}
+    best: tuple[tuple[int, int, int, tuple[int, ...]], list[str]] | None = None
+
+    def _walk(seq: list[str], remaining: dict[str, int]) -> None:
+        nonlocal best
+        if len(seq) == len(lift_indices):
+            deviation = sum(1 for i, fam in enumerate(seq) if fam != ideal[i])
+            key = (
+                _sequence_breaks(seq),
+                0 if seq and seq[0] == order[0] else 1,
+                deviation,
+                tuple(tie_rank.get(fam, 99) for fam in seq),
+            )
+            if best is None or key < best[0]:
+                best = (key, list(seq))
+            return
+        for fam in order:
+            if remaining.get(fam, 0) <= 0:
+                continue
+            remaining[fam] -= 1
+            seq.append(fam)
+            _walk(seq, remaining)
+            seq.pop()
+            remaining[fam] += 1
+
+    _walk([], dict(counts))
+    target_sequence = best[1] if best is not None else ideal
+
+    if len(target_sequence) != len(lift_indices):
+        return recipe
+
+    queues = {fam: list(items) for fam, items in by_family.items()}
+    out = list(recipe)
+    for idx, fam in zip(lift_indices, target_sequence):
+        out[idx] = queues[fam].pop(0)
+    return out
 
 
 def _ul_alt_breaks(lift_tokens: list[str]) -> int:
@@ -2255,8 +2420,9 @@ def _preserves_split_identity(
     None).
 
     Split checks:
-      - PPL / PPL_UL: lift-family cycle follows P→Pu→L (PPL_UL also
-        accepts …→L→U→L→P). Non-lift days (cardio/mobility/recovery)
+      - PPL / PPL_UL: lift-family cycle follows one stable ordering of
+        Push/Pull/Legs (PPL_UL also accepts …→L→U→L→P). Non-lift days
+        (cardio/mobility/recovery)
         are stripped before comparison.
       - Strict Upper/Lower (user_chose_split=True): no two consecutive
         upper or lower lift days. Stripped of non-lift days.
@@ -2330,30 +2496,13 @@ def _next_in_split_rotation(
         ppl_set = {"push", "pull", "legs"}
         if last_family not in ppl_set:
             return None
-        recent_ppl = [f for f in recent_focus_families if f in ppl_set]
-        # Need 2+ UNIQUE recent PPL entries to determine the user's
-        # rotation pattern. With 2 unique entries, the missing one is
-        # unambiguously "next". With 3, the oldest is "next".
-        unique_recent = []
-        seen_set: set[str] = set()
-        for f in recent_ppl:
-            if f not in seen_set:
-                unique_recent.append(f)
-                seen_set.add(f)
-            if len(unique_recent) >= 3:
-                break
-        if len(unique_recent) >= 2:
-            last_two = set(unique_recent[:2])
-            remaining = ppl_set - last_two
-            if len(remaining) == 1:
-                return remaining.pop()
-        if len(unique_recent) >= 3:
-            return unique_recent[2]
-        # Not enough history to determine a pattern — fall back to
-        # canonical PPL order so cold starts and single-entry histories
-        # produce a predictable rotation.
-        _canonical = {"push": "pull", "pull": "legs", "legs": "push"}
-        return _canonical.get(last_family)
+        open_order = _ppl_open_family_order(
+            recent_focus_families,
+            anchor_after=last_family,
+        )
+        if open_order:
+            return open_order[0]
+        return _ppl_tie_order(last_family)[0]
     if _is_ul_family(lifting_split):
         ul_next = {"upper": "lower", "lower": "upper"}
         return ul_next.get(last_family)
@@ -2366,9 +2515,8 @@ def _anchor_recipe_to_split_next(
     lifting_split: str | None,
     completed_today_family: str | None = None,
 ) -> list[DayArchetype]:
-    """Rotate `recipe` so day 0 is the EXPECTED next family in the
-    split rotation from the user's last completed lift, and the
-    internal cycle order matches the user's historical pattern.
+    """Rotate `recipe` so day 0 is the most-open family for the split,
+    and the internal cycle order follows the same recovery-aware order.
 
     When ``completed_today_family`` is set, the user has already
     finished today's workout. Day 0 of the plan maps to today and will
@@ -2417,56 +2565,44 @@ def _anchor_recipe_to_split_next(
     if best_cand is None:
         return recipe
 
-    # For PPL: reorder the internal cycle to match the user's
-    # historical pattern. The base recipe always uses canonical P→Pu→L
-    # order, but the user may have established a different rotation
-    # (e.g. P→L→Pu). Derive the expected day-1 family from history
-    # and swap within each 3-day block if needed.
+    # For PPL: reorder the internal cycle to match current recovery
+    # openness, not a hardcoded Push→Pull→Legs start. Strict PPL means
+    # "cycle through Push/Pull/Legs", but the first family can be the
+    # one least recently trained.
     from .day_templates import (
         SPLIT_PPL as _SPLIT_PPL_ANC,
         SPLIT_PPL_UL as _SPLIT_PPL_UL_ANC,
     )
     ppl_set = {"push", "pull", "legs"}
     if lifting_split in (_SPLIT_PPL_ANC, _SPLIT_PPL_UL_ANC) and target in ppl_set:
-        # Prepend the target (day 0 family) to history so the
-        # rotation knows day 0 is "taken" and picks the correct day 1.
-        augmented_history = (target,) + tuple(recent_focus_families)
-        expected_day1 = _next_in_split_rotation(
-            target, lifting_split,
-            recent_focus_families=augmented_history,
-        )
-        if expected_day1 and expected_day1 in ppl_set:
-            # Check what day 1 actually is in the anchored recipe.
-            lift_indices = []
-            for i, a in enumerate(best_cand):
-                try:
-                    f = archetype_to_focus_family(a)
-                except KeyError:
-                    continue
-                if f in ppl_set:
-                    lift_indices.append(i)
-            # Swap within each 3-day block: if the 2nd lift family
-            # doesn't match expected_day1, swap it with the 3rd.
-            if len(lift_indices) >= 3:
-                i1, i2 = lift_indices[1], lift_indices[2]
-                try:
-                    fam1 = archetype_to_focus_family(best_cand[i1])
-                except KeyError:
-                    fam1 = None
-                if fam1 != expected_day1:
-                    out = list(best_cand)
-                    # Swap pairs: each (block_pos_1, block_pos_2) in
-                    # both halves of the recipe.
-                    for block_start in range(0, len(lift_indices) - 2, 3):
-                        a_idx = lift_indices[block_start + 1]
-                        b_idx = lift_indices[block_start + 2]
-                        out[a_idx], out[b_idx] = out[b_idx], out[a_idx]
-                    logger.info(
-                        f"[weekly_recipe] ppl-cycle-reorder: "
-                        f"expected_day1={expected_day1} actual={fam1} "
-                        f"swapped within blocks"
-                    )
-                    best_cand = out
+        if completed_today_family and completed_today_family in ppl_set:
+            # Day 0 is already completed and will be overlaid by the
+            # client. Treat it as "newly trained" for ordering day 1+.
+            tail_order = [
+                fam for fam in _ppl_open_family_order(
+                    (target,) + tuple(recent_focus_families),
+                    anchor_after=target,
+                )
+                if fam != target
+            ]
+            desired_order = [target] + tail_order
+        else:
+            desired_order = _ppl_open_family_order(
+                recent_focus_families,
+                anchor_after=last_lift_family,
+            )
+            if target in desired_order:
+                desired_order = [target] + [fam for fam in desired_order if fam != target]
+
+        if len(desired_order) == 3:
+            reordered = _reorder_ppl_slots_by_open_order(best_cand, desired_order)
+            if reordered != best_cand:
+                logger.info(
+                    f"[weekly_recipe] ppl-cycle-reorder: "
+                    f"desired_order={desired_order} "
+                    f"history={list(recent_focus_families)}"
+                )
+                best_cand = reordered
 
     return best_cand
 
@@ -2883,7 +3019,7 @@ def generate_weekly_recipe(
     # Fatigue-aware rotation: if user has real muscle fatigue data,
     # prefer starting the week with the freshest focus.
     # For PPL splits, use cycle-aware rotation that only shifts at family
-    # boundaries (preserves P→Pu→L order within each triplet).
+    # boundaries (preserves the chosen PPL order within each triplet).
     from .day_templates import SPLIT_PPL, SPLIT_PPL_UL
     _is_ppl_split = lifting_split in (SPLIT_PPL, SPLIT_PPL_UL)
     if muscle_fatigue and mode in ("lifting", "strength", "fat_loss_mix", "lifting_plus_cardio", "maintain"):
@@ -3490,6 +3626,16 @@ def _enforce_strict_split_composition(
             if hybrid is not None and hybrid in profile.allowed_archetypes:
                 rebuilt[slot_idx] = hybrid
                 promoted += 1
+
+    if lifting_split == SPLIT_PPL:
+        desired_order: list[str] = []
+        for fam in lift_families:
+            if fam in ("push", "pull", "legs") and fam not in desired_order:
+                desired_order.append(fam)
+        for fam in ("push", "pull", "legs"):
+            if fam not in desired_order:
+                desired_order.append(fam)
+        rebuilt = _reorder_ppl_slots_by_open_order(rebuilt, desired_order)
     logger.info(
         f"[weekly_recipe] strict-split REBUILD: replaced lift slots with "
         f"canonical {lifting_split} sequence (preserved {plus_cardio_count} "

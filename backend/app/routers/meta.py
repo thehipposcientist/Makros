@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlmodel import Session, select
 
 from app.database import get_session
-from app.enums import GoalType, GoalPace, Gender, MealType, EquipmentType, MuscleGroup, FoodCategory
+from app.enums import GoalType, GoalPace, Gender, MealType, EquipmentType, MuscleGroup, FoodCategory, FoodSource
 from app.models import Exercise, Food, Equipment, ExerciseEquipment, GoalOption, PaceOption
 from app.seed_exercises_data import RETIRED_EXERCISE_SLUGS
 
@@ -123,16 +123,16 @@ def enrich_exercise_images(db: Session = Depends(get_session)):
 @router.get("/foods")
 def list_foods(category: str | None = None, db: Session = Depends(get_session)):
     """
-    Returns the food library with macros scaled to each food's DEFAULT SERVING,
-    not per-100g. The frontend treats `calories`/`protein`/... as "what one
-    unit of this food costs", so returning per-100g values was causing
-    wildly wrong numbers (e.g. 1 tbsp olive oil showing 884 cal).
+    Returns the curated template food library with macros scaled to each
+    food's DEFAULT SERVING, not per-100g. Larger USDA catalog rows live behind
+    /foods/search so signup/settings stay focused instead of downloading the
+    full searchable catalog.
 
     Now joins `FoodServing` and returns the default serving's precomputed
     macros plus its human-readable label as `unit`.
     """
     from app.models import FoodServing
-    query = select(Food)
+    query = select(Food).where(Food.source == FoodSource.SEED, Food.owner_user_id == None)  # noqa: E711
     if category:
         query = query.where(Food.category == category)
     foods = db.exec(query.order_by(Food.category, Food.name)).all()

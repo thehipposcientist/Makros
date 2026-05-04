@@ -38,6 +38,10 @@ seeder; read by meal assembler / search / validator):
   is_packaged:    True for branded/packaged goods (bars, cereals) where
                   the generic seed entry is a macro approximation.
   search_priority: int 1-5 (higher = prefer in search). Default 3.
+  usda_fdc_id:     Optional exact FoodData Central ID for the USDA seed
+                  backfill tool. Prefer this when we have reviewed the match.
+  usda_query:      Optional FoodData Central search query for the USDA seed
+                  backfill tool when an exact ID has not been pinned.
 
 Macro validation: calories should ≈ protein*4 + carbs*4 + fat*9 (±15%).
 The seeder will warn on mismatches but still insert.

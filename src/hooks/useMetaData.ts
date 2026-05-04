@@ -75,9 +75,9 @@ export interface MetaData {
 
 // ── Cache key ─────────────────────────────────────────────────────────────────
 
-// Bumped to v2 when `/foods` switched from per-100g to per-default-serving
-// macros. Old cached values would show 884 cal for a tbsp of olive oil.
-const CACHE_KEY = 'metaData_v2';
+// Bumped to v3 when `/meta/foods` became the curated template feed only.
+// Full USDA/imported catalog rows now stay behind live food search.
+const CACHE_KEY = 'metaData_v3';
 
 // ── Defaults (used until fetch completes) ─────────────────────────────────────
 

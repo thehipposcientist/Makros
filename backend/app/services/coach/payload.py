@@ -22,6 +22,7 @@ from sqlmodel import Session, select
 from app.models import (
     AIDecision,
     DailyRollup,
+    User,
     UserFlag,
     UserGoal,
     UserProfile,
@@ -43,17 +44,26 @@ WEEKLY_DECISIONS = 3
 # ─── Block builders ───────────────────────────────────────────────────────────
 
 def _profile_block(db: Session, user_id: int) -> dict[str, Any]:
+    user = db.exec(
+        select(User).where(User.id == user_id)
+    ).first()
     profile = db.exec(
         select(UserProfile).where(UserProfile.user_id == user_id)
     ).first()
     goal = db.exec(
         select(UserGoal).where(UserGoal.user_id == user_id, UserGoal.is_active == True)
     ).first()
+    identity = {
+        "user_id": user_id,
+        "first_name": user.first_name if user else None,
+        "username": user.username if user else None,
+        "display_name": (user.first_name or user.username) if user else None,
+    }
     if not profile:
-        return {"user_id": user_id}
+        return identity
     gender = profile.gender.value if hasattr(profile.gender, "value") else str(profile.gender)
     return {
-        "user_id": user_id,
+        **identity,
         "sex": gender,
         "age": profile.age,
         "height_in": profile.height_feet * 12 + profile.height_inches,

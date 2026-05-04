@@ -209,6 +209,18 @@ def _compute_serving_macros(nutrition: dict, serving_grams: float, ref_grams: fl
     }
 
 
+def _nutrition_dict_from_row(food: Food, nutrition: FoodNutrition | None) -> dict:
+    return {
+        "calories": nutrition.calories if nutrition else food.calories,
+        "protein": nutrition.protein if nutrition else food.protein,
+        "carbs": nutrition.carbs if nutrition else food.carbs,
+        "fat": nutrition.fat if nutrition else food.fat,
+        "fiber": nutrition.fiber if nutrition and nutrition.fiber is not None else food.fiber,
+        "sugar": nutrition.sugar if nutrition and nutrition.sugar is not None else food.sugar,
+        "sodium_mg": nutrition.sodium_mg if nutrition and nutrition.sodium_mg is not None else food.sodium_mg,
+    }
+
+
 def seed_foods(session: Session) -> None:
     """
     Idempotent food seeder — upserts Food + FoodNutrition + FoodServings + FoodAliases.
@@ -250,15 +262,25 @@ def seed_foods(session: Session) -> None:
         if norm in existing_foods:
             # ── Update existing seed food ────────────────────────────────
             food = existing_foods[norm]
+            fn = session.exec(
+                select(FoodNutrition).where(FoodNutrition.food_id == food.id)
+            ).first()
+            preserve_usda_values = bool(food.external_id)
+            serving_nutrition = _nutrition_dict_from_row(food, fn) if preserve_usda_values else n
+
             food.name = name
             food.category = category
             food.is_verified = True
             food.is_active = True
-            # Legacy columns
-            food.calories = n["calories"]
-            food.protein = n["protein"]
-            food.carbs = n["carbs"]
-            food.fat = n["fat"]
+            if not preserve_usda_values:
+                # Legacy columns
+                food.calories = n["calories"]
+                food.protein = n["protein"]
+                food.carbs = n["carbs"]
+                food.fat = n["fat"]
+                food.fiber = n.get("fiber")
+                food.sugar = n.get("sugar")
+                food.sodium_mg = n.get("sodium_mg")
             session.add(food)
 
             # Upsert FoodNutrition. Pull the canonical micronutrient panel
@@ -280,36 +302,38 @@ def seed_foods(session: Session) -> None:
                 sodium_v = n.get("sodium_mg")
                 extras_v = None
 
-            fn = session.exec(
-                select(FoodNutrition).where(FoodNutrition.food_id == food.id)
-            ).first()
             if fn:
-                fn.reference_unit = "100g"
-                fn.reference_grams = ref_grams
-                fn.calories = n["calories"]
-                fn.protein = n["protein"]
-                fn.carbs = n["carbs"]
-                fn.fat = n["fat"]
-                fn.fiber = fiber_v
-                fn.sugar = sugar_v
-                fn.sodium_mg = sodium_v
-                # Merge seed extras on top of any existing AI-backfilled
-                # extras so authoritative seed values always win for the
-                # fields they cover, while AI-enriched fields the seed
-                # doesn't cover (omega_3, vitamins, etc.) are preserved.
-                if extras_v:
-                    merged = dict(fn.extra_nutrients or {})
-                    merged.update(extras_v)
-                    fn.extra_nutrients = merged
+                if not preserve_usda_values:
+                    fn.reference_unit = "100g"
+                    fn.reference_grams = ref_grams
+                    fn.calories = n["calories"]
+                    fn.protein = n["protein"]
+                    fn.carbs = n["carbs"]
+                    fn.fat = n["fat"]
+                    fn.fiber = fiber_v
+                    fn.sugar = sugar_v
+                    fn.added_sugar_g = n.get("added_sugar_g")
+                    fn.sodium_mg = sodium_v
+                    # Merge seed extras on top of any existing AI-backfilled
+                    # extras so authoritative seed values always win for the
+                    # fields they cover, while AI-enriched fields the seed
+                    # doesn't cover (omega_3, vitamins, etc.) are preserved.
+                    if extras_v:
+                        merged = dict(fn.extra_nutrients or {})
+                        merged.update(extras_v)
+                        fn.extra_nutrients = merged
                 session.add(fn)
             else:
+                create_n = serving_nutrition if preserve_usda_values else n
                 session.add(FoodNutrition(
                     food_id=food.id,
                     reference_unit="100g",
                     reference_grams=ref_grams,
-                    calories=n["calories"], protein=n["protein"],
-                    carbs=n["carbs"], fat=n["fat"],
-                    fiber=fiber_v, sugar=sugar_v, sodium_mg=sodium_v,
+                    calories=create_n["calories"], protein=create_n["protein"],
+                    carbs=create_n["carbs"], fat=create_n["fat"],
+                    fiber=create_n.get("fiber") if preserve_usda_values else fiber_v,
+                    sugar=create_n.get("sugar") if preserve_usda_values else sugar_v,
+                    sodium_mg=create_n.get("sodium_mg") if preserve_usda_values else sodium_v,
                     extra_nutrients=extras_v,
                 ))
 
@@ -323,7 +347,7 @@ def seed_foods(session: Session) -> None:
 
             has_default = any(s.get("is_default") for s in servings_data)
             for i, s in enumerate(servings_data):
-                macros = _compute_serving_macros(n, s["grams"], ref_grams)
+                macros = _compute_serving_macros(serving_nutrition, s["grams"], ref_grams)
                 is_def = s.get("is_default", False) or (not has_default and i == 0)
                 session.add(FoodServing(
                     food_id=food.id, label=s["label"], grams=s["grams"],

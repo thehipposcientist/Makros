@@ -16,7 +16,6 @@
  */
 import * as Notifications from 'expo-notifications';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
 
 const REMINDER_KEY = 'meal_reminder_settings';
 const SCHEDULED_ID_KEY = 'meal_reminder_notification_id';
@@ -127,9 +126,12 @@ export async function scheduleMealReminder(settings: MealReminderSettings): Prom
         sound: 'default',
         data: { route: 'meals' },
       },
-      trigger: Platform.OS === 'ios'
-        ? { hour: settings.hour, minute: settings.minute, repeats: true } as any
-        : { hour: settings.hour, minute: settings.minute, repeats: true, channelId: 'default' } as any,
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DAILY,
+        hour: settings.hour,
+        minute: settings.minute,
+        channelId: 'default',
+      },
     });
     await AsyncStorage.setItem(SCHEDULED_ID_KEY, id);
     return;
@@ -211,7 +213,11 @@ export async function maybeCancelTodayReminder(allTodayChecked: boolean): Promis
         sound: 'default',
         data: { route: 'meals' },
       },
-      trigger: { date: tomorrow, repeats: false } as any,
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date: tomorrow,
+        channelId: 'default',
+      },
     });
     await AsyncStorage.setItem(SCHEDULED_ID_KEY, id);
     // After tomorrow's one-shot fires, we need to re-establish the repeating

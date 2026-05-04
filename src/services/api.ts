@@ -3877,6 +3877,7 @@ export interface PlanWeekResponse {
   planner_version: string;
   goal: string;
   days_per_week: number;
+  session_minutes: number | null;
   preferred_split: string | null;
   /** ISO date the plan resumes. While set + in the future, auto-renew,
    *  auto-skip, and reminders all suspend. */

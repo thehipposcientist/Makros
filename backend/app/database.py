@@ -1262,6 +1262,86 @@ def _backfill_plan_weeks() -> None:
             pass
 
 
+def _backfill_tricep_kickbacks_display_name() -> None:
+    """Rename legacy triceps `Kickbacks` rows and persisted plan payloads."""
+    from copy import deepcopy
+    from datetime import datetime, timezone
+    from sqlmodel import select
+    from app.models import Exercise, PlanDay, WorkoutExercise
+
+    old_name = "Kickbacks"
+    new_name = "Dumbbell Tricep Kickbacks"
+    new_description = "Strict dumbbell tricep kickback with a full elbow lockout"
+
+    def _is_tricep_kickback(ex: dict) -> bool:
+        if not isinstance(ex, dict):
+            return False
+        name = str(ex.get("name") or "").strip()
+        slug = str(
+            ex.get("_slug")
+            or ex.get("slug")
+            or ex.get("exercise_slug")
+            or ex.get("exerciseSlug")
+            or ""
+        ).strip()
+        primary = str(
+            ex.get("_primary_muscle")
+            or ex.get("primary_muscle")
+            or ex.get("primaryMuscle")
+            or ""
+        ).strip()
+        return name == old_name and (slug == "kickbacks" or primary == "triceps")
+
+    def _rewrite_workout_payload(payload: dict | None) -> tuple[dict | None, bool]:
+        if not isinstance(payload, dict):
+            return payload, False
+        updated = deepcopy(payload)
+        changed = False
+        for ex in updated.get("exercises") or []:
+            if _is_tricep_kickback(ex):
+                ex["name"] = new_name
+                changed = True
+        return updated, changed
+
+    try:
+        changed = 0
+        with Session(engine) as db:
+            for ex in db.exec(select(Exercise).where(Exercise.slug == "kickbacks")).all():
+                if ex.name != new_name:
+                    ex.name = new_name
+                    changed += 1
+                if ex.description != new_description:
+                    ex.description = new_description
+                    changed += 1
+                db.add(ex)
+
+            for pd in db.exec(select(PlanDay).where(PlanDay.workout_json != None)).all():
+                updated, did_change = _rewrite_workout_payload(pd.workout_json)
+                if did_change:
+                    pd.workout_json = updated
+                    pd.updated_at = datetime.now(timezone.utc)
+                    db.add(pd)
+                    changed += 1
+
+            workout_rows = db.exec(
+                select(WorkoutExercise).where(WorkoutExercise.name == old_name)
+            ).all()
+            for row in workout_rows:
+                if (
+                    getattr(row, "exercise_slug_snapshot", None) == "kickbacks"
+                    or getattr(row, "primary_muscle_snapshot", None) == "triceps"
+                ):
+                    row.name = new_name
+                    db.add(row)
+                    changed += 1
+
+            if changed:
+                db.commit()
+                print(f"[backfill] tricep_kickbacks_display_name: {changed} rows/payloads updated")
+    except Exception as e:
+        print(f"[backfill] tricep_kickbacks_display_name failed (non-fatal): {e}")
+
+
 def _ensure_user_name_columns() -> None:
     """Add first_name / last_name to the user table. Nullable so existing
     rows migrate cleanly without a default."""
@@ -1553,6 +1633,8 @@ def create_db_and_tables():
                     print(f"[seed] {seed_fn.__name__} took {elapsed:.0f}ms")
     else:
         print("[seed] STARTUP_SEEDS_ENABLED=0 — skipping seed inserts")
+
+    _backfill_tricep_kickbacks_display_name()
 
 
 def get_session():

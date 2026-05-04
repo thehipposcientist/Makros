@@ -17,6 +17,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
+import { humanizeToken } from '../utils/exerciseGuide';
 import {
   getWeekSummary, postWeekCheckin,
   WeekSummaryResponse, WeekCheckinAnswers,
@@ -165,6 +166,10 @@ const DECISION_OPTIONS: Array<{ value: CheckinDecision; label: string; sub: stri
   { value: 'make_easier',           label: 'Make it easier',        sub: 'Lighter loads and shorter sessions' },
   { value: 'make_harder',           label: 'Make it harder',        sub: 'More volume and intensity' },
 ];
+
+function humanList(items: string[]): string {
+  return items.map(item => humanizeToken(item).toLowerCase()).join(', ');
+}
 
 export default function WeeklyCheckinModal({
   visible, authToken, goal = 'body_recomp', themeName, onClose, onComplete,
@@ -547,8 +552,8 @@ export default function WeeklyCheckinModal({
             {renderAdjRow('SESSION LENGTH', adj.session_length_adjustment ?? undefined, 'time-outline')}
             {renderAdjRow('CARDIO', adj.cardio_adjustment ?? undefined, 'bicycle-outline')}
             {renderAdjRow('NUTRITION', adj.nutrition_adjustment ?? undefined, 'nutrition-outline')}
-            {adj.muscle_priorities.length > 0 && renderAdjRow('PRIORITY MUSCLE', adj.muscle_priorities.join(', '), 'body-outline')}
-            {adj.avoid_patterns.length > 0 && renderAdjRow('AVOIDING', adj.avoid_patterns.join(', '), 'shield-outline')}
+            {adj.muscle_priorities.length > 0 && renderAdjRow('PRIORITY MUSCLE', humanList(adj.muscle_priorities), 'body-outline')}
+            {adj.avoid_patterns.length > 0 && renderAdjRow('AVOIDING', humanList(adj.avoid_patterns), 'shield-outline')}
           </View>
         )}
 

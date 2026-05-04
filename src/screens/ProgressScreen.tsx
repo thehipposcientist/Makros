@@ -69,6 +69,62 @@ interface ProgressScreenProps {
   nutritionLogRefreshKey?: number;
 }
 
+function sentenceLabel(value: unknown): string {
+  return humanizeToken(String(value ?? '')).toLowerCase();
+}
+
+function describeCoachMemoryAction(action: any): string | null {
+  if (!action || typeof action !== 'object') return null;
+  const type = String(action.type ?? '');
+  const muscle = sentenceLabel(action.muscle);
+  const musclePrefix = muscle ? `${muscle} ` : '';
+  const sets = Number(action.sets);
+  const pct = Number(action.pct);
+  const minutes = Number(action.minutes);
+  const kcal = Number(action.kcal ?? action.delta);
+  switch (type) {
+    case 'add_muscle_volume':
+      return `Accepted recommendation: add ${Number.isFinite(sets) && sets > 0 ? `${sets} ` : ''}${musclePrefix}sets next generated week.`;
+    case 'reduce_muscle_volume':
+      return `Accepted recommendation: reduce ${musclePrefix}volume${Number.isFinite(pct) && pct > 0 ? ` about ${pct}%` : ''} next generated week.`;
+    case 'hold_muscle_volume':
+      return `Accepted recommendation: hold ${musclePrefix}volume steady next generated week.`;
+    case 'add_cardio_session':
+    case 'add_zone2_session':
+      return `Accepted recommendation: add ${Number.isFinite(minutes) && minutes > 0 ? `about ${minutes} min ` : ''}${type === 'add_zone2_session' ? 'Zone 2 ' : ''}cardio next generated week.`;
+    case 'raise_calories':
+      return `Accepted recommendation: raise calories${Number.isFinite(kcal) && kcal > 0 ? ` by ${kcal} kcal/day` : ''}.`;
+    case 'lower_calories':
+      return `Accepted recommendation: lower calories${Number.isFinite(kcal) && kcal > 0 ? ` by ${kcal} kcal/day` : ''}.`;
+    case 'change_days_per_week':
+      return action.value ? `Accepted recommendation: move to ${action.value} training days per week.` : null;
+    default:
+      return null;
+  }
+}
+
+function humanizeInlineIdentifiers(text: string): string {
+  return text.replace(
+    /\b([a-z]+(?:_[a-z0-9]+)+|[a-z]+[A-Z][A-Za-z0-9]*)\b/g,
+    token => sentenceLabel(token),
+  );
+}
+
+function formatCoachMemorySummary(memory: any): string {
+  const actionLine = describeCoachMemoryAction(memory?.details?.action);
+  if (actionLine) return actionLine;
+  const eventType = String(memory?.event_type ?? '');
+  const details = memory?.details ?? {};
+  if (eventType === 'muscle_priority' && Array.isArray(details.muscles) && details.muscles.length > 0) {
+    return `Priority muscle saved: ${details.muscles.map(sentenceLabel).join(', ')}.`;
+  }
+  if (eventType === 'preferred_cardio_mode' && Array.isArray(details.modes) && details.modes.length > 0) {
+    return `Preferred cardio saved: ${details.modes.map(sentenceLabel).join(', ')}.`;
+  }
+  const raw = String(memory?.summary ?? '');
+  return humanizeInlineIdentifiers(raw.replace(/^User accepted recommendation:/i, 'Accepted recommendation:'));
+}
+
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -2325,7 +2381,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <Text key={i} style={styles.guardrailText}>• {w}</Text>
               ))}
               {coachMemory.map((m, i) => (
-                <Text key={i} style={styles.memoryText}>{m.summary}</Text>
+                <Text key={i} style={styles.memoryText}>{formatCoachMemorySummary(m)}</Text>
               ))}
               {progressionHint ? <Text style={styles.progressionHint}>Progression: {progressionHint}</Text> : null}
             </View>
