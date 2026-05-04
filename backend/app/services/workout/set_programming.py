@@ -437,6 +437,9 @@ def recommend_next_set(
         )
 
     lo, hi = rng
+    # Keep both forms: `rir` is useful for display/positive-progression
+    # gates, while `actual_rir` remaining None tells the miss logic the
+    # user did not provide a reserve estimate.
     rir = actual_rir if actual_rir is not None else planned_set.target_rir
     beat_top = actual_reps > hi
     hit_range = lo <= actual_reps <= hi
@@ -500,7 +503,7 @@ def recommend_next_set(
         #     they need is another attempt, not a lighter bar.
         miss_gap = lo - actual_reps  # positive — how many reps short
         miss_ratio = actual_reps / lo if lo > 0 else 1.0
-        at_failure = rir is not None and rir <= 0
+        at_failure = actual_rir is None or actual_rir <= 0
 
         if at_failure and miss_ratio < 0.6 and weight > 0 and inc > 0:
             # Severe miss at failure — scale the drop proportionally so

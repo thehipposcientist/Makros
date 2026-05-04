@@ -69,6 +69,7 @@ import { startRestActivity, updateRestActivity, getRestActivityState, endRestAct
 import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, scoreSwapCandidate } from '../utils/swapScoring';
 import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate, tierOf } from '../utils/subscription';
 import { buildWorkoutBestSetHighlights } from '../utils/workoutBestSets';
+import { clearManagedInterval, restartManagedInterval, useManagedInterval } from '../hooks/useManagedInterval';
 
 /** Parse the top (ceiling) of a target rep string. Handles ranges like
  *  "8-12", AMRAP markers like "12+", singletons like "6", and junk.
@@ -92,6 +93,26 @@ function shouldPromptRir(actualReps: number, targetReps: string | number | null 
   return targetMax != null && actualReps >= targetMax + 2;
 }
 
+function loadIncrementForSessionExercise(ex: SessionExercise): number {
+  const equipment = (ex.equipment ?? '').toLowerCase();
+  if (/(bodyweight|body weight|\bnone\b|\bbw\b)/.test(equipment)) return 0;
+  const primary = String(ex.primaryMuscle ?? ex.primary_muscle ?? '').toLowerCase();
+  const pattern = String((ex as any).movementPattern ?? (ex as any).movement_pattern ?? '').toLowerCase();
+  const isCompound = Boolean(ex.isCompound);
+  const lowerBodyCompound = isCompound && (
+    ['squat', 'hinge', 'lunge'].includes(pattern)
+    || ['quads', 'hamstrings', 'glutes', 'adductors', 'abductors'].includes(primary)
+  );
+  if (/(barbell|trap bar|trap_bar|ez curl|ez_curl|landmine)/.test(equipment)) {
+    return lowerBodyCompound ? 10 : 5;
+  }
+  if (/dumbbell/.test(equipment)) return isCompound ? 5 : 2.5;
+  if (/(machine|cable|plate|leg press|leg_press|pulldown|smith)/.test(equipment)) {
+    return isCompound ? 5 : 2.5;
+  }
+  return 5;
+}
+
 function buildRirNextSetSuggestion(
   ex: SessionExercise,
   loggedSet: CompletedSet,
@@ -100,7 +121,7 @@ function buildRirNextSetSuggestion(
 ): { nextTarget: string; cue: string; watchText: string; fullText: string } | null {
   const weight = Number(loggedSet.weightLbs);
   if (!Number.isFinite(weight) || weight <= 0) return null;
-  const increment = (ex.equipment ?? '').toLowerCase().includes('dumbbell') ? 2.5 : 5;
+  const increment = loadIncrementForSessionExercise(ex);
   const targetReps = ex.targetReps || `${loggedSet.reps}`;
   const rounded = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(1);
   let nextWeight = weight;
@@ -1385,14 +1406,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   // Post-rest idle counter — ticks every 5s while restEndedAtRef is set.
   // Cleared when a new set is logged or a new rest timer starts.
-  useEffect(() => {
-    const tick = setInterval(() => {
-      if (restEndedAtRef.current > 0) {
-        setPostRestIdleSecs(Math.floor((Date.now() - restEndedAtRef.current) / 1000));
-      }
-    }, 5000);
-    return () => clearInterval(tick);
-  }, []);
+  useManagedInterval(() => {
+    if (restEndedAtRef.current > 0) {
+      setPostRestIdleSecs(Math.floor((Date.now() - restEndedAtRef.current) / 1000));
+    }
+  }, 5000);
 
   const [exercises, setExercisesRaw] = useState<SessionExercise[]>(() => {
     // Try to restore in-progress session from AsyncStorage
@@ -1969,7 +1987,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // running, fires every second to trigger re-renders, and stops
     // itself below when all timers are paused.
     if (!tickIntervalRef.current) {
-      tickIntervalRef.current = setInterval(() => {
+      restartManagedInterval(tickIntervalRef, () => {
         setTimerTick(t => (t + 1) % 1_000_000);
       }, 1000);
     }
@@ -1992,10 +2010,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       };
       // If nothing else is running, release the shared ticker.
       const anyRunning = Object.values(next).some(v => v?.running);
-      if (!anyRunning && tickIntervalRef.current) {
-        clearInterval(tickIntervalRef.current);
-        tickIntervalRef.current = null;
-      }
+      if (!anyRunning) clearManagedInterval(tickIntervalRef);
       return next;
     });
   }, []);
@@ -2004,10 +2019,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setActiveTimers(prev => {
       const next = { ...prev, [key]: { running: false, baseElapsed: 0, startedAt: null } };
       const anyRunning = Object.values(next).some(v => v?.running);
-      if (!anyRunning && tickIntervalRef.current) {
-        clearInterval(tickIntervalRef.current);
-        tickIntervalRef.current = null;
-      }
+      if (!anyRunning) clearManagedInterval(tickIntervalRef);
       return next;
     });
   }, []);
@@ -2019,10 +2031,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   useEffect(() => {
     return () => {
       Object.values(timerIntervalsRef.current).forEach(clearInterval);
-      if (tickIntervalRef.current) {
-        clearInterval(tickIntervalRef.current);
-        tickIntervalRef.current = null;
-      }
+      clearManagedInterval(tickIntervalRef);
     };
   }, []);
 
@@ -2431,12 +2440,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, [buildWatchWorkoutSnapshot, exercises, warmupSteps]);
 
   // Elapsed workout timer
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, []);
+  useManagedInterval(() => {
+    setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
+  }, 1000);
 
   // Set up notifications immediately so lock screen alerts work from the
   // first rest. If the user previously denied notifications, the OS
@@ -2478,7 +2484,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (restTimerRef.current) clearInterval(restTimerRef.current);
+      clearManagedInterval(restTimerRef);
       cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
       // Swallow any error here — we're unmounting, crashes are unrecoverable.
       try {
@@ -3037,7 +3043,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   // Timestamp-based rest timer — avoids drift from re-running setInterval every second
   const startRestTimer = useCallback((seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string; startedAtMs?: number }) => {
-    if (restTimerRef.current) clearInterval(restTimerRef.current);
+    clearManagedInterval(restTimerRef);
     const startedAtMs = opts?.startedAtMs && Number.isFinite(opts.startedAtMs) && opts.startedAtMs > 0
       ? opts.startedAtMs
       : Date.now();
@@ -3126,14 +3132,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
     })().catch(() => undefined);
 
-    restTimerRef.current = setInterval(() => {
+    restartManagedInterval(restTimerRef, () => {
       const elapsed = Math.floor((Date.now() - restStartAtRef.current) / 1000);
       const remaining = Math.max(0, restTotalSecondsRef.current - elapsed);
       setRestRemaining(remaining);
 
       if (remaining === 0) {
-        if (restTimerRef.current) clearInterval(restTimerRef.current);
-        restTimerRef.current = null;
+        clearManagedInterval(restTimerRef);
         restEndedAtRef.current = Date.now();
         lastRestClearedAtMsRef.current = restEndedAtRef.current;
         setPostRestIdleSecs(0);
@@ -3191,9 +3196,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           const restElapsed = Math.floor((Date.now() - restStartAtRef.current) / 1000);
           const remaining = Math.max(0, restTotalSecondsRef.current - restElapsed);
           setRestRemaining(remaining);
-          if (remaining === 0 && restTimerRef.current) {
-            clearInterval(restTimerRef.current);
-            restTimerRef.current = null;
+          if (remaining === 0) {
+            clearManagedInterval(restTimerRef);
             AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
           }
         }
@@ -3202,7 +3206,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           getRestActivityState(activityId).then(activityState => {
             if (activityState === undefined || liveActivityIdRef.current !== activityId) return;
             if (!activityState) {
-              clearRestStateRef.current();
+              // Live Activity is gone (most commonly: user swiped it off
+              // the lock screen). Do NOT clear the in-app rest — the LA
+              // is a mirror, not the source of truth. Just forget the
+              // dead activity ID so we stop querying it. The in-app
+              // rest catch-up above (restStartAtRef block) already
+              // restored the timer correctly. Previously this branch
+              // called clearRestStateRef which wiped the timer entirely
+              // when the user dismissed the LA — exactly the
+              // "swiping off skips rest" symptom.
+              liveActivityIdRef.current = null;
               return;
             }
             const remaining = Math.max(0, Math.ceil((activityState.endDateMs - Date.now()) / 1000));
@@ -3309,10 +3322,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const clearRestState = useCallback((opts?: { pushToWatch?: boolean }) => {
     lastRestClearedAtMsRef.current = Math.max(lastRestClearedAtMsRef.current, Date.now());
     const watchPosition = buildWatchPositionProgress();
-    if (restTimerRef.current) {
-      clearInterval(restTimerRef.current);
-      restTimerRef.current = null;
-    }
+    clearManagedInterval(restTimerRef);
     import('../utils/feedback').then(f => f.stopRestTimerKeepalive()).catch(() => {});
     setRestRemaining(0);
     setRestForExercise(null);
@@ -3345,7 +3355,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     includeStartAlert?: boolean;
   }) => {
     cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
-    restNotificationIds.current = await scheduleRestNotifications(params);
+    try {
+      restNotificationIds.current = await scheduleRestNotifications(params);
+    } catch (e) {
+      restNotificationIds.current = null;
+      console.warn('[ActiveWorkout] Rest notification scheduling failed (non-fatal):', e);
+    }
   }, []);
   rescheduleRestNotificationsRef.current = rescheduleRestNotifications;
 
@@ -3586,7 +3601,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         phase: 'accumulation',
         workoutFocus: workout.focus,
         weekNumber: 1,
-        incrementLbs: (ex.equipment ?? '').toLowerCase().includes('dumbbell') ? 2.5 : 5,
+        incrementLbs: loadIncrementForSessionExercise(ex),
         allTimeBestWeightLbs: bests?.allTime?.weightLbs,
         allTimeBestReps: bests?.allTime?.reps,
         lastSessionBestWeightLbs: bests?.lastSession?.weightLbs,
@@ -4073,7 +4088,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         // you did." Feedback is patched on later by handleSubmitFeedback
         // once the user fills in the form.
         const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
-        const totalReps = session.exercises.reduce((sum, ex) => ex.sets.reduce((rs, set) => rs + set.reps, sum), 0);
+        const totalReps = session.exercises.reduce(
+          (sum, ex) => sum + ex.sets.reduce((rs, set) => rs + (Number(set.reps) || 0), 0),
+          0,
+        );
         const exercisesForSummary = session.exercises.map(ex => ({
           name: ex.name,
           equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
@@ -5680,29 +5698,29 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               testID="finish-workout-button"
               style={[
                 styles.finishBtn,
-                completedCount > 0 && {
+                totalLoggedSets > 0 && {
                   backgroundColor: workoutPalette.strong,
                   borderColor: workoutPalette.strong,
                   shadowColor: workoutPalette.strong,
                 },
-                completedCount === 0 && styles.finishBtnDisabled,
+                totalLoggedSets === 0 && styles.finishBtnDisabled,
               ]}
-              disabled={completedCount === 0}
+              disabled={totalLoggedSets === 0}
               accessibilityRole="button"
               accessibilityLabel="Finish workout"
               onPress={() => {
-                if (completedCount === 0) {
+                if (totalLoggedSets === 0) {
                   Alert.alert('No sets logged', 'Log at least one set before finishing.');
                   return;
                 }
                 import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
                 setFinishModalVisible(true);
               }}>
-              <Text style={[styles.finishBtnText, completedCount === 0 && styles.finishBtnTextDisabled]}>
+              <Text style={[styles.finishBtnText, totalLoggedSets === 0 && styles.finishBtnTextDisabled]}>
                 <Ionicons
                   name="checkmark-circle"
                   size={16}
-                  color={completedCount > 0 ? themeColors.background : themeColors.textMuted}
+                  color={totalLoggedSets > 0 ? themeColors.background : themeColors.textMuted}
                 />{' '}
                 Finish Workout
               </Text>

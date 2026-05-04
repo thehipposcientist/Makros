@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getTheme } from '../constants/theme';
 import { AppThemeName } from '../types';
 import Svg, { Circle } from 'react-native-svg';
+import { clearManagedInterval, useManagedInterval } from '../hooks/useManagedInterval';
 
 export type TimerMode = 'amrap' | 'emom' | 'tabata';
 
@@ -61,8 +62,7 @@ export default function WorkoutTimerModal({
     : tabataRounds * (tabataWorkSeconds + tabataRestSeconds);
 
   const reset = useCallback(() => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    intervalRef.current = null;
+    clearManagedInterval(intervalRef);
     setRunning(false);
     setFinished(false);
     setElapsed(0);
@@ -85,8 +85,7 @@ export default function WorkoutTimerModal({
       const rem = Math.max(0, amrapCapSeconds - totalElapsed);
       setPhaseRemaining(rem);
       if (rem <= 0) {
-        if (intervalRef.current) clearInterval(intervalRef.current);
-        intervalRef.current = null;
+        clearManagedInterval(intervalRef);
         setRunning(false);
         setFinished(true);
         Vibration.vibrate([0, 500, 200, 500]);
@@ -102,8 +101,7 @@ export default function WorkoutTimerModal({
       setPhaseRemaining(rem);
       if (rem <= 0) {
         if (currentRound >= emomRounds) {
-          if (intervalRef.current) clearInterval(intervalRef.current);
-          intervalRef.current = null;
+          clearManagedInterval(intervalRef);
           setRunning(false);
           setFinished(true);
           Vibration.vibrate([0, 500, 200, 500]);
@@ -128,8 +126,7 @@ export default function WorkoutTimerModal({
     if (rem <= 0) {
       if (phase === 'work') {
         if (currentRound >= tabataRounds) {
-          if (intervalRef.current) clearInterval(intervalRef.current);
-          intervalRef.current = null;
+          clearManagedInterval(intervalRef);
           setRunning(false);
           setFinished(true);
           Vibration.vibrate([0, 500, 200, 500]);
@@ -151,11 +148,7 @@ export default function WorkoutTimerModal({
     }
   }, [mode, amrapCapSeconds, emomIntervalSeconds, emomRounds, tabataWorkSeconds, tabataRestSeconds, tabataRounds, currentRound, phase]);
 
-  useEffect(() => {
-    if (!running) return;
-    intervalRef.current = setInterval(tick, 500);
-    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-  }, [running, tick]);
+  useManagedInterval(tick, 500, running, intervalRef);
 
   const handleStart = () => {
     const now = Date.now();
@@ -170,8 +163,7 @@ export default function WorkoutTimerModal({
   };
 
   const handleStop = () => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    intervalRef.current = null;
+    clearManagedInterval(intervalRef);
     setRunning(false);
     setFinished(true);
   };

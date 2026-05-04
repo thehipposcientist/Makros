@@ -485,6 +485,21 @@ def test_next_minor_miss_at_failure_drops_one_increment():
     _ok("minor miss → one increment down")
 
 
+def test_next_miss_without_rir_drops_one_increment():
+    print("\n[test] target 6-8 → hit 5 with no RIR captured → conservative -1 increment")
+    # The mobile UI only asks for RIR after meaningful overshoots. A
+    # below-range set often reaches the backend with actual_rir=None,
+    # and the recommender should still react instead of treating missing
+    # RIR as the planned reserve.
+    plan = _planned(target_reps="6-8", target_rir=2.0, target_weight_lbs=200.0,
+                    progression_mode="load_first")
+    rec = recommend_next_set(exercise=_bench(), planned_set=plan,
+                             actual_reps=5, actual_weight_lbs=200.0, actual_rir=None)
+    assert rec.action == "reduce_load"
+    assert rec.next_set_weight_lbs == 195.0
+    _ok("missing RIR on a miss → one increment down")
+
+
 def test_next_miss_with_rir_in_reserve_holds_load():
     print("\n[test] target 8-10 → hit 6 with RIR 2 (didn't push) → HOLD load, push next set")
     plan = _planned(target_reps="8-10", target_rir=2.0, target_weight_lbs=155.0,
@@ -1142,6 +1157,49 @@ def test_callsite_full_review_pipeline_with_realistic_inputs():
     _ok(f"full pipeline: source={out.source}, action={out.action}")
 
 
+def test_callsite_http_metadata_preserves_barbell_squat_10lb_increment():
+    print("\n[test] HTTP metadata helper: Barbell Squat keeps 10 lb lower-body increment")
+    from app.services.workout.exercise_metadata import set_programming_exercise_metadata
+
+    exercise = set_programming_exercise_metadata(
+        None,
+        "Barbell Squat",
+        "barbell_squat",
+        "barbell",
+        "quads",
+    )
+    assert exercise["is_compound"] is True
+    assert exercise["movement_pattern"] == "squat"
+    assert exercise["primary_muscle"] == "quads"
+    assert load_increment_for(exercise) == 10.0
+
+    plan = _planned(target_reps="5-7", target_rir=2.0, target_weight_lbs=275.0,
+                    progression_mode="load_first")
+    rec = recommend_next_set(exercise=exercise, planned_set=plan,
+                             actual_reps=8, actual_weight_lbs=275.0, actual_rir=2.0)
+    assert rec.action == "increase_load"
+    assert rec.next_set_weight_lbs is not None
+    assert rec.next_set_weight_lbs - 275.0 >= 10.0
+    _ok(f"Barbell Squat metadata → increment 10, rec {rec.next_set_weight_lbs}")
+
+
+def test_callsite_http_metadata_preserves_cable_isolation_2_5lb_increment():
+    print("\n[test] HTTP metadata helper: Cable Pushdown keeps 2.5 lb isolation increment")
+    from app.services.workout.exercise_metadata import set_programming_exercise_metadata
+
+    exercise = set_programming_exercise_metadata(
+        None,
+        "Cable Pushdown",
+        "cable_pushdown",
+        "cable",
+        "triceps",
+    )
+    assert exercise["is_compound"] is False
+    assert exercise["primary_muscle"] == "triceps"
+    assert load_increment_for(exercise) == 2.5
+    _ok("Cable Pushdown metadata → increment 2.5")
+
+
 # ── Runner ──────────────────────────────────────────────────────────
 
 
@@ -1183,6 +1241,7 @@ def _run_all():
         test_next_fixed_skill_beat_top_explicitly_holds,
         test_next_severe_miss_at_failure_drops_proportionally,
         test_next_minor_miss_at_failure_drops_one_increment,
+        test_next_miss_without_rir_drops_one_increment,
         test_next_miss_with_rir_in_reserve_holds_load,
         test_next_timed_hold_always_returns_hold_with_unchanged_target,
         # Group 5b: off-grid anchor regression
@@ -1229,6 +1288,8 @@ def _run_all():
         test_callsite_progression_router_minimal_planned_set_proxy,
         test_callsite_realistic_warmup_filtered_in_e1rm,
         test_callsite_full_review_pipeline_with_realistic_inputs,
+        test_callsite_http_metadata_preserves_barbell_squat_10lb_increment,
+        test_callsite_http_metadata_preserves_cable_isolation_2_5lb_increment,
     ]
     failed = 0
     for t in tests:

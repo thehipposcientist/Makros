@@ -72,6 +72,7 @@ def _seed_completions(
     activity_intensity=None,
     stimulus=None,
     hr_summary=None,
+    soreness_areas=None,
 ):
     from app.models import WorkoutCompletion
     for d in dates:
@@ -83,6 +84,39 @@ def _seed_completions(
             activity_intensity=activity_intensity,
             stimulus=stimulus,
             hr_summary=hr_summary,
+            soreness_areas=soreness_areas,
+        ))
+    s.commit()
+
+
+def _seed_session_with_rir(s, user_id, *, workout_date: date, rir_values: list[float], focus="Push"):
+    from app.models import WorkoutSession, WorkoutExercise, ExerciseSet, EquipmentType
+    session = WorkoutSession(
+        user_id=user_id,
+        name=focus,
+        focus=focus,
+        workout_date=workout_date,
+        completed_at=datetime.now(timezone.utc),
+    )
+    s.add(session)
+    s.flush()
+    exercise = WorkoutExercise(
+        session_id=session.id,
+        name="Bench Press",
+        order_index=0,
+        equipment=EquipmentType.GYM,
+    )
+    s.add(exercise)
+    s.flush()
+    for idx, rir in enumerate(rir_values, start=1):
+        s.add(ExerciseSet(
+            workout_exercise_id=exercise.id,
+            set_number=idx,
+            actual_reps=8,
+            actual_weight_lbs=185,
+            actual_rir=rir,
+            completed=True,
+            completed_at=datetime.now(timezone.utc),
         ))
     s.commit()
 
@@ -430,6 +464,61 @@ def test_low_readiness_suppresses_add_volume_recs():
     )
     add_vol_recs = [r for r in review.recommendations if r.key.startswith("add_volume_")]
     assert len(add_vol_recs) == 0
+
+
+def test_low_readiness_with_training_recommends_deload():
+    """Low readiness plus several completed sessions should become a
+    one-tap deload action, not just a passive warning."""
+    print("\n[test] low readiness + training → schedule_deload rec")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    s, u = _setup_user_with_goal("muscle_gain")
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    _seed_completions(s, u.id, dates=[today - timedelta(days=i) for i in range(3)], activity_category="strength")
+
+    review = compute_weekly_review(s, u.id, readiness_score=40)
+    rec = next((r for r in review.recommendations if r.key == "readiness_deload"), None)
+    assert rec is not None, [r.key for r in review.recommendations]
+    assert rec.action["type"] == "schedule_deload"
+
+
+def test_low_rir_surfaces_reduce_intensity_rec():
+    """RIR is captured per set; weekly review should surface it."""
+    print("\n[test] low weekly RIR → reduce_intensity rec")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    s, u = _setup_user_with_goal("muscle_gain")
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    for i in range(2):
+        day = today - timedelta(days=i)
+        _seed_completions(s, u.id, dates=[day], activity_category="strength")
+        _seed_session_with_rir(s, u.id, workout_date=day, rir_values=[0, 0.5, 1], focus="Push")
+
+    review = compute_weekly_review(s, u.id)
+    assert review.avg_rir is not None and review.avg_rir <= 0.75
+    rec_keys = [r.key for r in review.recommendations]
+    assert "low_rir_reduce_intensity" in rec_keys, rec_keys
+
+
+def test_repeated_soreness_surfaces_recovery_rec():
+    """Post-workout soreness areas should feed the weekly review."""
+    print("\n[test] repeated soreness area → recovery rec")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    s, u = _setup_user_with_goal("muscle_gain")
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    _seed_completions(
+        s,
+        u.id,
+        dates=[today - timedelta(days=i) for i in range(2)],
+        activity_category="strength",
+        soreness_areas=["lower_back"],
+    )
+
+    review = compute_weekly_review(s, u.id)
+    assert review.soreness_areas[0] == {"area": "lower_back", "count": 2}
+    rec_keys = [r.key for r in review.recommendations]
+    assert "soreness_lower_back" in rec_keys, rec_keys
 
 
 # ── Weight trend ────────────────────────────────────────────

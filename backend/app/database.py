@@ -1622,6 +1622,57 @@ def _ensure_plan_week_checkins_table() -> None:
         print(f"[migration] plan_week_checkins table failed (non-fatal): {e}")
 
 
+def run_data_maintenance_tasks(
+    *,
+    include_backfills: bool = True,
+    include_seeds: bool = True,
+) -> None:
+    """Run non-schema maintenance explicitly.
+
+    These tasks scan data, recompute derived fields, seed reference rows,
+    or call external services. They stay out of the normal startup path
+    unless an env flag opts them back in.
+    """
+    import time as _time
+    if include_backfills:
+        for fn in (
+            _backfill_exercise_video_ids,
+            _autoscrape_missing_video_ids,  # already daemonized internally
+            _backfill_custom_food_micronutrients,
+            _backfill_mealitem_food_ids,
+            _recompute_recent_daily_metrics,
+            _seed_supplement_ingredients,
+            _backfill_plan_weeks,
+        ):
+            t0 = _time.time()
+            try:
+                fn()
+            except Exception as e:
+                print(f"[maintenance] {fn.__name__} failed (non-fatal): {e}")
+            elapsed = (_time.time() - t0) * 1000
+            if elapsed > 250:
+                print(f"[maintenance] {fn.__name__} took {elapsed:.0f}ms")
+    else:
+        print("[maintenance] skipping data backfills")
+
+    if include_seeds:
+        from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
+        with Session(engine) as session:
+            for seed_fn in (seed_equipment, seed_exercises, seed_foods, seed_goals):
+                t0 = _time.time()
+                try:
+                    seed_fn(session)
+                except Exception as e:
+                    print(f"[seed] {seed_fn.__name__} failed (non-fatal): {e}")
+                elapsed = (_time.time() - t0) * 1000
+                if elapsed > 250:
+                    print(f"[seed] {seed_fn.__name__} took {elapsed:.0f}ms")
+    else:
+        print("[maintenance] skipping seed inserts")
+
+    _backfill_tricep_kickbacks_display_name()
+
+
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
     from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, ClientTelemetryEvent, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, PlanWeek, PlanDay, UserEquipmentProfile, GearItem
@@ -1671,53 +1722,14 @@ def create_db_and_tables():
     _ensure_skip_reason_columns()
     _ensure_plan_week_checkins_table()
 
-    # ─── Heavy backfills ─────────────────────────────────────────────────
-    # Each of these scans a full table, recomputes derived data, or hits an
-    # external API. They are idempotent, but doing all of them serially on
-    # every container restart adds 5–30s to cold starts.
-    #
-    # `STARTUP_BACKFILLS_ENABLED=0` skips them entirely — useful for fast
-    # iteration during local dev when you know nothing has changed. Default
-    # is "1" so production keeps current behavior.
     import os as _os
-    import time as _time
-    if _os.getenv("STARTUP_BACKFILLS_ENABLED", "1") == "1":
-        for fn in (
-            _backfill_exercise_video_ids,
-            _autoscrape_missing_video_ids,  # already daemonized internally
-            _backfill_custom_food_micronutrients,
-            _backfill_mealitem_food_ids,
-            _recompute_recent_daily_metrics,
-            _seed_supplement_ingredients,
-            _backfill_plan_weeks,
-        ):
-            t0 = _time.time()
-            try:
-                fn()
-            except Exception as e:
-                print(f"[migration] {fn.__name__} failed (non-fatal): {e}")
-            elapsed = (_time.time() - t0) * 1000
-            if elapsed > 250:
-                print(f"[migration] {fn.__name__} took {elapsed:.0f}ms")
+    if _os.getenv("STARTUP_DATA_MAINTENANCE_ENABLED", "0") == "1":
+        run_data_maintenance_tasks(
+            include_backfills=_os.getenv("STARTUP_BACKFILLS_ENABLED", "1") == "1",
+            include_seeds=_os.getenv("STARTUP_SEEDS_ENABLED", "1") == "1",
+        )
     else:
-        print("[migration] STARTUP_BACKFILLS_ENABLED=0 — skipping backfills")
-
-    from app.seed import seed_equipment, seed_exercises, seed_foods, seed_goals
-    if _os.getenv("STARTUP_SEEDS_ENABLED", "1") == "1":
-        with Session(engine) as session:
-            for seed_fn in (seed_equipment, seed_exercises, seed_foods, seed_goals):
-                t0 = _time.time()
-                try:
-                    seed_fn(session)
-                except Exception as e:
-                    print(f"[seed] {seed_fn.__name__} failed (non-fatal): {e}")
-                elapsed = (_time.time() - t0) * 1000
-                if elapsed > 250:
-                    print(f"[seed] {seed_fn.__name__} took {elapsed:.0f}ms")
-    else:
-        print("[seed] STARTUP_SEEDS_ENABLED=0 — skipping seed inserts")
-
-    _backfill_tricep_kickbacks_display_name()
+        print("[maintenance] STARTUP_DATA_MAINTENANCE_ENABLED=0 — skipping data maintenance")
 
 
 def get_session():

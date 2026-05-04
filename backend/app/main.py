@@ -137,10 +137,10 @@ def _startup_enrich_food_micros():
     background thread so it never blocks boot.
 
     Idempotent + incremental — only enriches rows missing Layer 2
-    keys. Gated by `STARTUP_ENRICH_FOODS_ENABLED=1` env var (on by
-    default; set to 0 to disable during testing)."""
+    keys. Gated by `STARTUP_ENRICH_FOODS_ENABLED=1`; default is off so
+    deploys do not make surprise OpenAI calls."""
     import os
-    if os.getenv("STARTUP_ENRICH_FOODS_ENABLED", "1") != "1":
+    if os.getenv("STARTUP_ENRICH_FOODS_ENABLED", "0") != "1":
         logger.info("food_enrichment_disabled", extra={"reason": "STARTUP_ENRICH_FOODS_ENABLED=0"})
         return
     import threading
@@ -230,6 +230,10 @@ def _startup_enrich_food_micros():
 
 def _startup_enrich_exercise_images():
     """Background: clean generic images then re-enrich from wger.de."""
+    import os
+    if os.getenv("STARTUP_ENRICH_EXERCISE_IMAGES_ENABLED", "0") != "1":
+        logger.info("exercise_image_enrichment_disabled", extra={"reason": "STARTUP_ENRICH_EXERCISE_IMAGES_ENABLED=0"})
+        return
     import threading
     def _worker():
         try:
@@ -243,6 +247,10 @@ def _startup_enrich_exercise_images():
 
 def _startup_backfill_muscle_fatigue():
     """Background: resolve muscle fatigue for existing completions that don't have it."""
+    import os
+    if os.getenv("STARTUP_BACKFILL_MUSCLE_FATIGUE_ENABLED", "0") != "1":
+        logger.info("fatigue_backfill_disabled", extra={"reason": "STARTUP_BACKFILL_MUSCLE_FATIGUE_ENABLED=0"})
+        return
     import threading
     def _worker():
         try:
@@ -325,7 +333,7 @@ def _startup_backfill_gut_health():
     AI fallback stays off by default to avoid surprise API costs — flip
     GUT_BACKFILL_ALLOW_AI=1 to enable during a deliberate pass."""
     import os, threading
-    if os.getenv("GUT_BACKFILL_ENABLED", "1") != "1":
+    if os.getenv("GUT_BACKFILL_ENABLED", "0") != "1":
         logger.info("gut_backfill_disabled", extra={"reason": "GUT_BACKFILL_ENABLED=0"})
         return
     allow_ai = os.getenv("GUT_BACKFILL_ALLOW_AI", "0") == "1"

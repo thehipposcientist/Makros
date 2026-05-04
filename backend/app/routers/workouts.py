@@ -315,6 +315,28 @@ class WorkoutStartRequest(BaseModel):
     workout_date: date
     focus_label: str
     stimulus: str | None = None
+    source_context: str | None = None
+    plan_day_id: int | None = None
+
+
+def _start_focus_matches_plan_day(plan_day, focus_label: str) -> bool:
+    if getattr(plan_day, "is_rest", False):
+        return False
+    workout_json = getattr(plan_day, "workout_json", None)
+    if not isinstance(workout_json, dict):
+        return False
+    planned = str(workout_json.get("focus") or "").strip()
+    completed = str(focus_label or "").strip()
+    if not planned or not completed:
+        return False
+    clean = lambda value: " ".join(value.lower().replace("_", " ").split())
+    if clean(planned) == clean(completed):
+        return True
+    try:
+        from app.services.workout.focus_normalize import normalize_focus_to_family
+        return normalize_focus_to_family(planned) == normalize_focus_to_family(completed)
+    except Exception:
+        return False
 
 
 @router.post("/start", status_code=201)
@@ -323,33 +345,85 @@ def mark_workout_started(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Mark a workout as started (in-progress). Creates a WorkoutCompletion
-    row immediately so getWorkoutStatus returns done=true even if the
-    finish call never arrives (app crash, phone dies, etc.).
+    """Mark a workout as started without creating a completion marker.
 
-    The finish endpoint upserts the same row with final duration."""
-    existing = db.exec(
-        select(WorkoutCompletion)
-        .where(WorkoutCompletion.user_id == current_user.id)
-        .where(WorkoutCompletion.workout_date == body.workout_date)
+    A start is an in-progress signal only. Real completion stays owned by
+    POST /workouts/complete so crashed/abandoned workouts never look done.
+    """
+    from app.models import PlanDay, PlanWeek, WorkoutSource
+
+    existing_session = db.exec(
+        select(WorkoutSession)
+        .where(WorkoutSession.user_id == current_user.id)
+        .where(WorkoutSession.workout_date == body.workout_date)
+        .where(WorkoutSession.focus == body.focus_label)
     ).first()
-    if existing:
-        return {"ok": True, "already_exists": True}
-    db.add(WorkoutCompletion(
-        user_id=current_user.id,
-        workout_date=body.workout_date,
-        focus_label=body.focus_label,
-        duration_seconds=0,
-        stimulus=body.stimulus,
-        activity_category=body.activity_category,
-        activity_subtype=body.activity_subtype,
-        activity_intensity=body.activity_intensity,
-        activity_source=body.activity_source,
-        cardio_style=body.cardio_style,
-        completed_at=datetime.now(timezone.utc),
-    ))
+    already_exists = existing_session is not None
+
+    plan_day_started = False
+    plan_day = None
+    try:
+        if body.plan_day_id is not None:
+            plan_day = db.get(PlanDay, body.plan_day_id)
+            if plan_day and plan_day.user_id != current_user.id:
+                plan_day = None
+        if plan_day is None:
+            active_week = db.exec(
+                select(PlanWeek).where(
+                    PlanWeek.user_id == current_user.id,
+                    PlanWeek.status == "active",
+                )
+            ).first()
+            if active_week:
+                plan_day = db.exec(
+                    select(PlanDay).where(
+                        PlanDay.plan_week_id == active_week.id,
+                        PlanDay.day_date == body.workout_date,
+                    )
+                ).first()
+        if (
+            plan_day
+            and not plan_day.locked
+            and (body.plan_day_id is not None or _start_focus_matches_plan_day(plan_day, body.focus_label))
+        ):
+            from app.services.workout.week_manager import start_day
+            start_day(db, plan_day)
+            plan_day_started = True
+    except Exception as e:
+        logger.info(f"[workouts/start] plan day start failed (non-fatal): {type(e).__name__}: {e}")
+        db.rollback()
+
+    if existing_session is None:
+        source = WorkoutSource.GENERATED
+        if (body.source_context or "").lower() in {"manual_activity", "apple_health", "watch", "coach_log"}:
+            source = WorkoutSource.LOGGED
+        existing_session = WorkoutSession(
+            user_id=current_user.id,
+            name=body.focus_label or "Workout",
+            focus=body.focus_label or "",
+            workout_date=body.workout_date,
+            source=source,
+            completed_at=None,
+        )
+        db.add(existing_session)
+    elif existing_session.completed_at is not None:
+        return {
+            "ok": True,
+            "already_exists": True,
+            "session_id": existing_session.id,
+            "plan_day_started": plan_day_started,
+            "completion_created": False,
+        }
+
     db.commit()
-    return {"ok": True, "already_exists": False}
+    db.refresh(existing_session)
+    return {
+        "ok": True,
+        "already_exists": already_exists,
+        "session_id": existing_session.id,
+        "plan_day_started": plan_day_started,
+        "completion_created": False,
+    }
 
 
 # ─── Per-day workout generation ───────────────────────────────────────────────
@@ -1673,10 +1747,12 @@ def mark_workout_complete(
             # primary muscles worked. The client may send a stale focus_label
             # (e.g. "Recovery" from the plan day) even though the user did
             # actual lifting exercises.
+            completion_context = (completion_row.source_context or body.source_context or "").lower()
+            is_planned_completion = body.plan_day_id is not None or completion_context == "planned"
             if body.exercises and resolved:
                 top_muscles = sorted(resolved.items(), key=lambda x: -x[1])
                 top = [m for m, v in top_muscles if m != 'systemic' and v > 0.1]
-                if top:
+                if top and not is_planned_completion:
                     inferred = _infer_focus_from_muscles(top)
                     # Never rename PLUS_CARDIO labels — the client sent
                     # "Push + Cardio" intentionally and both WorkoutSession

@@ -59,7 +59,7 @@ One nuance: `POST /ai/workout-question` can accept an attached image, but it sti
 |---|---|---|
 | `PLAN_REVIEW_ENABLED=0` | Disabled no-op | Legacy workout AI review path is effectively off |
 | `NUTRITION_REVIEW_ENABLED=0` | Disabled no-op | Legacy nutrition review path is effectively off |
-| `STARTUP_ENRICH_FOODS_ENABLED=1` | On | Background enrichment on backend boot |
+| `STARTUP_ENRICH_FOODS_ENABLED=0` | Off by default | Food enrichment is an explicit maintenance job, not a boot-time OpenAI call |
 | Missing `OPENAI_API_KEY` | Graceful degradation | Deterministic paths still work |
 
 ## Zero-AI Systems

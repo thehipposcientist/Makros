@@ -29,7 +29,7 @@ from sqlmodel import select
 
 from app.models import (
     DailyNutritionMetrics, DailyRollup, PlanDay, PlanWeek, UserGoal, UserRollup,
-    WorkoutCompletion, WorkoutPlan,
+    WorkoutCompletion, WorkoutExercise, WorkoutPlan, WorkoutSession, ExerciseSet,
 )
 from app.services.workout.weekly_volume import (
     WeeklyVolumeSnapshot, compute_weekly_volume,
@@ -97,6 +97,9 @@ class WeeklyReview:
     # Recovery signals (averages; each card still owns the daily view).
     avg_sleep_hours: float | None = None
     avg_resting_hr: float | None = None
+    avg_rir: float | None = None
+    soreness_areas: list[dict[str, Any]] = field(default_factory=list)
+    plateaus: list[dict[str, Any]] = field(default_factory=list)
     # One-sentence summary the UI can use as the card headline.
     headline: str = ""
     recommendations: list[Recommendation] = field(default_factory=list)
@@ -135,6 +138,9 @@ class WeeklyReview:
             "weight_ema_lbs": self.weight_ema_lbs,
             "avg_sleep_hours": self.avg_sleep_hours,
             "avg_resting_hr": self.avg_resting_hr,
+            "avg_rir": round(self.avg_rir, 1) if self.avg_rir is not None else None,
+            "soreness_areas": self.soreness_areas,
+            "plateaus": self.plateaus,
             "headline": self.headline,
             "recommendations": [r.to_dict() for r in self.recommendations],
         }
@@ -259,6 +265,44 @@ def _sum_cardio_minutes(completions: list[WorkoutCompletion]) -> tuple[float, fl
         elif is_lift_plus_cardio and style not in {"intervals", "sprint"}:
             zone2 += cardio_mins
     return total, zone2
+
+
+def _weekly_training_signals(
+    db: Any,
+    user_id: int,
+    *,
+    start: date,
+    end_date: date,
+    completions: list[WorkoutCompletion],
+) -> tuple[float | None, list[dict[str, Any]]]:
+    rir_rows = db.exec(
+        select(ExerciseSet.actual_rir)
+        .join(WorkoutExercise, WorkoutExercise.id == ExerciseSet.workout_exercise_id)
+        .join(WorkoutSession, WorkoutSession.id == WorkoutExercise.session_id)
+        .where(WorkoutSession.user_id == user_id)
+        .where(WorkoutSession.workout_date >= start)
+        .where(WorkoutSession.workout_date <= end_date)
+        .where(ExerciseSet.completed == True)  # noqa: E712
+        .where(ExerciseSet.actual_rir != None)  # noqa: E711
+    ).all()
+    rir_values = [float(v) for v in rir_rows if v is not None]
+    avg_rir = sum(rir_values) / len(rir_values) if rir_values else None
+
+    soreness_counts: dict[str, int] = {}
+    for completion in completions:
+        areas = completion.soreness_areas or []
+        if not isinstance(areas, list):
+            continue
+        for raw in areas:
+            key = str(raw or "").strip().lower()
+            if not key:
+                continue
+            soreness_counts[key] = soreness_counts.get(key, 0) + 1
+    soreness_areas = [
+        {"area": area, "count": count}
+        for area, count in sorted(soreness_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return avg_rir, soreness_areas
 
 
 def _planned_focus(plan_day: PlanDay) -> str:
@@ -412,6 +456,18 @@ def compute_weekly_review(
     )
     cardio_mins, zone2_mins = _sum_cardio_minutes(completions)
     volume = compute_weekly_volume(db, user_id, end_date=end_date, days=days)
+    avg_rir, soreness_areas = _weekly_training_signals(
+        db,
+        user_id,
+        start=start,
+        end_date=end_date,
+        completions=completions,
+    )
+    try:
+        from app.services.workout.plateau_detection import detect_plateaus
+        plateaus = detect_plateaus(user_id, db=db, window_weeks=4, today=end_date)
+    except Exception:
+        plateaus = []
 
     # Nutrition signals — averaged over the window from DailyNutritionMetrics.
     nutrition_rows = db.exec(
@@ -500,6 +556,81 @@ def compute_weekly_review(
         poor_recovery = True
     if readiness_score is not None and readiness_score < 55:
         poor_recovery = True
+
+    # Readiness-triggered deload: if the user is training through low
+    # readiness, give them a one-tap durable deload action.
+    if readiness_score is not None and readiness_score < 45 and completed_for_adherence >= 3:
+        recs.append(Recommendation(
+            key="readiness_deload",
+            area="recovery",
+            priority="warn",
+            title="Schedule a deload",
+            detail=(
+                f"Readiness is {readiness_score} after {completed_for_adherence} logged sessions. "
+                "Take a lower-volume week before pushing load again."
+            ),
+            action={"type": "schedule_deload", "days": 7, "volume_pct": -30},
+        ))
+
+    # RIR signal: consistently living near failure is useful briefly, but
+    # across a week it raises fatigue without reliably improving progress.
+    if avg_rir is not None and avg_rir <= 0.75 and completed_for_adherence >= 2:
+        recs.append(Recommendation(
+            key="low_rir_reduce_intensity",
+            area="recovery",
+            priority="suggest",
+            title="Leave 1–2 reps in reserve",
+            detail=(
+                f"Logged sets averaged {avg_rir:.1f} RIR this week. Keep one or two reps in reserve "
+                "on most working sets to recover better."
+            ),
+            action={"type": "reduce_intensity", "pct": 10},
+        ))
+
+    top_soreness = soreness_areas[0] if soreness_areas else None
+    if top_soreness and int(top_soreness.get("count") or 0) >= 2:
+        area = str(top_soreness.get("area") or "").replace("_", " ")
+        recs.append(Recommendation(
+            key=f"soreness_{top_soreness.get('area')}",
+            area="recovery",
+            priority="suggest",
+            title=f"Ease up around {area}",
+            detail=(
+                f"{area.capitalize()} soreness showed up after {top_soreness.get('count')} sessions. "
+                "Keep range of motion pain-free and trim one hard set if it persists."
+            ),
+            action={"type": "reduce_intensity", "area": top_soreness.get("area"), "pct": 10},
+        ))
+
+    plateau_deloads = [p for p in plateaus if p.get("suggestion") == "deload"]
+    if plateau_deloads:
+        first = plateau_deloads[0]
+        recs.append(Recommendation(
+            key="plateau_deload",
+            area="workout",
+            priority="suggest",
+            title="Deload plateaued lifts",
+            detail=(
+                f"{first.get('exercise_name', 'A main lift')} has been flat for "
+                f"{first.get('weeks_stuck', 4)} weeks. Deload, then rebuild."
+            ),
+            action={"type": "schedule_deload", "days": 7, "volume_pct": -30},
+        ))
+    else:
+        plateau_swaps = [p for p in plateaus if p.get("suggestion") == "swap"]
+        if plateau_swaps:
+            first = plateau_swaps[0]
+            recs.append(Recommendation(
+                key="plateau_swap",
+                area="workout",
+                priority="info",
+                title="Swap a stale lift",
+                detail=(
+                    f"{first.get('exercise_name', 'A lift')} has stayed flat. "
+                    "Try a close variation for the next generated block."
+                ),
+                action={"type": "noop"},
+            ))
 
     # 1. Adherence → reduce days if consistently missing.
     if planned >= 3 and adherence_pct < _LOW_ADHERENCE_PCT:
@@ -782,6 +913,9 @@ def compute_weekly_review(
         weight_ema_lbs=weight_ema_lbs,
         avg_sleep_hours=avg_sleep_hours,
         avg_resting_hr=avg_resting_hr,
+        avg_rir=avg_rir,
+        soreness_areas=soreness_areas,
+        plateaus=plateaus,
         headline=headline,
         recommendations=recs,
     )

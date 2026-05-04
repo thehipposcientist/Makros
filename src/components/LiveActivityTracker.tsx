@@ -30,6 +30,7 @@ import { isHealthKitAvailable, getLatestHeartRate, getWorkoutHrSummary, getApple
 import LogActivityModal, { LogActivityPrefill } from './LogActivityModal';
 import { saveWorkoutSession } from '../utils/workoutHistory';
 import { startRestActivity, updateRestActivity, endRestActivity } from '../services/liveActivity';
+import { clearManagedInterval, useManagedInterval } from '../hooks/useManagedInterval';
 
 interface Props {
   visible: boolean;
@@ -143,8 +144,8 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     setHrN(0);
     setPrefill(null);
     setLogModalVisible(false);
-    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    if (hrIntervalRef.current) { clearInterval(hrIntervalRef.current); hrIntervalRef.current = null; }
+    clearManagedInterval(timerRef);
+    clearManagedInterval(hrIntervalRef);
   }, [endWorkoutLiveActivity]);
 
   // On close from outside (e.g. swipe down without saving) clean up
@@ -152,8 +153,8 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   useEffect(() => {
     if (!visible) reset();
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      if (hrIntervalRef.current) clearInterval(hrIntervalRef.current);
+      clearManagedInterval(timerRef);
+      clearManagedInterval(hrIntervalRef);
       endWorkoutLiveActivity();
     };
   }, [visible, reset, endWorkoutLiveActivity]);
@@ -161,41 +162,33 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   // Timer tick — runs while phase=running; pauses accumulate a static
   // offset that's subtracted from elapsed so the paused period doesn't
   // count toward workout time.
-  useEffect(() => {
-    if (phase !== 'running' || !startedAtMs) return;
-    timerRef.current = setInterval(() => {
-      const now = Date.now();
-      const raw = Math.floor((now - startedAtMs) / 1000);
-      setElapsedSec(Math.max(0, raw - pausedAccum));
-    }, 1000);
-    return () => {
-      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    };
-  }, [phase, startedAtMs, pausedAccum]);
+  const tickElapsed = useCallback(() => {
+    if (!startedAtMs) return;
+    const now = Date.now();
+    const raw = Math.floor((now - startedAtMs) / 1000);
+    setElapsedSec(Math.max(0, raw - pausedAccum));
+  }, [pausedAccum, startedAtMs]);
+  useManagedInterval(tickElapsed, 1000, phase === 'running' && !!startedAtMs, timerRef);
 
   // HR polling — only while running. Uses getLatestHeartRate which
   // hits HealthKit's latest sample. Sampling every 10s is plenty for
   // a display + a running-average calculation.
+  const tickHeartRate = useCallback(async () => {
+    try {
+      const bpm = await getLatestHeartRate();
+      if (bpm && bpm > 30 && bpm < 230) {
+        setHr(bpm);
+        setHrSum(prev => prev + bpm);
+        setHrN(prev => prev + 1);
+      }
+    } catch { /* swallow — HR isn't required */ }
+  }, []);
+  const shouldPollHr = phase === 'running' && enableHealthKit && isHealthKitAvailable();
   useEffect(() => {
-    if (phase !== 'running') return;
-    if (!enableHealthKit) return;
-    if (!isHealthKitAvailable()) return;
-    const tick = async () => {
-      try {
-        const bpm = await getLatestHeartRate();
-        if (bpm && bpm > 30 && bpm < 230) {
-          setHr(bpm);
-          setHrSum(prev => prev + bpm);
-          setHrN(prev => prev + 1);
-        }
-      } catch { /* swallow — HR isn't required */ }
-    };
-    tick();
-    hrIntervalRef.current = setInterval(tick, 10_000);
-    return () => {
-      if (hrIntervalRef.current) { clearInterval(hrIntervalRef.current); hrIntervalRef.current = null; }
-    };
-  }, [enableHealthKit, phase]);
+    if (!shouldPollHr) return;
+    tickHeartRate();
+  }, [shouldPollHr, tickHeartRate]);
+  useManagedInterval(tickHeartRate, 10_000, shouldPollHr, hrIntervalRef);
 
   const handleStart = (c: typeof QUICK_START[number]) => {
     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});

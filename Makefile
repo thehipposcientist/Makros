@@ -1,4 +1,4 @@
-.PHONY: start tunnel stop reset-db wait-backend test dev seed-e2e seed-e2e-recovery-apply \
+.PHONY: start tunnel stop reset-db wait-backend test dev maintenance maintenance-food-micros seed-e2e seed-e2e-recovery-apply \
         deploy deploy-backend deploy-ios deploy-ios-clean smoke-prod smoke-mobile smoke-mobile-seeded \
         smoke-mobile-workouts smoke-mobile-state smoke-mobile-social smoke-mobile-free-gates \
         smoke-mobile-plan-adaptation smoke-mobile-preflight
@@ -122,6 +122,18 @@ test:
 	@echo "Running backend test suites..."
 	@echo ""
 	@docker exec thallo-backend python -m tests.run_all
+
+maintenance:
+	@echo ""
+	@echo "Running backend maintenance jobs..."
+	@echo ""
+	@docker exec thallo-backend python -m app.maintenance_jobs --all
+
+maintenance-food-micros:
+	@echo ""
+	@echo "Running food micronutrient enrichment..."
+	@echo ""
+	@docker exec thallo-backend python enrich_food_micros.py
 
 seed-e2e:
 	@echo ""

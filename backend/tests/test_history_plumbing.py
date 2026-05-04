@@ -1423,6 +1423,64 @@ def test_feedback_patch_targets_focus_corrected_completion() -> None:
     _ok("feedback patches corrected completion without duplicate generic row")
 
 
+def test_planned_completion_keeps_plan_focus_after_partial_exercise_log() -> None:
+    """A planned Upper day may only have one chest exercise logged when the
+    user finishes early. The completion row must keep the planned focus so
+    client history hydration can match it back to the real local session."""
+    print("\n[test] planned completion keeps plan focus after partial exercise log")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, WorkoutCompletion  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import (
+        CompletedExercisePayload,
+        CompletedSetPayload,
+        WorkoutCompleteRequest,
+        mark_workout_complete,
+    )
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        u = User(email="planned-partial@example.com", username="plannedpartial", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=date(2026, 5, 4),
+                focus_label="Upper",
+                duration_seconds=90,
+                source_context="planned",
+                exercises=[
+                    CompletedExercisePayload(
+                        name="Band Chest Press",
+                        equipment="resistance_bands",
+                        primary_muscle="chest",
+                        secondary_muscles=["triceps", "shoulders"],
+                        is_compound=True,
+                        order_index=0,
+                        sets=[
+                            CompletedSetPayload(set_number=1, reps=99, weight_lbs=1, rir=4),
+                        ],
+                    )
+                ],
+            ),
+            current_user=u,
+            db=s,
+        )
+        row = s.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == u.id)).first()
+        assert row is not None
+        assert row.focus_label == "Upper", row.focus_label
+        fatigue = row.resolved_muscle_fatigue or {}
+        assert fatigue.get("chest", 0) > 0, fatigue
+    _ok("planned partial completion preserves scheduled focus key")
+
+
 def test_custom_exercise_muscles_feed_completion_fatigue() -> None:
     """Exercises that are not in the seed library should still affect
     recovery/generation when the client sends their muscle metadata."""
@@ -1510,6 +1568,7 @@ cases = [
     test_hydration_guidance_recognizes_logged_electrolytes_and_creatine,
     test_feedback_patch_preserves_exercise_based_fatigue_same_focus,
     test_feedback_patch_targets_focus_corrected_completion,
+    test_planned_completion_keeps_plan_focus_after_partial_exercise_log,
     test_custom_exercise_muscles_feed_completion_fatigue,
 ]
 

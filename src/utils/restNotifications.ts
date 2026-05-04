@@ -75,8 +75,6 @@ export async function scheduleRestNotifications(params: {
   // which is what makes music/podcasts pause. The app ping in feedback.ts
   // is the only audible rest-end sound; notifications provide banner +
   // vibration fallback when JS is not awake.
-  const notificationSound: undefined = undefined;
-
   const aiLine = params.aiCue ? `\n${params.aiCue}` : '';
   const endTime = new Date(Date.now() + params.seconds * 1000);
   const endClock = endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -89,7 +87,6 @@ export async function scheduleRestNotifications(params: {
         body: `${params.exerciseName}\n${params.nextSetLabel}${aiLine}`,
         // Starting a rest timer happens immediately after logging a set.
         // Keep that notification silent so it cannot interrupt music.
-        sound: undefined,
         ...(Platform.OS === 'android' ? { sticky: false, ongoing: false } : {}),
       },
       trigger: null,
@@ -102,7 +99,6 @@ export async function scheduleRestNotifications(params: {
       content: {
         title: '10 seconds left — get ready',
         body: `${params.exerciseName}\n${params.nextSetLabel}`,
-        sound: notificationSound,
       },
       trigger: {
         type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
@@ -115,7 +111,6 @@ export async function scheduleRestNotifications(params: {
     content: {
       title: 'Go! Next set ready',
       body: `${params.exerciseName}\n${params.nextSetLabel}${aiLine}`,
-      sound: notificationSound,
     },
     trigger: {
       type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,

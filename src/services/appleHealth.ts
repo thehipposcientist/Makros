@@ -46,10 +46,11 @@ export const APPLE_HEALTH_PERMISSION_COPY = {
   title: 'Connect Apple Health?',
   body:
     'Apple Health is optional.\n\n' +
-    'If you connect it, Thallo can read sleep, resting heart rate, HRV, steps, workouts, weight, and active energy to improve readiness, recovery, and progress trends.\n\n' +
+    'If you connect it, Thallo can read sleep, resting heart rate, HRV, steps, workouts, weight, active energy, and menstrual-flow data to improve readiness, recovery, progress trends, and optional cycle-aware training guidance.\n\n' +
+    'Thallo does not upload raw menstrual-flow samples; it only derives cycle phase and cycle day when that Apple Health category is shared.\n\n' +
     'Thallo also writes your completed workouts back to Apple Health.',
   denied:
-    'Apple Health stays optional. You can keep using Thallo normally and enable categories later in iPhone Settings -> Privacy & Security -> Health -> Thallo.',
+    'Apple Health stays optional. You can keep using Thallo normally and enable or disable categories later in iPhone Settings -> Privacy & Security -> Health -> Thallo.',
 };
 
 export function isHealthKitAvailable(): boolean {
@@ -592,12 +593,24 @@ export async function getWorkoutHrSummary(
 //   unknown      (no data)
 
 export type CyclePhase = 'menses' | 'follicular' | 'ovulation' | 'luteal' | 'unknown';
+export type CycleFlowIntensity = 'unspecified' | 'light' | 'moderate' | 'heavy';
 
 export interface CycleStatus {
   phase: CyclePhase;
   dayOfCycle: number | null;   // 1-indexed; null if unknown
   cycleLengthDays: number;     // estimated from history; defaults to 28
   nextExpectedMenses: string | null; // ISO date
+  currentFlow: CycleFlowIntensity | null;
+}
+
+function menstrualFlowIntensity(value: unknown): CycleFlowIntensity | null {
+  switch (Number(value)) {
+    case 1: return 'unspecified';
+    case 2: return 'light';
+    case 3: return 'moderate';
+    case 4: return 'heavy';
+    default: return null;
+  }
 }
 
 export async function getCycleStatus(): Promise<CycleStatus | null> {
@@ -613,7 +626,11 @@ export async function getCycleStatus(): Promise<CycleStatus | null> {
     type Period = { start: number; end: number };
     const flowDays = samples
       .filter((s: any) => s.value >= 1 && s.value <= 4)
-      .map((s: any) => ({ startMs: new Date(s.startDate).getTime(), endMs: new Date(s.endDate).getTime() }))
+      .map((s: any) => ({
+        startMs: new Date(s.startDate).getTime(),
+        endMs: new Date(s.endDate).getTime(),
+        value: Number(s.value),
+      }))
       .sort((a: any, b: any) => a.startMs - b.startMs);
     if (flowDays.length === 0) return null;
 
@@ -652,7 +669,17 @@ export async function getCycleStatus(): Promise<CycleStatus | null> {
     else if (dayOfCycle <= cycleLengthDays + 2) phase = 'luteal';
     else phase = 'unknown';
 
-    return { phase, dayOfCycle, cycleLengthDays, nextExpectedMenses };
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+    const todayStartMs = todayStart.getTime();
+    const currentFlowSample = [...flowDays].reverse().find(day =>
+      day.endMs > todayStartMs && day.startMs <= now + 86400000,
+    );
+    const currentFlow = phase === 'menses'
+      ? menstrualFlowIntensity(currentFlowSample?.value)
+      : null;
+
+    return { phase, dayOfCycle, cycleLengthDays, nextExpectedMenses, currentFlow };
   } catch {
     return null;
   }

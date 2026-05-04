@@ -4,11 +4,9 @@ import { Platform } from 'react-native';
 import { goalCategory } from '../constants/goalConfig';
 import { effectiveAge } from '../utils/age';
 
-const LOCAL_BACKEND_IP = '192.168.1.246'; // your dev machine's LAN IP
-
 /** Exported for callers that need to hit the API outside the `request`
  *  helper (e.g. direct `fetch` for endpoints that return binary/large
- *  payloads). Same resolution logic — dev override → LAN IP → prod URL. */
+ *  payloads). Same resolution logic — dev override → Expo host → prod URL. */
 export function getApiBaseUrl(): string {
   return getBaseUrl();
 }
@@ -47,9 +45,17 @@ function getBaseUrl(): string {
   const devOverride = process.env.EXPO_PUBLIC_API_URL;
   if (devOverride && devOverride.startsWith('http')) return devOverride;
   const hostUri = Constants.expoConfig?.hostUri ?? '';
-  const isTunnel = hostUri.includes('ngrok') || hostUri.includes('exp.direct') || !hostUri;
-  const host = isTunnel ? LOCAL_BACKEND_IP : (hostUri.split(':')[0] ?? LOCAL_BACKEND_IP);
-  return `http://${host}:8000`;
+  const isTunnel = hostUri.includes('ngrok') || hostUri.includes('exp.direct');
+  const host = !isTunnel ? hostUri.split(':')[0] : '';
+  if (host) return `http://${host}:8000`;
+
+  const isDevice = (Constants as { isDevice?: boolean }).isDevice === true;
+  if (Platform.OS === 'web' || !isDevice) return 'http://localhost:8000';
+
+  throw new Error(
+    '[Thallo] Dev API URL is missing for a physical device/tunnel session. ' +
+    'Set EXPO_PUBLIC_API_URL to your LAN or remote backend URL.',
+  );
 }
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);

@@ -10,6 +10,7 @@ simulator / device. Intended to catch the class of bugs we've been fighting:
 - Plan card renders without a focus, or with back-to-back same-family focuses
 - ShimmerLogo overlay missing during regen (silent blocking work)
 - Start Workout CTA fails to navigate to ActiveWorkoutScreen
+- Active workout RIR prompt fails to appear after a meaningful over-target set
 
 ## Install Maestro
 

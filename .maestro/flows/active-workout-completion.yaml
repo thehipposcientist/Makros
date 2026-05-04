@@ -82,20 +82,28 @@ tags:
     commands:
       - tapOn: "Not now"
 
-# Log one deliberately-low set. This proves inline set persistence,
-# enables Finish Workout, and avoids PR overlays in normal seeded history.
+# Log one deliberately-light but high-rep set. This proves inline set
+# persistence, enables Finish Workout, and exercises the RIR prompt that gates
+# the live next-set recommendation path after meaningful rep overshoots.
 - tapOn:
     id: "set-weight-input-0-0"
 - inputText: "1"
 - pressKey: Enter
 - tapOn:
     id: "set-reps-input-0-0"
-- inputText: "1"
+- inputText: "99"
 - pressKey: Enter
 - tapOn:
     id: "log-set-0-0"
 - extendedWaitUntil:
     visible: "Set 1 logged"
+    timeout: 15000
+- extendedWaitUntil:
+    visible: "Nice — how many more reps could you have done?"
+    timeout: 15000
+- tapOn: "4+"
+- extendedWaitUntil:
+    visible: "Recommendation"
     timeout: 15000
 
 - scrollUntilVisible:
@@ -126,6 +134,12 @@ tags:
 
 - assertVisible: "Workout Complete"
 - assertVisible: "1 sets logged"
+- scrollUntilVisible:
+    element:
+      id: "summary-close"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
 - tapOn:
     id: "summary-close"
 
@@ -142,4 +156,4 @@ tags:
     visible:
       id: "workout-history-row-0"
     timeout: 30000
-- assertVisible: "1 sets"
+- assertVisible: ".*1 sets.*"

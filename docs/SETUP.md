@@ -40,8 +40,12 @@ MODEL_FOOD_ENRICHMENT=gpt-4o-mini
 MODEL_IMAGE=gpt-5.4-mini
 PLAN_REVIEW_ENABLED=0
 NUTRITION_REVIEW_ENABLED=0
-STARTUP_ENRICH_FOODS_ENABLED=1
+STARTUP_ENRICH_FOODS_ENABLED=0
 ```
+
+Run `make maintenance` for explicit backend data backfills/seed refreshes, and
+`make maintenance-food-micros` when you intentionally want food micronutrient
+enrichment to call OpenAI.
 
 ## Expo Go Troubleshooting
 

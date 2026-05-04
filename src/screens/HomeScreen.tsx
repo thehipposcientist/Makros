@@ -87,7 +87,7 @@ import WeeklyDigestCard from '../components/WeeklyDigestCard';
 import WeeklyCheckinCard from '../components/WeeklyCheckinCard';
 import TrainingReadinessCard from '../components/TrainingReadinessCard';
 import BirthdateBackfillCard from '../components/BirthdateBackfillCard';
-import CyclePhaseCard from '../components/CyclePhaseCard';
+import CycleGuidanceCard from '../components/PeriodSupportCard';
 import GroceryListModal from '../components/GroceryListModal';
 import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
 import BirthdayBanner from '../components/BirthdayBanner';
@@ -108,6 +108,8 @@ import ErrorBoundary from '../components/ErrorBoundary';
 import { setActiveWatchSessionId } from '../utils/activeWatchSession';
 import { dynamicCompactTextProps, dynamicTextProps } from '../utils/dynamicType';
 import { effectiveAge } from '../utils/age';
+import { reduceWorkoutForCycleSymptoms } from '../utils/cycleSupport';
+import { useManagedInterval } from '../hooks/useManagedInterval';
 import {
   FREE_MEAL_ROUTINE_LIMIT,
   FREE_SAVED_MEAL_LIMIT,
@@ -1379,6 +1381,14 @@ function resolveTodayScheduleItem(
     : null;
 }
 
+function workoutPlanFromPlanWeek(planWeek: import('../services/api').PlanWeekResponse): WorkoutPlan {
+  return {
+    name: 'Active Week',
+    totalDays: planWeek.days.length,
+    days: planWeek.days.map(d => (d.workout ?? { day: 'Rest', focus: 'Rest', exercises: [] }) as WorkoutDay),
+  };
+}
+
 // humanizeToken and buildExerciseGuide imported from '../utils/exerciseGuide'
 
 function compactGoalProgressText(
@@ -1890,11 +1900,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const splashOpacity = useRef(new Animated.Value(0)).current;
   const [splashMounted, setSplashMounted] = useState(false);
   const bothUpdating = !!(isWorkoutUpdating && isNutritionUpdating);
+  const planProgressElapsedRef = useRef(0);
   useEffect(() => {
     if (bothUpdating) {
       setSplashMounted(true);
       Animated.timing(splashOpacity, { toValue: 1, duration: 200, useNativeDriver: true }).start();
-      return;
+      return undefined;
     }
     // Flag flipped off — fade out, then unmount.
     Animated.timing(splashOpacity, { toValue: 0, duration: 400, useNativeDriver: true }).start(({ finished }) => {
@@ -1911,6 +1922,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       return () => clearTimeout(t);
     }
     setPlanProgress(0);
+    planProgressElapsedRef.current = 0;
+    return undefined;
+  }, [isWorkoutUpdating, isNutritionUpdating]);
+  useManagedInterval(() => {
     const steps = [
       { at: 0,  label: 'Analyzing your foods and macros…' },
       { at: 5,  label: 'Building your workout plan…' },
@@ -1919,17 +1934,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       { at: 70, label: 'Finalizing your plan — the AI is writing details…' },
       { at: 110, label: 'Almost there — this plan is a long one, hang tight…' },
     ];
-    let elapsed = 0;
-    const interval = setInterval(() => {
-      elapsed += 1;
-      // Asymptotic progress: reaches ~88% around 120s, never 95%+.
-      const progress = Math.min(88, 100 * (1 - Math.exp(-elapsed / 50)));
-      setPlanProgress(progress);
-      const currentStep = [...steps].reverse().find(s => elapsed >= s.at);
-      if (currentStep) setPlanStep(currentStep.label);
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [isWorkoutUpdating, isNutritionUpdating]);
+    planProgressElapsedRef.current += 1;
+    const elapsed = planProgressElapsedRef.current;
+    // Asymptotic progress: reaches ~88% around 120s, never 95%+.
+    const progress = Math.min(88, 100 * (1 - Math.exp(-elapsed / 50)));
+    setPlanProgress(progress);
+    const currentStep = [...steps].reverse().find(s => elapsed >= s.at);
+    if (currentStep) setPlanStep(currentStep.label);
+  }, 1000, isWorkoutUpdating || isNutritionUpdating);
 
   // Chat loading progress animation
   useEffect(() => {
@@ -3670,22 +3682,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return () => { mounted = false; };
   }, [workoutPlan, todayDone]);
 
-  useEffect(() => {
-    const timer = setInterval(() => {
-      const nowKey = todayKey();
-      if (nowKey !== currentDate) {
-        // Skip the rollover refresh while a plan is actively being
-        // generated — reading/writing `aiWorkoutPlan` mid-gen can race
-        // with the apply path and surface a half-merged plan.
-        if (isWorkoutUpdating || isNutritionUpdating) return;
-        setCurrentDate(nowKey);
-        loadDayStatus();
-        if (userProfile) loadPlans(userProfile);
-      }
-    }, 60000);
-    return () => clearInterval(timer);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentDate, userProfile, authToken, isWorkoutUpdating, isNutritionUpdating]);
+  useManagedInterval(() => {
+    const nowKey = todayKey();
+    if (nowKey !== currentDate) {
+      // Skip the rollover refresh while a plan is actively being
+      // generated — reading/writing `aiWorkoutPlan` mid-gen can race
+      // with the apply path and surface a half-merged plan.
+      if (isWorkoutUpdating || isNutritionUpdating) return;
+      setCurrentDate(nowKey);
+      loadDayStatus();
+      if (userProfile) loadPlans(userProfile);
+    }
+  }, 60000);
 
   const loadDayStatus = async () => {
     const today = todayKey();
@@ -5901,6 +5909,91 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
   }, [authToken, persistDayState]);
 
+  const handlePeriodLighterWorkout = useCallback(async () => {
+    const today = todayKey();
+    const todayScheduleItem = scheduleRawRef.current.find(item => dateKey(item.date) === today)
+      ?? resolveTodayScheduleItem(scheduleRawRef.current, workoutPlan, planWeek);
+    if (!todayScheduleItem?.workout) return;
+
+    const adjustedWorkout = reduceWorkoutForCycleSymptoms(todayScheduleItem.workout);
+
+    if (authToken && planWeekRef.current?.days?.length) {
+      const { patchPlanDayWorkout } = await import('../services/api');
+      const savedDay = await patchPlanDayWorkout(authToken, today, adjustedWorkout);
+      const baseWeek = planWeekRef.current;
+      const nextWeek = {
+        ...baseWeek,
+        days: baseWeek.days.map(pd =>
+          pd.day_date === today
+            ? { ...pd, is_rest: savedDay.is_rest, workout: savedDay.workout, status: savedDay.status, locked: savedDay.locked }
+            : pd,
+        ),
+      };
+      planWeekRef.current = nextWeek;
+      setPlanWeek(nextWeek);
+      const projected = workoutPlanFromPlanWeek(nextWeek);
+      setWorkoutPlan(projected);
+      AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(projected)).catch(() => {});
+      setSelectedWorkoutDayKey(today);
+      return;
+    }
+
+    if (workoutPlan?.days?.length) {
+      const idx = workoutPlan.days.indexOf(todayScheduleItem.workout as WorkoutDay);
+      const nextPlan = {
+        ...workoutPlan,
+        days: idx >= 0
+          ? workoutPlan.days.map((day, i) => i === idx ? adjustedWorkout : day)
+          : [adjustedWorkout, ...workoutPlan.days.slice(1)],
+      };
+      setWorkoutPlan(nextPlan);
+      setManualWorkoutOverrides(prev => ({ ...prev, [today]: adjustedWorkout }));
+      await saveManualWorkoutOverride(today, adjustedWorkout);
+      AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(nextPlan)).catch(() => {});
+      setSelectedWorkoutDayKey(today);
+    }
+  }, [authToken, planWeek, workoutPlan]);
+
+  const handlePeriodRecoveryDay = useCallback(async () => {
+    const today = todayKey();
+    const reason = 'Active recovery for period symptoms';
+    const todayScheduleItem = scheduleRawRef.current.find(item => dateKey(item.date) === today)
+      ?? resolveTodayScheduleItem(scheduleRawRef.current, workoutPlan, planWeek);
+
+    setSkippedDates(prev => new Set([...prev, today]));
+    setSkipReasonsByDate(prev => ({ ...prev, [today]: reason }));
+    setDroppedSkipDates(prev => {
+      const next = new Set(prev);
+      next.delete(today);
+      return next;
+    });
+
+    if (todayScheduleItem?.workout) {
+      await savePreservedCompletedWorkout(today, todayScheduleItem.workout);
+      setPreservedWorkouts(prev => ({ ...prev, [today]: todayScheduleItem.workout! }));
+    }
+
+    await persistDayState(today, { skipped_focus: 'recovery', skip_reason: reason });
+    await saveSkipToHistory(today, todayScheduleItem?.workout?.focus ?? 'recovery', reason);
+
+    import('../utils/workoutReminders')
+      .then(({ cancelTodayWorkoutReminder }) => cancelTodayWorkoutReminder())
+      .catch(() => undefined);
+
+    if (authToken) {
+      const { skipPlanDay, getActivePlanWeek } = await import('../services/api');
+      await skipPlanDay(authToken, today, reason);
+      const freshWeek = await getActivePlanWeek(authToken);
+      if (freshWeek?.days?.length) {
+        planWeekRef.current = freshWeek;
+        setPlanWeek(freshWeek);
+        const projected = workoutPlanFromPlanWeek(freshWeek);
+        setWorkoutPlan(projected);
+        AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(projected)).catch(() => {});
+      }
+    }
+  }, [authToken, persistDayState, planWeek, workoutPlan]);
+
   // Wipe a phantom "done" state — backend WorkoutCompletion +
   // WorkoutSession + every related local artifact for the date.
   // Triggered from the day card's "Mark as not done" link.
@@ -6638,6 +6731,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
                       {/* Session cards */}
                       {history.slice(0, 30).map((session, i) => {
+                        const exerciseCount = (session.exercises ?? []).length;
                         const totalSets = (session.exercises ?? []).reduce((n, ex) => n + (ex.sets?.length ?? 0), 0);
                         const isExpanded = expandedWorkoutHistoryId === (session.id ?? `s${i}`);
                         const summary = summaries.find(s => s.date && session.date && s.date.slice(0, 10) === session.date.slice(0, 10) && s.focus === session.focus);
@@ -6647,10 +6741,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         const focusLabel = session.manualActivity
                           ? `${humanizeToken(session.manualActivity.category)}${session.manualActivity.subtype ? ' · ' + humanizeToken(session.manualActivity.subtype) : ''}${session.manualActivity.intensity ? ` (${session.manualActivity.intensity})` : ''}`
                           : session.focus;
+                        const historyRowLabel = `workout-history-row-${i} ${focusLabel} ${dateLabel} ${exerciseCount} exercises ${totalSets} sets`;
                         return (
                           <TouchableOpacity
                             testID={`workout-history-row-${i}`}
-                            accessibilityLabel={`workout-history-row-${i}`}
+                            accessibilityLabel={historyRowLabel}
                             key={session.id ?? i}
                             activeOpacity={0.85}
                             onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedWorkoutHistoryId(isExpanded ? null : (session.id ?? `s${i}`)); }}
@@ -6693,7 +6788,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               <Ionicons name={isExpanded ? 'chevron-down' : 'chevron-forward'} size={14} color={themeColors.textMuted} style={{ marginLeft: 6 }} />
                             </View>
                             <View style={{ flexDirection: 'row', gap: 6, marginTop: 4 }}>
-                              <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{(session.exercises ?? []).length} exercises</Text>
+                              <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{exerciseCount} exercises</Text>
                               <Text style={{ fontSize: 11, color: themeColors.textMuted }}>·</Text>
                               <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{totalSets} sets</Text>
                               {summary && summary.caloriesBurned > 0 && (
@@ -6835,10 +6930,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               );
             })()}
 
-            {/* Menstrual cycle phase (auto-hides if no Apple Health data) */}
-            {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (
-              <CyclePhaseCard themeName={userProfile.themePreference} />
-            )}
+            {/* Health-linked cycle guidance with period-phase advice and
+                user-triggered today-only workout adjustments. */}
+            {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (() => {
+              const todayScheduleItem = schedule?.find(s => dateKey(s.date) === todayKey()) ?? schedule?.[0] ?? null;
+              return (
+                <CycleGuidanceCard
+                  themeName={userProfile.themePreference}
+                  todaysWorkout={todayScheduleItem?.workout ?? null}
+                  isWorkoutDone={todayDone}
+                  isWorkoutSkipped={skippedDates.has(todayKey())}
+                  onUseLighterWorkout={handlePeriodLighterWorkout}
+                  onUseRecoveryDay={handlePeriodRecoveryDay}
+                  onAddHydration={() => handleHydrationDelta(16, todayKey())}
+                />
+              );
+            })()}
 
             {/* Weekly digest card — only renders Sunday / post-6pm (Feature 3) */}
             {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (

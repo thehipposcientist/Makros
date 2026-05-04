@@ -50,6 +50,15 @@ export default function CyclePhaseCard({ themeName }: Props) {
   const daysUntilNext = status.nextExpectedMenses
     ? Math.max(0, Math.ceil((new Date(status.nextExpectedMenses).getTime() - Date.now()) / 86400000))
     : null;
+  const cycleSubtitle = status.dayOfCycle != null
+    ? [
+        status.phase === 'menses'
+          ? `Period day ${status.dayOfCycle}`
+          : `Cycle day ${status.dayOfCycle}`,
+        `est. ${status.cycleLengthDays}-day cycle`,
+        daysUntilNext != null ? `next in ${daysUntilNext}d` : null,
+      ].filter(Boolean).join(' · ')
+    : null;
 
   return (
     <View style={{
@@ -71,10 +80,9 @@ export default function CyclePhaseCard({ themeName }: Props) {
           <Text style={{ fontSize: 16, fontWeight: '800', color: info.color, marginTop: 1 }}>
             {info.label}
           </Text>
-          {status.dayOfCycle != null && (
+          {cycleSubtitle && (
             <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 1 }}>
-              Day {status.dayOfCycle} of {status.cycleLengthDays}
-              {daysUntilNext != null ? ` · next in ${daysUntilNext}d` : ''}
+              {cycleSubtitle}
             </Text>
           )}
         </View>

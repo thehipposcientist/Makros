@@ -271,6 +271,46 @@ def test_short_session_fewer_exercises():
     _ok(f"30min total exercises={short_total} < 75min total={long_total}")
 
 
+def test_plus_cardio_finisher_drops_before_lift_slots_on_short_sessions():
+    """PLUS_CARDIO keeps lift-family identity and trims cardio first at 30 min."""
+    print("\n[test] density: PLUS_CARDIO drops finisher before lift slots on short sessions")
+    base = dict(
+        goal="muscle_gain",
+        days_per_week=5,
+        experience="intermediate",
+        equipment_slugs=_FULL_GYM,
+        preferred_split="ppl",
+    )
+    short = generate_workout_plan(
+        PlannerInputs(**base, session_minutes=30),
+        SEED_EXERCISES,
+    )["workout_plan"]["days"]
+    medium = generate_workout_plan(
+        PlannerInputs(**base, session_minutes=60),
+        SEED_EXERCISES,
+    )["workout_plan"]["days"]
+
+    short_plus = next((d for d in short if "+ Cardio" in (d.get("focus") or "")), None)
+    medium_plus = next((d for d in medium if "+ Cardio" in (d.get("focus") or "")), None)
+    assert short_plus is not None, f"short plan missing PLUS_CARDIO day: {[d.get('focus') for d in short]}"
+    assert medium_plus is not None, f"medium plan missing PLUS_CARDIO day: {[d.get('focus') for d in medium]}"
+    assert "Legs" not in short_plus["focus"], f"legs should never carry PLUS_CARDIO: {short_plus['focus']}"
+    assert "Legs" not in medium_plus["focus"], f"legs should never carry PLUS_CARDIO: {medium_plus['focus']}"
+
+    def _cardio_count(day: dict) -> int:
+        return sum(
+            1 for ex in day.get("exercises", [])
+            if str(ex.get("prescriptionType") or "").startswith("cardio")
+            or "cardio" in str(ex.get("_slot") or "").lower()
+            or any(token in (ex.get("name") or "").lower() for token in ("treadmill", "bike", "rower", "interval"))
+        )
+
+    assert _cardio_count(medium_plus) >= 1, f"60-min PLUS_CARDIO missing finisher: {medium_plus}"
+    assert _cardio_count(short_plus) == 0, f"30-min PLUS_CARDIO should trim finisher first: {short_plus}"
+    assert len(short_plus.get("exercises", [])) >= 2, f"short PLUS_CARDIO lost lift slots: {short_plus}"
+    _ok("30min PLUS_CARDIO keeps lift day, trims cardio finisher")
+
+
 # ─── Non-lifting goal plans ───────────────────────────────────────────────
 
 def test_endurance_plan_has_cardio_days():
@@ -354,6 +394,7 @@ cases = [
     test_muscle_fatigue_influences_plan,
     # Session duration
     test_short_session_fewer_exercises,
+    test_plus_cardio_finisher_drops_before_lift_slots_on_short_sessions,
     # Non-lifting goals
     test_endurance_plan_has_cardio_days,
     test_mobility_plan_has_no_heavy_lifts,

@@ -33,6 +33,9 @@ from app.services.workout.recommendation import (
     apply_fatigue_override,
     recommend_starting_weight,
 )
+from app.services.workout.exercise_metadata import (
+    set_programming_exercise_metadata,
+)
 from app.services.workout.ai_first_time_weight import (
     ai_first_time_weight_recommendation,
 )
@@ -235,6 +238,22 @@ def _primary_muscle_for(
     return None
 
 
+def _set_programming_exercise_metadata(
+    db: Session | None,
+    exercise_name: str,
+    exercise_slug: str | None = None,
+    equipment: str | None = None,
+    primary_muscle: str | None = None,
+) -> dict:
+    return set_programming_exercise_metadata(
+        db,
+        exercise_name,
+        exercise_slug,
+        equipment,
+        primary_muscle,
+    )
+
+
 @router.post("/recommend-weight")
 def recommend_weight(
     body: WeightRecommendRequest,
@@ -262,12 +281,25 @@ def recommend_weight(
     Each step past (1) also populates a `recommendation` field on the
     response so the client can show the user *why* a weight was picked."""
     try:
+        exercise_meta = _set_programming_exercise_metadata(
+            db,
+            body.exerciseName,
+            body.exerciseSlug,
+            body.equipment,
+            body.primaryMuscle,
+        )
+        from app.services.workout.set_programming import load_increment_for
+        metadata_increment_lbs = load_increment_for(exercise_meta)
+
         # Bodyweight gate: exercises performed with bodyweight (no added load)
         # never get a weight recommendation. Short-circuit before any tier logic.
         # The client also guards via shouldHideWeight(), but this prevents
         # non-zero weights from leaking through edge cases (e.g. historical
         # data with weight for an exercise the user is now doing unloaded).
-        if (body.equipment or "").strip().lower() in ("bodyweight", "none", "bw"):
+        if (
+            (body.equipment or "").strip().lower() in ("bodyweight", "none", "bw")
+            or metadata_increment_lbs <= 0
+        ):
             return {
                 "weightLbs": 0.0, "reps": 0,
                 "tip": "", "action": "continue", "repRange": None,
@@ -360,9 +392,13 @@ def recommend_weight(
         try:
             from app.services.workout.load_equipment import load_increment_lbs, snap_load_lbs
             fallback_increment = (
-                float(body.incrementLbs)
-                if body.incrementLbs and body.incrementLbs > 0
-                else (2.5 if "dumbbell" in (body.equipment or "").lower() else 5.0)
+                metadata_increment_lbs
+                if metadata_increment_lbs > 0
+                else (
+                    float(body.incrementLbs)
+                    if body.incrementLbs and body.incrementLbs > 0
+                    else (2.5 if "dumbbell" in (body.equipment or "").lower() else 5.0)
+                )
             )
             effective_increment_lbs = load_increment_lbs(
                 body.equipment,
@@ -583,12 +619,11 @@ def recommend_weight(
                     progression_mode=reviewed_progression_mode,
                 )
                 exercise_stub = {
-                    "name": body.exerciseName,
-                    "slug": body.exerciseSlug,
-                    "equipment_bucket": "barbell" if ex_category == ExerciseCategory.COMPOUND else "dumbbell",
-                    "is_compound": ex_category == ExerciseCategory.COMPOUND,
-                    "movement_pattern": None,
-                    "primary_muscle": None,
+                    **exercise_meta,
+                    "equipment_bucket": exercise_meta.get("equipment_bucket")
+                    or ("barbell" if ex_category == ExerciseCategory.COMPOUND else "dumbbell"),
+                    "is_compound": bool(exercise_meta.get("is_compound"))
+                    or ex_category == ExerciseCategory.COMPOUND,
                 }
                 prev_sets_this = [
                     {"reps": s.reps, "weight_lbs": s.weightLbs, "rir": s.rir, "feel": s.feedback}
@@ -1431,12 +1466,12 @@ def pre_set_recommendation(
     )
 
     # 2. Build a minimal exercise dict for the increment helper.
-    exercise = {
-        "name": body.exerciseName,
-        "slug": body.exerciseSlug,
-        "equipment": body.equipment or "dumbbell",
-        "equipment_bucket": body.equipment or "dumbbell",
-    }
+    exercise = _set_programming_exercise_metadata(
+        db,
+        body.exerciseName,
+        body.exerciseSlug,
+        body.equipment,
+    )
 
     prior = body.priorSetsThisSession or []
     last_session = body.lastSessionSets or []

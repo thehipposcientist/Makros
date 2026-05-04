@@ -79,6 +79,8 @@ _TEST_MODULES = (
     "tests.test_auth_google",
     # PlanWeekCheckin: status, gate, idempotency, skip, recap.
     "tests.test_plan_week_checkin",
+    # Workout start marker: in-progress session, never phantom completion.
+    "tests.test_workout_start",
     # plan_cadence_anchor: pure helper that locks the user's sign-up
     # day-of-week as the rhythm for every future plan-week start_date.
     "tests.test_plan_cadence_anchor",
