@@ -267,6 +267,7 @@ def _lower_heavy_slots() -> list[Slot]:
         Slot("Primary Hinge",    "hinge",          "hamstrings", "primary"),
         Slot("Secondary Lunge",  "lunge",          "quads",      "secondary"),
         Slot("Glute Isolation",  "isolation",       "glutes",    "isolation"),
+        Slot("Calves",           "isolation",       "calves",    "isolation"),
     ]
 
 
@@ -315,6 +316,7 @@ def _legs_heavy_slots() -> list[Slot]:
         Slot("Hinge Pattern",     "hinge",      "hamstrings", "primary"),
         Slot("Single-leg",        "lunge",      "quads",      "secondary"),
         Slot("Glute Isolation",   "isolation",   "glutes",    "isolation"),
+        Slot("Calves",            "isolation",   "calves",    "isolation"),
     ]
 
 
@@ -326,6 +328,7 @@ def _legs_heavy_glute_slots() -> list[Slot]:
         Slot("Squat Pattern",     "squat",      "quads",      "primary"),
         Slot("Single-leg Glute",  "lunge",      "glutes",     "secondary"),
         Slot("Glute Isolation",   "isolation",   "glutes",    "isolation"),
+        Slot("Calves",            "isolation",   "calves",    "isolation"),
     ]
 
 
@@ -398,6 +401,7 @@ def _lower_heavy_glute_slots() -> list[Slot]:
         Slot("Secondary Squat",  "squat",      "quads",      "secondary"),
         Slot("Single-leg Glute", "lunge",      "glutes",     "secondary"),
         Slot("Glute Isolation",  "isolation",   "glutes",    "isolation"),
+        Slot("Calves",           "isolation",   "calves",    "isolation"),
     ]
 
 
@@ -410,6 +414,7 @@ def _lower_hypertrophy_glute_slots() -> list[Slot]:
         Slot("Single-leg Glute",     "lunge",      "glutes",     "secondary"),
         Slot("Glute Isolation",      "isolation",   "glutes",    "isolation"),
         Slot("Hamstring Isolation",  "isolation",   "hamstrings","isolation"),
+        Slot("Calves",               "isolation",   "calves",    "isolation"),
     ]
 
 
@@ -706,6 +711,15 @@ _ROLE_MINUTES_BY_CATEGORY: dict[str, dict[str, int]] = {
 _DEFAULT_ROLE_MINUTES = _ROLE_MINUTES_BY_CATEGORY["lift"]
 
 
+def _is_protected_isolation_slot(slot: Slot) -> bool:
+    # Compounds already cover quads/glutes/hamstrings, but calves need
+    # direct work; trim their only isolation slot after other accessories.
+    return (
+        slot.role == "isolation"
+        and (slot.primary_muscle_hint or "").lower() == "calves"
+    )
+
+
 def density_adjust_slots(
     slots: list[Slot],
     session_minutes: Optional[int],
@@ -785,6 +799,8 @@ def density_adjust_slots(
             drop_idx: Optional[int] = None
             for i in range(len(kept) - 1, -1, -1):
                 if kept[i].role == role:
+                    if role == "isolation" and _is_protected_isolation_slot(kept[i]):
+                        continue
                     drop_idx = i
                     break
             if drop_idx is None:
@@ -793,4 +809,18 @@ def density_adjust_slots(
             kept.pop(drop_idx)
         if total <= budget:
             break
+    if total > budget:
+        for role in ("isolation", "secondary"):
+            while total > budget:
+                drop_idx: Optional[int] = None
+                for i in range(len(kept) - 1, -1, -1):
+                    if kept[i].role == role:
+                        drop_idx = i
+                        break
+                if drop_idx is None:
+                    break
+                total -= cost.get(role, 6)
+                kept.pop(drop_idx)
+            if total <= budget:
+                break
     return kept

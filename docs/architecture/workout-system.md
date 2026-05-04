@@ -60,6 +60,7 @@ open" regen is **removed**.
 - Duration picker values are the top of a 15-minute range: 45 = 30-45, 60 = 45-60, 75 = 60-75, 90 = 75-90.
 - 60-minute sessions do not receive extended-session filler accessories; filler starts at 75+.
 - Direct-core circuits treat 60 minutes as medium, not long, and are skipped on already-dense 60-minute days.
+- Lower/legs templates include direct calf work. Calf isolation slots are protected during density trimming, so duplicate lower accessories drop before the only direct calf slot.
 
 ## Weekly Recipe Repair + Rotation
 
@@ -76,6 +77,7 @@ open" regen is **removed**.
 Groups: `chest, back, shoulders, biceps, triceps, quads, hamstrings, glutes, calves, core, cardio, systemic`
 
 - Decay: day 0 = 1.0 / day 1 = 0.50 / day 2 = 0.25 / day 3 = 0.10
+- Forearms are not a separate fatigue bucket; direct forearm/grip exercises map onto the biceps/arm fatigue dimension.
 - Recovery/mobility days have NEGATIVE fatigue (recovery: -0.08/muscle, -0.10 systemic; mobility: -0.05/muscle, -0.08 systemic)
 - Two-pass rolling fatigue: Pass 1 accumulates; Pass 2 applies recovery (max 1 session/day, 15% of current fatigue, capped at 0.15). Fatigue floor clamped at 0.0.
 - Focus auto-correction on completion via `_infer_focus_from_muscles`.

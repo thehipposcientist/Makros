@@ -376,6 +376,71 @@ def test_body_recomp_ppl_60_min_does_not_stack_extended_density():
     _ok("60-min body_recomp PPL lift days stay at 8 exercises or fewer")
 
 
+def test_heavy_lower_archetypes_include_direct_calves():
+    """Heavy lower/legs days still need direct calf work.
+
+    Calves are a first-class fatigue/volume group, but the heavy lower
+    templates used to omit them entirely.
+    """
+    print("\n[test] calf coverage: heavy lower archetypes include calf slot")
+    heavy_lower = (
+        DayArchetype.LIFT_LOWER_HEAVY,
+        DayArchetype.LIFT_LEGS_HEAVY,
+    )
+    for arch in heavy_lower:
+        slots = archetype_to_slots(arch, 0, 4, session_minutes=60)
+        hints = [s.primary_muscle_hint for s in slots]
+        assert "calves" in hints, f"{arch.value} missing direct calf slot: {hints}"
+    _ok("heavy lower/legs templates include direct calf slot")
+
+
+def test_short_ppl_leg_days_preserve_direct_calves():
+    """At 45 minutes, lower days should trim duplicate leg volume before
+    dropping the only direct calf exercise."""
+    print("\n[test] calf coverage: 45-min PPL leg days keep direct calves")
+    from app.services.workout.planner import PlannerInputs, generate_workout_plan
+    from app.seed_exercises_data import SEED_EXERCISES
+
+    plan = generate_workout_plan(
+        PlannerInputs(
+            goal="muscle_gain",
+            days_per_week=4,
+            preferred_split="ppl",
+            session_minutes=45,
+            experience="intermediate",
+            equipment_slugs=(
+                "barbell", "dumbbells", "bench", "squat_rack",
+                "leg_press_machine", "leg_extension_machine",
+                "leg_curl_machine", "standing_calf_raise_machine",
+                "seated_calf_raise_machine", "smith_machine",
+            ),
+            rng_seed=37,
+        ),
+        SEED_EXERCISES,
+    )
+
+    lower_archetypes = {
+        DayArchetype.LIFT_LOWER.value,
+        DayArchetype.LIFT_LOWER_HEAVY.value,
+        DayArchetype.LIFT_LOWER_HYPERTROPHY.value,
+        DayArchetype.LIFT_LEGS.value,
+        DayArchetype.LIFT_LEGS_HEAVY.value,
+        DayArchetype.LIFT_LEGS_VOLUME.value,
+    }
+    lower_days = [
+        d for d in plan["workout_plan"]["days"]
+        if d.get("archetype") in lower_archetypes
+    ]
+    assert lower_days, "test plan did not generate any lower/legs days"
+    missing = [
+        (d.get("day"), d.get("archetype"), [e.get("name") for e in d.get("exercises", [])])
+        for d in lower_days
+        if not any(e.get("_primary_muscle") == "calves" for e in d.get("exercises", []))
+    ]
+    assert not missing, f"lower/legs days missing direct calves: {missing}"
+    _ok(f"{len(lower_days)} short lower/legs days include direct calf work")
+
+
 # ─── Cardio Finisher duration scaling ────────────────────────────────────────
 
 def _finisher_reps(session_minutes: int) -> str:
@@ -511,6 +576,8 @@ cases = [
     test_plan_has_more_exercises_at_90_than_60,
     test_plan_at_60_and_75_same_structure_different_count,
     test_body_recomp_ppl_60_min_does_not_stack_extended_density,
+    test_heavy_lower_archetypes_include_direct_calves,
+    test_short_ppl_leg_days_preserve_direct_calves,
     test_cardio_finisher_short_at_45_min,
     test_cardio_finisher_medium_at_60_min,
     test_cardio_finisher_extended_at_75_min,
