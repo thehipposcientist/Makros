@@ -118,6 +118,7 @@ class UserPreferences(SQLModel, table=True):
     days_per_week: int = Field(default=3)
     workout_duration_minutes: int | None = Field(default=None)
     core_frequency_per_week: int | None = Field(default=None)
+    preferred_split: str | None = Field(default=None)
     equipment: list = Field(default_factory=list, sa_column=Column(JSON))
     equipment_settings: dict | None = Field(default=None, sa_column=Column(JSON))
     foods_available: list = Field(default_factory=list, sa_column=Column(JSON))
@@ -1550,6 +1551,7 @@ class PreferencesUpsert(SQLModel):
     days_per_week: int
     workout_duration_minutes: int | None = None
     core_frequency_per_week: int | None = None
+    preferred_split: str | None = None
     equipment: list[str]       # item names e.g. "Dumbbells", "Pull-up bar"
     equipment_settings: dict | None = None
     foods_available: list[str]

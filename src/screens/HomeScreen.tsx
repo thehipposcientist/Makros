@@ -370,6 +370,20 @@ function resolveFocusMuscleKey(focus: string): string | null {
   return null;
 }
 
+function workoutDayCardTitleTestID(focus: string | null | undefined): string {
+  const lower = String(focus || '').toLowerCase();
+  if (lower.includes('recover')) return 'workout-day-card-title-recovery';
+  const rawKey = resolveFocusMuscleKey(lower);
+  const key = rawKey === 'back' || rawKey === 'lats'
+    ? 'pull'
+    : rawKey === 'chest' || rawKey === 'shoulders' || rawKey === 'arms'
+      ? 'push'
+      : rawKey === 'lower'
+        ? 'legs'
+        : rawKey;
+  return `workout-day-card-title-${key || 'unknown'}`;
+}
+
 // Focus keywords for the split-inference fallback when preferredSplit is missing.
 const SPLIT_FOCUS_KEYWORDS: Record<string, string[]> = {
   bro: ['chest', 'back', 'shoulders', 'arms'],
@@ -12496,7 +12510,7 @@ const btStyles = StyleSheet.create({
 // Small helper that fades the focus label out, swaps the text mid-fade,
 // then fades back in — so changing a day's focus via the Switch Day
 // picker doesn't snap to the new label. Pure animation; no logic change.
-function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
+function FocusLabelCrossfade({ focus, style, testID, accessibilityLabel }: { focus: string; style?: any; testID?: string; accessibilityLabel?: string }) {
   const [displayed, setDisplayed] = useState<string>(focus);
   const opacity = useRef(new Animated.Value(1)).current;
   const prevFocus = useRef<string>(focus);
@@ -12512,7 +12526,13 @@ function FocusLabelCrossfade({ focus, style }: { focus: string; style?: any }) {
     return () => clearTimeout(t);
   }, [focus, opacity]);
   return (
-    <Animated.Text style={[style, { opacity }]}>{displayed}</Animated.Text>
+    <Animated.Text
+      testID={testID}
+      accessibilityLabel={accessibilityLabel ?? displayed}
+      style={[style, { opacity }]}
+    >
+      {displayed}
+    </Animated.Text>
   );
 }
 
@@ -12883,7 +12903,13 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           </View>
           <View style={styles.dayCardRight}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <Text style={[styles.focusLabel, { color: tc.textPrimary }]}>{skippedTitle}</Text>
+              <Text
+                testID={workoutDayCardTitleTestID(skippedTitle)}
+                accessibilityLabel={skippedTitle}
+                style={[styles.focusLabel, { color: tc.textPrimary }]}
+              >
+                {skippedTitle}
+              </Text>
               {(() => {
                 const stim = item.workout?.stimulus || (() => {
                   // Infer stimulus from focus name for old cached plans
@@ -12920,12 +12946,21 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
               </Text>
             ) : null}
           </View>
-          <View style={[styles.skippedBadge, { backgroundColor: tc.warning + '22', borderColor: tc.warning }]}>
+          <View
+            testID="workout-day-card-skip-badge"
+            accessibilityLabel={skippedBadge}
+            style={[styles.skippedBadge, { backgroundColor: tc.warning + '22', borderColor: tc.warning }]}
+          >
             <Text style={[styles.skippedBadgeText, { color: tc.warning }]}>{skippedBadge}</Text>
           </View>
         </View>
         <View style={styles.actionRow}>
-          <TouchableOpacity style={[styles.unskipBtn, { backgroundColor: tc.surface, borderColor: tc.primary }]} onPress={onUnskip}>
+          <TouchableOpacity
+            testID="workout-day-card-unskip"
+            accessibilityLabel={skippedUndo}
+            style={[styles.unskipBtn, { backgroundColor: tc.surface, borderColor: tc.primary }]}
+            onPress={onUnskip}
+          >
             <Text style={[styles.unskipBtnText, { color: tc.primary }]}>{skippedUndo}</Text>
           </TouchableOpacity>
         </View>
@@ -12995,10 +13030,15 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
         </View>
         <View style={[styles.dayCardRight, isToday && styles.dayCardRightToday]}>
           <View style={[styles.focusHeaderRow, isToday && styles.focusHeaderRowToday]}>
-            <FocusLabelCrossfade focus={item.workout!.focus} style={[
-              styles.focusLabel,
-              { color: completedDashed ? tc.textSecondary : tc.textPrimary, textDecorationLine: completedDashed ? 'line-through' : 'none', fontSize: isToday ? 19 : 16, fontWeight: isToday ? '800' : '700', lineHeight: isToday ? 23 : undefined },
-            ]} />
+            <FocusLabelCrossfade
+              focus={item.workout!.focus}
+              testID={workoutDayCardTitleTestID(item.workout!.focus)}
+              accessibilityLabel={item.workout!.focus}
+              style={[
+                styles.focusLabel,
+                { color: completedDashed ? tc.textSecondary : tc.textPrimary, textDecorationLine: completedDashed ? 'line-through' : 'none', fontSize: isToday ? 19 : 16, fontWeight: isToday ? '800' : '700', lineHeight: isToday ? 23 : undefined },
+              ]}
+            />
             {(() => {
               const stim = item.workout?.stimulus;
               if (!stim || stim === 'conditioning' || stim === 'mobility' || stim === 'recovery') return null;

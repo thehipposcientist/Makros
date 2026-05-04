@@ -314,7 +314,7 @@ import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem }
 import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, getAIRemainingWeekNutritionPlan, repairPlanWeekInjuryConflicts, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName } from '../src/services/api';
 import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday, clearSavedNutritionPlansForDates, clearPreservedMealsForDates, clearMealChecksForDates } from '../src/utils/mealTracker';
 import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
-import { encodePulledStateValueForStorage } from '../src/utils/profileCache';
+import { encodePulledStateValueForStorage, preserveLocalPreferredSplitWhenRemoteMissing } from '../src/utils/profileCache';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
@@ -996,6 +996,7 @@ export default function Index() {
     }
     const remote = await getMyProfile(token);
     if (remote) {
+      const localProfile = profile;
       profile = profile ? {
         ...profile,
         ...remote,
@@ -1003,6 +1004,7 @@ export default function Index() {
         customFoods: remote.customFoods?.length ? remote.customFoods : (profile.customFoods ?? []),
         savedMeals: remote.savedMeals?.length ? remote.savedMeals : (profile.savedMeals ?? []),
       } : remote;
+      profile = preserveLocalPreferredSplitWhenRemoteMissing(profile, localProfile) as UserProfile;
       await AsyncStorage.setItem('userProfile', JSON.stringify(profile));
     }
     if (!profile) return null;

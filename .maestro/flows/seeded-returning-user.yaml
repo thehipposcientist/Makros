@@ -70,6 +70,12 @@ tags:
     id: "workout-week-day-chip-0"
 - assertVisible:
     text: ".*Upper.*"
+- assertVisible:
+    id: "workout-estimated-duration"
+# Returning persona is a 45-60 minute plan (stored as session_minutes=60).
+# This guards the old regression where the plan card displayed ~75 min.
+- assertNotVisible:
+    text: ".*~(6[1-9]|[7-9][0-9]|1[0-9]{2}) min.*"
 - tapOn:
     id: "workout-week-day-chip-1"
 - assertVisible:

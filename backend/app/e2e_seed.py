@@ -245,6 +245,85 @@ def e2e_personas() -> tuple[PersonaSpec, ...]:
             share_activity=False,
         ),
         PersonaSpec(
+            key="ppl_open",
+            email="e2e_ppl_open@test.thallo",
+            username="e2e_ppl_open",
+            first_name="Parker",
+            last_name="Open",
+            subscription_tier="pro",
+            goal_type=GoalType.MUSCLE_GAIN,
+            goal_track="muscle_gain",
+            pace=GoalPace.MODERATE,
+            target_weight_lbs=185,
+            timeline_weeks=18,
+            birthdate=date(1991, 4, 9),
+            gender=Gender.MALE,
+            weight_lbs=176,
+            height_feet=5,
+            height_inches=11,
+            days_per_week=5,
+            session_minutes=60,
+            preferred_split="ppl",
+            experience="intermediate",
+            priority_region="balanced",
+            equipment=(
+                "Barbell",
+                "Dumbbells",
+                "Squat rack",
+                "Adjustable bench",
+                "Lat pulldown",
+                "Leg press",
+            ),
+            foods_available=(
+                "Oats",
+                "Eggs",
+                "Chicken breast",
+                "Rice",
+                "Greek yogurt",
+                "Banana",
+            ),
+            social_display_name="Parker PPL",
+            share_activity=False,
+        ),
+        PersonaSpec(
+            key="recovery_apply",
+            email="e2e_recovery_apply@test.thallo",
+            username="e2e_recovery_apply",
+            first_name="Reese",
+            last_name="Recover",
+            subscription_tier="pro",
+            goal_type=GoalType.MUSCLE_GAIN,
+            goal_track="muscle_gain",
+            pace=GoalPace.MODERATE,
+            target_weight_lbs=170,
+            timeline_weeks=16,
+            birthdate=date(1988, 7, 22),
+            gender=Gender.FEMALE,
+            weight_lbs=162,
+            height_feet=5,
+            height_inches=6,
+            days_per_week=5,
+            session_minutes=60,
+            preferred_split="ppl",
+            experience="intermediate",
+            priority_region="balanced",
+            equipment=(
+                "Dumbbells",
+                "Adjustable bench",
+                "Resistance bands",
+                "Treadmill",
+            ),
+            foods_available=(
+                "Greek yogurt",
+                "Chicken breast",
+                "Rice",
+                "Sweet potato",
+                "Spinach",
+            ),
+            social_display_name="Reese Recovery",
+            share_activity=False,
+        ),
+        PersonaSpec(
             key="free_gate",
             email="e2e_free@test.thallo",
             username="e2e_free",
@@ -483,6 +562,7 @@ def _seed_persona(session: Session, user: User, spec: PersonaSpec, today: date) 
         days_per_week=spec.days_per_week,
         workout_duration_minutes=spec.session_minutes,
         core_frequency_per_week=2,
+        preferred_split=spec.preferred_split,
         equipment=list(spec.equipment),
         equipment_settings={
             "load_unit": "lb",
@@ -534,6 +614,11 @@ def _seed_persona(session: Session, user: User, spec: PersonaSpec, today: date) 
 def _seed_plans(session: Session, user: User, spec: PersonaSpec, today: date) -> dict[str, Any]:
     user_id = int(user.id)
     equipment_slugs = tuple(sorted(resolve_owned_equipment_slugs(list(spec.equipment))))
+    recent_focus_families: tuple[str, ...] = ()
+    recent_focus_buckets: tuple[str, ...] = ()
+    if spec.key == "ppl_open":
+        recent_focus_families = ("push", "pull")
+        recent_focus_buckets = ("upper_body", "upper_body")
     inputs = PlannerInputs(
         goal=spec.planner_goal,
         days_per_week=spec.days_per_week,
@@ -544,6 +629,8 @@ def _seed_plans(session: Session, user: User, spec: PersonaSpec, today: date) ->
         priority_region=spec.priority_region,
         injuries=spec.injuries,
         rng_seed=user_id,
+        recent_focus_buckets=recent_focus_buckets,
+        recent_focus_families=recent_focus_families,
         user_age=_age_on(spec.birthdate, today),
     )
     workout_plan = generate_workout_plan(inputs, SEED_EXERCISES)

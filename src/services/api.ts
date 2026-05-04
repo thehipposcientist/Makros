@@ -420,7 +420,8 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
         gender:       data.profile.gender,
       },
       daysPerWeek:            data.preferences.days_per_week,
-      workoutDurationMinutes: 60,
+      workoutDurationMinutes: data.preferences.workout_duration_minutes ?? 60,
+      preferredSplit:         data.preferences.preferred_split ?? undefined,
       equipment:              data.preferences.equipment ?? [],
       equipmentSettings:      data.preferences.equipment_settings ?? undefined,
       foodsAvailable:         data.preferences.foods_available ?? [],
@@ -1232,6 +1233,7 @@ export async function syncOnboarding(token: string, profile: import('../types').
       preferences: {
         days_per_week:   profile.daysPerWeek,
         workout_duration_minutes: profile.workoutDurationMinutes ?? null,
+        preferred_split: profile.preferredSplit ?? null,
         equipment:       profile.equipment,
         equipment_settings: profile.equipmentSettings ?? null,
         foods_available: profile.foodsAvailable,

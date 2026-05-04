@@ -22,6 +22,7 @@ from app.models import (
     UserGoal,
     UserPreferences,
     UserProfile,
+    UserState,
     WeeklyCheckIn,
     WeeklyCheckInCreate,
 )
@@ -99,6 +100,7 @@ def _onboarding_body(
     pace: GoalPace = GoalPace.MODERATE,
     weight_lbs: float = 180.0,
     injuries: list[str] | None = None,
+    preferred_split: str | None = None,
 ) -> OnboardingSync:
     return OnboardingSync(
         profile=ProfileUpsert(
@@ -118,6 +120,7 @@ def _onboarding_body(
         preferences=PreferencesUpsert(
             days_per_week=4,
             workout_duration_minutes=60,
+            preferred_split=preferred_split,
             equipment=["Dumbbells"],
             foods_available=["chicken breast"],
             injuries=injuries or [],
@@ -192,15 +195,18 @@ def test_onboarding_sync_records_goal_history_only_on_change():
     _ok("changed sync deactivates old goal and inserts exactly one new active goal")
 
 
-def test_onboarding_sync_updates_preferences_injuries():
-    """Profile saves must persist injuries where the planner reads them."""
-    print("\n[test] profile/onboarding: injuries sync into preferences")
+def test_onboarding_sync_updates_planner_preferences():
+    """Profile saves must persist planner-visible preferences."""
+    print("\n[test] profile/onboarding: split + injuries sync into preferences")
     eng = _make_engine()
     with Session(eng) as session:
         user = _seed_user_profile(session, user_id=17, weight_lbs=180.0)
 
         profile_router.sync_onboarding(
-            _onboarding_body(injuries=["knee pain", "shoulder impingement"]),
+            _onboarding_body(
+                injuries=["knee pain", "shoulder impingement"],
+                preferred_split="ppl",
+            ),
             current_user=user,
             session=session,
         )
@@ -208,7 +214,39 @@ def test_onboarding_sync_updates_preferences_injuries():
 
         assert prefs is not None
         assert prefs.injuries == ["knee pain", "shoulder impingement"]
-    _ok("onboarding sync persists planner-visible injuries")
+        assert prefs.preferred_split == "ppl"
+    _ok("onboarding sync persists planner-visible split + injuries")
+
+
+def test_user_state_backfills_missing_preferred_split():
+    """A returning client can heal missing DB split from cached userProfile."""
+    print("\n[test] profile/state: backfills missing preferred split")
+    eng = _make_engine()
+    with Session(eng) as session:
+        user = _seed_user_profile(session, user_id=18, weight_lbs=180.0)
+        prefs = session.exec(select(UserPreferences).where(UserPreferences.user_id == 18)).first()
+        assert prefs is not None
+        prefs.preferred_split = None
+        session.add(prefs)
+        session.commit()
+
+        profile_router.put_user_state(
+            profile_router.UserStateBody(state={
+                "userProfile": {
+                    "goal": "body_recomp",
+                    "preferredSplit": "ppl",
+                }
+            }),
+            current_user=user,
+            session=session,
+        )
+
+        state = session.exec(select(UserState).where(UserState.user_id == 18)).first()
+        refreshed = session.exec(select(UserPreferences).where(UserPreferences.user_id == 18)).first()
+        assert state is not None
+        assert refreshed is not None
+        assert refreshed.preferred_split == "ppl"
+    _ok("state sync fills missing split from cached userProfile")
 
 
 def test_measurement_checkin_does_not_update_profile_weight_when_flag_false():
@@ -292,7 +330,8 @@ cases = [
     test_profile_me_returns_dumped_profile_payload,
     test_onboarding_sync_keeps_unchanged_goal_idempotent,
     test_onboarding_sync_records_goal_history_only_on_change,
-    test_onboarding_sync_updates_preferences_injuries,
+    test_onboarding_sync_updates_planner_preferences,
+    test_user_state_backfills_missing_preferred_split,
     test_measurement_checkin_does_not_update_profile_weight_when_flag_false,
     test_checkin_defaults_to_updating_profile_weight,
     test_checkin_rejects_non_positive_weight,

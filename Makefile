@@ -1,7 +1,7 @@
-.PHONY: start tunnel stop reset-db wait-backend test dev seed-e2e \
+.PHONY: start tunnel stop reset-db wait-backend test dev seed-e2e seed-e2e-recovery-apply \
         deploy deploy-backend deploy-ios deploy-ios-clean smoke-prod smoke-mobile smoke-mobile-seeded \
         smoke-mobile-workouts smoke-mobile-state smoke-mobile-social smoke-mobile-free-gates \
-        smoke-mobile-preflight
+        smoke-mobile-plan-adaptation smoke-mobile-preflight
 
 # ── AWS / deploy config ──────────────────────────────────────────────────────
 AWS_ACCOUNT_ID  := 225629394823
@@ -129,6 +129,12 @@ seed-e2e:
 	@echo ""
 	@docker exec thallo-backend python seed_e2e.py
 
+seed-e2e-recovery-apply: seed-e2e
+	@echo ""
+	@echo "Applying seeded recovery coach recommendation..."
+	@echo ""
+	@docker exec thallo-backend python seed_e2e_recovery_apply.py
+
 # ── Deploy: backend (ECR + App Runner auto-deploys) ──────────────────────────
 deploy-backend:
 	@echo ""
@@ -216,6 +222,15 @@ smoke-mobile-workouts: seed-e2e
 	@$(MAESTRO) test .maestro/flows/workout-templates.yaml
 	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
 
+smoke-mobile-plan-adaptation: seed-e2e-recovery-apply
+	@echo "Running Maestro plan-adaptation E2E flows (requires backend + Metro running)..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@$(MAESTRO) test .maestro/flows/ppl-history-ordering.yaml
+	@$(MAESTRO) test .maestro/flows/recovery-recommendation-apply.yaml
+
 smoke-mobile-state: seed-e2e
 	@echo "Running Maestro state-mutation E2E flows (requires backend + Metro running)..."
 	@command -v maestro >/dev/null 2>&1 || { \
@@ -253,6 +268,10 @@ smoke-mobile-preflight:
 	@$(MAESTRO) test .maestro/flows/seeded-returning-user.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/plan-settings-immutability.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/ppl-history-ordering.yaml
+	@$(MAKE) seed-e2e-recovery-apply
+	@$(MAESTRO) test .maestro/flows/recovery-recommendation-apply.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/account-settings-state.yaml
 	@$(MAKE) seed-e2e

@@ -1,0 +1,73 @@
+# Coach recovery recommendation apply/render flow.
+#
+# Requires:
+#   make seed-e2e-recovery-apply
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: recovery-recommendation-apply
+tags:
+  - smoke
+  - seeded
+  - workouts
+  - coach
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_recovery_apply@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- tapOn:
+    id: "bottom-tab-workouts"
+- tapOn:
+    id: "workout-subtab-plan"
+
+- extendedWaitUntil:
+    visible:
+      id: "workout-week-day-chip-1"
+    timeout: 30000
+
+# The seed helper applies the same swap_to_recovery action that the coach UI
+# submits. The app should render that durable day-state overlay as Recovery Day.
+- tapOn:
+    id: "workout-week-day-chip-1"
+- extendedWaitUntil:
+    visible:
+      id: "workout-day-card-title-recovery"
+    timeout: 30000
+- assertVisible: "Recovery Day"
+- assertVisible:
+    id: "workout-day-card-skip-badge"
+- assertVisible: "Recovery"
+- assertVisible:
+    id: "workout-day-card-unskip"
+- assertVisible: "Undo recovery"

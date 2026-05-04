@@ -1,0 +1,80 @@
+# PPL history-aware ordering flow.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: ppl-history-ordering
+tags:
+  - smoke
+  - seeded
+  - workouts
+  - plan
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_ppl_open@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- tapOn:
+    id: "bottom-tab-workouts"
+- tapOn:
+    id: "workout-subtab-plan"
+
+- extendedWaitUntil:
+    visible:
+      id: "workout-week-day-chip-0"
+    timeout: 30000
+
+# This persona's recent PPL history is Push then Pull, leaving Legs most open.
+# Strict PPL still means the other two families follow, not that Push must lead.
+- tapOn:
+    id: "workout-week-day-chip-0"
+- extendedWaitUntil:
+    visible:
+      id: "workout-day-card-title-legs"
+    timeout: 30000
+
+- tapOn:
+    id: "workout-week-day-chip-1"
+- extendedWaitUntil:
+    visible:
+      id: "workout-day-card-title-pull"
+    timeout: 30000
+
+- tapOn:
+    id: "workout-week-day-chip-2"
+- extendedWaitUntil:
+    visible:
+      id: "workout-day-card-title-push"
+    timeout: 30000

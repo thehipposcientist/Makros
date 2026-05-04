@@ -43,7 +43,9 @@ def _approx_minutes_for_day(day: dict) -> float:
             if "each" in reps_lower:
                 work_seconds *= 2
         else:
-            min_match = re.match(r"^(\d+)(?:\s*-\s*(\d+))?\s*(m|min|mins|minute|minutes)\b", reps_lower)
+            # Bare "m" is meters in loaded-carry prescriptions
+            # ("30-40m or 40-60s"), not minutes.
+            min_match = re.match(r"^(\d+)(?:\s*-\s*(\d+))?\s*(min|mins|minute|minutes)\b", reps_lower)
             if min_match:
                 lo = int(min_match.group(1))
                 hi = int(min_match.group(2) or lo)
@@ -195,3 +197,24 @@ def test_exercise_count_scales_monotonically_with_budget():
             f"than {prev_budget}-min plan ({prev_total})"
         )
     _ok(f"counts by budget: {counts}")
+
+
+def test_duration_estimate_treats_loaded_carry_m_as_meters():
+    """Loaded carries use `m` for meters, so they must not inflate the
+    plan-card estimate as if 30-40m meant 30-40 minutes."""
+    print("\n[test] duration estimate treats loaded-carry m as meters")
+    day = {
+        "exercises": [
+            {
+                "name": "Suitcase Carry",
+                "sets": 3,
+                "reps": "30-40m or 40-60s",
+                "rest_seconds": 60,
+                "slot_role": "core",
+                "primary_muscle": "core",
+            }
+        ]
+    }
+    mins = _approx_minutes_for_day(day)
+    assert mins < 8, f"carry estimate should be seconds-scale, got {mins:.1f} min"
+    _ok(f"loaded carry estimate: {mins:.1f} min")

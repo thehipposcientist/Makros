@@ -61,6 +61,7 @@ def test_e2e_seed_creates_full_idempotent_personas() -> None:
         WorkoutPlan,
         WorkoutSession,
     )
+    from app.services.workout.focus_normalize import normalize_focus_to_family
     from app.services.workout.weekly_digest import build_weekly_digest
 
     engine = make_seed_test_engine()
@@ -89,6 +90,8 @@ def test_e2e_seed_creates_full_idempotent_personas() -> None:
 
         returning = users_by_email["e2e_returning@test.thallo"]
         long_user = users_by_email["e2e_long@test.thallo"]
+        ppl_open_user = users_by_email["e2e_ppl_open@test.thallo"]
+        recovery_apply_user = users_by_email["e2e_recovery_apply@test.thallo"]
         free_user = users_by_email["e2e_free@test.thallo"]
         assert verify_password(password, returning.hashed_password)
         assert returning.subscription_tier == "pro"
@@ -113,11 +116,17 @@ def test_e2e_seed_creates_full_idempotent_personas() -> None:
         returning_week = session.exec(
             select(PlanWeek).where(PlanWeek.user_id == returning.id)
         ).first()
+        returning_prefs = session.exec(
+            select(UserPreferences).where(UserPreferences.user_id == returning.id)
+        ).first()
+        assert returning_prefs is not None
+        assert returning_prefs.preferred_split == "upper_lower"
         assert returning_week is not None
         assert returning_week.start_date == today
         assert returning_week.end_date == today + timedelta(days=6)
         assert returning_week.days_per_week == 4
         assert returning_week.session_minutes == 60
+        assert returning_week.preferred_split == "upper_lower"
         returning_days = session.exec(
             select(PlanDay)
             .where(PlanDay.plan_week_id == returning_week.id)
@@ -185,6 +194,23 @@ def test_e2e_seed_creates_full_idempotent_personas() -> None:
         assert digest["nutrition"]["avg_protein_g"] > 110
 
         assert not session.exec(select(PlanWeek).where(PlanWeek.user_id == free_user.id)).first()
+        assert session.exec(select(PlanWeek).where(PlanWeek.user_id == recovery_apply_user.id)).first()
+
+        ppl_open_week = session.exec(
+            select(PlanWeek).where(PlanWeek.user_id == ppl_open_user.id)
+        ).first()
+        assert ppl_open_week is not None
+        ppl_open_days = session.exec(
+            select(PlanDay)
+            .where(PlanDay.plan_week_id == ppl_open_week.id)
+            .where(PlanDay.is_rest == False)  # noqa: E712
+            .order_by(PlanDay.day_index)
+        ).all()
+        ppl_open_families = [
+            normalize_focus_to_family(day.workout_json.get("focus") if day.workout_json else None)
+            for day in ppl_open_days[:3]
+        ]
+        assert ppl_open_families == ["legs", "pull", "push"]
 
         friendships = session.exec(
             select(Friendship).where(

@@ -59,7 +59,7 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
   // Supported rep formats parsed as time-per-set:
   //   "30s", "45 sec", "60 seconds"           → seconds
   //   "30-45s", "30-45 sec"                   → seconds (midpoint)
-  //   "5m", "5 min", "5 minutes"              → minutes
+  //   "5 min", "5 minutes"                    → minutes
   //   "30-45 min", "25-40 minutes"            → minutes (midpoint)
   // A plain number or rep-range like "6-8" falls back to the
   // 45s-per-set working estimate (normal strength set timing).
@@ -75,8 +75,10 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
       const base = Math.round((lo + hi) / 2);
       return s.includes('each') ? base * 2 : base;
     }
-    // Explicit minutes: "5 min", "30-45 min", "42-52 min"
-    const minMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(m|min|mins|minute|minutes)\b/);
+    // Explicit minutes: "5 min", "30-45 min", "42-52 min".
+    // Do not treat bare "m" as minutes; carry prescriptions use meters
+    // ("30-40m or 40-60s").
+    const minMatch = s.match(/^(\d+)(?:\s*-\s*(\d+))?\s*(min|mins|minute|minutes)\b/);
     if (minMatch) {
       const lo = parseInt(minMatch[1], 10);
       const hi = minMatch[2] ? parseInt(minMatch[2], 10) : lo;
@@ -163,7 +165,7 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
           Stats strip is now a plain inline row, no colored background,
           matching the macros grid on the meal accordion. */}
       <View style={[styles.statsStrip, embedded && styles.statsStripEmbedded]}>
-        <StatItem icon="time-outline" value={`~${estimatedMinutes} min`} color={s.strong} />
+        <StatItem icon="time-outline" value={`~${estimatedMinutes} min`} color={s.strong} testID="workout-estimated-duration" />
         <View style={[styles.statsDivider, { backgroundColor: c.border }]} />
         <StatItem icon="layers-outline" value={`${totalSets} sets`} color={s.strong} />
         <View style={[styles.statsDivider, { backgroundColor: c.border }]} />
@@ -281,13 +283,14 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
 
 // ── StatItem ──────────────────────────────────────────────────────────────────
 
-function StatItem({ icon, value, color }: {
+function StatItem({ icon, value, color, testID }: {
   icon: keyof typeof Ionicons.glyphMap;
   value: string;
   color: string;
+  testID?: string;
 }) {
   return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+    <View testID={testID} accessibilityLabel={testID} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
       <Ionicons name={icon} size={12} color={color} />
       <Text style={{ fontSize: 11, fontWeight: '600', color, letterSpacing: 0.2 }}>{value}</Text>
     </View>

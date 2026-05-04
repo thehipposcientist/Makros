@@ -84,6 +84,23 @@ Or:
 make smoke-mobile-workouts
 ```
 
+Plan-adaptation coverage for history-aware PPL ordering and coach recovery
+apply/render behavior:
+
+```bash
+make seed-e2e
+maestro test .maestro/flows/ppl-history-ordering.yaml
+
+make seed-e2e-recovery-apply
+maestro test .maestro/flows/recovery-recommendation-apply.yaml
+```
+
+Or:
+
+```bash
+make smoke-mobile-plan-adaptation
+```
+
 State-mutation coverage for meals, hydration, and supplements:
 
 ```bash
@@ -141,6 +158,10 @@ Seeded credentials:
 - `e2e_long@test.thallo` / `SeedTest1234` — pro 90-minute workout persona.
 - `e2e_social_a@test.thallo` / `SeedTest1234` and
   `e2e_social_b@test.thallo` / `SeedTest1234` — friend graph fixtures.
+- `e2e_ppl_open@test.thallo` / `SeedTest1234` — pro PPL user whose recent
+  Push/Pull history leaves Legs most open for plan-order assertions.
+- `e2e_recovery_apply@test.thallo` / `SeedTest1234` — pro PPL user for
+  recovery-recommendation apply/render assertions.
 - `e2e_free@test.thallo` / `SeedTest1234` — free entitlement control.
 
 ## iOS simulator vs device vs Android
@@ -233,6 +254,10 @@ maestro test \
   tracker finish → confirmation save
 - `flows/workout-templates.yaml` — build a template from the exercise library
   and launch it into ActiveWorkoutScreen
+- `flows/ppl-history-ordering.yaml` — verifies PPL can start with the most-open
+  family, then continue through the remaining PPL families
+- `flows/recovery-recommendation-apply.yaml` — verifies a coach-applied
+  recovery override renders as a Recovery Day in the Plan tab
 - `flows/active-workout-completion.yaml` — inline set logging → finish
   confirmation → post-workout summary → workout history
 - `flows/meals-supplements-state.yaml` — hydration quick-add, favorite meal

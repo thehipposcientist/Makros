@@ -1,3 +1,4 @@
+import json
 import secrets
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
@@ -64,6 +65,56 @@ def _dump_rows(rows):
     return [_dump_model(row) for row in rows]
 
 router = APIRouter(prefix="/profile", tags=["profile"])
+
+VALID_PREFERRED_SPLITS = {
+    "full_body",
+    "upper_lower",
+    "ppl",
+    "ppl_upper_lower",
+    "bro",
+}
+
+
+def _valid_preferred_split(value) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized if normalized in VALID_PREFERRED_SPLITS else None
+
+
+def _preferred_split_from_state(state: dict) -> str | None:
+    profile = state.get("userProfile") if isinstance(state, dict) else None
+    if isinstance(profile, str):
+        try:
+            profile = json.loads(profile)
+        except Exception:
+            return None
+    if not isinstance(profile, dict):
+        return None
+    return _valid_preferred_split(
+        profile.get("preferredSplit") or profile.get("preferred_split")
+    )
+
+
+def _backfill_preferred_split_from_state(
+    session: Session,
+    user_id: int,
+    state: dict,
+) -> None:
+    split = _preferred_split_from_state(state)
+    if not split:
+        return
+    prefs = session.exec(
+        select(UserPreferences).where(UserPreferences.user_id == user_id)
+    ).first()
+    if not prefs:
+        return
+    existing = _valid_preferred_split(getattr(prefs, "preferred_split", None))
+    if existing:
+        return
+    prefs.preferred_split = split
+    prefs.updated_at = datetime.now(timezone.utc)
+    session.add(prefs)
 
 
 def _derive_age(birthdate: date | None, today: date | None = None) -> int | None:
@@ -240,6 +291,7 @@ def sync_onboarding(
         prefs.days_per_week    = body.preferences.days_per_week
         prefs.workout_duration_minutes = body.preferences.workout_duration_minutes
         prefs.core_frequency_per_week = body.preferences.core_frequency_per_week
+        prefs.preferred_split  = body.preferences.preferred_split
         prefs.equipment        = body.preferences.equipment
         prefs.equipment_settings = body.preferences.equipment_settings
         prefs.foods_available  = body.preferences.foods_available
@@ -875,6 +927,7 @@ def put_user_state(
     else:
         row = UserState(user_id=current_user.id, state_json=body.state, updated_at=now)
     session.add(row)
+    _backfill_preferred_split_from_state(session, current_user.id, body.state)
     session.commit()
     return {"ok": True, "updated_at": now.isoformat()}
 

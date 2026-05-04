@@ -1,6 +1,7 @@
 import {
   encodePulledStateValueForStorage,
   mergePulledUserProfileWithCurrentStats,
+  preserveLocalPreferredSplitWhenRemoteMissing,
 } from '../profileCache.ts';
 
 describe('profile cache merge', () => {
@@ -55,6 +56,31 @@ describe('profile cache merge', () => {
         heightFeet: 5,
       },
     });
+  });
+
+  it('keeps local preferredSplit when the pulled profile is missing it', () => {
+    const encoded = encodePulledStateValueForStorage(
+      'userProfile',
+      { goal: 'body_recomp', physicalStats: { weightLbs: 170 } },
+      JSON.stringify({ preferredSplit: 'ppl', physicalStats: { weightLbs: 180 } }),
+    );
+
+    expect(JSON.parse(encoded)).toEqual({
+      goal: 'body_recomp',
+      physicalStats: {
+        weightLbs: 180,
+      },
+      preferredSplit: 'ppl',
+    });
+  });
+
+  it('lets an explicit remote preferredSplit beat the local cache', () => {
+    expect(
+      preserveLocalPreferredSplitWhenRemoteMissing(
+        { preferredSplit: 'upper_lower' },
+        { preferredSplit: 'ppl' },
+      ),
+    ).toEqual({ preferredSplit: 'upper_lower' });
   });
 
   it('leaves non-profile string values untouched', () => {

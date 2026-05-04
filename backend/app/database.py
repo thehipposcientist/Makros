@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Session
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from dotenv import load_dotenv
 import os
 
@@ -385,6 +385,10 @@ def _ensure_coach_apply_state_columns() -> None:
             ))
             conn.execute(text(
                 "ALTER TABLE user_preferences "
+                "ADD COLUMN IF NOT EXISTS preferred_split VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE user_preferences "
                 "ADD COLUMN IF NOT EXISTS injuries JSONB"
             ))
             conn.execute(text(
@@ -397,6 +401,84 @@ def _ensure_coach_apply_state_columns() -> None:
             ))
     except Exception as e:
         print(f"[migration] coach apply state columns add failed (non-fatal): {e}")
+
+
+def _backfill_user_preferences_preferred_split() -> None:
+    """Fill missing UserPreferences.preferred_split from reliable saved sources.
+
+    Priority:
+    1. The synced client `user_state.userProfile.preferredSplit` value,
+       which represents what the user actually selected in-app.
+    2. The explicit `plan_weeks.preferred_split` snapshot, if present.
+
+    We intentionally do not infer from PlanDay labels. A NULL split may
+    have produced an auto upper/lower-looking week, and writing that back
+    would cement the wrong preference for users who had selected PPL.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    valid = ("full_body", "upper_lower", "ppl", "ppl_upper_lower", "bro")
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(
+                text(
+                    """
+                    WITH state_splits AS (
+                      SELECT
+                        user_id,
+                        lower(btrim(coalesce(
+                          state_json -> 'userProfile' ->> 'preferredSplit',
+                          state_json -> 'userProfile' ->> 'preferred_split'
+                        ))) AS split
+                      FROM user_state
+                    )
+                    UPDATE user_preferences p
+                    SET preferred_split = s.split,
+                        updated_at = NOW()
+                    FROM state_splits s
+                    WHERE s.user_id = p.user_id
+                      AND (p.preferred_split IS NULL
+                           OR btrim(p.preferred_split) = ''
+                           OR lower(btrim(p.preferred_split)) = 'auto')
+                      AND s.split IN :valid_splits
+                    """
+                ).bindparams(bindparam("valid_splits", expanding=True)),
+                {"valid_splits": valid},
+            )
+            conn.execute(
+                text(
+                    """
+                    WITH ranked_plan_splits AS (
+                      SELECT
+                        user_id,
+                        lower(btrim(preferred_split)) AS split,
+                        row_number() OVER (
+                          PARTITION BY user_id
+                          ORDER BY
+                            CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+                            start_date DESC NULLS LAST,
+                            id DESC
+                        ) AS rn
+                      FROM plan_weeks
+                      WHERE preferred_split IS NOT NULL
+                        AND btrim(preferred_split) <> ''
+                    )
+                    UPDATE user_preferences p
+                    SET preferred_split = r.split,
+                        updated_at = NOW()
+                    FROM ranked_plan_splits r
+                    WHERE r.user_id = p.user_id
+                      AND r.rn = 1
+                      AND (p.preferred_split IS NULL
+                           OR btrim(p.preferred_split) = ''
+                           OR lower(btrim(p.preferred_split)) = 'auto')
+                      AND r.split IN :valid_splits
+                    """
+                ).bindparams(bindparam("valid_splits", expanding=True)),
+                {"valid_splits": valid},
+            )
+    except Exception as e:
+        print(f"[migration] user preferred_split backfill failed (non-fatal): {e}")
 
 
 def _ensure_exercise_tracking_mode_column() -> None:
@@ -1553,6 +1635,7 @@ def create_db_and_tables():
     _ensure_user_preferences_equipment_settings_column()
     _ensure_user_supplement_stack_group_column()
     _ensure_coach_apply_state_columns()
+    _backfill_user_preferences_preferred_split()
     _ensure_user_recovery_columns()
     _ensure_user_subscription_tier_column()
     _ensure_user_plan_cadence_anchor_column()
