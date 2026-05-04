@@ -2641,9 +2641,13 @@ export async function lookupSupplement(
   });
 }
 
+/** Pass `images: [b64, b64, ...]` for a multi-photo gym walkthrough (much
+ *  higher recall than a single shot — AI sees multiple corners of the gym
+ *  and deduplicates). The legacy `image_base64` shape still works for
+ *  older callers / older app builds. */
 export async function scanEquipmentPhoto(
   token: string,
-  payload: { image_base64: string; mime_type?: string },
+  payload: { images?: string[]; image_base64?: string; mime_type?: string },
 ): Promise<{ equipment: string[] }> {
   return request('/ai/scan-equipment', {
     method: 'POST',

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import PressableScale from '../components/PressableScale';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import BarcodeScannerModal from '../components/BarcodeScannerModal';
+import EquipmentScanModal from '../components/EquipmentScanModal';
 import FormVideoModal from '../components/FormVideoModal';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
@@ -491,6 +492,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   }, [profile.injuryEntries]);
   const [showAddInjury, setShowAddInjury] = useState(false);
   const [equipmentExpanded, setEquipmentExpanded] = useState(false);
+  const [equipScanVisible, setEquipScanVisible] = useState(false);
   const [foodsExpanded, setFoodsExpanded] = useState(false);
   const [injuryDesc, setInjuryDesc]   = useState('');
   const [injuryBodyPart, setInjuryBodyPart] = useState('');
@@ -2179,6 +2181,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             </View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <TouchableOpacity
+                style={[styles.sectionAddBtn, { flexDirection: 'row', alignItems: 'center', gap: 4 }]}
+                onPress={() => setEquipScanVisible(true)}>
+                <Ionicons name="camera-outline" size={12} color={tc.primary} />
+                <Text style={styles.sectionAddBtnText}>Scan</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
                 style={styles.sectionAddBtn}
                 onPress={() => { setNewEquipName(''); setEquipError(''); setEquipModalVisible(true); }}>
                 <Text style={styles.sectionAddBtnText}>+ Add</Text>
@@ -3654,6 +3662,14 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         onConfirm={handleAddEquipment}
         onClose={() => setEquipModalVisible(false)}
         confirmLabel="Add" error={equipError} themeColors={tc}
+      />
+      <EquipmentScanModal
+        visible={equipScanVisible}
+        authToken={authToken}
+        themeName={profile.themePreference}
+        alreadySelected={equipment}
+        onClose={() => setEquipScanVisible(false)}
+        onAdd={(merged) => setEquipment(merged)}
       />
       <AddFoodModal visible={addFoodVisible} onAdd={handleAddCustomFood} onClose={() => setAddFoodVisible(false)} themeColors={tc} />
 

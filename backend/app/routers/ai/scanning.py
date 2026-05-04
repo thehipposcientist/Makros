@@ -80,7 +80,7 @@ from app.models import User
 
 from .router import router
 from .models import (
-    FoodPhotoRequest, ScanFoodsRequest, FoodNutritionSearchRequest, ExerciseSearchRequest,
+    FoodPhotoRequest, ScanFoodsRequest, EquipmentScanRequest, FoodNutritionSearchRequest, ExerciseSearchRequest,
     WorkoutSuggestRequest,
     SupplementLookupRequest, SupplementPhotoRequest, FormPhotoRequest, BodyScanRequest,
     MealInstructionsRequest, ParseMealTextRequest,
@@ -1489,49 +1489,70 @@ def scan_supplements_photo(
 
 @router.post("/scan-equipment")
 def scan_equipment_photo(
-    body: FoodPhotoRequest,
+    body: EquipmentScanRequest,
     current_user: User = Depends(require_pro_feature("Equipment photo scanning")),
 ):
-    """Identify gym equipment visible in a photo and return names matching the app's equipment library."""
+    """Identify gym equipment visible in one OR multiple photos and return
+    names matching the app's equipment library. Multi-photo lets the user
+    walk around their gym snapping a few angles — AI consolidates the
+    union into a deduplicated list, which is far more accurate than a
+    single shot of one corner of the gym."""
     api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
-    if not body.image_base64:
-        raise HTTPException(status_code=400, detail="image_base64 is required")
 
-    _fb64, _fmime = _fix_image_mime(body.image_base64, body.mime_type or "image/jpeg")
-    image_data_url = f"data:{_fmime};base64,{_fb64}"
+    # Resolve incoming images: prefer the new `images` array, fall back to
+    # legacy single `image_base64` for older clients. Cap at 6 to control
+    # token cost — beyond that the marginal accuracy gain isn't worth it.
+    raw_images: list[str] = []
+    if body.images:
+        raw_images = body.images[:6]
+    elif body.image_base64:
+        raw_images = [body.image_base64]
+    if not raw_images:
+        raise HTTPException(status_code=400, detail="At least one image required")
+
+    image_data_urls: list[str] = []
+    for raw in raw_images:
+        _fb64, _fmime = _fix_image_mime(raw, body.mime_type or "image/jpeg")
+        image_data_urls.append(f"data:{_fmime};base64,{_fb64}")
+
     client = OpenAI(api_key=api_key)
 
     from app.seed_exercises_data import SEED_EQUIPMENT
     known_equipment = [entry["name"] for entry in SEED_EQUIPMENT]
 
+    photo_count = len(image_data_urls)
+    user_content: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                f"These are {photo_count} photo(s) from the same gym, taken from different angles. "
+                f"Identify ALL gym equipment visible across the set, deduplicating items that appear in multiple photos. "
+                f"Only include items whose names exactly match something in this list: {known_equipment}. "
+                'Return exactly this JSON: {"equipment": [<array of matching equipment name strings>]}'
+            ),
+        },
+    ]
+    for url in image_data_urls:
+        user_content.append({"type": "image_url", "image_url": {"url": url, "detail": "low"}})
+
     _eq_messages = [
         {
             "role": "system",
             "content": (
-                "You are a fitness equipment expert. Identify gym equipment visible in the image. "
+                "You are a fitness equipment expert. Identify gym equipment visible across the provided images. "
                 "Only return equipment names that exactly match items in the provided list. "
-                "Return valid JSON only."
+                "Deduplicate across photos. Return valid JSON only."
             ),
         },
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        f"Identify all gym equipment visible in this image. "
-                        f"Only include items whose names exactly match something in this list: {known_equipment}. "
-                        'Return exactly this JSON: {"equipment": [<array of matching equipment name strings>]}'
-                    ),
-                },
-                {"type": "image_url", "image_url": {"url": image_data_url}},
-            ],
-        },
+        {"role": "user", "content": user_content},
     ]
     try:
-        kwargs = _build_chat_kwargs(model_image(), _eq_messages, json_schema=SCHEMA_SCAN_EQUIPMENT, max_tokens=150, timeout_secs=20)
+        # Bump max_tokens for multi-photo so a 6-photo gym walkthrough
+        # has room to list everything; single-photo stayed within 150
+        # historically so 300 covers the full grid.
+        kwargs = _build_chat_kwargs(model_image(), _eq_messages, json_schema=SCHEMA_SCAN_EQUIPMENT, max_tokens=300, timeout_secs=30)
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:

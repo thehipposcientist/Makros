@@ -218,6 +218,17 @@ class FoodPhotoRequest(BaseModel):
     mime_type: str = "image/jpeg"
 
 
+class EquipmentScanRequest(BaseModel):
+    """Multi-photo gym/equipment walkthrough. The user takes 1-6 photos
+    around their gym; the AI returns a deduplicated list of recognized
+    equipment names that match the seed library. Falls back to the
+    single-photo `image_base64` field for older clients that haven't been
+    rebuilt yet."""
+    images: list[str] | None = None  # raw base64 or data URI strings
+    image_base64: str | None = None    # legacy single-photo field
+    mime_type: str = "image/jpeg"
+
+
 class ScanFoodsImageItem(BaseModel):
     image_base64: str
     mime_type: str = "image/jpeg"

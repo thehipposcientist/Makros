@@ -6,6 +6,7 @@ import { elevations, getTheme, radius, typography } from '../constants/theme';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
 import { shouldHideWeight } from '../utils/exerciseDisplay';
+import { clampDisplayedSessionMinutes } from '../utils/sessionDuration';
 import FadeInView from './FadeInView';
 
 /** Turn a planner-emitted equipment string into a display label.
@@ -155,8 +156,10 @@ export default function WorkoutCard({ workout, themeName, sessionMinutes, onOpen
     }, 0);
     void nonWarmupCount;
     const rawMinutes = Math.max(1, Math.round(secs / 60));
-    const cap = sessionMinutes ? Math.round(sessionMinutes) : 120;
-    return { estimatedSeconds: secs, estimatedMinutes: Math.min(rawMinutes, cap) };
+    return {
+      estimatedSeconds: secs,
+      estimatedMinutes: clampDisplayedSessionMinutes(rawMinutes, sessionMinutes),
+    };
   }, [workout.exercises, sessionMinutes]);
 
   return (
