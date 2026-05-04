@@ -1863,8 +1863,6 @@ def submit_week_checkin(
         compute_checkin_recommendations,
     )
     from app.services.coach.apply_action import apply_action
-    from app.models import UserProfile
-
     try:
         review = compute_weekly_review(
             db, current_user.id,
@@ -1878,12 +1876,8 @@ def submit_week_checkin(
         logger.warning(f"[week-checkin] compute_weekly_review failed: {e}")
         raise HTTPException(status_code=500, detail="Could not compute weekly review")
 
-    profile = db.exec(
-        select(UserProfile).where(UserProfile.user_id == current_user.id)
-    ).first()
-    goal = str(getattr(profile, "goal", "body_recomp") or "body_recomp")
-
     summary = compute_checkin_summary_from_review(review)
+    goal = str(getattr(review, "goal", None) or "body_recomp")
     answers = WeeklyCheckinAnswers(
         overall_difficulty=body.overall_difficulty,
         biggest_blocker=body.biggest_blocker,

@@ -32,6 +32,17 @@ PainArea = Literal[
     "knee", "hip", "foot_ankle", "other",
 ]
 
+_CARDIO_NEEDS_GOALS = {
+    "body_recomp",
+    "fat_loss",
+    "endurance",
+    "general_health",
+    "longevity",
+    "athletic_performance",
+    "maintain",
+    "stress_relief",
+}
+
 
 @dataclass
 class WeeklyCheckinAnswers:
@@ -293,7 +304,6 @@ def compute_checkin_recommendations(
         adj.cardio_adjustment = "Switching cardio format — try a different modality."
         adj.preferred_cardio_modes = ["bike", "incline_walk", "row"]
 
-    _CARDIO_NEEDS_GOALS = {"body_recomp", "fat_loss", "endurance", "general_health", "longevity"}
     if summary.cardio_minutes < 20 and goal in _CARDIO_NEEDS_GOALS:
         extra = " Adding one short cardio session (20–30 min)."
         adj.cardio_adjustment = (adj.cardio_adjustment or "") + extra
@@ -393,7 +403,8 @@ def _compute_coach_findings(review: Any) -> CoachFindings:
             f"Missed {missed} planned workout{'s' if missed > 1 else ''}."
         )
 
-    if review.cardio_minutes < 20 and planned > 0:
+    goal = str(getattr(review, "goal", "") or "").strip().lower()
+    if review.cardio_minutes < 20 and planned > 0 and goal in _CARDIO_NEEDS_GOALS:
         findings.needs_attention.append("Cardio was minimal — even 20 min helps recovery and base fitness.")
 
     if nutrition_logging_pct < 50 and days_logged > 0:

@@ -270,6 +270,105 @@ def test_six_strength_days_low_zone2_recommends_recovery_swap():
     assert rec.action == {"type": "swap_to_recovery", "count": 1}
 
 
+def test_muscle_gain_low_cardio_does_not_recommend_more_cardio():
+    """Hypertrophy goals should not get generic Zone 2/cardio-add recs."""
+    print("\n[test] muscle_gain + low cardio → no add_cardio/add_zone2 rec")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    s, u = _setup_user_with_goal("muscle_gain")
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    _seed_completions(
+        s,
+        u.id,
+        dates=[today - timedelta(days=i) for i in range(4)],
+        focus="Push",
+        activity_category="strength",
+        duration_min=55,
+    )
+
+    review = compute_weekly_review(s, u.id)
+    rec_keys = [r.key for r in review.recommendations]
+    assert "add_cardio" not in rec_keys, rec_keys
+    assert "add_zone2" not in rec_keys, rec_keys
+
+
+def test_body_recomp_low_cardio_still_recommends_goal_cardio():
+    """Goal-aligned cardio targets still fire for recomp/fat-loss style goals."""
+    print("\n[test] body_recomp + low cardio → add_cardio/add_zone2 recs")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    s, u = _setup_user_with_goal("body_recomp")
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    _seed_completions(
+        s,
+        u.id,
+        dates=[today - timedelta(days=i) for i in range(4)],
+        focus="Push",
+        activity_category="strength",
+        duration_min=55,
+    )
+
+    review = compute_weekly_review(s, u.id)
+    rec_keys = [r.key for r in review.recommendations]
+    assert "add_cardio" in rec_keys, rec_keys
+    assert "add_zone2" in rec_keys, rec_keys
+
+
+def test_goal_track_alias_resolves_before_cardio_targets():
+    """Specific hypertrophy tracks should not fall back to general-health cardio."""
+    print("\n[test] lean_bulk track resolves to muscle_gain before cardio recs")
+    from app.enums import GoalPace, GoalType
+    from app.models import UserGoal
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    from sqlmodel import select
+
+    s, u = _setup_user_with_goal("body_recomp")
+    active = s.exec(select(UserGoal).where(UserGoal.user_id == u.id)).first()
+    active.goal_type = GoalType.BODY_RECOMP
+    active.goal_track = "lean_bulk"
+    active.pace = GoalPace.MODERATE
+    s.add(active)
+    s.commit()
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    _seed_completions(
+        s,
+        u.id,
+        dates=[today - timedelta(days=i) for i in range(4)],
+        focus="Push",
+        activity_category="strength",
+        duration_min=55,
+    )
+
+    review = compute_weekly_review(s, u.id)
+    rec_keys = [r.key for r in review.recommendations]
+    assert review.goal == "muscle_gain"
+    assert "add_cardio" not in rec_keys, rec_keys
+    assert "add_zone2" not in rec_keys, rec_keys
+
+
+def test_checkin_findings_do_not_flag_minimal_cardio_for_muscle_gain():
+    """Check-in coach notes should follow the same goal-alignment rule."""
+    print("\n[test] muscle_gain check-in findings do not nag minimal cardio")
+    from app.services.workout.plan_review_v2 import compute_weekly_review
+    from app.services.workout.week_checkin_logic import compute_checkin_summary_from_review
+    s, u = _setup_user_with_goal("muscle_gain")
+    _seed_active_workout_plan(s, u.id, days_per_week=4)
+    today = date.today()
+    _seed_completions(
+        s,
+        u.id,
+        dates=[today - timedelta(days=i) for i in range(4)],
+        focus="Push",
+        activity_category="strength",
+        duration_min=55,
+    )
+
+    summary = compute_checkin_summary_from_review(compute_weekly_review(s, u.id))
+    joined = " ".join(summary.coach_findings.needs_attention).lower()
+    assert "cardio was minimal" not in joined
+
+
 # ── Headline ─────────────────────────────────────────────────
 
 def test_review_includes_headline():

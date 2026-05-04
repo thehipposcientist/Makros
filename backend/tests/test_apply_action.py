@@ -310,6 +310,40 @@ def test_noop_returns_applied_with_no_changes():
     assert not res.needs_regen
 
 
+# ── add_cardio_session / add_zone2_session ────────────────────────
+
+def test_add_cardio_session_with_minutes_increments_future_day_count():
+    print("\n[test] add_cardio_session: actionable minutes bumps days/week")
+    from app.services.coach.apply_action import apply_action
+    from app.models import UserPreferences
+    from sqlmodel import select
+    _, s, u = _setup(days_per_week=4)
+    res = apply_action(s, u.id, {"type": "add_cardio_session", "minutes": 30, "style": "zone2"})
+    assert res.applied
+    assert res.needs_regen
+    assert not res.descriptive_only
+    assert res.changed_fields["days_per_week"] == {"from": 4, "to": 5}
+    p = s.exec(select(UserPreferences).where(UserPreferences.user_id == u.id)).first()
+    assert p.days_per_week == 5
+
+
+def test_add_zone2_session_at_seven_days_is_descriptive_only():
+    print("\n[test] add_zone2_session: 7-day cap becomes descriptive")
+    from app.services.coach.apply_action import apply_action
+    from app.models import CoachMemory, UserPreferences
+    from sqlmodel import select
+    _, s, u = _setup(days_per_week=7)
+    res = apply_action(s, u.id, {"type": "add_zone2_session", "minutes": 45})
+    assert res.applied
+    assert res.descriptive_only
+    assert not res.needs_regen
+    assert res.changed_fields == {}
+    p = s.exec(select(UserPreferences).where(UserPreferences.user_id == u.id)).first()
+    assert p.days_per_week == 7
+    mem = s.exec(select(CoachMemory).where(CoachMemory.user_id == u.id)).all()
+    assert any("already at 7" in (m.summary or "") for m in mem)
+
+
 # ── descriptive-only actions ───────────────────────────────────────
 
 def test_descriptive_actions_write_memory_no_state_mutation():

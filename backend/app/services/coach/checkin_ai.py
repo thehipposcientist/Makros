@@ -54,6 +54,8 @@ Your job:
 8. Rationale key: short slug summarising WHY (e.g. 'strong_week_hold', 'cardio_gap_2wk', 'bench_plateau').
 9. If `weekly_review.structured_applied` has items, explicitly mention one applied change by its real target (for example "chest sets" or "Zone 2 cardio"). If no item was applied, mention one recommended change using its `title` or `detail`.
 
+Goal alignment: never recommend adding cardio/Zone 2 for muscle-gain or strength users unless the deterministic `weekly_review.recommendations[]`, `structured_applied[]`, or prior `evaluation.biggestGap` already names cardio. For those goals, cardio can be framed only as optional recovery support; strength and hypertrophy progress stay the priority.
+
 Never show raw identifiers to the user. Convert keys such as add_muscle_volume, protein_g, foot_ankle, response_type, or camelCase fields into plain English. For muscle-volume recommendations, name the muscle and amount when action fields provide them.
 
 Rules for the adjustment delta:

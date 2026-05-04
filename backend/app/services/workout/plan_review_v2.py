@@ -34,6 +34,7 @@ from app.models import (
 from app.services.workout.weekly_volume import (
     WeeklyVolumeSnapshot, compute_weekly_volume,
 )
+from app.services.workout.goals import effective_goal_id, goal_bucket as canonical_goal_bucket
 
 Priority = Literal["info", "suggest", "warn"]
 Area = Literal["workout", "nutrition", "recovery", "cardio"]
@@ -154,6 +155,21 @@ _CARDIO_TARGETS: dict[str, tuple[int, int]] = {
     "maintain":       (120, 80),
     "flexibility":      (60, 40),
     "stress_relief":    (90, 60),
+}
+
+# Goals where adding cardio is part of the goal contract. Strength and
+# hypertrophy users can still receive recovery guidance when they are
+# stacking hard lifting days, but the coach should not turn a muscle-gain
+# week into a cardio-chasing week because of a generic Zone 2 target.
+_CARDIO_RECOMMENDATION_GOALS = {
+    "body_recomp",
+    "fat_loss",
+    "endurance",
+    "general_health",
+    "longevity",
+    "athletic_performance",
+    "maintain",
+    "stress_relief",
 }
 
 # Adherence threshold below which we suggest reducing planned volume
@@ -352,13 +368,12 @@ def compute_weekly_review(
     start = end_date - timedelta(days=days - 1)
 
     # Active goal — drives targets.
-    if goal_override:
-        goal_bucket = goal_override
-    else:
+    if not goal_override:
         goal = db.exec(
             select(UserGoal).where(UserGoal.user_id == user_id, UserGoal.is_active == True)
         ).first()
-        goal_bucket = (goal.goal_type.value if goal and hasattr(goal.goal_type, "value") else None) or "general_health"
+        goal_override = effective_goal_id(goal, fallback="general_health")
+    goal_bucket = canonical_goal_bucket(goal_override)
 
     # Completions in window.
     completions = db.exec(
@@ -559,34 +574,35 @@ def compute_weekly_review(
             ))
 
     # 3. Cardio target vs goal.
-    target = _CARDIO_TARGETS.get(goal_bucket) or _CARDIO_TARGETS["general_health"]
-    t_total, t_z2 = target
-    if cardio_mins + 15 < t_total:
-        shortfall = int(t_total - cardio_mins)
-        recs.append(Recommendation(
-            key="add_cardio",
-            area="cardio",
-            priority="suggest",
-            title=f"Add ~{shortfall} min cardio",
-            detail=(
-                f"Cardio for your {goal_bucket.replace('_', ' ')} goal is about "
-                f"{t_total} min / week. You logged {int(cardio_mins)}."
-            ),
-            action={"type": "add_cardio_session", "minutes": min(45, shortfall)},
-        ))
-    if zone2_mins + 15 < t_z2:
-        shortfall = int(t_z2 - zone2_mins)
-        recs.append(Recommendation(
-            key="add_zone2",
-            area="cardio",
-            priority="info",
-            title=f"Add ~{shortfall} min easy cardio",
-            detail=(
-                f"Zone 2 target is ~{t_z2} min / week. You're at {int(zone2_mins)}. "
-                "Long walks + easy bike rides count."
-            ),
-            action={"type": "add_zone2_session", "minutes": min(45, shortfall)},
-        ))
+    if goal_bucket in _CARDIO_RECOMMENDATION_GOALS:
+        target = _CARDIO_TARGETS.get(goal_bucket) or _CARDIO_TARGETS["general_health"]
+        t_total, t_z2 = target
+        if cardio_mins + 15 < t_total:
+            shortfall = int(t_total - cardio_mins)
+            recs.append(Recommendation(
+                key="add_cardio",
+                area="cardio",
+                priority="suggest",
+                title=f"Add ~{shortfall} min cardio",
+                detail=(
+                    f"Cardio for your {goal_bucket.replace('_', ' ')} goal is about "
+                    f"{t_total} min / week. You logged {int(cardio_mins)}."
+                ),
+                action={"type": "add_cardio_session", "minutes": min(45, shortfall)},
+            ))
+        if zone2_mins + 15 < t_z2:
+            shortfall = int(t_z2 - zone2_mins)
+            recs.append(Recommendation(
+                key="add_zone2",
+                area="cardio",
+                priority="info",
+                title=f"Add ~{shortfall} min easy cardio",
+                detail=(
+                    f"Zone 2 target is ~{t_z2} min / week. You're at {int(zone2_mins)}. "
+                    "Long walks + easy bike rides count."
+                ),
+                action={"type": "add_zone2_session", "minutes": min(45, shortfall)},
+            ))
 
     # 4. 7-day all-hard pattern → warn on 6+ strength days with no Z2.
     strength_days = sum(
