@@ -28,7 +28,7 @@ interface Props {
    *  a double fetch when it's already querying `readHealthSummary`. */
   appleWorkouts?: any[] | null;
   authToken?: string | null;
-  onAfterImport?: () => void;
+  onAfterImport?: (sessionDate?: string) => void;
   lookbackDays?: number;
 }
 
@@ -145,7 +145,7 @@ export default function DetectedWorkoutsCard({ themeName, appleWorkouts, authTok
       ).catch(() => undefined);
     }
     setCandidates(prev => (prev ?? []).filter(c => c.externalId !== session.id));
-    onAfterImport?.();
+    onAfterImport?.(sessionDate);
   };
 
   // Loading on first query + no candidates → render nothing. We don't

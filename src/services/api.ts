@@ -3064,11 +3064,18 @@ export interface AdjustedDailyTarget {
   base_daily_target: number;
   adjusted_calories: number;
   adjustment_applied: number;
+  weekly_adjustment_applied?: number;
+  activity_adjustment_applied?: number;
+  activity_calories_burned?: number;
+  activity_duration_minutes?: number;
+  activity_workout_count?: number;
+  activity_at_cap?: boolean;
   at_cap: boolean;
   days_remaining: number;
   weekly_budget_remaining: number;
   note: string | null;
-  adjusted_macros: { protein_g: number; carbs_g: number; fat_g: number } | null;
+  activity_note?: string | null;
+  adjusted_macros: { calories?: number; protein_g: number; carbs_g: number; fat_g: number } | null;
 }
 
 export async function getAdjustedDailyTarget(token: string, date?: string): Promise<AdjustedDailyTarget> {

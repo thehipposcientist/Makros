@@ -154,10 +154,35 @@ def test_plan_day_targets_shift_with_day_type_without_mutating_template():
     _ok(f"carbs rest={rest['targets']['carbs']} base=250 heavy={heavy['targets']['carbs']}")
 
 
+def test_same_day_activity_adjustment_is_partial_and_capped():
+    print("\n[test] same-day activity calories partially adjust nutrition target")
+    from app.services.nutrition.activity_adjustment import compute_activity_target_adjustment
+
+    class Completion:
+        def __init__(self, calories_burned: int, duration_seconds: int):
+            self.calories_burned = calories_burned
+            self.duration_seconds = duration_seconds
+
+    moderate = compute_activity_target_adjustment(
+        [Completion(420, 3600)],
+        goal_bucket="body_recomp",
+    )
+    capped = compute_activity_target_adjustment(
+        [Completion(900, 5400)],
+        goal_bucket="fat_loss",
+    )
+
+    assert moderate.exercise_kcal == 420
+    assert moderate.adjustment_kcal == 150
+    assert capped.adjustment_kcal == 125 and capped.at_cap
+    _ok(f"body_recomp +{moderate.adjustment_kcal} kcal, fat_loss capped +{capped.adjustment_kcal} kcal")
+
+
 TESTS = [
     test_coaching_and_apple_health_activity_adjust_targets,
     test_recent_apple_health_weight_replaces_profile_weight,
     test_plan_day_targets_shift_with_day_type_without_mutating_template,
+    test_same_day_activity_adjustment_is_partial_and_capped,
 ]
 
 

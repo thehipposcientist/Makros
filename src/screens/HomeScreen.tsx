@@ -88,6 +88,7 @@ import BirthdateBackfillCard from '../components/BirthdateBackfillCard';
 import CyclePhaseCard from '../components/CyclePhaseCard';
 import GroceryListModal from '../components/GroceryListModal';
 import StreakConsistencyWidget from '../components/StreakConsistencyWidget';
+import BirthdayBanner from '../components/BirthdayBanner';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
 import { APP_THEMES, THEME_PICKER_ORDER, colors, elevations, getChromeColors, getContrastingTextColor, getTheme, isLightThemeName, radius, resolveThemeName, typography } from '../constants/theme';
@@ -2246,6 +2247,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [proteinBreakdown, setProteinBreakdown] = useState<any | null>(null);
   const [todaySupplementMicros, setTodaySupplementMicros] = useState<Array<{ ingredient_slug?: string | null; ingredient_name?: string | null; custom_name?: string | null; dose_amount: number; dose_unit: string; taken_count: number }> | null>(null);
   const [adjustedDailyTarget, setAdjustedDailyTarget] = useState<import('../services/api').AdjustedDailyTarget | null>(null);
+  const [activityNutritionRefreshKey, setActivityNutritionRefreshKey] = useState(0);
   useEffect(() => {
     if (!authToken) return;
     let cancelled = false;
@@ -2277,21 +2279,37 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return () => { cancelled = true; };
   }, [authToken, checkedMealsByDate, nutritionPlansByDate]);
 
-  // Weekly calorie budget — fetch once per day when on the meals tab.
-  // Re-fetches whenever logged meals change (checkedMealsByDate is the
-  // nearest proxy; the backend sums actual MealItem rows so it's authoritative).
+  const refreshAdjustedDailyTarget = useCallback(async (dateISO: string = todayKey()) => {
+    if (!authToken) return;
+    const { getAdjustedDailyTarget } = await import('../services/api');
+    const result = await getAdjustedDailyTarget(authToken, dateISO);
+    setAdjustedDailyTarget(result);
+  }, [authToken]);
+
+  const refreshNutritionAfterActivity = useCallback(async (dateISO: string = todayKey()) => {
+    setActivityNutritionRefreshKey(k => k + 1);
+    await Promise.all([
+      refreshHydration(dateISO),
+      dateISO === todayKey() ? refreshAdjustedDailyTarget(dateISO).catch(() => undefined) : Promise.resolve(),
+    ]);
+    if (dateISO === todayKey()) {
+      pushHydrationSnapshotToWatch(dateISO).catch(() => {});
+    }
+  }, [pushHydrationSnapshotToWatch, refreshAdjustedDailyTarget, refreshHydration]);
+
+  // Weekly calorie budget + same-day activity bump. Re-fetches whenever
+  // logged meals change; activity save paths call refreshNutritionAfterActivity
+  // directly so workout/import effects are visible right away.
   useEffect(() => {
     if (!authToken) return;
     let cancelled = false;
     (async () => {
       try {
-        const { getAdjustedDailyTarget } = await import('../services/api');
-        const result = await getAdjustedDailyTarget(authToken, todayKey());
-        if (!cancelled) setAdjustedDailyTarget(result);
+        if (!cancelled) await refreshAdjustedDailyTarget(todayKey());
       } catch { /* non-fatal — today's card falls back to static targets */ }
     })();
     return () => { cancelled = true; };
-  }, [authToken, checkedMealsByDate]);
+  }, [authToken, checkedMealsByDate, planRefreshKey, refreshAdjustedDailyTarget]);
 
   // Home history should show the same deduped meal rows Progress uses.
   // Plan/check state still powers editing, but backend rows are the
@@ -6730,6 +6748,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               />
             )}
 
+            {/* Birthday banner — fires once on the user's MM-DD, dismissable.
+                Self-gates on the birthdate so it's a no-op on every other day. */}
+            {renderedWorkoutSubTab === 'plan' && (
+              <BirthdayBanner
+                birthdate={userProfile.physicalStats?.birthdate}
+                displayName={userProfile.firstName || username || undefined}
+                themeName={userProfile.themePreference}
+              />
+            )}
+
             {/* Streak + daily motto */}
             {renderedWorkoutSubTab === 'plan' && authToken && (
               <StreakConsistencyWidget authToken={authToken} themeName={userProfile.themePreference} displayName={userProfile.firstName || username || undefined} />
@@ -7591,12 +7619,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       <DetectedWorkoutsCard
                         themeName={userProfile.themePreference}
                         authToken={authToken}
-                        onAfterImport={async () => {
+                        onAfterImport={async (sessionDate) => {
                           try {
                             const { history, summaries } = await loadWorkoutHistoryBundle();
                             setWorkoutHistoryList(history);
                             setWorkoutHistorySummaries(summaries);
                           } catch {}
+                          await refreshNutritionAfterActivity(sessionDate ?? todayKey()).catch(() => {});
                           loadDayStatus();
                         }}
                       />
@@ -8269,7 +8298,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 totalCarbs    += m.carbs ?? 0;
                 totalFat      += m.fat ?? 0;
               }
-              const t = plan.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
+              const liveAdjustedMacros = isToday ? adjustedDailyTarget?.adjusted_macros : null;
+              const planForDisplay = liveAdjustedMacros && adjustedDailyTarget
+                ? {
+                  ...plan,
+                  targets: {
+                    ...(plan.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 }),
+                    calories: adjustedDailyTarget.adjusted_calories,
+                    protein: liveAdjustedMacros.protein_g,
+                    carbs: liveAdjustedMacros.carbs_g,
+                    fat: liveAdjustedMacros.fat_g,
+                  },
+                  _liveTargets: {
+                    source: 'activity_and_weekly_budget',
+                    activity_adjustment_kcal: adjustedDailyTarget.activity_adjustment_applied ?? 0,
+                    weekly_adjustment_kcal: adjustedDailyTarget.weekly_adjustment_applied ?? adjustedDailyTarget.adjustment_applied,
+                  },
+                } as DailyNutritionPlan
+                : plan;
+              const t = planForDisplay.targets ?? { calories: 0, protein: 0, carbs: 0, fat: 0 };
               // Today highlight uses the hardcoded MEALS_ACCENT (green)
               // so it's guaranteed distinct from the workout side's
               // hardcoded WORKOUT_ACCENT (blue) regardless of which
@@ -8397,20 +8444,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       {isToday && adjustedDailyTarget && Math.abs(adjustedDailyTarget.adjustment_applied) > 15 && (
                         <Text style={{ fontSize: 10, color: adjustedDailyTarget.adjustment_applied > 0 ? themeColors.success : themeColors.warning, marginTop: 2, fontWeight: '600' }}>
                           {adjustedDailyTarget.adjustment_applied > 0 ? '↑' : '↓'}{' '}
-                          {Math.abs(Math.round(adjustedDailyTarget.adjustment_applied))} kcal weekly adjustment
+                          {Math.abs(Math.round(adjustedDailyTarget.adjustment_applied))} kcal {((adjustedDailyTarget.activity_adjustment_applied ?? 0) > 0) ? 'today adjustment' : 'weekly adjustment'}
                           {adjustedDailyTarget.note ? ` · ${adjustedDailyTarget.note}` : ''}
                         </Text>
                       )}
                       {isToday && authToken && !isFreeTier ? (
                         <View style={{ marginTop: 7 }}>
-                          <FuelingRecoveryCard authToken={authToken} themeName={userProfile.themePreference} variant="button" />
+                          <FuelingRecoveryCard key={`fueling-${activityNutritionRefreshKey}`} authToken={authToken} themeName={userProfile.themePreference} variant="button" />
                         </View>
                       ) : null}
                     </View>
                     {/* Per-day nutrition score badge */}
                     {(() => {
                       if (isFreeTier) return null;
-                      const ds = computeNutritionScore(plan, userProfile.goal ?? 'body_recomp');
+                      const ds = computeNutritionScore(planForDisplay, userProfile.goal ?? 'body_recomp');
                       if (!ds || ds.score <= 0) return null;
                       const c = ds.score >= 70 ? themeColors.success : ds.score >= 45 ? themeColors.warning : themeColors.error;
                       return (
@@ -8456,6 +8503,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       ounces={hydrationOunces}
                       target={hydrationTarget}
                       pct={hydrationPct}
+                      breakdown={hydrationForDay?.breakdown}
                       guidance={hydrationForDay?.guidance}
                       loading={hydrationLoading}
                       colors={themeColors}
@@ -8470,7 +8518,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         testID={d.key === todayKey() ? 'today-nutrition-card' : undefined}
                         embedded
                         themeName={userProfile.themePreference}
-                        nutritionPlan={plan}
+                        nutritionPlan={planForDisplay}
                         checkedMeals={checkedMealsByDate[d.key] ?? {}}
                         onToggleMeal={(mealType) => handleToggleMeal(d.key, mealType)}
                         onEditMeal={(mealType, meal) => setEditingMeal({ dateKey: d.key, type: mealType, meal })}
@@ -9226,6 +9274,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   avgHeartRate: session.manualActivity.avgHeartRate,
                 } : undefined,
               );
+              await refreshNutritionAfterActivity(sessionDate);
             } catch {}
           }
           import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
@@ -9286,6 +9335,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   avgHeartRate: session.manualActivity.avgHeartRate,
                 } : undefined,
               );
+              await refreshNutritionAfterActivity(sessionDate);
             } catch {}
           }
         }}
@@ -12050,6 +12100,7 @@ function HydrationTodayPanel({
   ounces,
   target,
   pct,
+  breakdown,
   guidance,
   loading,
   colors,
@@ -12059,6 +12110,7 @@ function HydrationTodayPanel({
   ounces: number;
   target: number;
   pct: number;
+  breakdown?: HydrationSummary['breakdown'];
   guidance?: HydrationSummary['guidance'];
   loading: boolean;
   colors: ReturnType<typeof getTheme>['colors'];
@@ -12143,10 +12195,32 @@ function HydrationTodayPanel({
     if (!Number.isFinite(parsed)) return;
     onSet(parsed);
   };
-  const guidanceMessage = guidance?.electrolytes?.message
+  const activityOz = Math.round(breakdown?.activity ?? 0);
+  const proteinOz = Math.round(breakdown?.protein ?? 0);
+  const alcoholOz = Math.round(breakdown?.alcohol ?? 0);
+  const workoutMinutes = Math.round(guidance?.workout_minutes ?? 0);
+  const targetReasons: string[] = [];
+  if (activityOz > 0) {
+    targetReasons.push(
+      workoutMinutes > 0
+        ? `Water goal raised ${activityOz} oz for ${workoutMinutes} min of training today.`
+        : `Water goal raised ${activityOz} oz for today's training.`
+    );
+  }
+  if (proteinOz > 0) {
+    targetReasons.push(`Protein logged today added ${proteinOz} oz.`);
+  }
+  if (alcoholOz > 0) {
+    targetReasons.push(`Alcohol logged today added ${alcoholOz} oz.`);
+  }
+  const targetReasonMessage = targetReasons.length > 0 ? targetReasons.join(' ') : null;
+  const guidanceMessage = targetReasonMessage
+    ?? guidance?.electrolytes?.message
     ?? guidance?.notes?.find(note => note.key === 'high_sodium')?.message
     ?? null;
-  const guidanceTone = guidance?.electrolytes?.status === 'covered' || guidance?.electrolytes?.status === 'planned'
+  const guidanceTone = targetReasonMessage
+    ? MEALS_ACCENT
+    : guidance?.electrolytes?.status === 'covered' || guidance?.electrolytes?.status === 'planned'
     ? colors.success
     : colors.warning;
 

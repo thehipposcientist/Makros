@@ -8,7 +8,7 @@ from typing import Optional
 
 from app.database import get_session
 from app.entitlements import require_pro_feature
-from app.models import User, Meal, MealItem, MealCreate, UserDayState, UserGoal
+from app.models import User, Meal, MealItem, MealCreate, UserDayState, UserGoal, WorkoutCompletion
 from app.auth import get_current_user
 
 router = APIRouter(prefix="/meals", tags=["meals"])
@@ -1137,6 +1137,7 @@ def adjusted_daily_target(
     from datetime import date as date_cls, timedelta
     from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
     from app.services.nutrition.targets import resolve_targets_for_user
+    from app.services.nutrition.activity_adjustment import compute_activity_target_adjustment
     from app.services.nutrition.weekly_calorie_budget import (
         compute_adjusted_daily_target, compute_adjusted_macros,
     )
@@ -1174,6 +1175,12 @@ def adjusted_daily_target(
 
     goal_id = targets.bucket_name
     base_daily = targets.calories
+    activity_rows = db.exec(
+        select(WorkoutCompletion)
+        .where(WorkoutCompletion.user_id == current_user.id)
+        .where(WorkoutCompletion.workout_date == today)
+    ).all()
+    activity_adj = compute_activity_target_adjustment(activity_rows, goal_bucket=goal_id)
 
     result = compute_adjusted_daily_target(
         base_daily_target=base_daily,
@@ -1181,24 +1188,36 @@ def adjusted_daily_target(
         days_remaining=days_remaining,
         goal=goal_id,
     )
+    adjusted_calories = int(result.adjusted_calories + activity_adj.adjustment_kcal)
 
     adjusted_macros = compute_adjusted_macros(
         base_protein_g=targets.protein_g,
         base_carbs_g=targets.carbs_g,
         base_fat_g=targets.fat_g,
-        adjusted_calories=result.adjusted_calories,
+        adjusted_calories=adjusted_calories,
         base_calories=base_daily,
     )
+    if activity_adj.note and abs(result.adjustment_applied) >= 15:
+        note = f"{activity_adj.note} {result.note}"
+    else:
+        note = activity_adj.note or result.note
 
     return {
-        "adjusted_calories":    result.adjusted_calories,
+        "adjusted_calories":    adjusted_calories,
         "base_daily_target":    result.base_daily_target,
         "weekly_budget_remaining": result.weekly_budget_remaining,
         "days_remaining":       result.days_remaining,
         "calories_logged_so_far": int(calories_this_week),
-        "adjustment_applied":   result.adjustment_applied,
-        "at_cap":               result.at_cap,
-        "note":                 result.note,
+        "adjustment_applied":   result.adjustment_applied + activity_adj.adjustment_kcal,
+        "weekly_adjustment_applied": result.adjustment_applied,
+        "activity_adjustment_applied": activity_adj.adjustment_kcal,
+        "activity_calories_burned": activity_adj.exercise_kcal,
+        "activity_duration_minutes": activity_adj.duration_minutes,
+        "activity_workout_count": activity_adj.workout_count,
+        "at_cap":               result.at_cap or activity_adj.at_cap,
+        "activity_at_cap":      activity_adj.at_cap,
+        "note":                 note,
+        "activity_note":        activity_adj.note,
         "adjusted_macros":      adjusted_macros,
         "goal":                 goal_id,
         "week_start":           week_start.isoformat(),

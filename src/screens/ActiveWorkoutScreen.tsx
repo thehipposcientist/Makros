@@ -3557,7 +3557,23 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     let healthMetrics: { caloriesBurned?: number; hrSummary?: { avgBpm: number; maxBpm: number; zoneMinutes: number[] } } | undefined;
     try {
       const canUseHealth = await cachedProfileIsPro();
-      const healthEnabled = canUseHealth && await isAppleHealthEnabled();
+      let healthEnabled = canUseHealth && await isAppleHealthEnabled();
+      // Self-heal: if Pro + native HK is loaded but the in-app toggle was
+      // never flipped on (older users who authorized iOS HK before we
+      // started auto-persisting the flag), probe getLatestHeartRate. A
+      // sample returning proves native auth is granted, so we flip the
+      // flag and proceed — instead of silently saving null hr_summary.
+      if (canUseHealth && !healthEnabled && isHealthKitAvailable()) {
+        try {
+          const probe = await getLatestHeartRate();
+          if (probe != null && probe > 0) {
+            const { setAppleHealthEnabled } = await import('../utils/workoutHistory');
+            await setAppleHealthEnabled(true);
+            healthEnabled = true;
+            console.log('[handleFinish] self-healed appleHealthEnabled flag (probe HR =', probe, 'bpm)');
+          }
+        } catch { /* probe failed → user really hasn't authorized */ }
+      }
       if (healthEnabled && isHealthKitAvailable()) {
         let profileAge: number | null = null;
         try {

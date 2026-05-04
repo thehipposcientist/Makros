@@ -94,6 +94,18 @@ export async function requestHealthPermissions(): Promise<boolean> {
     const ok = await mod.requestAuthorization(READ_TYPES);
     _lastHealthKitError = ok ? null : 'Authorization returned false';
     recordTelemetryEvent('healthkit_permission_result', { granted: ok, error: _lastHealthKitError });
+    // Once iOS auth succeeds, flip the in-app toggle on automatically.
+    // Without this, callers that gate on isAppleHealthEnabled() (workout
+    // HR summary, calorie capture, readiness reads) silently skip the HK
+    // fetch even though native authorization was granted.
+    if (ok) {
+      try {
+        const { setAppleHealthEnabled } = await import('../utils/workoutHistory');
+        await setAppleHealthEnabled(true);
+      } catch (e) {
+        console.warn('[appleHealth] could not persist appleHealthEnabled flag:', e);
+      }
+    }
     return ok;
   } catch (e: any) {
     _lastHealthKitError = e?.message ?? String(e);
