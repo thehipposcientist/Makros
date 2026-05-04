@@ -894,6 +894,36 @@ def one_rep_max_showcase(
         print(f"[one-rep-max] profile build failed: {e}")
         return {"lifts": []}
 
+    # Pull rolling-e1RM map so the showcase number matches the chart and
+    # the per-PR cards. Without this, three places on the screen show
+    # three different numbers for the same lift (Epley single-set vs.
+    # rolling RIR-adjusted weighted-median). Falling back to the Epley
+    # `estimated_1rm_lbs` only when rolling has too few usable sets.
+    from app.models import ExerciseSet, WorkoutExercise, WorkoutSession
+    from app.services.workout.rolling_e1rm import UsableSet, compute_rolling_e1rm
+    rows = db.exec(
+        select(ExerciseSet, WorkoutExercise, WorkoutSession)
+        .join(WorkoutExercise, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
+        .join(WorkoutSession, WorkoutExercise.session_id == WorkoutSession.id)
+        .where(
+            WorkoutSession.user_id == current_user.id,
+            ExerciseSet.completed == True,  # noqa: E712
+        )
+    ).all()
+    sets_by_name: dict[str, list[UsableSet]] = {}
+    for es, we, ws in rows:
+        nk = (we.name or "").strip().lower()
+        if not nk:
+            continue
+        sets_by_name.setdefault(nk, []).append(UsableSet(
+            completed_at=es.completed_at or ws.workout_date,
+            actual_weight_lbs=es.actual_weight_lbs or 0,
+            actual_reps=es.actual_reps or 0,
+            actual_rir=es.actual_rir,
+            target_rir=es.rir_target,
+            set_type=es.set_type,
+        ))
+
     # Preserve showcase order so the card always renders the same
     # sequence. Anything without a profile gets dropped silently.
     out: list[dict] = []
@@ -901,10 +931,17 @@ def one_rep_max_showcase(
         p = profiles.get(slug)
         if p is None or p.estimated_1rm_lbs <= 0:
             continue
+        rolling_lbs: float | None = None
+        sets_for_lift = sets_by_name.get((p.name or "").strip().lower())
+        if sets_for_lift:
+            est = compute_rolling_e1rm(sets_for_lift, role="primary")
+            if est is not None and est.e1rm_lbs > 0:
+                rolling_lbs = est.e1rm_lbs
+        display_1rm = rolling_lbs if rolling_lbs is not None else p.estimated_1rm_lbs
         out.append({
             "slug": p.slug,
             "name": p.name,
-            "oneRepMaxLbs": round(p.estimated_1rm_lbs, 1),
+            "oneRepMaxLbs": round(display_1rm, 1),
             "topWeightLbs": round(p.recent_top_weight_lbs, 1),
             "topReps": int(p.recent_top_reps),
             "sessionCount": int(p.session_count),

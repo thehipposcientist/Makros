@@ -56,6 +56,7 @@ import {
 import { workoutFromTemplateForToday } from '../utils/workoutTemplates';
 import { workoutSessionToLoggedPayload } from '../utils/workoutLogPayload';
 import { HYDRATION_QUICK_ADD_OUNCES, formatHydrationQuickAddLabel } from '../utils/hydration';
+import { buildUserFoodCategories } from '../utils/customFoodSearch';
 import { enqueueActiveWatchCommand, hasActiveWatchCommandConsumer, isActiveWorkoutWatchCommand } from '../utils/watchCommandBacklog';
 import { applyWatchLogSetToActiveWorkoutStorage } from '../utils/watchWorkoutMirror';
 import { coachApplyNeedsDayStatusRefresh, skippedDayBadgeLabel, skippedDayTitle, skippedDayUndoLabel } from '../utils/coachApplyState';
@@ -1488,35 +1489,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
    *  doesn't own. Custom foods land in a synthetic "My Custom Foods"
    *  category so they're visible and easy to find. */
   const userFoodCategories = useMemo(() => {
-    const available = new Set((userProfile?.foodsAvailable ?? []).map(n => n.toLowerCase()));
-    // Filter every seeded category down to only selected foods.
-    const filteredSeed = meta.foodCategories
-      .map(cat => ({
-        ...cat,
-        foods: cat.foods.filter(f => available.has(f.name.toLowerCase())),
-      }))
-      .filter(cat => cat.foods.length > 0);
-
-    // Synthetic custom-foods category so user-added items are visible
-    // even if they aren't in the pantry list yet.
-    const customs = userProfile?.customFoods ?? [];
-    if (customs.length === 0) return filteredSeed;
-    const customCat = {
-      key: 'custom',
-      label: 'My Custom Foods',
-      icon: 'star-outline',
-      foods: customs.map(cf => ({
-        name: cf.name,
-        category: 'custom',
-        unit: cf.unit ?? '1 serving',
-        calories: cf.calories ?? 0,
-        protein: cf.protein ?? 0,
-        carbs: cf.carbs ?? 0,
-        fat: cf.fat ?? 0,
-        ...(cf.micronutrients ? { micronutrients: cf.micronutrients } : {}),
-      })),
-    } as (typeof filteredSeed)[number];
-    return [customCat, ...filteredSeed];
+    return buildUserFoodCategories({
+      metaCategories: meta.foodCategories as any,
+      foodsAvailable: userProfile?.foodsAvailable ?? [],
+      customFoods: (userProfile?.customFoods ?? []) as any,
+    }) as any;
   }, [meta.foodCategories, userProfile?.foodsAvailable, userProfile?.customFoods]);
   const theme = getTheme(userProfile?.themePreference);
 	  const themeColors = theme.colors;
@@ -7361,8 +7338,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
                       setSelectedWorkoutDayKey(dayKey);
                       setSwitchDayIdx(-1);
-                      const selectedEntry = _weekSchedule.find(entry => dateKey(entry.s.date) === dayKey);
-                      setExpandedDay(selectedEntry && !selectedEntry.s.isRest ? selectedEntry.origIdx : -2);
+                      // Day-strip selection no longer auto-expands the
+                      // card — keep cards collapsed by default so the
+                      // user can scan the week without each tap blowing
+                      // the card open. Tapping the card itself still
+                      // expands as before (see DayCard onPress handler).
+                      setExpandedDay(-2);
                     }}
                   />
                 <FadeInView key={key} delay={renderIdx * 80}>

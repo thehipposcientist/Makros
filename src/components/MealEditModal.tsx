@@ -23,6 +23,7 @@ import { scanFoodsPhoto, searchFoodNutrition, getMealInstructions } from '../ser
 import type { FoodSearchResult } from '../services/api';
 import { buildGapMealSuggestion, positiveMacroGap } from '../utils/mealGapSuggestion';
 import { ensureItems, syncLegacyFieldsFromItems, splitFoodString, convertQuantity, parseAmountString, guessUnitForFood, validUnitsForFood } from '../utils/mealItems';
+import { badgeLabelForSource, searchUserFoodCategories } from '../utils/customFoodSearch';
 import type { ProFeature } from '../utils/subscription';
 
 interface Props {
@@ -404,39 +405,8 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     return Array.from(byName.values());
   }, [foodCategories, allFoods]);
 
-  const kitchenSearchResults = (): FoodSearchResult[] => {
-    const q = search.trim().toLowerCase();
-    if (q.length < 2) return [];
-    const tokens = q.split(/\s+/).filter(Boolean);
-    const results: FoodSearchResult[] = [];
-    const seen = new Set<string>();
-    for (const category of foodCategories) {
-      for (const food of category.foods ?? []) {
-        const name = String(food.name || '').trim();
-        const key = name.toLowerCase();
-        if (!name || seen.has(key)) continue;
-        const haystack = `${name} ${food.unit ?? ''} ${category.label ?? ''}`.toLowerCase();
-        if (!haystack.includes(q) && !tokens.every(t => haystack.includes(t))) continue;
-        seen.add(key);
-        results.push({
-          name,
-          serving: food.unit ?? '1 serving',
-          calories: Number(food.calories || 0),
-          protein: Number(food.protein || 0),
-          carbs: Number(food.carbs || 0),
-          fat: Number(food.fat || 0),
-          source: category.key === 'custom' ? 'user' : 'seed',
-          food_id: food.id ?? null,
-          serving_id: null,
-          serving_grams: null,
-          is_verified: category.key !== 'custom',
-          is_preferred: true,
-          ...((food as any).micronutrients ? { micronutrients: (food as any).micronutrients } : {}),
-        });
-      }
-    }
-    return results.slice(0, 12);
-  };
+  const kitchenSearchResults = (): FoodSearchResult[] =>
+    searchUserFoodCategories(foodCategories as any, search) as unknown as FoodSearchResult[];
 
   useEffect(() => {
     if (!foodSearchActive) return;
@@ -1642,13 +1612,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                 {aiResults.map((item, idx) => {
                   const isUsda = item.source === 'usda';
                   const isAi = item.source === 'ai';
-                  const badgeLabel =
-                    item.source === 'seed' ? 'THALLO'
-                    : item.source === 'user' ? 'MINE'
-                    : item.source === 'barcode' ? 'BARCODE'
-                    : isUsda ? 'USDA'
-                    : isAi ? 'AI'
-                    : String(item.source ?? '').toUpperCase();
+                  const badgeLabel = badgeLabelForSource(item.source);
                   return (
                     <TouchableOpacity key={`${item.source ?? ''}-${item.name}-${idx}`} style={s.aiResultRow} onPress={() => addAiFood(item)}>
                       <View style={{ flex: 1 }}>

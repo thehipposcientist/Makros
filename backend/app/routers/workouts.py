@@ -2327,6 +2327,62 @@ def get_e1rm_history(
     return {"exercise": exercise_name, "history": points}
 
 
+@router.get("/e1rm/all")
+def get_all_e1rm(
+    current_user: User = Depends(require_pro_feature("Workout analytics")),
+    db: Session = Depends(get_session),
+):
+    """Bulk rolling-e1RM map for every exercise the user has logged sets
+    for. One round-trip instead of N (one per exercise). Used by the
+    Progress History screen to show consistent 1RM values across the
+    chart, the showcase tile, and per-PR cards — same compute path
+    everywhere so the user never sees three different numbers for the
+    same lift.
+
+    Returns: `{exercises: {<name_lower>: <e1rm_lbs>}}`.
+
+    Names with fewer than 3 usable sets are omitted (rolling-e1RM
+    refuses to estimate from too little data — see
+    `compute_rolling_e1rm` source). The frontend falls back to its
+    per-set helper for those exercises and notes the lower confidence.
+    """
+    from app.services.workout.rolling_e1rm import UsableSet, compute_rolling_e1rm
+
+    rows = db.exec(
+        select(ExerciseSet, WorkoutExercise, WorkoutSession)
+        .join(WorkoutExercise, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
+        .join(WorkoutSession, WorkoutExercise.session_id == WorkoutSession.id)
+        .where(
+            WorkoutSession.user_id == current_user.id,
+            ExerciseSet.completed == True,  # noqa: E712
+        )
+    ).all()
+
+    by_name: dict[str, list[UsableSet]] = {}
+    for es, we, ws in rows:
+        name_key = (we.name or "").strip().lower()
+        if not name_key:
+            continue
+        by_name.setdefault(name_key, []).append(UsableSet(
+            completed_at=es.completed_at or ws.workout_date,
+            actual_weight_lbs=es.actual_weight_lbs or 0,
+            actual_reps=es.actual_reps or 0,
+            actual_rir=es.actual_rir,
+            target_rir=es.rir_target,
+            set_type=es.set_type,
+        ))
+
+    out: dict[str, float] = {}
+    for name_key, sets in by_name.items():
+        # Role defaults to "primary" for the bulk path. The per-exercise
+        # endpoint accepts a role override; we keep that for callers
+        # that already know the role of the exercise they care about.
+        est = compute_rolling_e1rm(sets, role="primary")
+        if est is not None and est.e1rm_lbs > 0:
+            out[name_key] = round(est.e1rm_lbs, 1)
+    return {"exercises": out}
+
+
 @router.get("/completions")
 def list_completions(
     limit: int = Query(default=100, ge=1, le=500),

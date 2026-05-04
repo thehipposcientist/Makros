@@ -28,6 +28,8 @@ const tests = [
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/oneRepMax.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/liveActivityQuickStart.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/gearSessionMatching.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/swapScoring.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/customFoodSearch.test.ts'],
 ];
 
 for (const args of tests) {

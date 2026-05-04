@@ -4296,6 +4296,13 @@ export async function getE1RMHistory(token: string, exerciseName: string, role =
   }, 30000, 30000);
 }
 
+export async function getAllE1RM(token: string): Promise<{ exercises: Record<string, number> }> {
+  return requestRead(`/workouts/e1rm/all`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${token}` },
+  }, 30000, 30000);
+}
+
 export interface HRZone {
   zone: number;
   label: string;

@@ -1298,6 +1298,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
   const [oneRepMaxLifts, setOneRepMaxLifts] = useState<import('../services/api').OneRepMaxLift[]>([]);
+  const [bulkE1RMMap, setBulkE1RMMap] = useState<Record<string, number>>({});
   // 1RM history for the top lift — fetched lazily after `oneRepMaxLifts`
   // resolves so the bars render immediately. Used to draw the trend chart
   // below the bar list.
@@ -1557,6 +1558,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               }
             })
             .catch(() => setOneRepMaxLifts([]))
+        );
+        import('../services/api').then(({ getAllE1RM }) =>
+          getAllE1RM(authToken)
+            .then(r => setBulkE1RMMap(r?.exercises ?? {}))
+            .catch(() => setBulkE1RMMap({}))
         );
         import('../services/api').then(({ getPlateaus }) =>
           getPlateaus(authToken, 4)
@@ -2861,9 +2867,18 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       /\b(squat|deadlift|bench|press|row|pull[-\s]?up|chin[-\s]?up|dip|clean|snatch|hip\s*thrust|lunge|good\s*morning)\b/.test(lower)
                       && !/\b(curl|fly|raise|extension|kickback|pulldown|crunch|skullcrusher|crossover|pec\s*deck|leg\s*curl|leg\s*extension)\b/.test(lower)
                     );
-                  const _est1rmRaw = isCompound && pr.reps <= ONE_RM_REP_LIMIT
-                    ? estimate1RM(pr.weightLbs, pr.reps)
-                    : null;
+                  // Prefer the server-side rolling-e1RM (RIR-adjusted,
+                  // 14-day half-life decayed weighted median over recent
+                  // sets) so this number matches the chart and the lift
+                  // showcase tile. Fall back to the single-set Epley+
+                  // Brzycki estimate only when the user has too few
+                  // usable sets for a rolling estimate.
+                  const _bulkE1RM = bulkE1RMMap[lower];
+                  const _est1rmRaw = _bulkE1RM != null && _bulkE1RM > 0
+                    ? _bulkE1RM
+                    : (isCompound && pr.reps <= ONE_RM_REP_LIMIT
+                      ? estimate1RM(pr.weightLbs, pr.reps)
+                      : null);
                   const est1rm = _est1rmRaw != null ? Math.round(_est1rmRaw)
                     : null;
                   const prWeightLabel = formatWeight(pr.weightLbs, weightUnit, { suffix: false });

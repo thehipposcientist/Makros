@@ -66,7 +66,7 @@ import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNot
 import { humanizeToken } from '../utils/exerciseGuide';
 import { shouldHideWeight, shouldHideReps, formatDurationTarget, isGuideExercise } from '../utils/exerciseDisplay';
 import { startRestActivity, updateRestActivity, getRestActivityState, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
-import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, scoreSwapCandidate } from '../utils/swapScoring';
+import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, rankWorkoutAddCandidates, scoreSwapCandidate } from '../utils/swapScoring';
 import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate, tierOf } from '../utils/subscription';
 import { buildWorkoutBestSetHighlights } from '../utils/workoutBestSets';
 import { clearManagedInterval, restartManagedInterval, useManagedInterval } from '../hooks/useManagedInterval';
@@ -192,16 +192,16 @@ const COACH_PROMPT_OPTIONS: Array<{ label: string; template: (exerciseName: stri
 ];
 
 interface ExerciseLibraryItem {
-  id?: number;
+  id?: number | string;
   name: string;
   slug?: string | null;
-  equipment?: string;
-  gear?: Array<{ slug: string; name: string; category?: string }>;
-  primary_muscle?: string;
-  secondary_muscles?: string[];
-  is_compound?: boolean;
+  equipment?: string | null;
+  gear?: Array<{ slug: string; name: string; category?: string; required?: boolean }> | null;
+  primary_muscle?: string | null;
+  secondary_muscles?: string[] | null;
+  is_compound?: boolean | null;
   movement_pattern?: string | null;
-  description?: string;
+  description?: string | null;
   image_url?: string | null;
   video_id?: string | null;
   is_custom?: boolean;
@@ -4562,17 +4562,35 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         _swapNotes: buildSwapNotes(s.item, base, s.historySignal, activeInjuryTokens),
       }));
     }
-    // Add-exercise branch (no swap target). Same equipment gate so
-    // unreachable exercises stay hidden.
-    return exerciseLibrary.filter(item => {
-      if (!isExerciseUsableWithEquipment(item, ownedEquipment)) return false;
-      if (!q) return true;
-      return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
-        .join(' ')
-        .toLowerCase()
-        .includes(q);
+    const currentWorkoutContext = exercises.map(ex => {
+      const libraryItem = exerciseLibrary.find(item => item.name.toLowerCase() === ex.name.toLowerCase());
+      return {
+        name: ex.name,
+        equipment: ex.equipment ?? libraryItem?.equipment ?? null,
+        gear: libraryItem?.gear ?? null,
+        primary_muscle: ex.primaryMuscle ?? ex.primary_muscle ?? libraryItem?.primary_muscle ?? null,
+        secondary_muscles: ex.secondaryMuscles ?? ex.secondary_muscles ?? libraryItem?.secondary_muscles ?? [],
+        is_compound: ex.isCompound ?? libraryItem?.is_compound ?? null,
+        movement_pattern: libraryItem?.movement_pattern ?? null,
+      };
     });
-  }, [activeInjuryTokens, deferredExerciseSearch, exerciseHistorySignals, exerciseLibrary, ownedEquipment, swapTargetExerciseName, swapTargetIdx]);
+    const searchableLibrary = exerciseLibrary
+      .filter(item => !candidateConflictsWithActiveInjuries(item, activeInjuryTokens))
+      .filter(item => {
+        if (!q) return true;
+        return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
+          .join(' ')
+          .toLowerCase()
+          .includes(q);
+      });
+    return rankWorkoutAddCandidates(
+      currentWorkoutContext,
+      searchableLibrary,
+      ownedEquipment,
+      workout.focus,
+      10,
+    );
+  }, [activeInjuryTokens, deferredExerciseSearch, exerciseHistorySignals, exerciseLibrary, exercises, ownedEquipment, swapTargetExerciseName, swapTargetIdx, workout.focus]);
   const renderExercisePickerItem = useCallback(({ item }: { item: SmartSwapItem }) => (
     <ActiveExercisePickerRow
       item={item}

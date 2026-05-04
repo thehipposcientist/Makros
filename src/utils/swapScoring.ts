@@ -189,6 +189,10 @@ export interface SwapCandidate extends ExerciseLibraryItem {
   _overlap: number;  // 0-100 display percentage
 }
 
+export interface WorkoutAddCandidate extends ExerciseLibraryItem {
+  _fitScore: number;
+}
+
 /** Rank alternatives for `base` from `library`, filtered by owned
  *  equipment. Returns top `limit` candidates with overlap percentage. */
 export function rankSwapCandidates(
@@ -209,4 +213,186 @@ export function rankSwapCandidates(
     ...r.ex,
     _overlap: Math.min(100, Math.round((r.score / MAX_SWAP_SCORE) * 100)),
   }));
+}
+
+function normalizedText(raw?: string | null): string {
+  return String(raw ?? '')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeMuscle(raw?: string | null): string {
+  const s = normalizedText(raw);
+  if (!s) return '';
+  if (s.includes('quad')) return 'quads';
+  if (s.includes('hamstring')) return 'hamstrings';
+  if (s.includes('glute')) return 'glutes';
+  if (s.includes('calf') || s.includes('calves')) return 'calves';
+  if (s.includes('lat') || s.includes('upper back') || s.includes('mid back') || s.includes('lower back')) return 'back';
+  if (s.includes('pec')) return 'chest';
+  if (s.includes('delt') || s.includes('shoulder')) return 'shoulders';
+  if (s.includes('bicep')) return 'biceps';
+  if (s.includes('tricep')) return 'triceps';
+  if (s.includes('ab') || s.includes('core') || s.includes('oblique')) return 'core';
+  if (s.includes('cardio') || s.includes('conditioning')) return 'cardio';
+  if (s.includes('full body') || s.includes('total body')) return 'full_body';
+  return s.replace(/\s+/g, '_');
+}
+
+function musclesForExercise(ex: ExerciseLibraryItem): string[] {
+  const muscles = new Set<string>();
+  const primary = normalizeMuscle(ex.primary_muscle);
+  if (primary) muscles.add(primary);
+  for (const muscle of ex.secondary_muscles ?? []) {
+    const normalized = normalizeMuscle(muscle);
+    if (normalized) muscles.add(normalized);
+  }
+  return [...muscles];
+}
+
+function focusMuscles(workoutFocus?: string | null): Set<string> {
+  const focus = normalizedText(workoutFocus);
+  const muscles = new Set<string>();
+  const add = (items: string[]) => items.forEach(item => muscles.add(item));
+
+  if (/push|chest/.test(focus)) add(['chest', 'shoulders', 'triceps']);
+  if (/pull|back/.test(focus)) add(['back', 'biceps', 'shoulders']);
+  if (/legs?|lower|squat|hinge/.test(focus)) add(['quads', 'hamstrings', 'glutes', 'calves']);
+  if (/upper/.test(focus)) add(['chest', 'back', 'shoulders', 'biceps', 'triceps']);
+  if (/full body|total body|strength maintenance/.test(focus)) add(['chest', 'back', 'shoulders', 'quads', 'hamstrings', 'glutes', 'core']);
+  if (/arms?/.test(focus)) add(['biceps', 'triceps']);
+  if (/shoulder/.test(focus)) add(['shoulders', 'triceps']);
+  if (/glute/.test(focus)) add(['glutes', 'hamstrings']);
+  if (/core|abs?/.test(focus)) add(['core']);
+  if (/cardio|conditioning|zone|interval|run|bike|row|hyrox/.test(focus)) add(['cardio', 'full_body']);
+  if (/mobility|recovery|stretch|yoga/.test(focus)) add(['full_body', 'core']);
+
+  return muscles;
+}
+
+function workoutMuscleWeights(currentExercises: ExerciseLibraryItem[]): Map<string, number> {
+  const weights = new Map<string, number>();
+  for (const ex of currentExercises) {
+    const primary = normalizeMuscle(ex.primary_muscle);
+    if (primary) weights.set(primary, (weights.get(primary) ?? 0) + 4);
+    for (const muscle of ex.secondary_muscles ?? []) {
+      const normalized = normalizeMuscle(muscle);
+      if (normalized) weights.set(normalized, (weights.get(normalized) ?? 0) + 1.5);
+    }
+  }
+  return weights;
+}
+
+function workoutPatternCounts(currentExercises: ExerciseLibraryItem[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const ex of currentExercises) {
+    const pattern = normalizedText(ex.movement_pattern);
+    if (pattern) counts.set(pattern, (counts.get(pattern) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function workoutEquipmentClasses(currentExercises: ExerciseLibraryItem[]): Set<string> {
+  return new Set(currentExercises.map(equipmentClass));
+}
+
+function currentWorkoutLookup(library: ExerciseLibraryItem[]): Map<string, ExerciseLibraryItem> {
+  return new Map(library.map(item => [normalizedText(item.name), item]));
+}
+
+function enrichCurrentExercise(ex: ExerciseLibraryItem, lookup: Map<string, ExerciseLibraryItem>): ExerciseLibraryItem {
+  const libraryRow = lookup.get(normalizedText(ex.name));
+  return {
+    ...libraryRow,
+    ...ex,
+    primary_muscle: ex.primary_muscle ?? libraryRow?.primary_muscle ?? null,
+    secondary_muscles: ex.secondary_muscles ?? libraryRow?.secondary_muscles ?? [],
+    equipment: ex.equipment ?? libraryRow?.equipment ?? null,
+    gear: ex.gear ?? libraryRow?.gear ?? null,
+    movement_pattern: ex.movement_pattern ?? libraryRow?.movement_pattern ?? null,
+    is_compound: ex.is_compound ?? libraryRow?.is_compound ?? null,
+  };
+}
+
+export function scoreWorkoutAddCandidate(
+  candidate: ExerciseLibraryItem,
+  currentExercises: ExerciseLibraryItem[],
+  workoutFocus?: string | null,
+): number {
+  const candidateMuscles = musclesForExercise(candidate);
+  const primary = normalizeMuscle(candidate.primary_muscle);
+  const targetMuscles = workoutMuscleWeights(currentExercises);
+  const focusTargets = focusMuscles(workoutFocus);
+  const patternCounts = workoutPatternCounts(currentExercises);
+  const equipmentClasses = workoutEquipmentClasses(currentExercises);
+  const currentCompoundCount = currentExercises.filter(ex => ex.is_compound === true).length;
+  const currentIsolationCount = currentExercises.filter(ex => ex.is_compound === false).length;
+
+  let score = 0;
+  const primaryWeight = targetMuscles.get(primary) ?? 0;
+  if (primaryWeight > 0) score += Math.min(18, 6 + primaryWeight * 2);
+
+  let secondaryMatchScore = 0;
+  for (const muscle of candidateMuscles) {
+    if (muscle === primary) continue;
+    secondaryMatchScore += Math.min(3, targetMuscles.get(muscle) ?? 0);
+  }
+  score += Math.min(8, secondaryMatchScore);
+
+  if (primary && focusTargets.has(primary)) {
+    score += 12;
+  } else if (candidateMuscles.some(muscle => focusTargets.has(muscle))) {
+    score += 6;
+  }
+
+  const pattern = normalizedText(candidate.movement_pattern);
+  if (pattern) {
+    if (patternCounts.has(pattern)) {
+      score += 3;
+    } else if ((primaryWeight > 0 || focusTargets.has(primary)) && patternCounts.size > 0) {
+      score += 5;
+    }
+  }
+
+  if (candidate.is_compound === true && currentCompoundCount < 2) score += 4;
+  if (candidate.is_compound === false && currentCompoundCount >= 2) score += 4;
+  if (candidate.is_compound === false && currentIsolationCount === 0 && (primaryWeight > 0 || focusTargets.has(primary))) score += 2;
+
+  if (equipmentClasses.has(equipmentClass(candidate))) score += 2;
+  if (primary === 'full_body' && focusTargets.size > 0) score += 2;
+
+  return score;
+}
+
+export function rankWorkoutAddCandidates(
+  currentExercises: ExerciseLibraryItem[],
+  library: ExerciseLibraryItem[],
+  ownedEquipment: string[] | undefined,
+  workoutFocus?: string | null,
+  limit = 10,
+): WorkoutAddCandidate[] {
+  const lookup = currentWorkoutLookup(library);
+  const enrichedCurrent = currentExercises.map(ex => enrichCurrentExercise(ex, lookup));
+  const currentNames = new Set(enrichedCurrent.map(ex => normalizedText(ex.name)));
+  const ranked: WorkoutAddCandidate[] = [];
+
+  for (const item of library) {
+    if (currentNames.has(normalizedText(item.name))) continue;
+    if (!isExerciseUsableWithEquipment(item, ownedEquipment)) continue;
+    ranked.push({
+      ...item,
+      _fitScore: scoreWorkoutAddCandidate(item, enrichedCurrent, workoutFocus),
+    });
+  }
+
+  ranked.sort((a, b) => {
+    const scoreDelta = b._fitScore - a._fitScore;
+    if (scoreDelta !== 0) return scoreDelta;
+    return a.name.localeCompare(b.name);
+  });
+
+  return ranked.slice(0, limit);
 }
