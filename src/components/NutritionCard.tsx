@@ -1150,24 +1150,6 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
                 </TouchableOpacity>
               </>
             )}
-            {onToggleSave && (
-              <TouchableOpacity
-                onPress={() => onToggleSave(mealType, meal)}
-                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                activeOpacity={0.7}
-                accessibilityRole="button"
-                accessibilityLabel={isSaved ? 'Remove from favorites' : 'Add to favorites'}
-                style={{
-                  paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,
-                  backgroundColor: isSaved ? mealAccent.strong + '18' : 'transparent',
-                  borderWidth: 1, borderColor: isSaved ? mealAccent.strong + '44' : colors.border,
-                }}
-              >
-                <Text {...dynamicCompactTextProps} style={{ fontSize: 10, fontWeight: '700', color: isSaved ? mealAccent.strong : colors.textMuted }}>
-                  {isSaved ? 'Saved' : 'Save'}
-                </Text>
-              </TouchableOpacity>
-            )}
             {isProtectedMeal && (
               <View style={[
                 styles.protectedBadge,
@@ -1186,27 +1168,6 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
                 </Text>
               </View>
             )}
-            {/* Inline routine badge — small, beside the title, taps to
-                toggle. No more dedicated row. */}
-            {onToggleRoutine && (
-              <TouchableOpacity
-                onPress={() => onToggleRoutine(mealType)}
-                hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
-                activeOpacity={0.7}
-                style={[
-                  styles.routineBadge,
-                  isRoutineBacked
-                    ? { backgroundColor: mealAccent.strong + '22', borderColor: mealAccent.strong + '66' }
-                    : { backgroundColor: 'transparent', borderColor: colors.border },
-                ]}>
-                <Text {...dynamicCompactTextProps} style={[
-                  styles.routineBadgeText,
-                  { color: isRoutineBacked ? mealAccent.strong : colors.textMuted },
-                ]}>
-                  {isRoutineBacked ? 'Pinned' : '+ Pin'}
-                </Text>
-              </TouchableOpacity>
-            )}
           </View>
         </View>
         {/* Secondary icon strip — pencil (edit) stays muted + outlined so
@@ -1215,6 +1176,27 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
         <View style={styles.iconStrip}>
           {isShuffling && (
             <ActivityIndicator size="small" color={mealAccent.strong} style={{ marginRight: 4 }} />
+          )}
+          {onToggleRoutine && (
+            <TouchableOpacity
+              onPress={() => onToggleRoutine(mealType)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              style={[styles.iconBtn, isRoutineBacked && { backgroundColor: mealAccent.strong + '18', borderColor: mealAccent.strong + '44' }]}
+              accessibilityRole="button"
+              accessibilityLabel={isRoutineBacked ? `Unpin ${meal.meal} routine` : `Pin ${meal.meal} as a routine`}>
+              <Ionicons name={isRoutineBacked ? 'repeat' : 'repeat-outline'} size={16} color={isRoutineBacked ? mealAccent.strong : colors.textMuted} />
+            </TouchableOpacity>
+          )}
+          {onToggleSave && (
+            <TouchableOpacity
+              onPress={() => onToggleSave(mealType, meal)}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={isSaved ? `Remove ${meal.meal} from favorites` : `Add ${meal.meal} to favorites`}
+              style={[styles.iconBtn, isSaved && { backgroundColor: mealAccent.strong + '18', borderColor: mealAccent.strong + '44' }]}>
+              <Ionicons name={isSaved ? 'star' : 'star-outline'} size={16} color={isSaved ? mealAccent.strong : colors.textMuted} />
+            </TouchableOpacity>
           )}
           {onEdit && (
             <TouchableOpacity onPress={() => onEdit(mealType, meal)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} style={styles.iconBtn} accessibilityRole="button" accessibilityLabel={`Edit ${meal.meal}`}>

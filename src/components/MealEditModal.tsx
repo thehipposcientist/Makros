@@ -21,6 +21,7 @@ import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { scanFoodsPhoto, searchFoodNutrition, getMealInstructions } from '../services/api';
 import type { FoodSearchResult } from '../services/api';
+import { buildGapMealSuggestion, positiveMacroGap } from '../utils/mealGapSuggestion';
 import { ensureItems, syncLegacyFieldsFromItems, splitFoodString, convertQuantity, parseAmountString, guessUnitForFood, validUnitsForFood } from '../utils/mealItems';
 import type { ProFeature } from '../utils/subscription';
 
@@ -354,9 +355,8 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const eatenAtDateLabel = useMemo(() => eatenAt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }), [eatenAt]);
   // `new_meal` (legacy: `new_extra`) is the sentinel for an unsaved meal
   // being created via the "Add Meal" button. Anything else is an existing
-  // meal at index N. The flag isn't read directly anymore — naming is
-  // controlled by `mealName` either way — but kept here for documentation.
-  void (mealType === 'new_meal' || mealType === 'new_extra');
+  // meal at index N.
+  const isNewMeal = mealType === 'new_meal' || mealType === 'new_extra';
 
   const userEdited = useRef(false);
   useEffect(() => {
@@ -392,6 +392,17 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   }, []);
 
   const foodSearchActive = foodSearchFocused || search.trim().length > 0 || aiSearchLoading || aiResults.length > 0;
+
+  const gapSuggestionFoods = useMemo(() => {
+    const byName = new Map<string, FoodItem>();
+    const categoryFoods = foodCategories.flatMap(category => category.foods ?? []);
+    const source = categoryFoods.length > 0 ? categoryFoods : allFoods;
+    for (const food of source) {
+      const key = String(food.name ?? '').trim().toLowerCase();
+      if (key && !byName.has(key)) byName.set(key, food);
+    }
+    return Array.from(byName.values());
+  }, [foodCategories, allFoods]);
 
   const kitchenSearchResults = (): FoodSearchResult[] => {
     const q = search.trim().toLowerCase();
@@ -614,6 +625,34 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const mealMacros = calcMacrosFromItems(items, meal);
   const otherMacros = otherMealsMacros(nutritionPlan, mealType);
   const dayTotal    = addMacros(mealMacros, otherMacros);
+  const gapPreview = positiveMacroGap(nutritionPlan.targets, otherMacros);
+  const canSuggestGapMeal = mode === 'day' && isNewMeal && items.length === 0 && (
+    gapPreview.calories >= 120 || gapPreview.protein >= 12 || gapPreview.carbs >= 20 || gapPreview.fat >= 8
+  );
+
+  const applyGapSuggestion = () => {
+    const suggestion = buildGapMealSuggestion({
+      targets: nutritionPlan.targets,
+      consumed: otherMacros,
+      pantryFoods: gapSuggestionFoods,
+      savedMeals,
+      seed: `${dateKey ?? ''}|${mealType}`,
+    });
+    if (!suggestion) {
+      Alert.alert('Targets already covered', 'There is not enough remaining macro room to build a useful meal.');
+      return;
+    }
+    const apply = () => {
+      const hydratedItems = seedItemBaselines(ensureItems(suggestion.meal).items ?? []);
+      userEdited.current = true;
+      setMealName(suggestion.meal.meal || 'Target Meal');
+      setItems(hydratedItems);
+      setInstructions(null);
+      setShowInstructions(false);
+      setUnitPickerIdx(null);
+    };
+    apply();
+  };
 
   const removeItem = (idx: number) => {
     userEdited.current = true;
@@ -1183,6 +1222,24 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               {' '}On save you'll pick: change only today, or update the routine for every day.
             </Text>
           </View>
+        )}
+
+        {canSuggestGapMeal && (
+          <TouchableOpacity
+            onPress={applyGapSuggestion}
+            activeOpacity={0.84}
+            style={s.gapButton}>
+            <View style={s.gapButtonIcon}>
+              <Ionicons name="analytics-outline" size={17} color={colors.primary} />
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text style={s.gapButtonTitle}>Hit Today's Targets</Text>
+              <Text style={s.gapButtonMeta} numberOfLines={1}>
+                {gapPreview.calories} cal · {gapPreview.protein}g P · {gapPreview.carbs}g C · {gapPreview.fat}g F left
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={colors.textMuted} />
+          </TouchableOpacity>
         )}
 
         {/* How to make this — on-demand AI recipe, cached on the meal.
@@ -1766,6 +1823,38 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   routineBadgeTextActive: { color: colors.primary },
   cancelText: { fontSize: 15, color: colors.textSecondary },
   saveText:   { fontSize: 15, fontWeight: '700', color: colors.primary },
+  gapButton: {
+    marginHorizontal: 16,
+    marginTop: 8,
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: colors.primary + '12',
+    borderWidth: 1,
+    borderColor: colors.primary + '55',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  gapButtonIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: colors.primary + '18',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gapButtonTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  gapButtonMeta: {
+    marginTop: 2,
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.textMuted,
+  },
 
   // Totals panel
   totalsPanel: {

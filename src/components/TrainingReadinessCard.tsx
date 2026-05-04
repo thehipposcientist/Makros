@@ -22,6 +22,7 @@ import { scorePreparedness, PreparednessResult } from '../services/preparedness'
 import { loadPreparednessInputs } from '../services/preparednessLoader';
 import { isHealthKitAvailable, readHealthSummary } from '../services/appleHealth';
 import { getFatigueScore, FatigueScore } from '../services/api';
+import { getCachedReadinessToday } from '../services/readinessCache';
 import { loadHealthSummary, saveHealthSummary } from '../utils/workoutHistory';
 import FadeInView from './FadeInView';
 
@@ -247,14 +248,13 @@ export default function TrainingReadinessCard({
 
       let serverResp: import('../services/api').ReadinessTodayResponse | null = null;
       try {
-        const { getReadinessToday } = await import('../services/api');
         // Pull cycle phase if available — adds a "Cycle" pillar that
         // softly penalizes luteal phase, validating "feels harder
         // today" rather than letting a low score look unexplained.
         // Silent for users without HK menstrual data.
         const { getCycleStatus } = await import('../services/appleHealth');
         const cycle = await getCycleStatus().catch(() => null);
-        serverResp = await getReadinessToday(authToken, {
+        serverResp = await getCachedReadinessToday(authToken, {
           avgSleepHours: summary?.lastNightSleepHours ?? null,
           avgRestingHr: summary?.restingHeartRate ?? null,
           avgHrvMs: summary?.hrvAvg ?? null,

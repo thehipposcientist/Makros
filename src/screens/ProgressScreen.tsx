@@ -26,7 +26,6 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
 }
 import Svg, { Polyline, Circle, Line, Text as SvgText } from 'react-native-svg';
 import ViewShot from 'react-native-view-shot';
-import * as Sharing from 'expo-sharing';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, derivePersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
@@ -55,6 +54,15 @@ import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
 import { aggregateDailyFromHistory, dailyBarDenominator, headlineLoggedCalories, macrosHeadlineFromAverages, macrosHeadlineFromDailyRows, selectDailyRows } from './progressData';
 import { tierOf } from '../utils/subscription';
 import { manualActivityFromCompletion, mergeCompletionIntoWorkoutSession } from '../utils/workoutCompletion';
+import { formatDistance, formatWeight, lbsToUnit, resolveDistanceUnit, resolveWeightUnit, unitToLbs, type DistanceUnit, type WeightUnit } from '../utils/units';
+import {
+  buildExerciseTrendMap,
+  buildLocalE1RMHistory,
+  inferChartMuscleFromName,
+  type E1RMTrendPoint,
+} from '../utils/workoutProgressFilters';
+
+type ProgressTab = 'today' | 'trends' | 'history' | 'body' | 'health';
 
 interface ProgressScreenProps {
   onBack: () => void;
@@ -249,34 +257,6 @@ function formatDuration(seconds: number): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-type ExerciseTrendPoint = {
-  label: string;
-  bestWeight: number;
-  volume: number;
-  totalDuration: number;
-};
-
-function buildExerciseTrendMap(history: WorkoutSession[]): Record<string, ExerciseTrendPoint[]> {
-  const trendMap: Record<string, ExerciseTrendPoint[]> = {};
-  const sorted = [...history].sort((a, b) => +new Date(a.date) - +new Date(b.date));
-  for (const session of sorted) {
-    for (const exercise of session.exercises ?? []) {
-      const key = exercise.name?.toLowerCase();
-      if (!key) continue;
-      const bestWeight = exercise.sets.length ? Math.max(...exercise.sets.map(set => set.weightLbs)) : 0;
-      const volume = exercise.sets.reduce((sum, set) => sum + set.weightLbs * set.reps, 0);
-      const totalDuration = exercise.sets.reduce((sum, set) => sum + ((set as any).durationSeconds ?? 0), 0);
-      const d = new Date(session.date);
-      const rows = trendMap[key] ?? [];
-      rows.push({ label: `${d.getMonth() + 1}/${d.getDate()}`, bestWeight, volume, totalDuration });
-      trendMap[key] = rows.length > 10 ? rows.slice(-10) : rows;
-    }
-  }
-  return trendMap;
-}
-
-const _CARDIO_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle rope|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone.?2|tempo|boxing|kickboxing|bag.?work|shadow.?box|burpee|plank|dead hang|wall sit|hollow.?hold|farmer.?carry|suitcase carry/i;
-
 const CHART_MUSCLE_BUCKETS: { id: string; label: string; matches: (m: string) => boolean }[] = [
   { id: 'all',       label: 'All',       matches: () => true },
   { id: 'chest',     label: 'Chest',     matches: m => m === 'chest' },
@@ -289,22 +269,6 @@ const CHART_MUSCLE_BUCKETS: { id: string; label: string; matches: (m: string) =>
   { id: 'calves',    label: 'Calves',    matches: m => m === 'calves' },
   { id: 'core',      label: 'Core',      matches: m => m === 'core' || m === 'abs' || m === 'obliques' },
 ];
-
-function inferChartMuscleFromName(name: string): string {
-  const n = name.toLowerCase();
-  if (_CARDIO_EXERCISE_RE.test(n)) return 'cardio';
-  if (/bench|push.?up|chest|pec|fly/.test(n)) return 'chest';
-  if (/row|pulldown|pull.?up|chin.?up|lat|deadlift|trap/.test(n)) return 'back';
-  if (/shoulder|overhead|ohp|lateral raise|rear delt|face pull/.test(n)) return 'shoulders';
-  if (/curl|bicep/.test(n)) return 'biceps';
-  if (/tricep|dip|skull/.test(n)) return 'triceps';
-  if (/squat|leg press|lunge|split squat|step.?up|extension/.test(n)) return 'quads';
-  if (/romanian|rdl|hamstring|leg curl|good morning/.test(n)) return 'hamstrings';
-  if (/hip thrust|glute|kickback|bridge/.test(n)) return 'glutes';
-  if (/calf/.test(n)) return 'calves';
-  if (/\babs?\b|crunch|plank|\bcore\b|russian twist|leg raise|sit.?up|hollow|knee raise|woodchopper/.test(n)) return 'core';
-  return '';
-}
 
 function paceSeconds(raw: string | null): number | null {
   if (!raw) return null;
@@ -320,7 +284,17 @@ function formatPaceDelta(seconds: number): string {
   return `${seconds < 0 ? '-' : '+'}${min}:${String(sec).padStart(2, '0')}`;
 }
 
-function buildCardioInsights(points: PaceHistoryPoint[]) {
+function formatSignedWeightDelta(lbs: number, weightUnit: WeightUnit): string {
+  const prefix = lbs > 0 ? '+' : lbs < 0 ? '-' : '';
+  return `${prefix}${formatWeight(Math.abs(lbs), weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })}`;
+}
+
+function weightChartValue(lbs: number, weightUnit: WeightUnit): number {
+  const value = lbsToUnit(lbs, weightUnit);
+  return weightUnit === 'kg' ? Math.round(value * 10) / 10 : Math.round(value);
+}
+
+function buildCardioInsights(points: PaceHistoryPoint[], distanceUnit: DistanceUnit) {
   const withDistance = points.filter(p => p.distance != null && p.distance > 0);
   if (withDistance.length === 0) return [];
   const totalDistance = withDistance.reduce((sum, p) => sum + (p.distance ?? 0), 0);
@@ -343,13 +317,13 @@ function buildCardioInsights(points: PaceHistoryPoint[]) {
   const previousAvg = previous.reduce((sum, p) => sum + (p.distance ?? 0), 0) / Math.max(1, previous.length);
   const avgDelta = previous.length ? recentAvg - previousAvg : null;
   return [
-    { label: '90d distance', value: `${totalDistance.toFixed(1)} mi`, detail: `${withDistance.length} cardio logs with distance` },
-    { label: 'Best session', value: `${(bestDistance.distance ?? 0).toFixed(1)} mi`, detail: bestDistance.exercise },
-    { label: 'Latest', value: `${(latest.distance ?? 0).toFixed(1)} mi`, detail: latest.pace ? `${latest.exercise} · ${latest.pace}` : latest.exercise },
+	    { label: '90d distance', value: formatDistance(totalDistance, distanceUnit), detail: `${withDistance.length} cardio logs with distance` },
+	    { label: 'Best session', value: formatDistance(bestDistance.distance ?? 0, distanceUnit), detail: bestDistance.exercise },
+	    { label: 'Latest', value: formatDistance(latest.distance ?? 0, distanceUnit), detail: latest.pace ? `${latest.exercise} · ${latest.pace}` : latest.exercise },
     bestPaceTrend
       ? { label: 'Pace trend', value: formatPaceDelta(bestPaceTrend.delta), detail: `${bestPaceTrend.exercise} vs first log` }
       : avgDelta != null
-        ? { label: 'Distance trend', value: `${avgDelta >= 0 ? '+' : ''}${avgDelta.toFixed(1)} mi`, detail: 'Recent 3 vs previous 3 avg' }
+	        ? { label: 'Distance trend', value: `${avgDelta >= 0 ? '+' : ''}${formatDistance(Math.abs(avgDelta), distanceUnit)}`, detail: 'Recent 3 vs previous 3 avg' }
         : null,
   ].filter((x): x is { label: string; value: string; detail: string } => Boolean(x));
 }
@@ -390,11 +364,17 @@ type ProgressOverviewItem = {
   detail: string;
   icon: any;
   color: string;
-  targetTab: 'health' | 'body' | 'prs' | 'charts';
+  targetTab: ProgressTab;
 };
 
 const PR_MOMENTUM_WINDOW_DAYS = 30;
 const MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE = 4;
+const LEGACY_PROGRESS_OVERVIEW_TEST_IDS: Record<string, string> = {
+  'week-workouts': 'progress-overview-week-workouts',
+  'week-meals': 'progress-overview-week-meals',
+  'week-weight': 'progress-overview-week-weight',
+  'week-prs': 'progress-overview-week-prs',
+};
 
 function isActiveWorkoutSummary(summary: StoredWorkoutSummary): boolean {
   const hasSets = (summary.totalSets ?? 0) > 0
@@ -441,16 +421,38 @@ function establishedRecentPrs(history: WorkoutSession[], prs: PR[], sinceMs: num
   });
 }
 
+function buildWorkoutHistoryIndex(history: WorkoutSession[]) {
+  const muscleMap: Record<string, string> = {};
+  const compoundMap: Record<string, boolean> = {};
+  for (const s of history) {
+    for (const e of (s.exercises ?? [])) {
+      const nm = e.name?.toLowerCase();
+      if (!nm) continue;
+      const pm = e.primaryMuscle ?? (e as any).primary_muscle;
+      if (pm && !muscleMap[nm]) muscleMap[nm] = String(pm).toLowerCase();
+      const compound = e.isCompound ?? (e as any).is_compound;
+      if (compound != null && !(nm in compoundMap)) compoundMap[nm] = Boolean(compound);
+    }
+  }
+  return {
+    muscleMap,
+    compoundMap,
+    trendMap: buildExerciseTrendMap(history),
+  };
+}
+
 function OneRepMaxTrendCard({
   title,
   subtitle,
   points,
+  weightUnit,
   tc,
   styles,
 }: {
   title: string;
   subtitle: string;
   points: import('../services/api').E1RMHistoryPoint[];
+  weightUnit: WeightUnit;
   tc: ReturnType<typeof getTheme>['colors'];
   styles: ReturnType<typeof createStyles>;
 }) {
@@ -495,7 +497,7 @@ function OneRepMaxTrendCard({
       <View style={styles.graphHeader}>
         <Text style={styles.graphTitle}>{title}</Text>
         <Text style={{ fontSize: 12, fontWeight: '800', color: deltaColor }}>
-          {delta > 0 ? '+' : ''}{delta} lb
+          {formatSignedWeightDelta(delta, weightUnit)}
         </Text>
       </View>
       <Text style={styles.graphSubtitle}>{subtitle}</Text>
@@ -513,7 +515,7 @@ function OneRepMaxTrendCard({
             return (
               <SvgText key={`lbl${gi}`} x={padL - 6} y={gy + 4}
                 fontSize={10} fill={tc.textMuted} textAnchor="end">
-                {gv}
+                {weightChartValue(gv, weightUnit)}
               </SvgText>
             );
           })}
@@ -536,16 +538,16 @@ function OneRepMaxTrendCard({
       </View>
       <View style={styles.chartSummaryRow}>
         <View style={styles.chartStat}>
-          <Text style={styles.chartStatValue}>{Math.round(last)} lbs</Text>
+          <Text style={styles.chartStatValue}>{formatWeight(last, weightUnit)}</Text>
           <Text style={styles.chartStatLabel}>Current e1RM</Text>
         </View>
         <View style={styles.chartStat}>
-          <Text style={styles.chartStatValue}>{Math.round(Math.max(...values))} lbs</Text>
+          <Text style={styles.chartStatValue}>{formatWeight(Math.max(...values), weightUnit)}</Text>
           <Text style={styles.chartStatLabel}>Peak e1RM</Text>
         </View>
         <View style={styles.chartStat}>
           <Text style={[styles.chartStatValue, { color: deltaColor }]}>
-            {delta > 0 ? '+' : ''}{delta} lbs
+            {formatSignedWeightDelta(delta, weightUnit)}
           </Text>
           <Text style={styles.chartStatLabel}>vs first estimate</Text>
         </View>
@@ -561,6 +563,8 @@ function buildProgressMilestones(
   paceHistory: PaceHistoryPoint[],
   mealAverages: { window_days: number; days_with_data: number; avg_protein_g: number; avg_protein_g_when_logged?: number } | null,
   oneRepMaxLifts: Array<{ name: string; oneRepMaxLbs: number }>,
+  weightUnit: WeightUnit,
+  distanceUnit: DistanceUnit,
 ): ProgressMilestone[] {
   const now = Date.now();
   const thirtyDaysAgo = now - PR_MOMENTUM_WINDOW_DAYS * 86400000;
@@ -608,7 +612,7 @@ function buildProgressMilestones(
     cards.push({
       key: 'top-lift',
       title: 'Top strength marker',
-      value: `${Math.round(topLift.oneRepMaxLbs)} lb`,
+	      value: formatWeight(topLift.oneRepMaxLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }),
       detail: `${topLift.name} estimated 1RM`,
       icon: 'barbell-outline',
       color: '#6366F1',
@@ -631,7 +635,7 @@ function buildProgressMilestones(
     cards.push({
       key: 'cardio-base',
       title: 'Cardio base',
-      value: `${cardioMiles.toFixed(1)} mi`,
+	      value: formatDistance(cardioMiles, distanceUnit),
       detail: `${paceHistory.length} distance-based cardio log${paceHistory.length === 1 ? '' : 's'}`,
       icon: 'pulse-outline',
       color: '#EF4444',
@@ -775,6 +779,8 @@ function buildThisWeekOverview(
   weightEntries: Array<{ date: string; weightLbs: number }>,
   paceHistory: PaceHistoryPoint[],
   mealHistory: Array<{ meal_date: string }> | null,
+  weightUnit: WeightUnit,
+  distanceUnit: DistanceUnit,
 ): ProgressOverviewItem[] {
   const now = Date.now();
   const dayMs = 86400000;
@@ -826,7 +832,7 @@ function buildThisWeekOverview(
       detail: trendText(recentWorkoutDays, previousWorkoutDays, 'active days'),
       icon: 'calendar-outline',
       color: '#22C55E',
-      targetTab: 'health',
+	      targetTab: 'today',
     });
   }
   if (recentSets > 0) {
@@ -837,7 +843,7 @@ function buildThisWeekOverview(
       detail: trendText(recentSets, previousSets, 'sets logged'),
       icon: 'barbell-outline',
       color: '#6366F1',
-      targetTab: 'charts',
+	      targetTab: 'trends',
     });
   }
 
@@ -846,12 +852,12 @@ function buildThisWeekOverview(
     const top = recentPrs[0];
     items.push({
       key: 'week-prs',
-      label: 'New PRs',
+      label: 'PRs',
       value: `${recentPrs.length}`,
-      detail: top ? `${top.exerciseName}: ${Math.round(top.weightLbs)} lb x ${top.reps}` : 'records this week',
+	      detail: top ? `${top.exerciseName}: ${formatWeight(top.weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} x ${top.reps}` : 'records this week',
       icon: 'trophy-outline',
       color: '#F59E0B',
-      targetTab: 'prs',
+	      targetTab: 'history',
     });
   }
 
@@ -861,12 +867,12 @@ function buildThisWeekOverview(
   if (weights.length >= 2) {
     const latest = weights[weights.length - 1];
     const baseline = [...weights].reverse().find(w => timeOf(w.date) <= sevenAgo) ?? weights[0];
-    const delta = Math.round((latest.weightLbs - baseline.weightLbs) * 10) / 10;
-    items.push({
+	    const delta = Math.round((latest.weightLbs - baseline.weightLbs) * 10) / 10;
+	    items.push({
       key: 'week-weight',
       label: 'Body weight',
-      value: `${latest.weightLbs} lb`,
-      detail: `${delta > 0 ? '+' : ''}${delta} lb since ${formatDate(baseline.date)}`,
+	      value: formatWeight(latest.weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }),
+	      detail: `${delta > 0 ? '+' : ''}${formatWeight(Math.abs(delta), weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} since ${formatDate(baseline.date)}`,
       icon: delta < 0 ? 'trending-down-outline' : delta > 0 ? 'trending-up-outline' : 'remove-outline',
       color: delta < 0 ? '#22C55E' : delta > 0 ? '#F59E0B' : '#0EA5E9',
       targetTab: 'body',
@@ -880,11 +886,11 @@ function buildThisWeekOverview(
     items.push({
       key: 'week-cardio',
       label: 'Cardio distance',
-      value: `${recentCardioMiles.toFixed(1)} mi`,
+	      value: formatDistance(recentCardioMiles, distanceUnit),
       detail: 'distance logged in the last 7 days',
       icon: 'pulse-outline',
       color: '#EF4444',
-      targetTab: 'charts',
+	      targetTab: 'trends',
     });
   }
 
@@ -1243,25 +1249,26 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const primaryButtonTextColor = getContrastingTextColor(tc.primary);
   const meta = useMetaData();
   const isProTier = tierOf(userProfile) === 'pro';
-  const [tab, setTab] = useState<'health' | 'body' | 'prs' | 'charts'>('health');
+  const weightUnit = resolveWeightUnit(userProfile);
+  const distanceUnit = resolveDistanceUnit(userProfile);
+  const [tab, setTab] = useState<ProgressTab>('today');
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
   const [showLogActivity, setShowLogActivity] = useState(false);
   const fitnessScoreRef = useRef<ViewShot>(null);
   const bodyScanShareRef = useRef<ViewShot>(null);
   const [shareLoading, setShareLoading] = useState(false);
   const [selectedExercise, setSelectedExercise] = useState<string | null>(null);
-  // Default to 'volume' — most users care about total work done per
-  // session more than max load on a single set. Toggleable.
-  // PR chart was removed — running max-weight is essentially the Weight
-  // chart with a different highlight, and Estimated 1RM is the better
-  // progress signal (factors in reps + RIR, not just heaviest set).
-  const [chartMode, setChartMode] = useState<'weight' | 'volume' | 'duration' | 'e1rm'>('volume');
-  const [e1rmHistory, setE1rmHistory] = useState<Array<{ date: string; e1rm_lbs: number; confidence: string }>>([]);
+  // Default to e1RM when available. It combines load + reps, and falls
+  // back to Weight automatically for exercises without enough usable
+  // strength data.
+  const [chartMode, setChartMode] = useState<'weight' | 'volume' | 'duration' | 'e1rm'>('e1rm');
+  const [e1rmHistory, setE1rmHistory] = useState<E1RMTrendPoint[]>([]);
   // Optional muscle filter for the exercise picker. 'all' = no filter.
   const [chartMuscleFilter, setChartMuscleFilter] = useState<string>('all');
   const [prs, setPrs] = useState<PR[]>([]);
   const [prSearch, setPrSearch] = useState('');
   const [prFocusFilter, setPrFocusFilter] = useState<string | null>(null);
+  const [visiblePrCount, setVisiblePrCount] = useState(40);
   const [history, setHistory] = useState<WorkoutSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [insights, setInsights] = useState<any | null>(null);
@@ -1276,13 +1283,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // Local state — the data is already in memory, so pagination is
   // pure render-time slicing.
   const [visibleSummaryCount, setVisibleSummaryCount] = useState(30);
+  const [visibleWorkoutCount, setVisibleWorkoutCount] = useState(30);
   const [goalHistory, setGoalHistory] = useState<GoalHistoryEntry[]>([]);
   const [planChanges, setPlanChanges] = useState<PlanChangeEntry[]>([]);
   const [bodyScanLoading, setBodyScanLoading] = useState(false);
   const [bodyScanResult, setBodyScanResult] = useState<BodyScanResult | null>(null);
   const [bodyScanHistory, setBodyScanHistory] = useState<BodyScanEntry[]>([]);
+  const bodyScanHistoryLoadedRef = useRef(false);
   const [bodyScanPrepSource, setBodyScanPrepSource] = useState<'camera' | 'library' | null>(null);
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
+  const healthLiveLoadedRef = useRef(false);
   const [sleepHistoryCount, setSleepHistoryCount] = useState<number>(0);
   const [healthEnabled, setHealthEnabled] = useState<boolean>(false);
   const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
@@ -1333,49 +1343,42 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // ─── Exercise property lookup maps ────────────────────────────────────────
   // Built from workout history — prefers structured fields from the planner
   // (primaryMuscle, isCompound) over regex heuristics.
-  const exerciseMuscleMap = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const s of history) {
-      for (const e of (s.exercises ?? [])) {
-        const nm = e.name?.toLowerCase();
-        const pm = e.primaryMuscle ?? (e as any).primary_muscle;
-        if (nm && pm && !map[nm]) map[nm] = String(pm).toLowerCase();
-      }
-    }
-    return map;
-  }, [history]);
-
-  const exerciseCompoundMap = useMemo(() => {
-    const map: Record<string, boolean> = {};
-    for (const s of history) {
-      for (const e of (s.exercises ?? [])) {
-        const nm = e.name?.toLowerCase();
-        const compound = e.isCompound ?? (e as any).is_compound;
-        if (nm && compound != null && !(nm in map)) map[nm] = Boolean(compound);
-      }
-    }
-    return map;
-  }, [history]);
-
-  const exerciseTrendMap = useMemo(() => buildExerciseTrendMap(history), [history]);
-  const chartablePrsMemo = useMemo(
-    () => prs.filter(pr => (exerciseTrendMap[pr.exerciseName.toLowerCase()] ?? []).length >= 2),
-    [exerciseTrendMap, prs],
-  );
+  const workoutHistoryIndex = useMemo(() => buildWorkoutHistoryIndex(history), [history]);
+  const exerciseMuscleMap = workoutHistoryIndex.muscleMap;
+  const exerciseCompoundMap = workoutHistoryIndex.compoundMap;
+  const exerciseTrendMap = workoutHistoryIndex.trendMap;
+  const chartExerciseOptions = useMemo(() => {
+    const prNameByKey = new Map(prs.map(pr => [pr.exerciseName.toLowerCase(), pr.exerciseName] as const));
+    return Object.entries(exerciseTrendMap)
+      .filter(([, points]) => points.length >= 2)
+      .map(([key]) => ({
+        key,
+        name: prNameByKey.get(key) ?? key.replace(/\b\w/g, c => c.toUpperCase()),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [exerciseTrendMap, prs]);
   const activeChartBucket = useMemo(
     () => CHART_MUSCLE_BUCKETS.find(b => b.id === chartMuscleFilter) ?? CHART_MUSCLE_BUCKETS[0],
     [chartMuscleFilter],
   );
-  const filteredChartPrs = useMemo(() => chartablePrsMemo.filter(pr => {
+  const filteredChartExercises = useMemo(() => chartExerciseOptions.filter(option => {
     if (chartMuscleFilter === 'all') return true;
-    const muscle = exerciseMuscleMap[pr.exerciseName.toLowerCase()] || inferChartMuscleFromName(pr.exerciseName);
+    const muscle = exerciseMuscleMap[option.key] || inferChartMuscleFromName(option.name);
     return activeChartBucket.matches(muscle);
-  }), [activeChartBucket, chartMuscleFilter, chartablePrsMemo, exerciseMuscleMap]);
+  }), [activeChartBucket, chartExerciseOptions, chartMuscleFilter, exerciseMuscleMap]);
   const selectedExerciseTrend = useMemo(
     () => selectedExercise ? (exerciseTrendMap[selectedExercise.toLowerCase()] ?? []) : [],
     [exerciseTrendMap, selectedExercise],
   );
-  const cardioInsightsMemo = useMemo(() => buildCardioInsights(paceHistory), [paceHistory]);
+  const localSelectedE1rmHistory = useMemo(
+    () => buildLocalE1RMHistory(history, selectedExercise, estimate1RM),
+    [history, selectedExercise],
+  );
+  const selectedE1rmHistory = useMemo(
+    () => e1rmHistory.length >= 2 ? e1rmHistory : localSelectedE1rmHistory,
+    [e1rmHistory, localSelectedE1rmHistory],
+  );
+  const cardioInsightsMemo = useMemo(() => buildCardioInsights(paceHistory, distanceUnit), [distanceUnit, paceHistory]);
   const paceExerciseGroups = useMemo(() => {
     const groups = new Map<string, PaceHistoryPoint[]>();
     for (const point of paceHistory) {
@@ -1406,16 +1409,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     return { name, bestDist, lastPace, bestDur, extraBests, sessionCount: points.length };
   }).filter(pr => pr.bestDist != null || pr.lastPace != null || pr.bestDur != null), [paceExerciseGroups]);
   const progressMilestones = useMemo(
-    () => buildProgressMilestones(history, prs, summaries, paceHistory, mealAverages, oneRepMaxLifts),
-    [history, mealAverages, oneRepMaxLifts, paceHistory, prs, summaries],
+    () => buildProgressMilestones(history, prs, summaries, paceHistory, mealAverages, oneRepMaxLifts, weightUnit, distanceUnit),
+    [distanceUnit, history, mealAverages, oneRepMaxLifts, paceHistory, prs, summaries, weightUnit],
   );
   const progressAnalytics = useMemo(
     () => buildProgressAnalytics(history, summaries, prs, plateaus),
     [history, plateaus, prs, summaries],
   );
   const thisWeekOverview = useMemo(
-    () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory),
-    [history, mealHistory, paceHistory, prs, summaries, weightEntries],
+    () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory, weightUnit, distanceUnit),
+    [distanceUnit, history, mealHistory, paceHistory, prs, summaries, weightEntries, weightUnit],
   );
   const mealHistoryDailyRows = useMemo(
     () => (mealHistory == null ? null : aggregateDailyFromHistory(mealHistory as any)),
@@ -1443,9 +1446,29 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       return true;
     });
   }, [prFocusFilter, prSearch, prs]);
+  const visiblePrsForTab = useMemo(
+    () => filteredPrsForTab.slice(0, visiblePrCount),
+    [filteredPrsForTab, visiblePrCount],
+  );
 
   useEffect(() => {
-    if ((tab === 'charts' || tab === 'prs') && authToken && !paceLoadedRef.current) {
+    setVisiblePrCount(40);
+  }, [prFocusFilter, prSearch]);
+
+  useEffect(() => {
+    if (tab !== 'trends') return;
+    if (filteredChartExercises.length === 0) {
+      if (selectedExercise) setSelectedExercise(null);
+      return;
+    }
+    const stillVisible = selectedExercise
+      ? filteredChartExercises.some(option => option.name === selectedExercise)
+      : false;
+    if (!stillVisible) setSelectedExercise(filteredChartExercises[0].name);
+  }, [filteredChartExercises, selectedExercise, tab]);
+
+  useEffect(() => {
+    if ((tab === 'trends' || tab === 'history') && authToken && !paceLoadedRef.current) {
       paceLoadedRef.current = true;
       getPaceHistory(authToken).then(r => setPaceHistory(r.points)).catch(() => {});
     }
@@ -1457,8 +1480,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       loadWorkoutSummaries(),
       loadGoalHistory(),
       loadPlanChanges(),
-      authToken ? listWorkoutSessions(authToken, 100).catch(() => null) : Promise.resolve(null),
-      authToken ? listWorkoutCompletions(authToken, 100).catch(() => null) : Promise.resolve(null),
+      authToken ? listWorkoutSessions(authToken, { limit: 60, skip: 0 }).catch(() => null) : Promise.resolve(null),
+      authToken ? listWorkoutCompletions(authToken, { limit: 100, skip: 0 }).catch(() => null) : Promise.resolve(null),
     ]).then(([h, s, g, c, serverSessions, completions]) => {
       const historyWithServerSets = mergeWorkoutSessionSources(h, serverSessions);
       const scoped = reconcileWorkoutProgressData(historyWithServerSets, s, completions);
@@ -1598,35 +1621,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     }
     if (!isProTier) {
       setBodyScanHistory([]);
-    } else {
-      AsyncStorage.getItem('bodyScanHistory').then(async raw => {
-        const local: BodyScanEntry[] = raw ? (JSON.parse(raw) ?? []) : [];
-        // Cap in-memory history at the most recent 20 scans. Older entries
-        // stay in storage but aren't loaded into render state — body-scan
-        // entries carry full base64 image strings and a long-running user
-        // could otherwise keep hundreds of MBs of decoded images in JS heap.
-        // The history list UI only ever shows the recent slice anyway.
-        const RECENT_CAP = 20;
-        const localSorted = [...local].sort((a, b) => b.date.localeCompare(a.date));
-        if (localSorted.length > 0) setBodyScanHistory(localSorted.slice(0, RECENT_CAP));
-        if (authToken) {
-          try {
-            const { getBodyScanHistory } = await import('../services/api');
-            const remote = await getBodyScanHistory(authToken);
-            if (remote.length > 0) {
-              const merged = new Map<string, BodyScanEntry>();
-              for (const e of local) merged.set(e.date, e);
-              for (const e of remote) {
-                const key = (e as any).scan_date ?? (e as any).date ?? '';
-                if (!merged.has(key)) merged.set(key, { date: key, ...(e as any) });
-              }
-              const sorted = Array.from(merged.values()).sort((a, b) => b.date.localeCompare(a.date));
-              setBodyScanHistory(sorted.slice(0, RECENT_CAP));
-              await AsyncStorage.setItem('bodyScanHistory', JSON.stringify(sorted));
-            }
-          } catch { /* non-fatal */ }
-        }
-      }).catch(() => {});
+      bodyScanHistoryLoadedRef.current = false;
     }
 
     // ── Gut / longevity insights — compute from existing meal data ──
@@ -1670,61 +1665,90 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       }
     })();
     else setGutInsights(null);
-    // Load Apple Health data — cached value first, then refresh from HealthKit
-    // so the vitals row reflects live data without requiring a workout finish.
+    // Cheap cached values are okay on mount; live HealthKit refresh is
+    // deferred until the Health tab opens.
     if (isProTier) loadHealthSummary().then(setHealthSummary);
     else setHealthSummary(null);
     if (isProTier) loadHealthScore().then(setHealthScore);
     else setHealthScore(null);
-    if (isProTier) (async () => {
-      try {
-        if (!isHealthKitAvailable()) return;
-        const enabled = await isAppleHealthEnabled();
-        setHealthEnabled(enabled);
-        if (!enabled) return;
-        // Route through the aggregator so other cards (Zone 2,
-        // weekly coaching, readiness) get the same cached value
-        // without re-querying HealthKit. Falls back to direct
-        // readHealthSummary if the aggregator returns null.
-        const age = userProfile.physicalStats?.age ?? null;
-        const { getHealthDataSummary } = await import('../services/healthDataSummary');
-        const agg = await getHealthDataSummary({ age });
-        setAppleHealthZone2Minutes(agg?.weekly?.totalZone2Minutes ?? agg?.zone2Minutes ?? null);
-        const fresh = agg?.raw ?? await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
-        if (fresh) {
-          setHealthSummary(fresh);
-          saveHealthSummary(fresh).catch(() => null);
-          // Re-push the fresh sleep score to the watch. Without this,
-          // the watch reads only the cached HealthSummary at HomeScreen
-          // mount time and never sees the refreshed score Progress just
-          // pulled from HealthKit — phone shows a new score, watch stays
-          // stuck on the older one.
-          try {
-            const { pushSleepToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
-            await pushSleepToWatch(buildWatchSleepPayloadFromSummary(fresh as any));
-          } catch { /* watch may be unavailable */ }
-          const rows = await Promise.all(
-            (fresh.workoutDetails ?? []).map((w) => summarizeWorkoutZone2(w, age).catch(() => null)),
-          );
-          setZone2DetectedWorkouts(rows
-            .filter((w): w is NonNullable<typeof w> => !!w)
-            .map((w) => ({
-              name: w.name,
-              durationMin: w.durationMin,
-              counted: w.counted,
-              reason: w.reason,
-            })));
-        }
-        // Nights of HRV/sleep history drive the "X/14 nights" calibration UI.
-        try { setSleepHistoryCount((await loadSleepHistory()).length); } catch {}
-      } catch {}
-    })();
-    else {
+    if (!isProTier) {
+      healthLiveLoadedRef.current = false;
       setHealthEnabled(false);
       setAppleHealthZone2Minutes(null);
       setZone2DetectedWorkouts([]);
     }
   }, [authToken, isProTier, nutritionPlan, userProfile.goal, userProfile.mealsPerDay, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
+
+  useEffect(() => {
+    if (tab !== 'body' || !isProTier || bodyScanHistoryLoadedRef.current) return;
+    bodyScanHistoryLoadedRef.current = true;
+    let cancelled = false;
+    AsyncStorage.getItem('bodyScanHistory').then(async raw => {
+      const local: BodyScanEntry[] = raw ? (JSON.parse(raw) ?? []) : [];
+      const RECENT_CAP = 20;
+      const localSorted = [...local].sort((a, b) => b.date.localeCompare(a.date));
+      if (!cancelled && localSorted.length > 0) setBodyScanHistory(localSorted.slice(0, RECENT_CAP));
+      if (authToken) {
+        try {
+          const { getBodyScanHistory } = await import('../services/api');
+          const remote = await getBodyScanHistory(authToken);
+          if (cancelled || remote.length === 0) return;
+          const merged = new Map<string, BodyScanEntry>();
+          for (const e of local) merged.set(e.date, e);
+          for (const e of remote) {
+            const key = (e as any).scan_date ?? (e as any).date ?? '';
+            if (!merged.has(key)) merged.set(key, { date: key, ...(e as any) });
+          }
+          const sorted = Array.from(merged.values()).sort((a, b) => b.date.localeCompare(a.date));
+          setBodyScanHistory(sorted.slice(0, RECENT_CAP));
+          await AsyncStorage.setItem('bodyScanHistory', JSON.stringify(sorted));
+        } catch { /* non-fatal */ }
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [authToken, isProTier, tab]);
+
+  useEffect(() => {
+    if (tab !== 'health' || !isProTier || healthLiveLoadedRef.current) return;
+    healthLiveLoadedRef.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        if (!isHealthKitAvailable()) return;
+        const enabled = await isAppleHealthEnabled();
+        if (cancelled) return;
+        setHealthEnabled(enabled);
+        if (!enabled) return;
+        const age = userProfile.physicalStats?.age ?? null;
+        const { getHealthDataSummary } = await import('../services/healthDataSummary');
+        const agg = await getHealthDataSummary({ age });
+        if (cancelled) return;
+        setAppleHealthZone2Minutes(agg?.weekly?.totalZone2Minutes ?? agg?.zone2Minutes ?? null);
+        const fresh = agg?.raw ?? await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
+        if (cancelled || !fresh) return;
+        setHealthSummary(fresh);
+        saveHealthSummary(fresh).catch(() => null);
+        try {
+          const { pushSleepToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
+          await pushSleepToWatch(buildWatchSleepPayloadFromSummary(fresh as any));
+        } catch { /* watch may be unavailable */ }
+        const rows = await Promise.all(
+          (fresh.workoutDetails ?? []).map((w) => summarizeWorkoutZone2(w, age).catch(() => null)),
+        );
+        if (cancelled) return;
+        setZone2DetectedWorkouts(rows
+          .filter((w): w is NonNullable<typeof w> => !!w)
+          .map((w) => ({
+            name: w.name,
+            durationMin: w.durationMin,
+            counted: w.counted,
+            reason: w.reason,
+          })));
+        try { setSleepHistoryCount((await loadSleepHistory()).length); } catch {}
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [isProTier, tab, userProfile.physicalStats?.age]);
 
   const handleDeletePlanChange = (change: PlanChangeEntry) => {
     if (!change.id) return;
@@ -1818,6 +1842,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       const ref = bodyScanShareRef.current as any;
       if (!ref?.capture) return;
       const uri = await ref.capture();
+      const Sharing = await import('expo-sharing');
       const canShare = await Sharing.isAvailableAsync();
       if (canShare) {
         await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share Body Scan' });
@@ -1839,6 +1864,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       if (!ref?.capture) return;
       const uri = await ref.capture();
       setSharingScore(false);
+      const Sharing = await import('expo-sharing');
       const canShare = await Sharing.isAvailableAsync();
       if (canShare) {
         await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share Fitness Score' });
@@ -1933,7 +1959,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // show a skeleton while it's in flight instead of an empty flash.
   const [compositeFitnessLoading, setCompositeFitnessLoading] = useState(true);
   useEffect(() => {
-    if (!authToken || !isProTier) {
+    if (!authToken || !isProTier || tab !== 'health') {
       setCompositeFitness(null);
       setCompositeFitnessLoading(false);
       return;
@@ -1950,19 +1976,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         .catch(() => setCompositeFitness(null))
         .finally(() => setCompositeFitnessLoading(false))
     );
-  }, [authToken, isProTier, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length]);
+  }, [authToken, isProTier, tab, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length]);
 
   useEffect(() => {
     if (!authToken || !selectedExercise) { setE1rmHistory([]); return; }
-    // Prefer structured primaryMuscle field; fall back to regex heuristic
-    const _selMuscle = exerciseMuscleMap[selectedExercise.toLowerCase()];
-    if (_selMuscle === 'cardio' || (!_selMuscle && _CARDIO_EXERCISE_RE.test(selectedExercise))) { setE1rmHistory([]); return; }
+    let cancelled = false;
+    setE1rmHistory([]);
     import('../services/api').then(({ getE1RMHistory }) =>
       getE1RMHistory(authToken, selectedExercise)
-        .then(res => setE1rmHistory(res.history ?? []))
-        .catch(() => setE1rmHistory([]))
+        .then(res => { if (!cancelled) setE1rmHistory(res.history ?? []); })
+        .catch(() => { if (!cancelled) setE1rmHistory([]); })
     );
-  }, [authToken, selectedExercise, exerciseMuscleMap]);
+    return () => { cancelled = true; };
+  }, [authToken, selectedExercise]);
 
   const startWeight = userProfile.goalDetails.startWeightLbs ?? userProfile.physicalStats.weightLbs;
   const currentWeight = userProfile.physicalStats.weightLbs;
@@ -1988,19 +2014,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
       <View style={styles.tabs}>
         {([
-          ['health', 'Health'],
+          ['today', 'Today'],
+          ['trends', 'Trends'],
+          ['history', 'History'],
           ['body', 'Body'],
-          ['prs', 'PRs'],
-          ['charts', 'Charts'],
+          ['health', 'Health'],
         ] as const).map(([key, label]) => (
           <TouchableOpacity
             key={key}
             activeOpacity={0.7}
             style={[styles.tab, tab === key && styles.tabActive]}
+            accessibilityRole="tab"
+            accessibilityLabel={label}
+            accessibilityState={{ selected: tab === key }}
             onPress={() => {
               if (tab === key) return;
               import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-              setTab(key as typeof tab);
+              setTab(key);
             }}>
             <Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label}</Text>
           </TouchableOpacity>
@@ -2013,54 +2043,169 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         </View>
       ) : (
       <FadeInView key={tab} duration={260} slideDistance={8} style={{ flex: 1 }}>
-      {tab === 'charts' ? (
+      {tab === 'today' ? (
         <ScrollView contentContainerStyle={styles.content}>
-          {prs.length === 0 ? (
+          <View style={styles.todayDashboardCard}>
+            <View style={styles.weekOverviewHeader}>
+              <View>
+                <Text style={styles.weekOverviewEyebrow}>THIS WEEK</Text>
+                <Text style={styles.weekOverviewTitle}>At a glance</Text>
+              </View>
+              <Text style={styles.weekOverviewHint}>Tap tiles to drill in</Text>
+            </View>
+            {thisWeekOverview.length > 0 ? (
+              <View style={styles.weekOverviewGrid}>
+                {thisWeekOverview.map(item => (
+                  <TouchableOpacity
+                    key={item.key}
+                    testID={LEGACY_PROGRESS_OVERVIEW_TEST_IDS[item.key] ?? `progress-today-${item.key}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={item.key === 'week-prs' ? 'PRs' : `${item.label}: ${item.value}. ${item.detail}`}
+                    activeOpacity={0.82}
+                    style={styles.weekOverviewTile}
+                    onPress={() => {
+                      import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                      setTab(item.targetTab);
+                    }}>
+                    <View style={[styles.weekOverviewIcon, { backgroundColor: item.color + '20' }]}>
+                      <Ionicons name={item.icon} size={15} color={item.color} />
+                    </View>
+                    <Text
+                      style={[styles.weekOverviewLabel, item.key === 'week-prs' && { textTransform: 'none' }]}
+                      numberOfLines={1}
+                    >
+                      {item.label}
+                    </Text>
+                    <Text style={styles.weekOverviewValue} numberOfLines={1}>{item.value}</Text>
+                    <Text style={styles.weekOverviewDetail} numberOfLines={2}>{item.detail}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : (
+              <Text style={styles.emptyBody}>Complete workouts, log meals, or add body data to populate today's dashboard.</Text>
+            )}
+          </View>
+
+          {progressMilestones.length > 0 && (
+            <View style={{ marginBottom: 16 }}>
+              <Text style={styles.sectionLabel}>Current Highlights</Text>
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                {progressMilestones.map(item => (
+                  <TouchableOpacity
+                    key={item.key}
+                    activeOpacity={0.82}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${item.title}: ${item.value}. ${item.detail}`}
+                    style={{
+                      flexGrow: 1,
+                      flexBasis: '47%',
+                      minHeight: 104,
+                      backgroundColor: tc.surfaceRaised,
+                      borderRadius: 12,
+                      borderWidth: 1,
+                      borderColor: tc.border,
+                      padding: 12,
+                    }}
+                    onPress={() => setTab(item.key === 'cardio-base' ? 'trends' : item.key === 'top-lift' ? 'trends' : 'history')}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                      <View style={{ width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '20' }}>
+                        <Ionicons name={item.icon} size={16} color={item.color} />
+                      </View>
+                      <Text style={{ flex: 1, fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.3, textTransform: 'uppercase' }} numberOfLines={2}>
+                        {item.title}
+                      </Text>
+                    </View>
+                    <Text style={{ fontSize: 22, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
+                    <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 4, lineHeight: 15 }} numberOfLines={2}>
+                      {item.detail}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
+
+          {trainingSignals.length > 0 && (
+            <View style={{ marginBottom: 16 }}>
+              <Text style={styles.sectionLabel}>Training Signals</Text>
+              <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
+                {trainingSignals.slice(0, 4).map(item => (
+                  <View
+                    key={item.key}
+                    style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}
+                    accessible
+                    accessibilityLabel={`${item.label}: ${item.value}. ${item.detail}`}
+                  >
+                    <View style={{ width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '1F' }}>
+                      <Ionicons name={item.icon} size={16} color={item.color} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                        {item.label}
+                      </Text>
+                      <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 2, lineHeight: 16 }}>
+                        {item.detail}
+                      </Text>
+                    </View>
+                    <Text style={{ fontSize: 16, fontWeight: '900', color: item.color, textAlign: 'right', maxWidth: 92 }} numberOfLines={2}>
+                      {item.value}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          )}
+        </ScrollView>
+      ) : tab === 'trends' ? (
+        <ScrollView contentContainerStyle={styles.content}>
+          {chartExerciseOptions.length === 0 && paceHistory.length < 2 ? (
             <View style={styles.emptyBox}>
               <Ionicons name="analytics-outline" size={40} color={tc.textMuted} style={{ marginBottom: 8 }} />
-              <Text style={styles.emptyTitle}>Complete 3 workouts to see charts</Text>
-              <Text style={styles.emptyBody}>Charts appear after your first few sessions with logged sets.</Text>
+              <Text style={styles.emptyTitle}>Complete 2 tracked sessions to see charts</Text>
+              <Text style={styles.emptyBody}>Strength charts use loaded sets. Cardio charts use distance and pace logs.</Text>
             </View>
           ) : (
             <>
-              <Text style={styles.sectionLabel}>Filter by muscle</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
-                {CHART_MUSCLE_BUCKETS.map(b => {
-                  const active = chartMuscleFilter === b.id;
-                  return (
-                    <TouchableOpacity
-                      key={b.id}
-                      style={[styles.exerciseChip, active && styles.exerciseChipActive]}
-                      onPress={() => setChartMuscleFilter(b.id)}
-                      activeOpacity={0.75}>
-                      <Text style={[styles.exerciseChipText, active && styles.exerciseChipTextActive]}>
-                        {b.label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
+              {chartExerciseOptions.length > 0 && (
+                <>
+                  <Text style={styles.sectionLabel}>Filter by muscle</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+                    {CHART_MUSCLE_BUCKETS.map(b => {
+                      const active = chartMuscleFilter === b.id;
+                      return (
+                        <TouchableOpacity
+                          key={b.id}
+                          style={[styles.exerciseChip, active && styles.exerciseChipActive]}
+                          onPress={() => setChartMuscleFilter(b.id)}
+                          activeOpacity={0.75}>
+                          <Text style={[styles.exerciseChipText, active && styles.exerciseChipTextActive]}>
+                            {b.label}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
 
-              <Text style={styles.sectionLabel}>Select exercise</Text>
-              {filteredChartPrs.length === 0 ? (
-                <Text style={{ color: tc.textMuted, fontSize: 12, marginBottom: 12 }}>
-                  {chartablePrsMemo.length === 0
-                    ? 'Log at least 2 sessions of an exercise to chart its trend.'
-                    : `No ${activeChartBucket.label.toLowerCase()} exercises with enough data yet.`}
-                </Text>
-              ) : (
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
-                  {filteredChartPrs.map((pr, i) => (
-                    <TouchableOpacity
-                      key={`${pr.exerciseName}-${i}`}
-                      style={[styles.exerciseChip, selectedExercise === pr.exerciseName && styles.exerciseChipActive]}
-                      onPress={() => setSelectedExercise(pr.exerciseName)}>
-                      <Text style={[styles.exerciseChipText, selectedExercise === pr.exerciseName && styles.exerciseChipTextActive]}>
-                        {pr.exerciseName}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </ScrollView>
+                  <Text style={styles.sectionLabel}>Select exercise</Text>
+                  {filteredChartExercises.length === 0 ? (
+                    <Text style={{ color: tc.textMuted, fontSize: 12, marginBottom: 12 }}>
+                      No {activeChartBucket.label.toLowerCase()} exercises with enough data yet.
+                    </Text>
+                  ) : (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+                      {filteredChartExercises.map(option => (
+                        <TouchableOpacity
+                          key={option.key}
+                          style={[styles.exerciseChip, selectedExercise === option.name && styles.exerciseChipActive]}
+                          onPress={() => setSelectedExercise(option.name)}>
+                          <Text style={[styles.exerciseChipText, selectedExercise === option.name && styles.exerciseChipTextActive]}>
+                            {option.name}
+                          </Text>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                  )}
+                </>
               )}
 
               {topLiftHistory && topLiftHistory.points.length >= 3 && (
@@ -2070,6 +2215,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     title={topLiftHistory.name}
                     subtitle="Rolling estimated 1-rep max from logged working sets"
                     points={topLiftHistory.points}
+                    weightUnit={weightUnit}
                     tc={tc}
                     styles={styles}
                   />
@@ -2087,19 +2233,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     </View>
                   );
                 }
-                const _selMuscleChart = exerciseMuscleMap[selectedExercise.toLowerCase()];
-                const isCardioExercise = _selMuscleChart === 'cardio' || (!_selMuscleChart && _CARDIO_EXERCISE_RE.test(selectedExercise));
                 const hasDuration = trend.some(p => p.totalDuration > 0);
                 const hasWeight = trend.some(p => p.bestWeight > 0);
-                const hasE1rm = e1rmHistory.length >= 2;
+                const hasE1rm = selectedE1rmHistory.length >= 2;
 
                 const effectiveMode = chartMode === 'e1rm' && hasE1rm ? 'e1rm'
-                  : isCardioExercise && !hasWeight && hasDuration ? 'duration'
                   : chartMode === 'e1rm' ? 'weight'
                   : chartMode;
 
                 if (effectiveMode === 'e1rm') {
-                  const e1rmValues = e1rmHistory.map(p => Math.round(p.e1rm_lbs));
+                  const e1rmValues = selectedE1rmHistory.map(p => Math.round(p.e1rm_lbs));
                   const e1rmMin = Math.min(...e1rmValues);
                   const e1rmMax = Math.max(...e1rmValues, 1);
                   const chartW = 320;
@@ -2117,8 +2260,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     x: padL + (e1rmValues.length > 1 ? (i / (e1rmValues.length - 1)) * plotW : plotW / 2),
                     y: padT + plotH - ((v - rangeMin) / rangeDelta) * plotH,
                     val: v,
-                    label: (() => { const d = new Date(e1rmHistory[i].date); return `${d.getMonth() + 1}/${d.getDate()}`; })(),
-                    conf: e1rmHistory[i].confidence,
+                    label: (() => { const d = new Date(selectedE1rmHistory[i].date); return `${d.getMonth() + 1}/${d.getDate()}`; })(),
+                    conf: selectedE1rmHistory[i].confidence,
                   }));
                   const polyPoints = pts.map(p => `${p.x},${p.y}`).join(' ');
                   const gridLines = 4;
@@ -2145,7 +2288,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           </TouchableOpacity>
                         </View>
                       </View>
-                      <Text style={styles.graphSubtitle}>Estimated 1-rep max (lbs) over time</Text>
+                      <Text style={styles.graphSubtitle}>Estimated 1-rep max ({weightUnit}) over time</Text>
                       <View style={{ alignItems: 'center', marginVertical: 8 }}>
                         <Svg width={chartW} height={chartH}>
                           {gridVals.map((gv, gi) => {
@@ -2160,7 +2303,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                             return (
                               <SvgText key={`lbl${gi}`} x={padL - 6} y={gy + 4}
                                 fontSize={10} fill={tc.textMuted} textAnchor="end">
-                                {gv}
+                                {weightChartValue(gv, weightUnit)}
                               </SvgText>
                             );
                           })}
@@ -2183,16 +2326,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       </View>
                       <View style={styles.chartSummaryRow}>
                         <View style={styles.chartStat}>
-                          <Text style={styles.chartStatValue}>{e1rmValues[e1rmValues.length - 1]} lbs</Text>
+                          <Text style={styles.chartStatValue}>{formatWeight(e1rmValues[e1rmValues.length - 1], weightUnit)}</Text>
                           <Text style={styles.chartStatLabel}>Current e1RM</Text>
                         </View>
                         <View style={styles.chartStat}>
-                          <Text style={styles.chartStatValue}>{Math.max(...e1rmValues)} lbs</Text>
+                          <Text style={styles.chartStatValue}>{formatWeight(Math.max(...e1rmValues), weightUnit)}</Text>
                           <Text style={styles.chartStatLabel}>Peak e1RM</Text>
                         </View>
                         <View style={styles.chartStat}>
                           <Text style={[styles.chartStatValue, { color: e1rmValues[e1rmValues.length - 1] >= e1rmValues[0] ? tc.primary : tc.error }]}>
-                            {e1rmValues[e1rmValues.length - 1] >= e1rmValues[0] ? '+' : ''}{e1rmValues[e1rmValues.length - 1] - e1rmValues[0]} lbs
+                            {formatSignedWeightDelta(e1rmValues[e1rmValues.length - 1] - e1rmValues[0], weightUnit)}
                           </Text>
                           <Text style={styles.chartStatLabel}>vs first estimate</Text>
                         </View>
@@ -2202,12 +2345,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 }
 
                 const values = trend.map(p =>
-                  effectiveMode === 'weight' ? p.bestWeight
+                  effectiveMode === 'weight' ? weightChartValue(p.bestWeight, weightUnit)
                     : effectiveMode === 'duration' ? Math.round(p.totalDuration / 60)
                     : Math.round(p.volume)
                 );
                 const maxVal = Math.max(...values, 1);
-                const unit = effectiveMode === 'weight' ? ' lbs' : effectiveMode === 'duration' ? ' min' : '';
+                const unit = effectiveMode === 'weight' ? ` ${weightUnit}` : effectiveMode === 'duration' ? ' min' : '';
                 return (
                   <View style={styles.graphCard}>
                     <View style={styles.graphHeader}>
@@ -2244,7 +2387,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       </View>
                     </View>
                     <Text style={styles.graphSubtitle}>
-                      {effectiveMode === 'weight' ? 'Best set weight (lbs) per session'
+                      {effectiveMode === 'weight' ? `Best set weight (${weightUnit}) per session`
                         : effectiveMode === 'duration' ? 'Total duration (min) per session'
                         : 'Total volume (lbs x reps) per session'}
                     </Text>
@@ -2254,7 +2397,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         const h = Math.max(8, Math.round((val / maxVal) * 100));
                         const isLast = i === trend.length - 1;
                         return (
-                          <View key={i} style={styles.graphBarCol}>
+                          <View
+                            key={i}
+                            style={styles.graphBarCol}
+                            accessible
+                            accessibilityLabel={`${point.label}: ${val}${unit}`}>
                             <Text style={[styles.graphBarValue, isLast && { color: colors.primary }]}>{val}</Text>
                             <AnimatedChartBar
                               targetHeight={h}
@@ -2284,11 +2431,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     </View>
                   </View>
                 );
-              })() : (
+              })() : chartExerciseOptions.length > 0 ? (
                 <View style={styles.emptyBox}>
                   <Text style={styles.emptyBody}>Tap an exercise above to see its progress chart.</Text>
                 </View>
-              )}
+              ) : null}
 
               {cardioInsightsMemo.length > 0 && (
                 <View style={{ marginTop: 20 }}>
@@ -2349,7 +2496,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </>
           )}
         </ScrollView>
-      ) : tab === 'prs' ? (
+      ) : tab === 'history' ? (
         <ScrollView contentContainerStyle={styles.content} style={!noHeader ? { backgroundColor: tc.background } : undefined}>
           {(insights || guardrails.length > 0 || coachMemory.length > 0) && (
             <View style={styles.insightsCard}>
@@ -2631,6 +2778,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     title={`${topLiftHistory.name} · 1RM trend`}
                     subtitle="Rolling estimated 1-rep max from logged working sets"
                     points={topLiftHistory.points}
+                    weightUnit={weightUnit}
                     tc={tc}
                     styles={styles}
                   />
@@ -2691,7 +2839,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <View style={styles.emptyBox}>
                     <Text style={styles.emptyBody}>No exercises match your search.</Text>
                   </View>
-                ) : filteredPrsForTab.map((pr, i) => {
+                ) : visiblePrsForTab.map((pr, i) => {
                   // Estimated 1RM only for compound lifts. Showing
                   // an estimated 1RM on a 25 lb lateral raise or a
                   // 12 lb cable curl is misleading — isolation work
@@ -2718,6 +2866,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     : null;
                   const est1rm = _est1rmRaw != null ? Math.round(_est1rmRaw)
                     : null;
+                  const prWeightLabel = formatWeight(pr.weightLbs, weightUnit, { suffix: false });
                   return (
                     <FadeInView key={i} delay={Math.min(i * 35, 350)} duration={260} slideDistance={6}>
                     <View style={styles.prCard}>
@@ -2726,19 +2875,37 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         <Text style={styles.prMeta}>{pr.sessionFocus}  ·  {formatDate(pr.date)}</Text>
                         {est1rm != null && (
                           <Text style={[styles.prMeta, { marginTop: 2, fontWeight: '600', color: tc.textPrimary }]}>
-                            ~{est1rm} lb est 1RM
+                            ~{formatWeight(est1rm, weightUnit)} est 1RM
                           </Text>
                         )}
                       </View>
                       <View style={styles.prRight}>
-                        <Text style={styles.prWeight}>{pr.weightLbs}</Text>
-                        <Text style={styles.prUnit}>lbs</Text>
+                        <Text style={styles.prWeight}>{prWeightLabel}</Text>
+                        <Text style={styles.prUnit}>{weightUnit}</Text>
                         <Text style={styles.prReps}>{pr.reps} reps</Text>
                       </View>
                     </View>
                     </FadeInView>
                   );
                 })}
+                {filteredPrsForTab.length > visiblePrsForTab.length && (
+                  <TouchableOpacity
+                    onPress={() => setVisiblePrCount(c => c + 40)}
+                    activeOpacity={0.85}
+                    style={{
+                      backgroundColor: tc.surface,
+                      borderRadius: 12,
+                      paddingVertical: 12,
+                      borderWidth: 1,
+                      borderColor: tc.border,
+                      alignItems: 'center',
+                      marginTop: 4,
+                    }}>
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                      Load {Math.min(40, filteredPrsForTab.length - visiblePrsForTab.length)} more records
+                    </Text>
+                  </TouchableOpacity>
+                )}
               </>
             );
           })()}
@@ -2935,7 +3102,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                 <Text style={styles.sectionLabel}>
                   {history.length} workout{history.length !== 1 ? 's' : ''}
-                  {history.length > 30 ? ' · most recent 30' : ''}
+                  {history.length > visibleWorkoutCount ? ` · showing ${visibleWorkoutCount}` : ''}
                 </Text>
                 <View style={{ flexDirection: 'row', gap: 6 }}>
                   <TouchableOpacity
@@ -2958,7 +3125,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </TouchableOpacity>
                 </View>
               </View>
-              {history.slice(0, 30).map((session, i) => {
+              {history.slice(0, visibleWorkoutCount).map((session, i) => {
                 const totalSets = session.exercises.reduce((sum, ex) => sum + ex.sets.length, 0);
                 const isExpanded = expandedSessionId === session.id;
                 const summary = summaries.find(s => s.date && session.date && s.date.slice(0, 10) === session.date.slice(0, 10) && s.focus === session.focus);
@@ -3050,7 +3217,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           return (
                             <View key={ei} style={styles.exRow}>
                               <Text style={styles.exName}>{ex.name}</Text>
-                              <Text style={styles.exBest}>{best.weightLbs} lbs × {best.reps}</Text>
+                              <Text style={styles.exBest}>{formatWeight(best.weightLbs, weightUnit)} × {best.reps}</Text>
                             </View>
                           );
                         })}
@@ -3132,6 +3299,24 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </FadeInView>
                 );
               })}
+              {history.length > visibleWorkoutCount && (
+                <TouchableOpacity
+                  onPress={() => setVisibleWorkoutCount(c => c + 30)}
+                  activeOpacity={0.85}
+                  style={{
+                    backgroundColor: tc.surface,
+                    borderRadius: 12,
+                    paddingVertical: 12,
+                    borderWidth: 1,
+                    borderColor: tc.border,
+                    alignItems: 'center',
+                    marginTop: 4,
+                  }}>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                    Load {Math.min(30, history.length - visibleWorkoutCount)} more workouts
+                  </Text>
+                </TouchableOpacity>
+              )}
             </>
           )}
         </ScrollView>
@@ -3183,7 +3368,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   {entry.startWeightLbs ? (
                     <>
                       <Text style={styles.sessionStatDot}>·</Text>
-                      <Text style={styles.sessionStat}>Started at {entry.startWeightLbs} lbs</Text>
+                      <Text style={styles.sessionStat}>Started at {formatWeight(entry.startWeightLbs, weightUnit)}</Text>
                     </>
                   ) : null}
                 </View>
@@ -4571,7 +4756,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <TouchableOpacity
                 style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: tc.primary, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 6 }}
                 onPress={() => {
-                  setWeightInputValue(weightEntries.length > 0 ? String(weightEntries[weightEntries.length - 1].weightLbs) : '');
+                  setWeightInputValue(weightEntries.length > 0 ? formatWeight(weightEntries[weightEntries.length - 1].weightLbs, weightUnit, { suffix: false }) : '');
                   setWeightInputError('');
                   setWeightInputVisible(true);
                 }}>
@@ -4590,7 +4775,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Text
                       testID="progress-weight-current-value"
                       style={{ fontSize: 28, fontWeight: '800', color: tc.textPrimary }}>
-                      {weightEntries[weightEntries.length - 1].weightLbs} <Text style={{ fontSize: 14, fontWeight: '500', color: tc.textMuted }}>lbs</Text>
+                      {formatWeight(weightEntries[weightEntries.length - 1].weightLbs, weightUnit, { suffix: false })} <Text style={{ fontSize: 14, fontWeight: '500', color: tc.textMuted }}>{weightUnit}</Text>
                     </Text>
                     <Text style={{ fontSize: 11, color: tc.textMuted }}>
                       {new Date(weightEntries[weightEntries.length - 1].date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
@@ -4606,7 +4791,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
                           <Ionicons name={diff < 0 ? 'trending-down' : diff > 0 ? 'trending-up' : 'remove'} size={18} color={color} />
                           <Text style={{ fontSize: 16, fontWeight: '700', color }}>
-                            {diff > 0 ? '+' : ''}{diff} lbs
+                            {formatSignedWeightDelta(diff, weightUnit)}
                           </Text>
                         </View>
                         <Text style={{ fontSize: 11, color: tc.textMuted }}>
@@ -4638,23 +4823,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       {start != null && (
                         <View style={{ alignItems: 'center' }}>
                           <Text style={{ fontSize: 11, color: tc.textMuted }}>Start</Text>
-                          <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textSecondary }}>{start}</Text>
+                          <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textSecondary }}>{formatWeight(start, weightUnit, { suffix: false })}</Text>
                         </View>
                       )}
                       <View style={{ alignItems: 'center' }}>
                         <Text style={{ fontSize: 11, color: tc.textMuted }}>Current</Text>
-                        <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{curr}</Text>
+                        <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{formatWeight(curr, weightUnit, { suffix: false })}</Text>
                       </View>
                       {target != null && (
                         <View style={{ alignItems: 'center' }}>
                           <Text style={{ fontSize: 11, color: tc.textMuted }}>Target</Text>
-                          <Text style={{ fontSize: 15, fontWeight: '700', color: tc.primary }}>{target}</Text>
+                          <Text style={{ fontSize: 15, fontWeight: '700', color: tc.primary }}>{formatWeight(target, weightUnit, { suffix: false })}</Text>
                         </View>
                       )}
                       {remaining != null && (
                         <View style={{ alignItems: 'center' }}>
                           <Text style={{ fontSize: 11, color: tc.textMuted }}>Remaining</Text>
-                          <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textSecondary }}>{remaining.toFixed(1)}</Text>
+                          <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textSecondary }}>{formatWeight(remaining, weightUnit, { suffix: false })}</Text>
                         </View>
                       )}
                       {showEstimate && estimate && (
@@ -4678,14 +4863,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       {new Date(e.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
                     </Text>
                     <Text style={{ fontSize: 13, fontWeight: '600', color: tc.textPrimary }}>
-                      {e.weightLbs} lbs
+                      {formatWeight(e.weightLbs, weightUnit)}
                     </Text>
                     <TouchableOpacity
                       hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                       onPress={() => {
                         Alert.alert(
                           'Delete entry?',
-                          `Remove ${e.weightLbs} lbs logged on ${new Date(e.date + 'T12:00:00').toLocaleDateString()}? Derived stats (diff, ETA) will recalculate.`,
+                          `Remove ${formatWeight(e.weightLbs, weightUnit)} logged on ${new Date(e.date + 'T12:00:00').toLocaleDateString()}? Derived stats (diff, ETA) will recalculate.`,
                           [
                             { text: 'Cancel', style: 'cancel' },
                             {
@@ -5219,7 +5404,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>{entry.category}</Text>
                         <Text style={{ fontSize: 11, color: tc.textMuted }}>
                           {MONTH_NAMES[d.getMonth()]} {d.getDate()}, {d.getFullYear()}
-                          {entry.weightLbs ? `  ·  ${entry.weightLbs} lbs` : ''}
+                          {entry.weightLbs ? `  ·  ${formatWeight(entry.weightLbs, weightUnit)}` : ''}
                         </Text>
                       </View>
                       <View style={{ alignItems: 'flex-end' }}>
@@ -5256,11 +5441,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 if (weightInputError) setWeightInputError('');
               }}
               keyboardType="decimal-pad"
-              placeholder="e.g. 175"
+              placeholder={weightUnit === 'kg' ? 'e.g. 79.4' : 'e.g. 175'}
               placeholderTextColor={tc.textMuted}
               autoFocus
             />
-            <Text style={{ fontSize: 12, color: tc.textMuted, textAlign: 'center', marginTop: 6 }}>lbs</Text>
+            <Text style={{ fontSize: 12, color: tc.textMuted, textAlign: 'center', marginTop: 6 }}>{weightUnit}</Text>
             {weightInputError ? (
               <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.error, textAlign: 'center', marginTop: 8 }}>
                 {weightInputError}
@@ -5279,15 +5464,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 style={{ flex: 1, paddingVertical: 12, borderRadius: radius.md, backgroundColor: tc.primary, alignItems: 'center' }}
                 onPress={async () => {
                   const val = parseFloat(weightInputValue);
-                  if (!val || val < 50 || val > 700) {
-                    setWeightInputError('Please enter a weight between 50 and 700 lbs.');
+                  const canonicalLbs = unitToLbs(val, weightUnit);
+                  if (!val || canonicalLbs < 50 || canonicalLbs > 700) {
+                    setWeightInputError(`Please enter a weight between ${formatWeight(50, weightUnit)} and ${formatWeight(700, weightUnit)}.`);
                     return;
                   }
                   const { saveWeightEntry } = await import('../utils/weightHistory');
-                  const updated = await saveWeightEntry(val, 'manual');
+                  const updated = await saveWeightEntry(canonicalLbs, 'manual');
                   setWeightEntries(updated);
                   setWeightInputVisible(false);
-                  if (onUpdateWeight) onUpdateWeight(val);
+                  if (onUpdateWeight) onUpdateWeight(canonicalLbs);
                   import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
                 }}>
                 <Text style={{ fontSize: 15, fontWeight: '700', color: getContrastingTextColor(tc.primary) }}>Save</Text>
@@ -5488,6 +5674,14 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   },
 
   weekOverviewCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
+    marginBottom: 16,
+  },
+  todayDashboardCard: {
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
     borderWidth: 1,

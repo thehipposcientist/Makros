@@ -3,7 +3,7 @@
  * the canonical `MealItem[]` shape. These run any time a plan is read or
  * written so the rest of the app can assume structured items are present.
  */
-import { FoodUnit, MealItem, MealSuggestion } from '../types';
+import type { FoodUnit, MealItem, MealSuggestion } from '../types';
 
 /** Alias map so we recognize common typo / plural / synonym forms. */
 const UNIT_ALIASES: Record<string, FoodUnit> = {

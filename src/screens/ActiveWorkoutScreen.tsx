@@ -34,7 +34,6 @@ const WATCH_COMMAND_START_GRACE_MS = 5000;
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
-import * as Sharing from 'expo-sharing';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle } from 'react-native-svg';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity, SavedWorkoutTemplate, UserProfile, PlannedSet } from '../types';
@@ -71,6 +70,16 @@ import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, 
 import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate, tierOf } from '../utils/subscription';
 import { buildWorkoutBestSetHighlights } from '../utils/workoutBestSets';
 import { clearManagedInterval, restartManagedInterval, useManagedInterval } from '../hooks/useManagedInterval';
+import {
+  distanceSuffix,
+  formatWeight,
+  lbsToUnit,
+  unitToLbs,
+  unitToMi,
+  weightSuffix,
+  type DistanceUnit,
+  type WeightUnit,
+} from '../utils/units';
 
 /** Parse the top (ceiling) of a target rep string. Handles ranges like
  *  "8-12", AMRAP markers like "12+", singletons like "6", and junk.
@@ -119,12 +128,12 @@ function buildRirNextSetSuggestion(
   loggedSet: CompletedSet,
   rir: number,
   nextSetNumber: number,
+  weightUnit: WeightUnit = 'lbs',
 ): { nextTarget: string; cue: string; watchText: string; fullText: string } | null {
   const weight = Number(loggedSet.weightLbs);
   if (!Number.isFinite(weight) || weight <= 0) return null;
   const increment = loadIncrementForSessionExercise(ex);
   const targetReps = ex.targetReps || `${loggedSet.reps}`;
-  const rounded = (value: number) => Number.isInteger(value) ? String(value) : value.toFixed(1);
   let nextWeight = weight;
   let cue = '';
   if (rir <= 1) {
@@ -138,11 +147,14 @@ function buildRirNextSetSuggestion(
     nextWeight = weight + increment;
     cue = 'That was clearly under target effort. Add load on the next set.';
   }
-  const nextTarget = `Set ${nextSetNumber}: ${rounded(nextWeight)} lbs x ${targetReps}`;
+  const displayWeight = formatWeight(nextWeight, weightUnit, {
+    precision: weightUnit === 'kg' ? 1 : 0,
+  });
+  const nextTarget = `Set ${nextSetNumber}: ${displayWeight} x ${targetReps}`;
   return {
     nextTarget,
     cue,
-    watchText: `${rounded(nextWeight)} lbs x ${targetReps} - ${cue}`,
+    watchText: `${displayWeight} x ${targetReps} - ${cue}`,
     fullText: `${nextTarget} — ${cue}`,
   };
 }
@@ -462,6 +474,8 @@ interface ActiveWorkoutScreenProps {
   goal: string;
   themeName?: AppThemeName;
   weightLbs?: number;
+  weightUnit?: WeightUnit;
+  distanceUnit?: DistanceUnit;
   onFinish: (session: WorkoutSession) => void;
   onCancel: () => void;
   onDislikeExercise?: (exerciseName: string) => void;
@@ -646,8 +660,10 @@ type TimedMetricsConfig = {
   fields: MetricField[];
 };
 
-function getTimedMetricsConfig(name: string, cardioGuidance?: any): TimedMetricsConfig | null {
+function getTimedMetricsConfig(name: string, cardioGuidance?: any, distanceUnit: DistanceUnit = 'mi'): TimedMetricsConfig | null {
   const n = (name || '').toLowerCase();
+  const dist = distanceSuffix(distanceUnit);
+  const runPace = distanceUnit === 'km' ? '/km' : '/mi';
   // Incline walk — speed + incline are the primary metrics
   if (/incline.?walk|incline.*tread|\bwalk\b/.test(n)) {
     return {
@@ -657,7 +673,7 @@ function getTimedMetricsConfig(name: string, cardioGuidance?: any): TimedMetrics
       fields: [
         { key: 'speed', label: 'Speed', placeholder: cardioGuidance?.speed_range ?? '3.5 mph', keyboard: 'decimal-pad', helper: 'Console average' },
         { key: 'incline', label: 'Incline', placeholder: cardioGuidance?.incline_range ?? '6%', keyboard: 'decimal-pad', helper: 'Average grade' },
-        { key: 'distance', label: 'Distance', placeholder: '1.5 mi', keyboard: 'decimal-pad', helper: 'Total session' },
+        { key: 'distance', label: `Distance (${dist})`, placeholder: distanceUnit === 'km' ? '2.4 km' : '1.5 mi', keyboard: 'decimal-pad', helper: 'Total session' },
       ],
     };
   }
@@ -667,8 +683,8 @@ function getTimedMetricsConfig(name: string, cardioGuidance?: any): TimedMetrics
       subtitle: 'Distance and pace feed endurance charts and pace history.',
       icon: 'analytics-outline',
       fields: [
-        { key: 'pace', label: 'Avg Pace', placeholder: '8:30 /mi', keyboard: 'default', helper: 'Overall pace' },
-        { key: 'distance', label: 'Distance', placeholder: '3.1 mi', keyboard: 'decimal-pad', helper: 'Total distance' },
+        { key: 'pace', label: 'Avg Pace', placeholder: distanceUnit === 'km' ? `5:15 ${runPace}` : `8:30 ${runPace}`, keyboard: 'default', helper: 'Overall pace' },
+        { key: 'distance', label: `Distance (${dist})`, placeholder: distanceUnit === 'km' ? '5.0 km' : '3.1 mi', keyboard: 'decimal-pad', helper: 'Total distance' },
         { key: 'incline', label: 'Incline', placeholder: cardioGuidance?.incline_range ?? '2%', keyboard: 'decimal-pad', helper: 'If treadmill' },
       ],
     };
@@ -704,7 +720,7 @@ function getTimedMetricsConfig(name: string, cardioGuidance?: any): TimedMetrics
       subtitle: 'Use the bike console values so future rides compare cleanly.',
       icon: 'bicycle-outline',
       fields: [
-        { key: 'distance', label: 'Distance', placeholder: '12.5 mi', keyboard: 'decimal-pad', helper: 'Total ride' },
+        { key: 'distance', label: `Distance (${dist})`, placeholder: distanceUnit === 'km' ? '20.0 km' : '12.5 mi', keyboard: 'decimal-pad', helper: 'Total ride' },
         { key: 'cadence', label: 'Cadence', placeholder: '85 rpm', keyboard: 'number-pad', helper: 'Average RPM' },
         { key: 'output', label: 'Output', placeholder: '350 kJ', keyboard: 'number-pad', helper: 'If shown' },
       ],
@@ -738,7 +754,7 @@ function getTimedMetricsConfig(name: string, cardioGuidance?: any): TimedMetrics
       subtitle: 'Distance plus elevation tells a better story than duration alone.',
       icon: 'trail-sign-outline',
       fields: [
-        { key: 'distance', label: 'Distance', placeholder: '4.2 mi', keyboard: 'decimal-pad', helper: 'Total hike' },
+        { key: 'distance', label: `Distance (${dist})`, placeholder: distanceUnit === 'km' ? '6.8 km' : '4.2 mi', keyboard: 'decimal-pad', helper: 'Total hike' },
         { key: 'elevation', label: 'Elevation', placeholder: '800 ft', keyboard: 'number-pad', helper: 'Gain' },
       ],
     };
@@ -756,6 +772,10 @@ function getTimedMetricsConfig(name: string, cardioGuidance?: any): TimedMetrics
   }
   // Boxing, kickboxing, yoga, stretching, etc — no metrics to capture
   return null;
+}
+
+function shouldStoreDistanceAsMiles(exerciseName: string): boolean {
+  return /incline.?walk|treadmill|running|jogging|run\b|bike|cycling|ride|peloton|spin|hik/.test((exerciseName || '').toLowerCase());
 }
 
 /** Parse a user-entered duration string into seconds. Accepts:
@@ -988,7 +1008,7 @@ function serializeActiveWorkoutExercise(ex: SessionExercise, exerciseIndex: numb
   };
 }
 
-export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, onFinish, onCancel, onDislikeExercise }: ActiveWorkoutScreenProps) {
+export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, weightUnit = 'lbs', distanceUnit = 'mi', onFinish, onCancel, onDislikeExercise }: ActiveWorkoutScreenProps) {
     // Warm-up state
     const [warmupDone, setWarmupDone] = useState(true);
     // When the user has started the workout, the warm-up card collapses
@@ -1018,6 +1038,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const profile = await loadCachedProfile();
       return tierOf(profile) === 'pro';
     }, [loadCachedProfile]);
+    const displayWeight = useCallback((lbs: number | null | undefined, opts?: { precision?: number; suffix?: boolean }) =>
+      formatWeight(lbs, weightUnit, {
+        precision: opts?.precision ?? (weightUnit === 'kg' ? 1 : 0),
+        suffix: opts?.suffix,
+      }),
+    [weightUnit]);
+    const displayWeightNumber = useCallback((lbs: number | null | undefined) => {
+      if (lbs == null || !Number.isFinite(Number(lbs))) return '';
+      const value = lbsToUnit(Number(lbs), weightUnit);
+      return weightUnit === 'kg' ? String(Math.round(value * 10) / 10) : String(Math.round(value));
+    }, [weightUnit]);
+    const parseInputWeightLbs = useCallback((raw: string | number | undefined | null): number => {
+      const value = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''));
+      return Number.isFinite(value) ? unitToLbs(value, weightUnit) : NaN;
+    }, [weightUnit]);
     const backendWorkoutHistoryRef = useRef<WorkoutSessionRecord[] | null>(null);
     const backendWorkoutHistoryPromiseRef = useRef<Promise<WorkoutSessionRecord[]> | null>(null);
     useEffect(() => {
@@ -1903,6 +1938,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // adjustments reconcile without waiting on a React render.
   const restRemainingRef = useRef(restRemaining);
   useEffect(() => { restRemainingRef.current = restRemaining; }, [restRemaining]);
+  const lastRestWatchPushAtRef = useRef(0);
   // Mirror cue + nextTarget into refs so startRestTimer can read latest values
   // synchronously when persisting the snapshot blob to AsyncStorage.
   const restNextTargetRef = useRef<string | null>(null);
@@ -1935,6 +1971,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     const endAtMs = startedAtMs + totalSeconds * 1000;
     const remaining = Math.max(0, Math.ceil((endAtMs - Date.now()) / 1000));
     if (remaining <= 0) return;
+    const now = Date.now();
+    if (now - lastRestWatchPushAtRef.current < 1000) return;
+    lastRestWatchPushAtRef.current = now;
     const { pushProgressToWatch } = await import('../utils/watchSync');
     await pushProgressToWatch({
       ...buildWatchPositionProgress(),
@@ -2132,6 +2171,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const ref = summaryCardRef.current as any;
       if (!ref?.capture) return;
       const uri = await ref.capture();
+      const Sharing = await import('expo-sharing');
       const canShare = await Sharing.isAvailableAsync();
       if (canShare) {
         await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Share Workout Summary' });
@@ -2349,8 +2389,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const guide = isGuideExercise(ex, workout);
       const hint = index === opts?.skipHintIndex ? undefined : preSetHints[index];
       const recommendedWeight = guide ? null : hint?.recommendedWeight ?? ex.targetWeightLbs ?? null;
-      const recommendation = guide ? null : hint?.recommendedWeight != null
-        ? `Try ${Math.round(hint.recommendedWeight)} lbs${hint.recommendedReps ? ` x ${hint.recommendedReps}` : ''}`
+	      const recommendation = guide ? null : hint?.recommendedWeight != null
+	        ? `Try ${displayWeight(hint.recommendedWeight)}${hint.recommendedReps ? ` x ${hint.recommendedReps}` : ''}`
         : ex.aiRecommendation;
       return {
         name: ex.name,
@@ -2372,7 +2412,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         })),
       };
     }),
-  }), [preSetHints, swapCandidatesForExercise, workout]);
+	  }), [displayWeight, preSetHints, swapCandidatesForExercise, workout]);
 
   buildWatchWorkoutSnapshotRef.current = buildWatchWorkoutSnapshot;
 
@@ -2587,15 +2627,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     if (!set) return;
     setEditSetExIdx(exIdx);
     setEditSetIdx(setIdx);
-    setEditSetWeight(String(set.weightLbs));
+    setEditSetWeight(displayWeightNumber(set.weightLbs));
     setEditSetReps(String(set.reps));
     setEditSetVisible(true);
-  }, [exercises]);
+  }, [displayWeightNumber, exercises]);
 
   const commitInlineEdit = useCallback((exIdx: number, setIdx: number) => {
     if (editCommitTimer.current) clearTimeout(editCommitTimer.current);
     editCommitTimer.current = setTimeout(() => {
-      const w = parseFloat(editDraft.weight ?? '');
+      const w = parseInputWeightLbs(editDraft.weight);
       const r = parseInt(editDraft.reps ?? '', 10);
       const ex = exercises[exIdx];
       const existingSet = ex?.sets[setIdx];
@@ -2626,10 +2666,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         maybeRefreshRecommendationForExerciseRef.current?.(exIdx, updatedSets);
       }
     }, 800);
-  }, [clearLiveRecommendationState, editDraft, exercises, pendingRir, workout.focus, workout.stimulus]);
+  }, [clearLiveRecommendationState, editDraft, exercises, parseInputWeightLbs, pendingRir, workout.focus, workout.stimulus]);
 
   const handleSaveEditedSet = useCallback(() => {
-    const w = parseFloat(editSetWeight);
+    const w = parseInputWeightLbs(editSetWeight);
     const r = parseInt(editSetReps, 10);
     if (isNaN(w) || isNaN(r) || r <= 0 || w < 0) {
       Alert.alert('Invalid values', 'Enter a valid weight and reps.');
@@ -2656,7 +2696,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     if (!guide && !shouldPromptRir(r, ex?.targetReps)) {
       maybeRefreshRecommendationForExerciseRef.current?.(editSetExIdx, updatedSets);
     }
-  }, [clearLiveRecommendationState, editSetExIdx, editSetIdx, editSetWeight, editSetReps, exercises, pendingRir, workout.focus, workout.stimulus]);
+  }, [clearLiveRecommendationState, editSetExIdx, editSetIdx, editSetWeight, editSetReps, exercises, parseInputWeightLbs, pendingRir, workout.focus, workout.stimulus]);
 
   // Log a specific set slot inline (no modal).
   // `overrideDuration` bypasses the state read for timed exercises —
@@ -2725,7 +2765,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       };
       const skipWeight = shouldHideWeight(exMeta);
       const skipReps   = shouldHideReps(exMeta);
-      const weightNum  = skipWeight ? 0 : parseFloat(effectiveWeight ?? '');
+      const weightNum  = skipWeight ? 0 : (typeof overrideWeight === 'number' ? overrideWeight : parseInputWeightLbs(effectiveWeight));
       const repsNum    = skipReps   ? 0 : parseInt(effectiveReps ?? '', 10);
       const rirNum = typeof overrideRir === 'number' && Number.isFinite(overrideRir)
         ? Math.max(0, Math.min(4, Math.round(overrideRir)))
@@ -2835,7 +2875,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const clearedAfterRestStarted = Boolean(sourceActionAtMs && lastRestClearedAtMsRef.current >= restStartedAtMs);
       const nextSetLabel = timed
         ? `Set ${cleanSets.length + 1}: ${ex.targetReps}`
-        : `Set ${cleanSets.length + 1}: ${newSet.weightLbs} lbs x ${ex.targetReps}`;
+        : `Set ${cleanSets.length + 1}: ${displayWeight(newSet.weightLbs)} x ${ex.targetReps}`;
       if (!clearedAfterRestStarted && remainingRestSeconds > 0) {
         restDurationSeconds.current = restSeconds;
         setRestForExercise(ex.name);
@@ -2895,7 +2935,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } else if (pendingRir?.exIdx === exIdx) {
       setPendingRir(null);
     }
-  }, [authToken, clearLiveRecommendationState, exercises, getEffectiveTargetSetCount, pendingRir, setInputs, workout.focus, workout.stimulus]);
+  }, [authToken, clearLiveRecommendationState, displayWeight, exercises, getEffectiveTargetSetCount, parseInputWeightLbs, pendingRir, setInputs, workout.focus, workout.stimulus]);
   handleLogSetInlineRef.current = handleLogSetInline;
 
   const openAddExerciseModal = useCallback(async () => {
@@ -3159,7 +3199,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     restartManagedInterval(restTimerRef, () => {
       const elapsed = Math.floor((Date.now() - restStartAtRef.current) / 1000);
       const remaining = Math.max(0, restTotalSecondsRef.current - elapsed);
-      setRestRemaining(remaining);
+      if (remaining !== restRemainingRef.current) {
+        restRemainingRef.current = remaining;
+        setRestRemaining(remaining);
+      }
 
       if (remaining === 0) {
         clearManagedInterval(restTimerRef);
@@ -3425,7 +3468,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   const handleLogSet = async () => {
     console.log('[LOG_SET] handleLogSet called with weight:', logWeight, 'reps:', logReps, 'exercise index:', logExIdx);
-    const weightNum = parseFloat(logWeight);
+    const weightNum = parseInputWeightLbs(logWeight);
     const repsNum   = parseInt(logReps, 10);
     if (!logWeight || !logReps || isNaN(weightNum) || isNaN(repsNum) || repsNum <= 0) {
       console.warn('[LOG_SET] Invalid input validation failed');
@@ -3463,7 +3506,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Start rest timer automatically if more sets remain for this exercise.
     if (!guide && updatedSets.length < targetSetCount) {
       const restSeconds = Math.max(15, ex.targetRestSeconds || 60);
-      const nextSetLabel = `Set ${updatedSets.length + 1}: ${weightNum} lbs x ${ex.targetReps}`;
+      const nextSetLabel = `Set ${updatedSets.length + 1}: ${displayWeight(weightNum)} x ${ex.targetReps}`;
       restDurationSeconds.current = restSeconds;
       setRestForExercise(ex.name);
       setRestRemaining(restSeconds);
@@ -3604,8 +3647,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     if (!(await cachedProfileIsPro())) {
       const setN = setsForExercise.length + 1;
       const last = setsForExercise[setsForExercise.length - 1];
-      const baseTip = last && Number(last.weightLbs) > 0
-        ? `Set ${setN}: aim to match ${last.weightLbs} lbs for ${last.reps || ex.targetReps} reps with clean form.`
+	      const baseTip = last && Number(last.weightLbs) > 0
+	        ? `Set ${setN}: aim to match ${displayWeight(last.weightLbs)} for ${last.reps || ex.targetReps} reps with clean form.`
         : `Set ${setN}: use a comfortable load for ${ex.targetReps} clean reps.`;
       setRestNextTarget(`Set ${setN}: ${ex.targetReps} reps`);
       setRestCue(baseTip);
@@ -3636,28 +3679,29 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         equipment: ex.equipment,
         primaryMuscle: ex.primaryMuscle ?? undefined,
       });
-      const tip = `Set ${setsForExercise.length + 1}: try ${rec.weightLbs} lbs x ${rec.reps} reps — ${rec.tip}`;
-      setRestNextTarget(`Set ${setsForExercise.length + 1}: ${rec.weightLbs} lbs x ${rec.reps}`);
+	      const recWeightText = displayWeight(rec.weightLbs);
+	      const tip = `Set ${setsForExercise.length + 1}: try ${recWeightText} x ${rec.reps} reps — ${rec.tip}`;
+	      setRestNextTarget(`Set ${setsForExercise.length + 1}: ${recWeightText} x ${rec.reps}`);
       setRestCue(rec.tip);
       setExercises(prev => prev.map((item, i) => i === exIdx ? { ...item, aiRecommendation: tip } : item));
       if (liveActivityIdRef.current) {
         updateRestActivity(liveActivityIdRef.current, {
           setNumber: setsForExercise.length,
           totalSets: targetSetCount,
-          nextSetRecommendation: `${rec.weightLbs} lbs x ${rec.reps} - ${rec.tip}`,
+	          nextSetRecommendation: `${recWeightText} x ${rec.reps} - ${rec.tip}`,
           exerciseName: ex.name,
           themeColorHex: theme.colors.primary,
         }).catch(() => undefined);
       }
       import('../utils/watchSync').then(({ pushProgressToWatch }) =>
-        pushProgressToWatch({ recommendation: `${rec.weightLbs} lbs x ${rec.reps} - ${rec.tip}` })
+	        pushProgressToWatch({ recommendation: `${recWeightText} x ${rec.reps} - ${rec.tip}` })
       ).catch(() => undefined);
 
       if (restRemaining > 0 && restForExercise === ex.name) {
         await rescheduleRestNotifications({
           seconds: restRemaining,
           exerciseName: ex.name,
-          nextSetLabel: `Set ${setsForExercise.length + 1}: ${rec.weightLbs} lbs x ${rec.reps}`,
+	          nextSetLabel: `Set ${setsForExercise.length + 1}: ${recWeightText} x ${rec.reps}`,
           aiCue: rec.tip,
           includeStartAlert: false,
         });
@@ -3667,7 +3711,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } finally {
       setAiLoadingIdx(null);
     }
-  }, [authToken, cachedProfileIsPro, clearLiveRecommendationState, exercises, getEffectiveTargetSetCount, goal, rescheduleRestNotifications, restForExercise, restRemaining, theme.colors.primary, workout.focus, workout.stimulus]);
+	  }, [authToken, cachedProfileIsPro, clearLiveRecommendationState, displayWeight, exercises, getEffectiveTargetSetCount, goal, rescheduleRestNotifications, restForExercise, restRemaining, theme.colors.primary, workout.focus, workout.stimulus]);
 
   const maybeRefreshRecommendationForExercise = useCallback(async (
     exIdx: number,
@@ -3907,44 +3951,47 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const exercisesPayload = session.exercises
           .filter(ex => ex.sets.length > 0)
           .map((ex, idx) => {
-          const exMetrics: Record<string, string> = {};
-          for (const [k, v] of Object.entries(timedMetrics)) {
-            const m = k.match(/^(\d+)-(.+)$/);
-            if (m && parseInt(m[1], 10) === idx && v) exMetrics[m[2]] = v;
-          }
-          const distVal = exMetrics.distance ? parseFloat(exMetrics.distance) : null;
-          const paceVal = exMetrics.pace || exMetrics.split || null;
-          const extras = { ...exMetrics };
-          delete extras.distance; delete extras.pace; delete extras.split;
-          const hasExtras = Object.keys(extras).length > 0;
-          return {
-            name: ex.name,
-            slug: ex.slug ?? (ex as any).exerciseSlug ?? (ex as any)._slug ?? null,
-            target_sets: typeof ex.targetSets === 'number' ? ex.targetSets : null,
-            target_reps: typeof ex.targetReps === 'string' ? ex.targetReps : null,
-            equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
-            primary_muscle: ex.primaryMuscle ?? ex.primary_muscle ?? null,
-            secondary_muscles: ex.secondaryMuscles ?? ex.secondary_muscles ?? null,
-            is_compound: ex.isCompound ?? null,
-            order_index: idx,
-            sets: ex.sets.map((s, si) => {
-              const isLast = si === ex.sets.length - 1;
-              return {
-                set_number: s.setNumber ?? si + 1,
-                reps: s.reps ?? 0,
-                weight_lbs: s.weightLbs ?? 0,
-                duration_seconds: s.durationSeconds ?? null,
-                comfort_rating: s.comfortRating ?? null,
-                feedback: s.feedback ?? null,
-                rir: s.rir ?? null,
-                heart_rate_avg: s.heartRateAvg ?? null,
-                ...(isLast && distVal != null ? { actual_distance: distVal } : {}),
-                ...(isLast && paceVal ? { actual_pace: paceVal } : {}),
-                ...(isLast && hasExtras ? { cardio_metrics: extras } : {}),
-              };
-            }),
-          };
-        });
+            const exMetrics: Record<string, string> = {};
+            for (const [k, v] of Object.entries(timedMetrics)) {
+              const m = k.match(/^(\d+)-(.+)$/);
+              if (m && parseInt(m[1], 10) === idx && v) exMetrics[m[2]] = v;
+            }
+            const rawDistVal = exMetrics.distance ? parseFloat(exMetrics.distance) : null;
+            const distVal = rawDistVal != null && Number.isFinite(rawDistVal) && shouldStoreDistanceAsMiles(ex.name)
+              ? unitToMi(rawDistVal, distanceUnit)
+              : rawDistVal;
+            const paceVal = exMetrics.pace || exMetrics.split || null;
+            const extras = { ...exMetrics };
+            delete extras.distance; delete extras.pace; delete extras.split;
+            const hasExtras = Object.keys(extras).length > 0;
+            return {
+              name: ex.name,
+              slug: ex.slug ?? (ex as any).exerciseSlug ?? (ex as any)._slug ?? null,
+              target_sets: typeof ex.targetSets === 'number' ? ex.targetSets : null,
+              target_reps: typeof ex.targetReps === 'string' ? ex.targetReps : null,
+              equipment: typeof ex.equipment === 'string' ? ex.equipment : null,
+              primary_muscle: ex.primaryMuscle ?? ex.primary_muscle ?? null,
+              secondary_muscles: ex.secondaryMuscles ?? ex.secondary_muscles ?? null,
+              is_compound: ex.isCompound ?? null,
+              order_index: idx,
+              sets: ex.sets.map((s, si) => {
+                const isLast = si === ex.sets.length - 1;
+                return {
+                  set_number: s.setNumber ?? si + 1,
+                  reps: s.reps ?? 0,
+                  weight_lbs: s.weightLbs ?? 0,
+                  duration_seconds: s.durationSeconds ?? null,
+                  comfort_rating: s.comfortRating ?? null,
+                  feedback: s.feedback ?? null,
+                  rir: s.rir ?? null,
+                  heart_rate_avg: s.heartRateAvg ?? null,
+                  ...(isLast && distVal != null ? { actual_distance: distVal } : {}),
+                  ...(isLast && paceVal ? { actual_pace: paceVal } : {}),
+                  ...(isLast && hasExtras ? { cardio_metrics: extras } : {}),
+                };
+              }),
+            };
+          });
         const focusText = workout.focus.trim();
         const liftPlusCardioFocus = /\+\s*cardio/i.test(focusText);
         const cardioLikeFocus = /cardio|conditioning|zone\s*2|interval|hiit|run|bike|row|swim/i.test(focusText);
@@ -4207,10 +4254,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       exercises: sourceExercises.map(e => ({
         name: e.name,
         equipment: (e as any).equipment ?? null,
-        sets: e.sets.map(s => ({
-          reps: Number(s.reps) || 0,
-          weight_lbs: Number((s as any).weightLbs ?? (s as any).weight_lbs) || 0,
-        })),
+	        sets: e.sets.map(s => ({ reps: Number(s.reps) || 0 })),
       })),
       total_sets: summarySetCount,
       total_reps: summaryRepCount,
@@ -4947,7 +4991,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   })()}
                   {bestLastSet && bestLastSet.weightLbs > 0 && !isDone && (
                     <Text style={{ fontSize: 13, color: themeColors.primary, fontWeight: '700', marginTop: 1 }}>
-                      Last: {bestLastSet.weightLbs}×{bestLastSet.reps}
+                      Last: {displayWeight(bestLastSet.weightLbs, { suffix: false })}×{bestLastSet.reps} {weightSuffix(weightUnit)}
                     </Text>
                   )}
                 </View>
@@ -5089,7 +5133,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         Recommended weight
                       </Text>
                       <Text style={{ fontSize: 18, fontWeight: '800', color: themeColors.textPrimary, marginTop: 2 }}>
-                        {Math.round(preSetHints[i].recommendedWeight!)} lb
+	                        {displayWeight(preSetHints[i].recommendedWeight!)}
                         {preSetHints[i].recommendedReps ? (
                           <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textSecondary }}>
                             {' '}× {preSetHints[i].recommendedReps}
@@ -5127,11 +5171,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 const loggedSet = updatedSets[setIdx];
                                 const suggestion = loggedSet
                                   ? buildRirNextSetSuggestion(
-                                      exercises[i],
-                                      loggedSet,
-                                      rir,
-                                      updatedSets.length + 1,
-                                    )
+                                    exercises[i],
+                                    loggedSet,
+                                    rir,
+                                    updatedSets.length + 1,
+                                    weightUnit,
+                                  )
                                   : null;
                                 setExercises(prev => prev.map((e, ei) => {
                                   if (ei !== i) return e;
@@ -5344,7 +5389,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               )}
                               {/* Optional metrics input — shown when done, exercise-type-specific */}
                               {allDone && (() => {
-                                const metricConfig = getTimedMetricsConfig(ex.name, (ex as any).cardioGuidance);
+                                const metricConfig = getTimedMetricsConfig(ex.name, (ex as any).cardioGuidance, distanceUnit);
                                 if (!metricConfig) return null;
                                 return (
                                   <View style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 10, padding: 12, marginTop: 10, gap: 10, borderWidth: 1, borderColor: themeColors.border }}>
@@ -5412,8 +5457,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           return (
                         <View style={styles.inlineSetsHeader}>
                           <Text style={[styles.inlineSetsLabel, { width: 20, flex: 0 }]}>#</Text>
-                              {!hideWeight && <Text style={styles.inlineSetsLabel}>Weight</Text>}
-                              <Text style={styles.inlineSetsLabel}>{hideReps ? 'Duration' : 'Reps'}</Text>
+                          {!hideWeight && <Text style={styles.inlineSetsLabel}>Weight ({weightSuffix(weightUnit)})</Text>}
+                          <Text style={styles.inlineSetsLabel}>{hideReps ? 'Duration' : 'Reps'}</Text>
                           <Text style={styles.inlineSetsLabel}>Last time</Text>
                           <View style={{ width: 40 }} />
                         </View>
@@ -5440,7 +5485,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           const lastTimeLabel = lastSet
                             ? (lastSet.durationSeconds != null
                                 ? `${(lastSet.durationSeconds / 60).toFixed(1)}min`
-                                : `${lastSet.weightLbs}×${lastSet.reps}`)
+                                : `${displayWeight(lastSet.weightLbs, { suffix: false })}×${lastSet.reps}`)
                             : '—';
                           // Only the LAST slot is deletable (logged or
                           // unlogged) so we don't rearrange slot indices
@@ -5514,7 +5559,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   // see at a glance which sets are already written.
                                   !isLogged && { borderColor: weightBorderColor, borderWidth: weightBorderWidth },
                                 ]}
-                                value={isLogged ? (editingSetKey === inputKey ? (editDraft.weight ?? String(logged.weightLbs)) : String(logged.weightLbs)) : input.weight}
+	                                value={isLogged ? (editingSetKey === inputKey ? (editDraft.weight ?? displayWeightNumber(logged.weightLbs)) : displayWeightNumber(logged.weightLbs)) : input.weight}
                                 onChangeText={v => {
                                   if (isLogged) {
                                     setEditingSetKey(inputKey);
@@ -5533,7 +5578,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   }
                                 }}
                                 keyboardType="decimal-pad"
-                                placeholder="lbs"
+	                                placeholder={weightSuffix(weightUnit)}
                                 placeholderTextColor={themeColors.textMuted}
                                 selectTextOnFocus
                               />}
@@ -5903,7 +5948,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
               <View style={styles.logInputRow}>
                 <View style={styles.logInputWrap}>
-                  <Text style={styles.logInputLabel}>Weight (lbs)</Text>
+                  <Text style={styles.logInputLabel}>Weight ({weightSuffix(weightUnit)})</Text>
                   <TextInput
                     style={styles.logInput}
                     value={logWeight}
@@ -6332,27 +6377,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     structured workout summary to the friends Activity
                     digest (no kcal/macros/weight ever — privacy boundary). */}
                 <View style={{ flexDirection: 'row', gap: 10 }}>
-                  <TouchableOpacity
-                    style={[styles.summaryFeedbackBtn, { flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }]}
-                    onPress={handleShareSummary}
-                    disabled={shareLoading || summaryLoading}
-                    activeOpacity={0.85}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                      <Ionicons name="share-outline" size={15} color={themeColors.textPrimary} />
-                      <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
-                        {shareLoading ? 'Saving…' : 'Share'}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
                   {SOCIAL_WORKOUT_POSTS_ENABLED ? (
                     <TouchableOpacity
                       style={[
                         styles.summaryFeedbackBtn,
                         {
-                          flex: 1,
-                          backgroundColor: themeColors.surfaceRaised,
+                          flex: 1.15,
+                          backgroundColor: themeColors.primary,
                           borderWidth: 1,
-                          borderColor: themeColors.border,
+                          borderColor: themeColors.primary,
                           opacity: workoutPostSummary ? 1 : 0.55,
                         },
                       ]}
@@ -6361,13 +6394,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       accessibilityLabel="Open friends share sheet"
                       activeOpacity={0.85}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <Ionicons name="people-outline" size={15} color={themeColors.textPrimary} />
-                        <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
-                          Friends
+                        <Ionicons name="people-outline" size={15} color={getContrastingTextColor(themeColors.primary)} />
+                        <Text style={[styles.summaryFeedbackBtnText, { color: getContrastingTextColor(themeColors.primary) }]}>
+                          Post to Friends
                         </Text>
                       </View>
                     </TouchableOpacity>
                   ) : null}
+                  <TouchableOpacity
+                    style={[styles.summaryFeedbackBtn, { flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border }]}
+                    onPress={handleShareSummary}
+                    disabled={shareLoading || summaryLoading}
+                    accessibilityRole="button"
+                    accessibilityLabel="Share workout recap image"
+                    activeOpacity={0.85}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Ionicons name="share-outline" size={15} color={themeColors.textPrimary} />
+                      <Text style={[styles.summaryFeedbackBtnText, { color: themeColors.textPrimary }]}>
+                        {shareLoading ? 'Saving…' : 'Share Image'}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
                 </View>
                 <TouchableOpacity
                   testID="summary-close"
@@ -6499,7 +6546,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           <View style={[styles.finishModal, { padding: 24, gap: 14 }]}>
             <Text style={[styles.summaryTitle, { fontSize: 18 }]}>Edit Set</Text>
             <View style={{ gap: 10 }}>
-              <Text style={{ color: themeColors.textSecondary, fontSize: 13, fontWeight: '600' }}>Weight (lbs)</Text>
+              <Text style={{ color: themeColors.textSecondary, fontSize: 13, fontWeight: '600' }}>Weight ({weightSuffix(weightUnit)})</Text>
               <TextInput
                 value={editSetWeight}
                 onChangeText={setEditSetWeight}

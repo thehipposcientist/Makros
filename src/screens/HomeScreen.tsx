@@ -131,6 +131,7 @@ import {
   type InjuryCheckinResponse,
   type InjuryCheckinState,
 } from '../utils/injuryCheckins';
+import { formatDistance, formatWeight, resolveDistanceUnit, resolveWeightUnit } from '../utils/units';
 
 interface HomeScreenProps {
   authToken: string;
@@ -1518,10 +1519,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return [customCat, ...filteredSeed];
   }, [meta.foodCategories, userProfile?.foodsAvailable, userProfile?.customFoods]);
   const theme = getTheme(userProfile?.themePreference);
-  const themeColors = theme.colors;
-  const workoutPalette = theme.sections.workout;
-  const mealPalette = theme.sections.meals;
-  const plannerPalette = theme.sections.planner;
+	  const themeColors = theme.colors;
+	  const workoutPalette = theme.sections.workout;
+	  const mealPalette = theme.sections.meals;
+	  const plannerPalette = theme.sections.planner;
+	  const weightUnit = resolveWeightUnit(userProfile);
+	  const distanceUnit = resolveDistanceUnit(userProfile);
 
   const [workoutPlan, setWorkoutPlan]     = useState<WorkoutPlan | null>(null);
   // The persisted 7-day plan from /plans/week/active. Source of truth for
@@ -2629,13 +2632,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         } else {
           try {
             if (authToken) {
-              const { getReadinessToday } = await import('../services/api');
+              const { getCachedReadinessToday } = await import('../services/readinessCache');
               const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
               const { getCycleStatus } = await import('../services/appleHealth');
               const cached = await getCachedHealthDataSummary().catch(() => null);
               const sleepHours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
               const cycle = await getCycleStatus().catch(() => null);
-              const prep = await getReadinessToday(authToken, {
+              const prep = await getCachedReadinessToday(authToken, {
                 avgSleepHours: sleepHours,
                 avgRestingHr: cached?.restingHeartRate ?? null,
                 avgHrvMs: cached?.hrv ?? null,
@@ -2968,13 +2971,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             try {
               if (!authToken) return;
               const { pushReadinessToWatch } = watchSync;
-              const { getReadinessToday } = await import('../services/api');
+              const { getCachedReadinessToday } = await import('../services/readinessCache');
               const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
               const { getCycleStatus } = await import('../services/appleHealth');
               const cached = await getCachedHealthDataSummary().catch(() => null);
               const sleepHours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
               const cycle = await getCycleStatus().catch(() => null);
-              const serverResp = await getReadinessToday(authToken, {
+              const serverResp = await getCachedReadinessToday(authToken, {
                 avgSleepHours: sleepHours,
                 avgRestingHr: cached?.restingHeartRate ?? null,
                 avgHrvMs: cached?.hrv ?? null,
@@ -3094,7 +3097,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       if (now - lastRefreshAt < REFRESH_MIN_INTERVAL_MS) return;
       lastRefreshAt = now;
       try {
-        const { getReadinessToday } = await import('../services/api');
+        const { getCachedReadinessToday } = await import('../services/readinessCache');
         const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
         const { getCycleStatus } = await import('../services/appleHealth');
         const { pushReadinessToWatch } = await import('../utils/watchSync');
@@ -3104,7 +3107,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const s = rePushStateRef.current;
         const todayItem = resolveTodayScheduleItem(s.schedule, s.workoutPlan, s.planWeek);
         const todayWorkout = todayItem?.workout ?? s.workoutPlan?.days?.[0] ?? null;
-        const r = await getReadinessToday(authToken, {
+        const r = await getCachedReadinessToday(authToken, {
           avgSleepHours: sleepHours,
           avgRestingHr: cached?.restingHeartRate ?? null,
           avgHrvMs: cached?.hrv ?? null,
@@ -6884,33 +6887,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               />
             )}
 
-            {/* Combined "Today's training readiness" — fuses Recovery (per-muscle
-                for today's focus) + Preparedness (sleep/HRV/nutrition/RHR).
-                Re-runs when today's focus changes (Switch Day picker).
-                Pro-only: this card calls the server readiness/fatigue endpoints. */}
-            {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (() => {
-              const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
-              // Find today by date — with the dated PlanWeek schedule,
-              // today is no longer guaranteed to live at index 0.
-              const todayScheduleItem = schedule?.find(s => dateKey(s.date) === todayKey()) ?? schedule?.[0];
-              const todaysFocus = todayScheduleItem?.workout?.focus ?? workoutPlan?.days?.[0]?.focus ?? null;
-              return (
-                <View style={{ height: 0, overflow: 'hidden' }}>
-                  <TrainingReadinessCard
-                    authToken={authToken}
-                    themeName={userProfile.themePreference}
-                    age={userProfile.physicalStats?.age ?? null}
-                    proteinTarget={todayPlan?.targets?.protein ?? null}
-                    calorieTarget={todayPlan?.targets?.calories ?? null}
-                    todaysFocus={todaysFocus}
-                    workoutDone={todayDone}
-                    onScoreComputed={applyReadinessScore}
-                    onDataComputed={(prep) => { bgPrepDataRef.current = prep; }}
-                  />
-                </View>
-              );
-            })()}
-
             {/* Health-linked cycle guidance with period-phase advice and
                 user-triggered today-only workout adjustments. */}
             <CycleGuidanceSection
@@ -6996,7 +6972,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             )}
 
 
-            {/* (Previous Readiness/RecoveryCard was replaced by TrainingReadinessCard above.) */}
+            {/* Readiness lives on today's plan card and opens a detail modal. */}
 
             {/* Resume workout banner — shown when the user force-quit
                 mid-workout. Jumps straight back into ActiveWorkoutScreen
@@ -7385,6 +7361,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
                       setSelectedWorkoutDayKey(dayKey);
                       setSwitchDayIdx(-1);
+                      const selectedEntry = _weekSchedule.find(entry => dateKey(entry.s.date) === dayKey);
+                      setExpandedDay(selectedEntry && !selectedEntry.s.isRest ? selectedEntry.origIdx : -2);
                     }}
                   />
                 <FadeInView key={key} delay={renderIdx * 80}>
@@ -7684,8 +7662,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </FadeInView>
                 {isToday ? (
                   <View style={styles.todayPlanCardsWrap}>
+                    {!isFreeTier && authToken && (() => {
+                      const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
+                      const todaysFocus = item.workout?.focus ?? workoutPlan?.days?.[0]?.focus ?? null;
+                      return (
+                        <TrainingReadinessCard
+                          authToken={authToken}
+                          themeName={userProfile.themePreference}
+                          age={userProfile.physicalStats?.age ?? null}
+                          proteinTarget={todayPlan?.targets?.protein ?? null}
+                          calorieTarget={todayPlan?.targets?.calories ?? null}
+                          todaysFocus={todaysFocus}
+                          workoutDone={todayDone}
+                          onScoreComputed={applyReadinessScore}
+                          onDataComputed={(prep) => { bgPrepDataRef.current = prep; }}
+                        />
+                      );
+                    })()}
                     <TodayWorkoutPlanActivityCards
                       themeName={userProfile.themePreference}
+                      distanceUnit={distanceUnit}
                       sessions={workoutHistoryList.filter((s) => {
                         if (!isExtraWorkoutActivitySession(s)) return false;
                         const d = (s.startedAt ?? s.date ?? '').slice(0, 10);
@@ -7717,6 +7713,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       }}
                       onLogActivity={() => setShowLogActivity(true)}
                       onEditPlan={() => setWorkoutSubTab('equipment')}
+                      plannedWorkout={isWorkoutCardExpanded && item.workout && !isCompleted && !isSkipped ? item.workout : null}
+                      onStartPlanned={(workout) => {
+                        import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {});
+                        onStartWorkout(workout);
+                      }}
                       onNewTemplate={() => {
                         // Free-cap defense — backend helper also enforces.
                         if (isFreeTier && workoutTemplates.length >= 3) {
@@ -9107,9 +9108,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }
           return null;
         };
-        const formatPounds = (value: number): string =>
-          Number.isInteger(value) ? `${value}` : value.toFixed(1);
-        const stats = ps as any;
+	        const stats = ps as any;
         const details = (userProfile.goalDetails ?? {}) as any;
         const weightLbs = numberValue(stats?.weightLbs ?? stats?.weight_lbs);
         const heightFeet = numberValue(stats?.heightFeet ?? stats?.height_feet);
@@ -9122,8 +9121,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const avatarLetter = (cleanText(userProfile.firstName) || cleanText(username) || cleanText(userProfile.goal) || 'U')[0].toUpperCase();
         const metaParts = [
           profileGoalLabel || null,
-          weightLbs != null && weightLbs > 0 ? `${formatPounds(weightLbs)} lb` : null,
-          targetWeightLbs != null && targetWeightLbs > 0 ? `goal ${formatPounds(targetWeightLbs)} lb` : null,
+	          weightLbs != null && weightLbs > 0 ? formatWeight(weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }) : null,
+	          targetWeightLbs != null && targetWeightLbs > 0 ? `goal ${formatWeight(targetWeightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })}` : null,
           heightFeet != null && heightInches != null ? `${Math.round(heightFeet)}'${Math.round(heightInches)}"` : null,
           age != null && age > 0 ? `age ${Math.round(age)}` : null,
         ].filter((part): part is string => !!part);
@@ -9182,9 +9181,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <View style={[styles.profileStatTile, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
               <Text style={[styles.profileStatLabel, { color: themeColors.textMuted }]}>WEIGHT</Text>
               <Text style={[styles.profileStatValue, { color: themeColors.textPrimary }]}>
-                {weightLbs != null && weightLbs > 0 ? formatPounds(weightLbs) : '—'}
-              </Text>
-              <Text style={[styles.profileStatSub, { color: themeColors.textMuted }]}>lb</Text>
+	                {weightLbs != null && weightLbs > 0 ? formatWeight(weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0, suffix: false }) : '—'}
+	              </Text>
+	              <Text style={[styles.profileStatSub, { color: themeColors.textMuted }]}>{weightUnit}</Text>
             </View>
             <View style={[styles.profileStatTile, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
               <Text style={[styles.profileStatLabel, { color: themeColors.textMuted }]}>GOAL PACE</Text>
@@ -9192,7 +9191,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {userProfile.goalDetails?.pace ?? '—'}
               </Text>
               <Text style={[styles.profileStatSub, { color: themeColors.textMuted }]}>
-                {targetWeightLbs != null && targetWeightLbs > 0 ? `→ ${formatPounds(targetWeightLbs)} lb` : ''}
+	                {targetWeightLbs != null && targetWeightLbs > 0 ? `→ ${formatWeight(targetWeightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })}` : ''}
               </Text>
             </View>
           </View>
@@ -11085,9 +11084,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         onRequestClose={() => setShowGearScreen(false)}>
         {showGearScreen && authToken && (
           <GearScreen
-            authToken={authToken}
-            themeName={userProfile.themePreference}
-            onBack={() => setShowGearScreen(false)}
+	            authToken={authToken}
+	            themeName={userProfile.themePreference}
+	            distanceUnit={distanceUnit}
+	            onBack={() => setShowGearScreen(false)}
           />
         )}
       </Modal>
@@ -12780,12 +12780,15 @@ function activityIcon(session: WorkoutSession): string {
   return 'walk-outline';
 }
 
-function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onLogActivity, onEditPlan, templates = [], isFreeTier = false, onStartTemplate, onDeleteTemplate, onNewTemplate, onEditTemplate }: {
+const TodayWorkoutPlanActivityCards = React.memo(function TodayWorkoutPlanActivityCards({ themeName, distanceUnit = 'mi', sessions, onStartCustom, onLogActivity, onEditPlan, plannedWorkout = null, onStartPlanned, templates = [], isFreeTier = false, onStartTemplate, onDeleteTemplate, onNewTemplate, onEditTemplate }: {
   themeName?: import('../types').AppThemeName;
+  distanceUnit?: import('../utils/units').DistanceUnit;
   sessions: WorkoutSession[];
   onStartCustom: () => void;
   onLogActivity: () => void;
   onEditPlan: () => void;
+  plannedWorkout?: WorkoutDay | null;
+  onStartPlanned?: (workout: WorkoutDay) => void;
   templates?: SavedWorkoutTemplate[];
   isFreeTier?: boolean;
   onStartTemplate?: (template: SavedWorkoutTemplate) => void;
@@ -12797,11 +12800,11 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
 }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
-  const sortedSessions = [...sessions].sort((a, b) => {
+  const sortedSessions = React.useMemo(() => [...sessions].sort((a, b) => {
     const aMs = new Date(a.startedAt ?? a.date ?? 0).getTime();
     const bMs = new Date(b.startedAt ?? b.date ?? 0).getTime();
     return bMs - aMs;
-  });
+  }), [sessions]);
 
   return (
     <View style={styles.todayActivitySection}>
@@ -12820,7 +12823,7 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
         const pieces = [
           source,
           formatActivityDuration(session.durationSeconds),
-          activity?.distanceMiles ? `${activity.distanceMiles.toFixed(1)} mi` : null,
+          activity?.distanceMiles ? formatDistance(activity.distanceMiles, distanceUnit) : null,
           activity?.caloriesBurned ? `${Math.round(activity.caloriesBurned)} kcal` : null,
           activity?.avgHeartRate ? `${Math.round(activity.avgHeartRate)} bpm` : null,
         ].filter(Boolean);
@@ -12847,6 +12850,17 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
       })}
 
       <View style={styles.todayActivityQuickRow}>
+        {plannedWorkout && onStartPlanned ? (
+          <TouchableOpacity
+            testID="start-workout-cta"
+            accessibilityLabel="start-workout-cta"
+            style={[styles.todayActivityQuickAction, { backgroundColor: tc.primary, borderColor: tc.primary }]}
+            onPress={() => onStartPlanned(plannedWorkout)}
+            activeOpacity={0.78}>
+            <Ionicons name="play-circle" size={15} color={getContrastingTextColor(tc.primary)} />
+            <Text style={[styles.todayActivityQuickText, { color: getContrastingTextColor(tc.primary) }]}>Plan</Text>
+          </TouchableOpacity>
+        ) : null}
         <TouchableOpacity
           testID="extra-workout-custom"
           accessibilityLabel="extra-workout-custom"
@@ -12983,7 +12997,7 @@ function TodayWorkoutPlanActivityCards({ themeName, sessions, onStartCustom, onL
       )}
     </View>
   );
-}
+});
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 

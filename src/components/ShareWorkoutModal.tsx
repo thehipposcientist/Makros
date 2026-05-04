@@ -220,8 +220,8 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
                   <View style={s.exerciseList}>
                     {exs.map((ex, i) => {
                       const bestSet = ex.sets.reduce(
-                        (best, set) => ((set.weight_lbs ?? 0) > (best.weight_lbs ?? 0) ? set : best),
-                        ex.sets[0] ?? { reps: 0, weight_lbs: 0 },
+                        (best, set) => ((set.reps ?? 0) > (best.reps ?? 0) ? set : best),
+                        ex.sets[0] ?? { reps: 0 },
                       );
                       return (
                         <View key={i} style={s.exerciseRow}>
@@ -233,7 +233,6 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
                           </View>
                           <Text style={s.exerciseSets}>
                             {ex.sets.length}x{bestSet.reps}
-                            {(bestSet.weight_lbs ?? 0) > 0 ? ` @ ${bestSet.weight_lbs} lbs` : ''}
                           </Text>
                         </View>
                       );

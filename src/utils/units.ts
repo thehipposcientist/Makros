@@ -5,13 +5,9 @@
 // stays on the canonical unit so a user toggling display preference never
 // triggers a data migration. Formatters here convert at render time only.
 //
-// Adding kg/km support across the app is staged: phase 1 (this file) gives
-// us the helpers and the preference field; phase 2 sweeps display sites to
-// route through these helpers. Until phase 2 lands, most screens still
-// hardcode lbs/mi — the preference shows up in Settings but doesn't flip
-// every chart label yet. That's intentional: shipping the toggle without
-// the helpers risks display drift; shipping the helpers without sweeping
-// every site is reversible and low-risk.
+// Adding kg/km support across the app is staged. The core workout,
+// progress, gear, and share surfaces now route their primary displays
+// through these helpers; less visible legacy copy can migrate as touched.
 
 export type WeightUnit = 'lbs' | 'kg';
 export type DistanceUnit = 'mi' | 'km';

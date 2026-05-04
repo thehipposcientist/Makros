@@ -198,6 +198,8 @@ export default function CoachCheckinModal({
   const [response, setResponse] = useState<CoachCheckinResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [applyNotice, setApplyNotice] = useState<string | null>(null);
+  const [applyUndoAction, setApplyUndoAction] = useState<Record<string, any> | null>(null);
+  const [applyUndoBusy, setApplyUndoBusy] = useState(false);
   // Trainer / nutritionist summary fetched from the deterministic
   // weekly review. Shown above the rating form so the check-in reads
   // as "here's what the coach saw, does this match your experience?"
@@ -242,6 +244,8 @@ export default function CoachCheckinModal({
     setResponse(null);
     setError(null);
     setApplyNotice(null);
+    setApplyUndoAction(null);
+    setApplyUndoBusy(false);
   };
 
   const handleClose = () => {
@@ -655,6 +659,7 @@ export default function CoachCheckinModal({
                                         setApplyNotice(applied.summary || (applied.descriptive_only
                                           ? 'Recommendation noted.'
                                           : 'Applied to your saved settings.'));
+                                        setApplyUndoAction(applied.undo_action ?? null);
                                         setReview(prev => prev ? {
                                           ...prev,
                                           recommendations: prev.recommendations.filter(x => x.key !== rec.key),
@@ -688,6 +693,50 @@ export default function CoachCheckinModal({
                           Applied to settings
                         </Text>
                         <Text style={styles.deltaLine}>{applyNotice}</Text>
+                        {applyUndoAction && (
+                          <TouchableOpacity
+                            disabled={applyUndoBusy}
+                            onPress={async () => {
+                              if (!applyUndoAction) return;
+                              setApplyUndoBusy(true);
+                              try {
+                                const undone = await applyRecommendationAction(
+                                  authToken,
+                                  applyUndoAction,
+                                  `checkin:undo:${Date.now()}`,
+                                );
+                                const changed = undone.changed_fields ?? {};
+                                if (coachApplyNeedsDayStatusRefresh(changed)) {
+                                  onPlanUpdated?.();
+                                }
+                                setApplyNotice(undone.summary || 'Change undone.');
+                                setApplyUndoAction(null);
+                              } catch {
+                                setApplyNotice('Could not undo that change. Try again from settings.');
+                              } finally {
+                                setApplyUndoBusy(false);
+                              }
+                            }}
+                            style={{
+                              alignSelf: 'flex-start',
+                              marginTop: 8,
+                              paddingHorizontal: 10,
+                              paddingVertical: 5,
+                              borderRadius: 6,
+                              backgroundColor: colors.surfaceRaised,
+                              borderWidth: 1,
+                              borderColor: colors.primary + '55',
+                              opacity: applyUndoBusy ? 0.7 : 1,
+                            }}>
+                            {applyUndoBusy ? (
+                              <ActivityIndicator size="small" color={colors.primary} />
+                            ) : (
+                              <Text style={{ fontSize: 11, fontWeight: '800', color: colors.primary }}>
+                                Undo
+                              </Text>
+                            )}
+                          </TouchableOpacity>
+                        )}
                         <Text style={styles.deltaFootnote}>
                           Your active 7-day PlanWeek stays fixed. Future generated weeks read these settings; use Workout {'>'} Plan {'>'} Change Focus or Swap for this week.
                         </Text>

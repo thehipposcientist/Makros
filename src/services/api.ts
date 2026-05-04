@@ -153,6 +153,57 @@ async function request<T>(path: string, options: RequestInit = {}, timeoutMs = 3
   throw lastError ?? new Error('Request failed');
 }
 
+const readInflight = new Map<string, Promise<any>>();
+const readCache = new Map<string, { expiresAt: number; value: any }>();
+
+function readRequestKey(path: string, options: RequestInit = {}): string | null {
+  const method = String(options.method ?? 'GET').toUpperCase();
+  if (method !== 'GET') return null;
+  return `${tokenFromHeaders(options.headers) ?? ''}::${path}`;
+}
+
+async function requestRead<T>(
+  path: string,
+  options: RequestInit = {},
+  timeoutMs = 30000,
+  ttlMs = 15000,
+): Promise<T> {
+  const key = readRequestKey(path, options);
+  if (!key) return request<T>(path, options, timeoutMs);
+  const cached = readCache.get(key);
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) return cached.value as T;
+  const existing = readInflight.get(key);
+  if (existing) return existing as Promise<T>;
+  const promise = request<T>(path, options, timeoutMs)
+    .then(value => {
+      readCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+      return value;
+    })
+    .finally(() => {
+      readInflight.delete(key);
+    });
+  readInflight.set(key, promise);
+  return promise;
+}
+
+type ListWindowOptions = {
+  limit?: number;
+  skip?: number;
+  since?: string | null;
+  before?: string | null;
+};
+
+function normalizeWindowOptions(input: number | ListWindowOptions | undefined, defaultLimit: number): Required<Pick<ListWindowOptions, 'limit' | 'skip'>> & Pick<ListWindowOptions, 'since' | 'before'> {
+  if (typeof input === 'number') return { limit: input, skip: 0, since: null, before: null };
+  return {
+    limit: input?.limit ?? defaultLimit,
+    skip: input?.skip ?? 0,
+    since: input?.since ?? null,
+    before: input?.before ?? null,
+  };
+}
+
 export async function register(
   email: string,
   username: string,
@@ -1061,9 +1112,9 @@ export type OneRepMaxLift = {
 
 export async function getOneRepMaxShowcase(token: string): Promise<OneRepMaxLift[]> {
   try {
-    const res = await request<{ lifts: OneRepMaxLift[] }>('/ai/strength/one-rep-max', {
+    const res = await requestRead<{ lifts: OneRepMaxLift[] }>('/ai/strength/one-rep-max', {
       headers: { Authorization: `Bearer ${token}` },
-    });
+    }, 30000, 30000);
     return res.lifts ?? [];
   } catch {
     return [];
@@ -1678,22 +1729,30 @@ export interface WorkoutSessionRecord {
 
 export async function listWorkoutSessions(
   token: string,
-  limit: number = 100,
+  opts: number | ListWindowOptions = 100,
 ): Promise<WorkoutSessionRecord[]> {
-  return request(`/workouts?limit=${limit}`, {
+  const { limit, skip, since, before } = normalizeWindowOptions(opts, 100);
+  const params = new URLSearchParams({ limit: String(limit), skip: String(skip) });
+  if (since) params.set('since', since);
+  if (before) params.set('before', before);
+  return requestRead(`/workouts?${params}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 10000);
 }
 
 /** Fetch the user's recent completion markers. No per-set detail. Used to
  *  rehydrate local workoutHistory after a wipe. */
 export async function listWorkoutCompletions(
   token: string,
-  limit: number = 100,
+  opts: number | ListWindowOptions = 100,
 ): Promise<WorkoutCompletionRecord[]> {
-  return request(`/workouts/completions?limit=${limit}`, {
+  const { limit, skip, since, before } = normalizeWindowOptions(opts, 100);
+  const params = new URLSearchParams({ limit: String(limit), skip: String(skip) });
+  if (since) params.set('since', since);
+  if (before) params.set('before', before);
+  return requestRead(`/workouts/completions?${params}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 10000);
 }
 
 export interface FatigueScore {
@@ -1720,9 +1779,9 @@ export interface FatigueScore {
 }
 
 export async function getFatigueScore(token: string): Promise<FatigueScore> {
-  return request<FatigueScore>('/workouts/fatigue', {
+  return requestRead<FatigueScore>('/workouts/fatigue', {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 30000);
 }
 
 export interface NutritionScoreResult {
@@ -2848,9 +2907,9 @@ export async function unlogMealChecked(
 }
 
 export async function getMealHistory(token: string, days = 30, limit = 100): Promise<{ meals: MealHistoryEntry[] }> {
-  return request(`/meals/history?days=${days}&limit=${limit}`, {
+  return requestRead(`/meals/history?days=${days}&limit=${limit}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 10000);
 }
 
 /** Hard-delete a logged meal by its backend Meal id. The matching MealItem
@@ -2865,15 +2924,15 @@ export async function deleteLoggedMeal(token: string, mealId: number): Promise<v
 }
 
 export async function getMealAverages(token: string, window = 7): Promise<MealAverages> {
-  return request(`/meals/averages?window=${window}`, {
+  return requestRead(`/meals/averages?window=${window}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 10000);
 }
 
 export async function getMealInsights(token: string): Promise<{ insights: string[]; patterns: Record<string, any> }> {
-  return request('/meals/insights', {
+  return requestRead('/meals/insights', {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 30000);
 }
 
 export interface GutHealthToday {
@@ -2945,9 +3004,9 @@ export interface GutHealthWindow {
 }
 
 export async function getGutHealth(token: string, days = 7): Promise<{ today: GutHealthToday | null; window: GutHealthWindow }> {
-  return request(`/meals/gut-health?days=${days}`, {
+  return requestRead(`/meals/gut-health?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 10000);
 }
 
 // Plant vs animal protein breakdown for today — per-food list so the
@@ -3034,9 +3093,9 @@ export interface NutritionScoreWeekly {
 }
 
 export async function getNutritionScore(token: string, days = 7): Promise<{ today: NutritionScoreToday; weekly: NutritionScoreWeekly }> {
-  return request(`/meals/score?days=${days}`, {
+  return requestRead(`/meals/score?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 10000);
 }
 
 export interface AdjustedDailyTarget {
@@ -3228,9 +3287,9 @@ export interface PlateauEntry {
 }
 
 export async function getPlateaus(token: string, windowWeeks = 4): Promise<{ plateaus: PlateauEntry[] }> {
-  return request(`/ai/plateaus?window_weeks=${windowWeeks}`, {
+  return requestRead(`/ai/plateaus?window_weeks=${windowWeeks}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 30000);
 }
 
 // ── Streak + consistency (Feature 8) ───────────────────────────────────────
@@ -3261,9 +3320,9 @@ export interface MuscleBalanceResult {
 }
 
 export async function getMuscleBalance(token: string, days = 14): Promise<MuscleBalanceResult> {
-  return request(`/ai/muscle-balance?days=${days}`, {
+  return requestRead(`/ai/muscle-balance?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 30000);
 }
 
 export async function scanBody(
@@ -3294,10 +3353,10 @@ export interface WeightEntryAPI {
 }
 
 export async function getWeightEntries(token: string): Promise<WeightEntryAPI[]> {
-  return request<WeightEntryAPI[]>('/profile/weight-entries', {
+  return requestRead<WeightEntryAPI[]>('/profile/weight-entries', {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 30000);
 }
 
 export async function saveWeightEntryAPI(token: string, date: string, weightLbs: number, source = 'manual'): Promise<void> {
@@ -3709,10 +3768,10 @@ export async function getWeeklyReview(
   if (opts.avgSteps != null) params.set('avg_steps', String(opts.avgSteps));
   if (opts.readinessScore != null) params.set('readiness_score', String(opts.readinessScore));
   const qs = params.toString();
-  return request<WeeklyReviewResponse>(`/workouts/weekly-review${qs ? `?${qs}` : ''}`, {
+  return requestRead<WeeklyReviewResponse>(`/workouts/weekly-review${qs ? `?${qs}` : ''}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 30000);
 }
 
 export interface ApplyActionResult {
@@ -4231,10 +4290,10 @@ export async function getE1RM(token: string, exerciseName: string, role = 'prima
 }
 
 export async function getE1RMHistory(token: string, exerciseName: string, role = 'primary'): Promise<{ exercise: string; history: E1RMHistoryPoint[] }> {
-  return request(`/workouts/e1rm/history?exercise_name=${encodeURIComponent(exerciseName)}&role=${role}`, {
+  return requestRead(`/workouts/e1rm/history?exercise_name=${encodeURIComponent(exerciseName)}&role=${role}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 30000);
 }
 
 export interface HRZone {
@@ -4274,10 +4333,10 @@ export interface PaceHistoryPoint {
 export async function getPaceHistory(token: string, exercise?: string, days = 90): Promise<{ points: PaceHistoryPoint[] }> {
   const params = new URLSearchParams({ days: String(days) });
   if (exercise) params.set('exercise', exercise);
-  return request(`/workouts/pace-history?${params}`, {
+  return requestRead(`/workouts/pace-history?${params}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
-  });
+  }, 30000, 30000);
 }
 
 // ─── Social ────────────────────────────────────────────────────────────────
@@ -4483,7 +4542,7 @@ export interface WorkoutPostSummary {
   exercises: Array<{
     name: string;
     equipment?: string | null;
-    sets: Array<{ reps: number; weight_lbs?: number }>;
+    sets: Array<{ reps: number }>;
   }>;
   total_sets: number;
   total_reps: number;

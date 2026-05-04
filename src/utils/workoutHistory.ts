@@ -8,6 +8,7 @@ import {
   upsertWorkoutTemplateInStorage,
 } from './workoutTemplates';
 import { sanitizeWorkoutHistorySession } from './workoutCompletion';
+import { isTrackableStrengthExercise, loadedStrengthSets } from './workoutProgressFilters';
 
 const HISTORY_KEY        = 'workoutHistory';
 const SKIPPED_KEY        = 'skippedWorkouts';
@@ -690,7 +691,8 @@ export function derivePersonalRecords(history: WorkoutSession[]): PR[] {
 
   for (const session of history.filter(s => s.completed && !s.skipped)) {
     for (const ex of session.exercises) {
-      for (const set of ex.sets) {
+      if (!isTrackableStrengthExercise(ex)) continue;
+      for (const set of loadedStrengthSets(ex)) {
         const key = ex.name.toLowerCase();
         const existing = prMap.get(key);
         if (

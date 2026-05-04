@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
+import { formatDistance, unitToMi, type DistanceUnit } from '../utils/units';
 import {
   listGear,
   addGear,
@@ -146,6 +147,13 @@ function formatLastUsed(iso: string | null): string | null {
   return `${years} year${years !== 1 ? 's' : ''} ago`;
 }
 
+function daysSinceLastUsed(iso: string | null): number | null {
+  if (!iso) return null;
+  const then = new Date(iso);
+  if (isNaN(then.getTime())) return null;
+  return Math.floor((Date.now() - then.getTime()) / 86_400_000);
+}
+
 // ─── Mileage progress bar ─────────────────────────────────────────────────────
 
 function MileageBar({ pct, color }: { pct: number | null; color: string }) {
@@ -158,17 +166,99 @@ function MileageBar({ pct, color }: { pct: number | null; color: string }) {
   );
 }
 
+function GearInsightPanel({
+  gear,
+  tc,
+  distanceUnit,
+}: {
+  gear: GearItem[];
+  tc: ReturnType<typeof getTheme>['colors'];
+  distanceUnit: DistanceUnit;
+}) {
+  if (gear.length === 0) return null;
+  const active = gear.filter(item => item.is_active !== false);
+  const nearRetirement = active.filter(item => item.pct_used != null && item.pct_used >= 0.85);
+  const watchList = active.filter(item => item.pct_used != null && item.pct_used >= 0.65 && item.pct_used < 0.85);
+  const stale = active.filter(item => {
+    const days = daysSinceLastUsed(item.last_used_at);
+    return days != null && days >= 45;
+  });
+  const mileTracked = active.filter(item => isMileTracked(item.gear_type));
+  const totalMiles = mileTracked.reduce((sum, item) => sum + item.total_miles, 0);
+  const totalSessions = active.reduce((sum, item) => sum + item.accumulated_sessions, 0);
+  const primaryAlert = nearRetirement[0] ?? watchList[0] ?? null;
+
+  const insightRows = [
+    {
+      key: 'lifecycle',
+      icon: nearRetirement.length ? 'warning-outline' : 'shield-checkmark-outline',
+      color: nearRetirement.length ? '#F97316' : tc.primary,
+      title: nearRetirement.length
+        ? `${nearRetirement.length} item${nearRetirement.length === 1 ? '' : 's'} near retirement`
+        : watchList.length
+          ? `${watchList.length} item${watchList.length === 1 ? '' : 's'} on the watch list`
+          : 'Lifecycle looks clean',
+      detail: primaryAlert?.recommendation ?? 'Thresholds are comfortably below alert levels.',
+    },
+    {
+      key: 'load',
+      icon: 'analytics-outline',
+      color: tc.primary,
+      title: `${formatDistance(totalMiles, distanceUnit)} tracked · ${totalSessions} session${totalSessions === 1 ? '' : 's'}`,
+      detail: mileTracked.length > 1
+        ? 'Rotate mile-tracked gear to spread wear across shoes, bikes, and tires.'
+        : 'Add a second pair or bike part when rotation matters for your training.',
+    },
+    {
+      key: 'signal',
+      icon: stale.length ? 'time-outline' : 'trending-up-outline',
+      color: stale.length ? '#F59E0B' : '#22C55E',
+      title: stale.length ? `${stale.length} item${stale.length === 1 ? '' : 's'} not used recently` : 'Session signals are current',
+      detail: stale.length
+        ? `${stale[0].name} last appeared ${formatLastUsed(stale[0].last_used_at)}. Archive or update keywords if that is wrong.`
+        : 'Usage is fresh enough to catch maintenance and performance patterns after workouts.',
+    },
+  ];
+
+  return (
+    <View style={[styles.insightPanel, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+      <View style={styles.insightHeader}>
+        <Ionicons name="sparkles-outline" size={16} color={tc.primary} />
+        <Text style={[styles.insightTitle, { color: tc.textPrimary }]}>Lifecycle Insights</Text>
+      </View>
+      {insightRows.map(row => (
+        <View
+          key={row.key}
+          style={styles.insightRow}
+          accessible
+          accessibilityLabel={`${row.title}. ${row.detail}`}
+        >
+          <View style={[styles.insightIcon, { backgroundColor: row.color + '1F' }]}>
+            <Ionicons name={row.icon as any} size={15} color={row.color} />
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text style={[styles.insightRowTitle, { color: tc.textPrimary }]}>{row.title}</Text>
+            <Text style={[styles.insightRowDetail, { color: tc.textSecondary }]}>{row.detail}</Text>
+          </View>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 // ─── Gear card ─────────────────────────────────────────────────────────────────
 
 function GearCard({
   item,
   tc,
+  distanceUnit,
   onEdit,
   onLogMiles,
   onDelete,
 }: {
   item: GearItem;
   tc: ReturnType<typeof getTheme>['colors'];
+  distanceUnit: DistanceUnit;
   onEdit: () => void;
   onLogMiles: () => void;
   onDelete: () => void;
@@ -188,13 +278,13 @@ function GearCard({
           <Text style={[styles.gearType, { color: tc.textSecondary }]}>{info.label}</Text>
         </View>
         <View style={styles.cardActions}>
-          <TouchableOpacity onPress={onLogMiles} style={styles.actionBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <TouchableOpacity onPress={onLogMiles} style={styles.actionBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} accessibilityRole="button" accessibilityLabel={`Log usage for ${item.name}`}>
             <Ionicons name="add-circle-outline" size={22} color={tc.primary} />
           </TouchableOpacity>
-          <TouchableOpacity onPress={onEdit} style={styles.actionBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <TouchableOpacity onPress={onEdit} style={styles.actionBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} accessibilityRole="button" accessibilityLabel={`Edit ${item.name}`}>
             <Ionicons name="pencil-outline" size={20} color={tc.textSecondary} />
           </TouchableOpacity>
-          <TouchableOpacity onPress={onDelete} style={styles.actionBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <TouchableOpacity onPress={onDelete} style={styles.actionBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} accessibilityRole="button" accessibilityLabel={`Delete ${item.name}`}>
             <Ionicons name="trash-outline" size={18} color={tc.textMuted} />
           </TouchableOpacity>
         </View>
@@ -217,8 +307,8 @@ function GearCard({
       <View style={styles.statsRow}>
         {isMileTracked(item.gear_type) && (
           <View style={styles.stat}>
-            <Text style={[styles.statValue, { color: tc.textPrimary }]}>{item.total_miles.toFixed(1)}</Text>
-            <Text style={[styles.statLabel, { color: tc.textSecondary }]}>total mi</Text>
+            <Text style={[styles.statValue, { color: tc.textPrimary }]}>{formatDistance(item.total_miles, distanceUnit, { suffix: false })}</Text>
+            <Text style={[styles.statLabel, { color: tc.textSecondary }]}>total {distanceUnit}</Text>
           </View>
         )}
         <View style={styles.stat}>
@@ -266,6 +356,7 @@ function GearFormModal({
   initial,
   tc,
   authToken,
+  distanceUnit,
   onSave,
   onCancel,
 }: {
@@ -273,6 +364,7 @@ function GearFormModal({
   initial: GearItem | null;
   tc: ReturnType<typeof getTheme>['colors'];
   authToken: string;
+  distanceUnit: DistanceUnit;
   onSave: (body: GearItemCreate) => void;
   onCancel: () => void;
 }) {
@@ -291,15 +383,15 @@ function GearFormModal({
     if (visible) {
       setName(initial?.name ?? '');
       setGearType(initial?.gear_type ?? 'running_shoe');
-      setStartingMiles(String(initial?.starting_miles ?? 0));
-      setThreshold(initial?.retirement_threshold_miles != null ? String(initial.retirement_threshold_miles) : '');
+      setStartingMiles(formatDistance(initial?.starting_miles ?? 0, distanceUnit, { suffix: false }).replace(/\.0$/, ''));
+      setThreshold(initial?.retirement_threshold_miles != null ? formatDistance(initial.retirement_threshold_miles, distanceUnit, { suffix: false }).replace(/\.0$/, '') : '');
       setSessionThreshold(initial?.retirement_threshold_sessions != null ? String(initial.retirement_threshold_sessions) : '');
       setKeywords((initial?.auto_track_keywords ?? []).join(', '));
       setNotes(initial?.notes ?? '');
       setPhotos(initial?.photos ?? []);
       setAiNote(null);
     }
-  }, [visible, initial]);
+  }, [visible, initial, distanceUnit]);
 
   const handleGearTypeChange = (type: string) => {
     setGearType(type);
@@ -386,10 +478,10 @@ function GearFormModal({
         handleGearTypeChange(identified.gear_type);
       }
       if (identified.estimated_miles != null && startingMiles === '0') {
-        setStartingMiles(String(Math.round(identified.estimated_miles)));
+        setStartingMiles(formatDistance(identified.estimated_miles, distanceUnit, { suffix: false }).replace(/\.0$/, ''));
       }
       if (identified.retirement_threshold_miles != null && !threshold) {
-        setThreshold(String(Math.round(identified.retirement_threshold_miles)));
+        setThreshold(formatDistance(identified.retirement_threshold_miles, distanceUnit, { suffix: false }).replace(/\.0$/, ''));
       }
       const conf = identified.confidence === 'high' ? '✓ High confidence'
         : identified.confidence === 'medium' ? '~ Medium confidence'
@@ -411,11 +503,11 @@ function GearFormModal({
     onSave({
       name: name.trim(),
       gear_type: gearType,
-      starting_miles: parseFloat(startingMiles) || 0,
+      starting_miles: unitToMi(parseFloat(startingMiles) || 0, distanceUnit),
       // Only persist the unit that applies — keeps the other null so the
       // backend doesn't compute a misleading pct_used off a stale value
       // when the user changes gear type.
-      retirement_threshold_miles: isMile && threshold ? parseFloat(threshold) : null,
+      retirement_threshold_miles: isMile && threshold ? unitToMi(parseFloat(threshold), distanceUnit) : null,
       retirement_threshold_sessions: !isMile && sessionThreshold ? parseInt(sessionThreshold, 10) : null,
       auto_track_keywords: keywords.split(',').map(k => k.trim()).filter(Boolean),
       notes: notes.trim() || null,
@@ -557,7 +649,7 @@ function GearFormModal({
               the threshold blank just disables the retirement progress bar. */}
           {isMileTracked(gearType) ? (
             <>
-              <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>MILES ALREADY ON IT</Text>
+              <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>{distanceUnit.toUpperCase()} ALREADY ON IT</Text>
               <TextInput
                 style={[styles.input, { backgroundColor: tc.surface, color: tc.textPrimary, borderColor: tc.border }]}
                 value={startingMiles}
@@ -567,7 +659,7 @@ function GearFormModal({
                 placeholderTextColor={tc.textMuted}
               />
 
-              <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>RETIREMENT THRESHOLD (miles)</Text>
+              <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>RETIREMENT THRESHOLD ({distanceUnit})</Text>
               <TextInput
                 style={[styles.input, { backgroundColor: tc.surface, color: tc.textPrimary, borderColor: tc.border }]}
                 value={threshold}
@@ -629,12 +721,14 @@ function LogMilesModal({
   visible,
   gear,
   tc,
+  distanceUnit,
   onLog,
   onCancel,
 }: {
   visible: boolean;
   gear: GearItem | null;
   tc: ReturnType<typeof getTheme>['colors'];
+  distanceUnit: DistanceUnit;
   onLog: (miles: number, sessions: number) => void;
   onCancel: () => void;
 }) {
@@ -654,7 +748,7 @@ function LogMilesModal({
       <View style={styles.logOverlay}>
         <View style={[styles.logBox, { backgroundColor: tc.surface }]}>
           <Text style={[styles.logTitle, { color: tc.textPrimary }]}>
-            {sessionOnly ? 'Log Session' : 'Log Miles'}
+            {sessionOnly ? 'Log Session' : `Log ${distanceUnit.toUpperCase()}`}
           </Text>
           <Text style={[styles.logSubtitle, { color: tc.textSecondary }]}>{gear?.name}</Text>
           {sessionOnly ? (
@@ -681,7 +775,7 @@ function LogMilesModal({
                 placeholderTextColor={tc.textMuted}
                 autoFocus
               />
-              <Text style={[styles.hint, { color: tc.textMuted, textAlign: 'center', marginBottom: 16 }]}>miles to add</Text>
+              <Text style={[styles.hint, { color: tc.textMuted, textAlign: 'center', marginBottom: 16 }]}>{distanceUnit} to add</Text>
             </>
           )}
           <View style={styles.logButtons}>
@@ -693,7 +787,7 @@ function LogMilesModal({
                 if (sessionOnly) {
                   onLog(0, Math.max(1, parseInt(sessions, 10) || 1));
                 } else {
-                  onLog(parseFloat(miles) || 0, 1);
+                  onLog(unitToMi(parseFloat(miles) || 0, distanceUnit), 1);
                 }
               }}
               style={[styles.logBtn, { backgroundColor: tc.primary, borderColor: tc.primary }]}
@@ -712,10 +806,11 @@ function LogMilesModal({
 interface Props {
   authToken: string;
   themeName?: AppThemeName;
+  distanceUnit?: DistanceUnit;
   onBack?: () => void;
 }
 
-export default function GearScreen({ authToken, themeName = 'slate', onBack }: Props) {
+export default function GearScreen({ authToken, themeName = 'slate', distanceUnit = 'mi', onBack }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const insets = useSafeAreaInsets();
@@ -822,6 +917,8 @@ export default function GearScreen({ authToken, themeName = 'slate', onBack }: P
             </Text>
           </View>
 
+          <GearInsightPanel gear={gear} tc={tc} distanceUnit={distanceUnit} />
+
           {gear.length === 0 ? (
             <View style={styles.empty}>
               <Ionicons name="walk-outline" size={48} color={tc.textMuted} />
@@ -842,6 +939,7 @@ export default function GearScreen({ authToken, themeName = 'slate', onBack }: P
                 key={item.id}
                 item={item}
                 tc={tc}
+                distanceUnit={distanceUnit}
                 onEdit={() => { setEditTarget(item); setShowForm(true); }}
                 onLogMiles={() => setLogTarget(item)}
                 onDelete={() => handleDelete(item)}
@@ -856,6 +954,7 @@ export default function GearScreen({ authToken, themeName = 'slate', onBack }: P
         initial={editTarget}
         tc={tc}
         authToken={authToken}
+        distanceUnit={distanceUnit}
         onSave={handleSave}
         onCancel={() => { setShowForm(false); setEditTarget(null); }}
       />
@@ -864,6 +963,7 @@ export default function GearScreen({ authToken, themeName = 'slate', onBack }: P
         visible={!!logTarget}
         gear={logTarget}
         tc={tc}
+        distanceUnit={distanceUnit}
         onLog={handleLogMiles}
         onCancel={() => setLogTarget(null)}
       />
@@ -906,6 +1006,19 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   infoText: { flex: 1, fontSize: 12, lineHeight: 18 },
+  insightPanel: {
+    borderRadius: radius.md,
+    borderWidth: 1,
+    padding: 14,
+    marginBottom: 12,
+    gap: 10,
+  },
+  insightHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  insightTitle: { fontSize: 14, fontWeight: '800' },
+  insightRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  insightIcon: { width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginTop: 1 },
+  insightRowTitle: { fontSize: 12, fontWeight: '800' },
+  insightRowDetail: { fontSize: 11, lineHeight: 15, marginTop: 2 },
   card: {
     borderRadius: radius.md,
     borderWidth: 1,

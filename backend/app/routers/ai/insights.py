@@ -77,6 +77,7 @@ def muscle_balance(
     hamstrings, glutes).
     """
     from datetime import date as date_type, timedelta
+    import re
     from sqlmodel import select
     from app.models import WorkoutSession, WorkoutExercise, ExerciseSet, Exercise
 
@@ -86,8 +87,29 @@ def muscle_balance(
         select(WorkoutSession)
         .where(WorkoutSession.user_id == current_user.id)
         .where(WorkoutSession.workout_date >= cutoff)
+        .where(WorkoutSession.completed_at.is_not(None))
     ).all()
-    session_ids = [s.id for s in sessions]
+    def _is_non_strength_focus(focus: str | None) -> bool:
+        value = (focus or "").strip().lower()
+        if not value or "+" in value:
+            return False
+        return value in {
+            "cardio",
+            "zone 2 cardio",
+            "conditioning",
+            "endurance",
+            "mobility",
+            "mobility day",
+            "recovery",
+            "recovery day",
+            "rest",
+            "stretch",
+        }
+
+    session_ids = [
+        s.id for s in sessions
+        if s.id is not None and not _is_non_strength_focus(s.focus)
+    ]
 
     if not session_ids:
         return {
@@ -97,42 +119,77 @@ def muscle_balance(
             "balance_score": 0,
         }
 
-    exercises = db.exec(
-        select(WorkoutExercise).where(WorkoutExercise.session_id.in_(session_ids))
+    def _muscle_to_str(value) -> str:
+        if value is None:
+            return ""
+        if hasattr(value, "value"):
+            return str(value.value).strip().lower()
+        return str(value).strip().lower()
+
+    def _muscles_to_list(value) -> list[str]:
+        if not value:
+            return []
+        if isinstance(value, list):
+            return [_muscle_to_str(v) for v in value if _muscle_to_str(v)]
+        return [_muscle_to_str(value)]
+
+    EXCLUDED_BUCKETS = {"", "full_body", "cardio", "mobility", "recovery", "stretch", "systemic"}
+    SKIPPED_SET_TYPES = {"warmup", "warm_up", "mobility", "recovery"}
+    SKIPPED_ACTIVITY_TYPES = {"cardio", "conditioning", "mobility", "recovery", "stretch"}
+    skipped_exercise_re = re.compile(
+        r"treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|"
+        r"battle rope|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|"
+        r"cardio|zone.?2|tempo (run|ride|bike|row|swim)|boxing|kickboxing|bag.?work|"
+        r"shadow.?box|yoga|vinyasa|pilates|mobility|stretch|foam.?roll|recovery flow|"
+        r"child.?s pose|seated forward fold|spinal twist|couch stretch|deep squat hold|"
+        r"90/90|cat.?cow|thread.?the.?needle|dead hang|wall sit|hollow.?hold|plank|burpee",
+        re.I,
+    )
+
+    rows = db.exec(
+        select(
+            WorkoutExercise.id,
+            WorkoutExercise.name,
+            Exercise.primary_muscle,
+            Exercise.secondary_muscles,
+            Exercise.exercise_type,
+            Exercise.movement_pattern,
+            WorkoutExercise.primary_muscle_snapshot,
+            WorkoutExercise.secondary_muscles_snapshot,
+            ExerciseSet.set_type,
+        )
+        .outerjoin(Exercise, WorkoutExercise.exercise_id == Exercise.id)
+        .join(ExerciseSet, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
+        .where(WorkoutExercise.session_id.in_(session_ids))
+        .where(ExerciseSet.completed == True)  # noqa: E712
     ).all()
-    we_ids = [we.id for we in exercises]
-
-    completed_sets: dict[int, int] = {}
-    if we_ids:
-        sets_rows = db.exec(
-            select(ExerciseSet)
-            .where(ExerciseSet.workout_exercise_id.in_(we_ids))
-            .where(ExerciseSet.completed == True)  # noqa: E712
-        ).all()
-        for s in sets_rows:
-            completed_sets[s.workout_exercise_id] = completed_sets.get(s.workout_exercise_id, 0) + 1
-
-    ex_cache: dict[str, Exercise | None] = {}
-    def _lookup(name: str) -> Exercise | None:
-        if name not in ex_cache:
-            ex_cache[name] = db.exec(
-                select(Exercise).where(Exercise.name == name)
-            ).first()
-        return ex_cache[name]
 
     muscle_sets: dict[str, float] = {}
-    for we in exercises:
-        n = completed_sets.get(we.id, 0)
-        if n == 0:
+    for _we_id, name, pm, sm, exercise_type, movement_pattern, pm_snapshot, sm_snapshot, set_type in rows:
+        if (set_type or "working").lower() in SKIPPED_SET_TYPES:
             continue
-        ex = _lookup(we.name)
-        if not ex:
+        if _muscle_to_str(exercise_type) in SKIPPED_ACTIVITY_TYPES:
             continue
-        pm = ex.primary_muscle.value if hasattr(ex.primary_muscle, "value") else str(ex.primary_muscle)
-        muscle_sets[pm] = muscle_sets.get(pm, 0) + n
-        for sm in (ex.secondary_muscles or []):
-            key = sm.value if hasattr(sm, "value") else str(sm)
-            muscle_sets[key] = muscle_sets.get(key, 0) + n * 0.5
+        if _muscle_to_str(movement_pattern) in SKIPPED_ACTIVITY_TYPES:
+            continue
+        if skipped_exercise_re.search(name or ""):
+            continue
+        primary = _muscle_to_str(pm_snapshot) or _muscle_to_str(pm)
+        secondaries = _muscles_to_list(sm_snapshot) or _muscles_to_list(sm)
+        if primary not in EXCLUDED_BUCKETS:
+            muscle_sets[primary] = muscle_sets.get(primary, 0) + 1.0
+        for secondary in secondaries:
+            if secondary in EXCLUDED_BUCKETS:
+                continue
+            muscle_sets[secondary] = muscle_sets.get(secondary, 0) + 0.5
+
+    if not muscle_sets:
+        return {
+            "muscles": {},
+            "period_days": days,
+            "total_sets": 0,
+            "balance_score": 0,
+        }
 
     total = sum(muscle_sets.values()) or 1
     muscles = {

@@ -379,7 +379,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
         {SOCIAL_ACTIVITY_FEED_ENABLED ? (
           <TouchableOpacity
             testID="social-tab-activity"
-            accessibilityLabel="social-tab-activity"
+            accessibilityLabel="Activity"
             style={[styles.tab, activeTab === 'activity' && styles.tabActive]}
             onPress={() => setActiveTab('activity')}
           >
@@ -390,7 +390,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
         ) : null}
         <TouchableOpacity
           testID="social-tab-friends"
-          accessibilityLabel="social-tab-friends"
+          accessibilityLabel="Friends"
           style={[styles.tab, activeTab === 'friends' && styles.tabActive]}
           onPress={() => setActiveTab('friends')}
         >

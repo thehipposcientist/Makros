@@ -328,10 +328,38 @@ export default function WeeklyCoachingCard({
                             // Hand back to the parent so it can refresh
                             // status; the active PlanWeek stays fixed.
                             onAcceptRecommendation?.(rec);
+                            const alertButtons = result.undo_action
+                              ? [
+                                  {
+                                    text: 'Undo',
+                                    onPress: async () => {
+                                      try {
+                                        const undo = await applyRecommendationAction(
+                                          authToken,
+                                          result.undo_action!,
+                                          `${rec.key}:undo:${Date.now()}`,
+                                        );
+                                        onAcceptRecommendation?.(rec);
+                                        Alert.alert(
+                                          'Undone',
+                                          undo.summary || 'Change undone.',
+                                          [{ text: 'OK', onPress: () => dismissRec(rec.key) }],
+                                        );
+                                      } catch (e: any) {
+                                        Alert.alert(
+                                          'Could not undo',
+                                          e?.message ?? 'Something went wrong. Try again.',
+                                        );
+                                      }
+                                    },
+                                  },
+                                  { text: 'OK', onPress: () => dismissRec(rec.key) },
+                                ]
+                              : [{ text: 'OK', onPress: () => dismissRec(rec.key) }];
                             Alert.alert(
                               result.applied ? 'Applied' : 'Acknowledged',
                               result.summary,
-                              [{ text: 'OK', onPress: () => dismissRec(rec.key) }],
+                              alertButtons,
                             );
                           } catch (e: any) {
                             Alert.alert(

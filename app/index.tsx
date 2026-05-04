@@ -1738,6 +1738,8 @@ export default function Index() {
         goal={userProfile.goal}
         themeName={userProfile.themePreference}
         weightLbs={userProfile.physicalStats.weightLbs}
+        weightUnit={userProfile.weightUnit ?? 'lbs'}
+        distanceUnit={userProfile.distanceUnit ?? 'mi'}
         onFinish={handleWorkoutFinish}
         onCancel={handleCancelActiveWorkout}
         onDislikeExercise={(name) => {
