@@ -455,6 +455,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // roundtrip every time EditProfileScreen mounts.
   const [calorieRanges, setCalorieRanges] = useState<CalorieRanges | null>(null);
   const [calorieRangesLoading, setCalorieRangesLoading] = useState(false);
+  const [calorieRangesLoadedKey, setCalorieRangesLoadedKey] = useState<string | null>(null);
+  const calorieRangesKey = [
+    profile.physicalStats.weightLbs,
+    profile.physicalStats.heightFeet,
+    profile.physicalStats.heightInches,
+    profile.physicalStats.birthdate ?? profile.physicalStats.age,
+    profile.physicalStats.gender,
+    profile.daysPerWeek ?? 3,
+    profile.workoutDurationMinutes ?? 60,
+  ].join('|');
   const [equipment, setEquipment]     = useState<string[]>(profile.equipment as string[]);
   const [equipmentSettings, setEquipmentSettings] = useState<StrengthEquipmentSettings | undefined>(profile.equipmentSettings);
   const [foods, setFoods]             = useState<string[]>([
@@ -653,8 +663,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   // and retry. This catches the test-user case where signup happened on
   // top of a stale local profile and onboarding sync was never triggered.
   useEffect(() => {
-    if (mode === 'mealplan' && (mealplanTab === 'macros' || mealplanTab === 'foods') && authToken && !calorieRanges && !calorieRangesLoading) {
+    if (mode === 'mealplan' && (mealplanTab === 'macros' || mealplanTab === 'foods') && authToken) {
+      if (calorieRanges && calorieRangesLoadedKey === calorieRangesKey) return;
+      let cancelled = false;
+      const fetchKey = calorieRangesKey;
       setCalorieRangesLoading(true);
+      setCalorieRanges(null);
       const fetchOnce = () => getCalorieRanges(authToken);
       const trySync = async () => {
         const { syncOnboarding } = await import('../services/api');
@@ -665,21 +679,33 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
         }
       };
       fetchOnce()
-        .then(setCalorieRanges)
+        .then((ranges) => {
+          if (cancelled) return;
+          setCalorieRanges(ranges);
+          setCalorieRangesLoadedKey(fetchKey);
+        })
         .catch(async () => {
           // First failure → push profile + retry once.
           await trySync();
           try {
             const ranges = await fetchOnce();
+            if (cancelled) return;
             setCalorieRanges(ranges);
+            setCalorieRangesLoadedKey(fetchKey);
           } catch (e) {
             console.warn('[calorie-ranges] still failing after sync retry', e);
+            if (cancelled) return;
             setCalorieRanges(null);
+            setCalorieRangesLoadedKey(null);
           }
         })
-        .finally(() => setCalorieRangesLoading(false));
+        .finally(() => {
+          if (!cancelled) setCalorieRangesLoading(false);
+        });
+      return () => { cancelled = true; };
     }
-  }, [mode, mealplanTab, authToken, profile]);
+    return undefined;
+  }, [mode, mealplanTab, authToken, profile, calorieRangesKey, calorieRangesLoadedKey]);
 
   // Load exercise library when exercises tab is opened. Merges user's
   // AI-saved custom exercises on top of the seeded backend library so

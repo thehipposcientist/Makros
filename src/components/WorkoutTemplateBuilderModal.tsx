@@ -19,6 +19,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName, SavedWorkoutTemplate, WorkoutDay, Exercise } from '../types';
 import { upsertWorkoutTemplate } from '../utils/workoutHistory';
+import { parseWorkoutPhoto } from '../services/api';
 
 interface LibraryItem {
   id?: number | string;
@@ -55,9 +56,10 @@ interface Props {
   currentCount?: number;
   /** When set, opens the modal in edit mode for this template. */
   editTarget?: SavedWorkoutTemplate | null;
+  authToken?: string | null;
 }
 
-export default function WorkoutTemplateBuilderModal({ visible, themeName, onClose, onSaved, editTarget }: Props) {
+export default function WorkoutTemplateBuilderModal({ visible, themeName, onClose, onSaved, editTarget, authToken }: Props) {
   const tc = getTheme(themeName).colors;
   const [name, setName] = useState('');
   const [draftExercises, setDraftExercises] = useState<DraftExercise[]>([]);
@@ -66,6 +68,7 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
   const [libraryLoading, setLibraryLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [saving, setSaving] = useState(false);
+  const [importingPhoto, setImportingPhoto] = useState(false);
 
   useEffect(() => {
     if (!visible) return;
@@ -138,6 +141,61 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
 
   const updateExercise = (idx: number, patch: Partial<DraftExercise>) => {
     setDraftExercises(prev => prev.map((e, i) => i === idx ? { ...e, ...patch } : e));
+  };
+
+  const handleImportPhoto = async () => {
+    if (!authToken) return;
+    setImportingPhoto(true);
+    try {
+      const ImagePicker = await import('expo-image-picker');
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Photo access needed', 'Allow photo access to import a workout screenshot.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        base64: true,
+        quality: 0.85,
+      });
+      if (result.canceled) return;
+      const asset = result.assets?.[0];
+      if (!asset?.base64) {
+        Alert.alert('Could not read photo', 'Choose a different screenshot and try again.');
+        return;
+      }
+      const parsed = await parseWorkoutPhoto(authToken, asset.base64, (asset as any).mimeType || 'image/jpeg');
+      const session = (parsed.sessions ?? []).find(s => Array.isArray(s.exercises) && s.exercises.length > 0) ?? parsed.sessions?.[0];
+      const imported = (session?.exercises ?? []).filter((ex: any) => String(ex?.name ?? '').trim());
+      if (!session || imported.length === 0) {
+        Alert.alert('No exercises found', 'I found the workout, but not enough exercise detail to build a saved template.');
+        return;
+      }
+      setName(prev => prev.trim() ? prev : String(session.focus || 'Imported Template'));
+      setDraftExercises(prev => [
+        ...prev,
+        ...imported.map((ex: any): DraftExercise => {
+          const sets = Array.isArray(ex.sets) ? ex.sets : [];
+          const reps = sets.length > 0
+            ? String(sets[0]?.reps ?? '8-12')
+            : '8-12';
+          return {
+            name: String(ex.name).trim(),
+            slug: null,
+            primaryMuscle: null,
+            equipment: String(ex.equipment || 'Bodyweight'),
+            sets: Math.max(1, Number(ex.sets_count ?? sets.length) || 3),
+            reps,
+            restSeconds: Math.max(0, Number(ex.restSeconds) || 60),
+          };
+        }),
+      ]);
+    } catch (e: any) {
+      Alert.alert('Import failed', String(e?.message ?? 'Could not import that screenshot.'));
+    } finally {
+      setImportingPhoto(false);
+    }
   };
 
   const handleSave = async () => {
@@ -283,6 +341,24 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
             <Ionicons name="add" size={18} color={tc.primary} />
             <Text style={{ fontSize: 13, fontWeight: '700', color: tc.primary }}>Add Exercise</Text>
           </TouchableOpacity>
+          {authToken ? (
+            <TouchableOpacity
+              testID="workout-template-import-photo"
+              accessibilityLabel="workout-template-import-photo"
+              onPress={handleImportPhoto}
+              disabled={importingPhoto}
+              style={[s.addBtn, { borderColor: tc.border, backgroundColor: tc.surface, opacity: importingPhoto ? 0.65 : 1 }]}
+              activeOpacity={0.75}>
+              {importingPhoto ? (
+                <ActivityIndicator size="small" color={tc.primary} />
+              ) : (
+                <Ionicons name="image-outline" size={18} color={tc.primary} />
+              )}
+              <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
+                {importingPhoto ? 'Importing...' : 'Import Screenshot'}
+              </Text>
+            </TouchableOpacity>
+          ) : null}
         </ScrollView>
 
         {/* Exercise picker — full-screen list with search. */}

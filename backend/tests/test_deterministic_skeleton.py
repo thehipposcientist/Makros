@@ -33,6 +33,13 @@ from app.services.nutrition.deterministic_skeleton import (
 from app.services.nutrition.meal_assembler import (
     DEFAULT_NUTRITION_PANTRY,
     FoodMacros,
+    _CARB_KEYWORDS,
+    _CARB_KEYWORDS_PREFERRED,
+    _FAT_KEYWORDS,
+    _PROTEIN_KEYWORDS,
+    _VEG_KEYWORDS,
+    _build_deterministic_template,
+    _food_matches_keywords,
     assemble_nutrition_response,
     assemble_template,
     food_names_for_generation,
@@ -314,6 +321,23 @@ def test_variety_day_n_and_n_plus_one_differ() -> None:
     _ok("consecutive days differ in at least one meal")
 
 
+def test_variety_one_template_has_distinct_meals_with_title_case_foods() -> None:
+    """mealVariety=1 means one repeatable day template, not the exact same
+    meal copied into every slot. Title-cased food names previously bypassed
+    the used-food set because it stored lower-case names."""
+    print("\n[test] variety=1 one-day template has distinct meals")
+    pantry = [
+        "Chicken Breast", "Brown Rice", "Broccoli", "Olive Oil",
+        "Eggs", "Oats", "Greek Yogurt", "Banana",
+        "Salmon", "Sweet Potato", "Spinach", "Avocado",
+    ]
+    tpl = _build_deterministic_template(pantry, 3)
+    signatures = [tuple(m.food_refs) for m in tpl.meals]
+    assert len(signatures) == 3
+    assert len(set(signatures)) == 3, signatures
+    _ok("single daily template contains 3 different meals")
+
+
 # ─── 5. Pantry-poor fallback — no crash ─────────────────────────────────────
 
 
@@ -563,6 +587,30 @@ def test_meals_per_day_7() -> None:
     _ok("7 meals emitted with indices 0..6")
 
 
+def test_full_meals_include_protein_plant_and_energy_anchor() -> None:
+    """Breakfast/lunch/dinner should be plate-shaped when the pantry allows it:
+    protein + plant + either a smart carb or a fat source."""
+    print("\n[test] full meals include protein + plant + carb/fat anchor")
+    pantry = [
+        "chicken breast", "salmon", "greek yogurt", "eggs",
+        "brown rice", "quinoa", "oats", "sweet potato",
+        "broccoli", "spinach", "berries",
+        "olive oil", "avocado", "almonds",
+    ]
+    plant_keywords = _VEG_KEYWORDS | {"berries", "berry", "apple", "banana"}
+    energy_keywords = _CARB_KEYWORDS_PREFERRED | _CARB_KEYWORDS | _FAT_KEYWORDS
+    req = _make_plan_request(mealsPerDay=3, mealVariety=3)
+    templates, _, _ = generate_deterministic_skeleton(req, 3, pantry)
+
+    for day_i, template in enumerate(templates):
+        for meal in template.meals:
+            refs = meal.food_refs
+            assert any(_food_matches_keywords(f, _PROTEIN_KEYWORDS) for f in refs), (day_i, meal.name, refs)
+            assert any(_food_matches_keywords(f, plant_keywords) for f in refs), (day_i, meal.name, refs)
+            assert any(_food_matches_keywords(f, energy_keywords) for f in refs), (day_i, meal.name, refs)
+    _ok("all full meals had a protein, plant, and carb/fat anchor")
+
+
 # ─── 8. Determinism — same input → same output ──────────────────────────────
 
 
@@ -595,6 +643,7 @@ cases = [
     test_allergen_filter_blocks_tree_nuts,
     test_food_is_allergen_helper,
     test_variety_day_n_and_n_plus_one_differ,
+    test_variety_one_template_has_distinct_meals_with_title_case_foods,
     test_pantry_poor_user_gets_meals_no_crash,
     test_empty_pantry_returns_empty_templates,
     test_vegan_preference_filters_animal_foods,
@@ -606,6 +655,7 @@ cases = [
     test_assembler_merges_custom_foods_into_generation_pantry,
     test_meals_per_day_5,
     test_meals_per_day_7,
+    test_full_meals_include_protein_plant_and_energy_anchor,
     test_determinism_identical_inputs_produce_identical_output,
 ]
 

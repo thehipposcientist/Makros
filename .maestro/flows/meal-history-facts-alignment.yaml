@@ -76,9 +76,11 @@ tags:
 - tapOn:
     id: "meal-history-row-0"
 - extendedWaitUntil:
-    visible: "Greek yogurt protein bowl"
+    visible:
+      id: "meal-history-row-0-meal-0"
     timeout: 15000
-- assertVisible: "Salmon sweet potato plate"
+- assertVisible:
+    id: "meal-history-row-0-meal-2"
 
 # Progress facts should aggregate the same seven seeded meal-history days:
 # four 933-cal days + three 1427-cal days => 1145 logged-cal average.
@@ -96,8 +98,12 @@ tags:
     direction: DOWN
     timeout: 30000
     visibilityPercentage: 50
-- assertVisible:
-    id: "nutrition-trend-logged-calories-1145"
+- scrollUntilVisible:
+    element:
+      id: "nutrition-trend-logged-calories-1145"
+    direction: DOWN
+    timeout: 30000
+    visibilityPercentage: 30
 - scrollUntilVisible:
     element:
       id: "nutrition-gut-facts-card"

@@ -26,6 +26,8 @@ export interface GapMealSuggestion {
 const ZERO: MacroTotals = { calories: 0, protein: 0, carbs: 0, fat: 0 };
 const MACRO_KEYS: Array<keyof MacroTotals> = ['calories', 'protein', 'carbs', 'fat'];
 const MAX_SUGGESTED_MEAL_CALORIES = 1200;
+const PANTRY_CALORIE_OVERSHOOT_LIMIT = 1.08;
+const SAVED_MEAL_CALORIE_OVERSHOOT_LIMIT = 1.15;
 const UNIT_ALIASES: Record<string, FoodUnit> = {
   g: 'g', gram: 'g', grams: 'g',
   kg: 'kg', kilogram: 'kg', kilograms: 'kg',
@@ -308,7 +310,7 @@ function buildSavedMealCandidate(
     };
     if (!best || candidate.fitScore < best.fitScore) best = candidate;
   }
-  if (!best || best.meal.calories > target.calories * 1.35 || best.fitScore > 1.15) return null;
+  if (!best || best.meal.calories > target.calories * SAVED_MEAL_CALORIE_OVERSHOOT_LIMIT || best.fitScore > 1.15) return null;
   return best;
 }
 
@@ -347,12 +349,14 @@ function buildPantryCandidate(
     return 1;
   };
 
-  let items = selected.map(entry => scaleFood(entry.food, scaleFor(entry)));
+  let itemScales = selected.map(entry => scaleFor(entry));
+  let items = selected.map((entry, index) => scaleFood(entry.food, itemScales[index]));
   let totals = itemTotals(items);
 
   if (totals.calories > target.calories * 1.15) {
     const ratio = target.calories / totals.calories;
-    items = selected.map(entry => scaleFood(entry.food, scaleFor(entry) * ratio));
+    itemScales = itemScales.map(scale => scale * ratio);
+    items = selected.map((entry, index) => scaleFood(entry.food, itemScales[index]));
     totals = itemTotals(items);
   }
 
@@ -368,9 +372,18 @@ function buildPantryCandidate(
     if (fillerIdx >= 0) {
       const entry = selected[fillerIdx];
       const extraScale = calorieShortfall / Math.max(1, entry.food.calories);
-      items[fillerIdx] = scaleFood(entry.food, scaleFor(entry) + extraScale);
+      itemScales[fillerIdx] = itemScales[fillerIdx] + extraScale;
+      items[fillerIdx] = scaleFood(entry.food, itemScales[fillerIdx]);
       totals = itemTotals(items);
     }
+  }
+
+  const calorieCap = target.calories * PANTRY_CALORIE_OVERSHOOT_LIMIT;
+  if (totals.calories > calorieCap) {
+    const ratio = calorieCap / Math.max(1, totals.calories);
+    itemScales = itemScales.map(scale => scale * ratio);
+    items = selected.map((entry, index) => scaleFood(entry.food, itemScales[index]));
+    totals = itemTotals(items);
   }
 
   const meal = syncMealFromItems({

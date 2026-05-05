@@ -16,11 +16,13 @@ from app.services.workout.planner import (
     SPLIT_PPL,
     SPLIT_PPL_UL,
     SPLIT_UPPER_LOWER,
+    _display_focus_for_exercises,
     build_day_templates,
     generate_workout_plan,
     pick_split,
     weekly_set_targets,
 )
+from app.services.workout.archetypes import DayArchetype
 from app.services.workout.history import (
     make_dict_history_lookup,
     propagate_session_targets,
@@ -225,6 +227,30 @@ def test_full_body_name_is_trainer_style_not_day_n() -> None:
     _, focus = _day_meta(SPLIT_FULL_BODY, 0)
     assert focus == "Full Body", f"focus label regressed to {focus!r}"
     _ok(f"{names[0]} | focus={focus}")
+
+
+def test_plus_cardio_focus_label_matches_generated_contents() -> None:
+    print("\n[test] plus-cardio label reflects generated contents")
+    focus = _display_focus_for_exercises(
+        DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+        "Push + Cardio",
+        [
+            {"_primary_muscle": "chest", "_role": "primary", "prescriptionType": "strength"},
+            {"_primary_muscle": "core", "_role": "core", "prescriptionType": "core_circuit"},
+        ],
+    )
+    assert focus == "Push + Core", f"expected Push + Core, got {focus!r}"
+
+    focus = _display_focus_for_exercises(
+        DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+        "Push + Cardio",
+        [
+            {"_primary_muscle": "chest", "_role": "primary", "prescriptionType": "strength"},
+            {"_primary_muscle": "cardio", "_role": "secondary", "prescriptionType": "cardio_steady"},
+        ],
+    )
+    assert focus == "Push + Cardio", f"expected Push + Cardio, got {focus!r}"
+    _ok("plus-cardio display label follows cardio/core contents")
 
 
 def test_upper_lower_emphasis_rotates() -> None:
@@ -1251,6 +1277,7 @@ if __name__ == "__main__":
         test_focused_muscle_gets_volume_bonus,
         test_ppl_4_day_cycle_order_and_naming,
         test_full_body_name_is_trainer_style_not_day_n,
+        test_plus_cardio_focus_label_matches_generated_contents,
         test_upper_lower_emphasis_rotates,
         test_session_minutes_short_drops_isolation_keeps_compounds,
         test_injury_blocks_movement_pattern,

@@ -13,7 +13,7 @@ Goal weights (adherence/quality/micro):
 - fat_loss: 45/35/20 | muscle_gain: 45/30/25 | body_recomp: 40/35/25
 - endurance: 40/35/25 | general_health: 30/40/30 | strength: 45/30/25
 
-`SCORE_VERSION=3`, `METRICS_VERSION=3`, `CLASSIFIER_VERSION=3`
+`SCORE_VERSION=3`, `METRICS_VERSION=3`, `CLASSIFIER_VERSION=5`
 
 **The longevity_signals_score has been deleted.** Gut & Plants is descriptive only (no score).
 
@@ -29,7 +29,7 @@ Emits per-food flags:
 
 Fish (salmon/tuna/shrimp/etc.) resolves as `minimally_processed`.
 
-**v4 AI amount estimator** (`ai_classify.estimate_amounts`): runs on EVERY food regardless of keyword match. Estimates: `collagen_g_per_serving` (clamped 0–30 g), `probiotic_cfu_billions_per_serving` (clamped 0–200 B), `amount_confidence` (high/med/low/none). Cached on `FoodMetadata` keyed by `(normalized_name, classifier_version)`. `compute_daily_metrics` always passes `allow_ai=True`. `CLASSIFIER_VERSION` bump invalidates cache.
+**v5 classifier** keeps the v4 AI amount estimator and tightens alcohol detection so non-alcohol foods such as cider vinegar, root beer, cocktail sauce, and old-fashioned oats do not count as alcohol servings. The amount estimator (`ai_classify.estimate_amounts`) runs on EVERY food regardless of keyword match. Estimates: `collagen_g_per_serving` (clamped 0–30 g), `probiotic_cfu_billions_per_serving` (clamped 0–200 B), `amount_confidence` (high/med/low/none). Cached on `FoodMetadata` keyed by `(normalized_name, classifier_version)`. `compute_daily_metrics` always passes `allow_ai=True`. `CLASSIFIER_VERSION` bump invalidates cache.
 
 ## Daily Metrics (`gut_health.py`)
 

@@ -31,6 +31,7 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
 const SOCIAL_WORKOUT_POSTS_ENABLED = true;
 const SHARE_WORKOUT_MODAL_OPEN_DELAY_MS = 360;
 const WATCH_COMMAND_START_GRACE_MS = 5000;
+const REST_RECOMMENDATION_TUTORIAL_KEY = 'tutorial_live_rest_recommendation_v1_seen';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
 import ViewShot from 'react-native-view-shot';
@@ -515,10 +516,16 @@ interface ActiveWorkoutScreenProps {
   weightLbs?: number;
   weightUnit?: WeightUnit;
   distanceUnit?: DistanceUnit;
+  playStartCountdown?: boolean;
   onFinish: (session: WorkoutSession) => void;
   onCancel: () => void;
   onDislikeExercise?: (exerciseName: string) => void;
 }
+
+type ClearRestStateOptions = {
+  pushToWatch?: boolean;
+  endAllLiveActivities?: boolean;
+};
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60).toString().padStart(2, '0');
@@ -1053,7 +1060,7 @@ function serializeActiveWorkoutExercise(ex: SessionExercise, exerciseIndex: numb
   };
 }
 
-export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, weightUnit = 'lbs', distanceUnit = 'mi', onFinish, onCancel, onDislikeExercise }: ActiveWorkoutScreenProps) {
+export default function ActiveWorkoutScreen({ authToken, workout, goal, themeName, weightLbs = 150, weightUnit = 'lbs', distanceUnit = 'mi', playStartCountdown = false, onFinish, onCancel, onDislikeExercise }: ActiveWorkoutScreenProps) {
     // Warm-up state
     const [warmupDone, setWarmupDone] = useState(true);
     // When the user has started the workout, the warm-up card collapses
@@ -1171,7 +1178,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // Show the 3-2-1 countdown only on a true fresh start. If we find a
   // persisted start time on mount, the user is resuming after a
   // background / app restart and the countdown would be jarring.
-  const [showStartCountdown, setShowStartCountdown] = useState(false);
+  const [showStartCountdown, setShowStartCountdown] = useState(
+    () => playStartCountdown && !getActiveWatchSessionId(),
+  );
   // When the phone starts a workout and the user has a paired but
   // currently-closed Thallo watch app, we can't auto-launch it — iOS
   // blocks that. So we nudge: show a dismissable prompt telling the
@@ -1213,6 +1222,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         && savedSessionId === liveSessionId,
       );
       if (hasValidSavedStart && (hasLoggedSets || isWatchInitiatedEmptyStart)) {
+        setShowStartCountdown(false);
         startTime.current = savedStartMs;
         if (savedSessionId) {
           watchSessionId.current = savedSessionId;
@@ -1236,14 +1246,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       // Fresh phone start — play the countdown. A same-process
       // watch-initiated start keeps its pre-seeded session id above and
       // skips this so the wrist stays local-first.
-      setShowStartCountdown(true);
+      setShowStartCountdown(playStartCountdown);
     }).catch(() => {
       startTime.current = Date.now();
       setActiveWatchSessionId(watchSessionId.current);
       AsyncStorage.setItem('activeWorkoutStartTime', String(startTime.current)).catch(() => {});
       AsyncStorage.setItem('activeWatchSessionId', watchSessionId.current).catch(() => {});
       setWatchSessionHydrated(true);
-      setShowStartCountdown(true);
+      setShowStartCountdown(playStartCountdown);
     });
     // Pre-load the rest-timer chime so the first set's countdown
     // end fires the audio without a few-hundred-ms decode delay.
@@ -1361,7 +1371,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   ) => Promise<void> | void>(() => {});
   const exercisesRef = useRef<SessionExercise[]>([]);
   const startRestTimerRef = useRef<(seconds: number, exerciseName: string, opts?: { nextTarget?: string; cue?: string; startedAtMs?: number }) => void>(() => {});
-  const clearRestStateRef = useRef<(opts?: { pushToWatch?: boolean }) => void>(() => {});
+  const clearRestStateRef = useRef<(opts?: ClearRestStateOptions) => void>(() => {});
   const rescheduleRestNotificationsRef = useRef<(params: {
     seconds: number;
     exerciseName: string;
@@ -1546,6 +1556,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const restTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Active Live Activity ID so we can update/end it from timer callbacks.
   const liveActivityIdRef = useRef<string | null>(null);
+  const liveActivityGenerationRef = useRef(0);
   // One-time per-workout diagnostic flag so the alert only fires on first rest.
   const liveActivityDiagShownRef = useRef<boolean>(false);
   const restStartAtRef = useRef<number>(0);
@@ -1558,6 +1569,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [postRestIdleSecs, setPostRestIdleSecs] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [liveHR, setLiveHR] = useState<number | null>(null);
+
+  const endActiveRestLiveActivity = useCallback((opts?: { endAll?: boolean }) => {
+    liveActivityGenerationRef.current += 1;
+    const activityId = liveActivityIdRef.current;
+    liveActivityIdRef.current = null;
+    if (activityId) endRestActivity(activityId).catch(() => undefined);
+    if (opts?.endAll) endAllActivities().catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -2088,6 +2107,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [restForExercise, setRestForExercise] = useState<string | null>(null);
   const [restCue, setRestCue] = useState<string | null>(null);
   const [restNextTarget, setRestNextTarget] = useState<string | null>(null);
+  const [showRestRecommendationTutorial, setShowRestRecommendationTutorial] = useState(false);
   // Tracks the live value so rapid +/-15 taps and native Live Activity
   // adjustments reconcile without waiting on a React render.
   const restRemainingRef = useRef(restRemaining);
@@ -2099,6 +2119,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const restCueRef = useRef<string | null>(null);
   useEffect(() => { restNextTargetRef.current = restNextTarget; }, [restNextTarget]);
   useEffect(() => { restCueRef.current = restCue; }, [restCue]);
+  useEffect(() => {
+    if (restRemaining <= 0) {
+      setShowRestRecommendationTutorial(false);
+      return;
+    }
+    if (!restNextTarget && !restCue) return;
+    let cancelled = false;
+    AsyncStorage.getItem(REST_RECOMMENDATION_TUTORIAL_KEY)
+      .then(seen => {
+        if (!seen && !cancelled) setShowRestRecommendationTutorial(true);
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [restCue, restNextTarget, restRemaining]);
+  const dismissRestRecommendationTutorial = useCallback(() => {
+    setShowRestRecommendationTutorial(false);
+    AsyncStorage.setItem(REST_RECOMMENDATION_TUTORIAL_KEY, String(Date.now())).catch(() => undefined);
+  }, []);
 
   const buildWatchPositionProgress = useCallback(() => {
     const exerciseName = restExerciseNameRef.current;
@@ -2706,14 +2744,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       clearManagedInterval(restTimerRef);
       cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
       // Swallow any error here — we're unmounting, crashes are unrecoverable.
-      try {
-        if (liveActivityIdRef.current) {
-          endRestActivity(liveActivityIdRef.current).catch(() => undefined);
-          liveActivityIdRef.current = null;
-        }
-      } catch {}
+      try { endActiveRestLiveActivity(); } catch {}
     };
-  }, []);
+  }, [endActiveRestLiveActivity]);
 
   // Preload last-session data so the "last time" label next to each
   // input has something to display. Inputs themselves stay EMPTY — per
@@ -3327,9 +3360,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // so any failure in the native bridge can't take down the workout.
     (async () => {
       try {
-        if (liveActivityIdRef.current) {
-          await endRestActivity(liveActivityIdRef.current);
-          liveActivityIdRef.current = null;
+        const generation = liveActivityGenerationRef.current + 1;
+        liveActivityGenerationRef.current = generation;
+        const priorActivityId = liveActivityIdRef.current;
+        liveActivityIdRef.current = null;
+        if (priorActivityId) {
+          await endRestActivity(priorActivityId);
+          if (liveActivityGenerationRef.current !== generation) return;
         }
         const startedAtMs = restStartAtRef.current || Date.now();
         const durationSeconds = Math.max(1, seconds);
@@ -3355,6 +3392,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           themeColorHex: theme.colors.primary,
           workoutId: `w_${workout.focus}_${Date.now()}`,
         });
+        if (!id) {
+          if (!liveActivityDiagShownRef.current) {
+            liveActivityDiagShownRef.current = true;
+            const diag = getLastStartDiagnostic();
+            if (diag && !diag.startsWith('ok')) {
+              console.warn('[ActiveWorkout] Live Activity diagnostic:', diag);
+            }
+          }
+          return;
+        }
+        if (
+          liveActivityGenerationRef.current !== generation
+          || restStartAtRef.current !== startedAtMs
+          || restExerciseNameRef.current !== exerciseName
+        ) {
+          await endRestActivity(id);
+          return;
+        }
         liveActivityIdRef.current = id;
         // Diagnostic: on the first rest only, log why the native bridge
         // refused to start. Do not alert mid-workout.
@@ -3412,13 +3467,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
         restNotificationIds.current = null;
         // End the Live Activity on the lock screen.
-        if (liveActivityIdRef.current) {
-          endRestActivity(liveActivityIdRef.current).catch(() => undefined);
-          liveActivityIdRef.current = null;
-        }
+        endActiveRestLiveActivity();
       }
     }, 500); // 500ms tick for smooth countdown without drift
-  }, [buildWatchPositionProgress, getEffectiveTargetSetCount, theme.colors.primary, workout.focus]);
+  }, [buildWatchPositionProgress, endActiveRestLiveActivity, getEffectiveTargetSetCount, theme.colors.primary, workout.focus]);
   startRestTimerRef.current = startRestTimer;
 
   // Force-update timers when app returns from background. Also re-persist
@@ -3560,7 +3612,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const clearRestState = useCallback((opts?: { pushToWatch?: boolean }) => {
+  const clearRestState = useCallback((opts?: ClearRestStateOptions) => {
     lastRestClearedAtMsRef.current = Math.max(lastRestClearedAtMsRef.current, Date.now());
     const watchPosition = buildWatchPositionProgress();
     clearManagedInterval(restTimerRef);
@@ -3581,11 +3633,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
     cancelRestNotifications(restNotificationIds.current).catch(() => undefined);
     restNotificationIds.current = null;
-    if (liveActivityIdRef.current) {
-      endRestActivity(liveActivityIdRef.current).catch(() => undefined);
-      liveActivityIdRef.current = null;
-    }
-  }, [buildWatchPositionProgress]);
+    endActiveRestLiveActivity({ endAll: opts?.endAllLiveActivities === true });
+  }, [buildWatchPositionProgress, endActiveRestLiveActivity]);
   clearRestStateRef.current = clearRestState;
 
   const rescheduleRestNotifications = useCallback(async (params: {
@@ -3990,7 +4039,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   const cancelActiveWorkoutFromWatch = useCallback(() => {
     watchWorkoutEndedRef.current = true;
-    clearRestState();
+    clearRestState({ endAllLiveActivities: true });
     setActiveWatchSessionId(null);
     AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
     AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
@@ -4019,6 +4068,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
     AsyncStorage.removeItem('activeWorkoutSets').catch(() => {}); AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {}); AsyncStorage.removeItem('activeWorkoutRest').catch(() => {}); AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
     setActiveWatchSessionId(null);
+    clearRestState({ endAllLiveActivities: true });
     // Reset feedback state for fresh form
     setSummaryStep('summary');
     setFeedbackFeeling(null);
@@ -4059,7 +4109,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Snapshot the exact WorkoutDay the user just finished so plan
     // regeneration can't replace today's card with a different workout.
     await savePreservedCompletedWorkout(dateKey(now), workout);
-    clearRestState();
     setFinishedSession(session);
     setFinishModalVisible(false);
 
@@ -4789,7 +4838,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           style: 'destructive',
           onPress: () => {
             watchWorkoutEndedRef.current = true;
-            clearRestState();
+            clearRestState({ endAllLiveActivities: true });
             AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
             AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
             AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
@@ -4890,7 +4939,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     {recommendation ? (
                       <View style={styles.headerRestRecommendation}>
                         <Text style={styles.headerRestInfoLabel}>Recommendation</Text>
-                        <Text style={[styles.headerRestTarget, { color: workoutPalette.strong }]} numberOfLines={3}>{recommendation}</Text>
+                        <Text style={[styles.headerRestTarget, { color: workoutPalette.strong }]}>{recommendation}</Text>
+                      </View>
+                    ) : null}
+                    {showRestRecommendationTutorial && recommendation ? (
+                      <View style={styles.headerRestTutorial}>
+                        <Ionicons name="sparkles-outline" size={13} color={workoutPalette.strong} />
+                        <Text style={styles.headerRestTutorialText}>
+                          Rest guidance updates after logged sets so the next target stays visible.
+                        </Text>
+                        <TouchableOpacity style={styles.headerRestTutorialButton} onPress={dismissRestRecommendationTutorial}>
+                          <Text style={styles.headerRestTutorialButtonText}>Got it</Text>
+                        </TouchableOpacity>
                       </View>
                     ) : null}
                     {(() => {
@@ -7103,7 +7163,7 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     borderRadius: radius.md,
     borderWidth: 1,
   },
-  headerRestMainRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  headerRestMainRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
   headerRestCircle: {
     width: 82,
     height: 82,
@@ -7114,9 +7174,10 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   },
   headerRestCircleLabel: { fontSize: 8, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 0.5, opacity: 0.75 },
   headerRestCircleValue: { fontSize: 19, fontWeight: '900', fontVariant: ['tabular-nums'] as any, lineHeight: 22 },
-  headerRestCopy: { flex: 1, minWidth: 0, gap: 5 },
+  headerRestCopy: { flex: 1, minWidth: 0, gap: 5, alignSelf: 'stretch' },
   headerRestExercise: { fontSize: 10, color: tc.textMuted, fontWeight: '900' },
   headerRestRecommendation: {
+    flexShrink: 1,
     paddingHorizontal: 10,
     paddingVertical: 7,
     borderRadius: radius.sm,
@@ -7126,6 +7187,18 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   },
   headerRestInfoLabel: { fontSize: 8, color: tc.textMuted, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 1 },
   headerRestTarget: { fontSize: 12, fontWeight: '900', lineHeight: 16 },
+  headerRestTutorial: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: radius.sm,
+    backgroundColor: tc.background + '66',
+  },
+  headerRestTutorialText: { flex: 1, minWidth: 0, fontSize: 10, color: tc.textSecondary, fontWeight: '700', lineHeight: 13 },
+  headerRestTutorialButton: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: radius.full, backgroundColor: tc.surface },
+  headerRestTutorialButtonText: { fontSize: 10, color: tc.textPrimary, fontWeight: '900' },
   headerRestWatchRow: { flexDirection: 'row', alignItems: 'center', gap: 5, alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, borderRadius: radius.full, backgroundColor: tc.background + '66' },
   headerRestWatchText: { fontSize: 10, fontWeight: '800' },
   headerRestActions: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 7, paddingLeft: 94 },

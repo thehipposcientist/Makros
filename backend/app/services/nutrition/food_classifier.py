@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-CLASSIFIER_VERSION = 4   # v4: AI-estimated collagen_g + probiotic_servings amounts
+CLASSIFIER_VERSION = 5   # v5: conservative alcohol phrase detection + v4 amount estimates
 
 Source = Literal["deterministic", "heuristic", "ai", "unknown"]
 ProcessingBucket = Literal["minimally_processed", "processed", "ultra_processed", "unknown"]
@@ -57,7 +57,7 @@ _BRAND_NOISE = re.compile(
     r"\b(organic|fresh|frozen|raw|cooked|plain|whole|low[- ]fat|fat[- ]free|sugar[- ]free|"
     r"unsweetened|sweetened|natural|premium|classic|homemade|store[- ]bought|keto|"
     r"gluten[- ]free|non[- ]gmo|grass[- ]fed|wild[- ]caught|pasture[- ]raised|"
-    r"grade a|usda|extra virgin|virgin|pure|real|kirkland|trader joe'?s|"
+    r"grade a|usda|extra virgin|pure|real|kirkland|trader joe'?s|"
     r"whole foods|365)\b",
     re.IGNORECASE,
 )
@@ -286,9 +286,18 @@ _ALCOHOL_FRAGMENTS = [
     "beer", "wine", "champagne", "prosecco", "cocktail", "whiskey", "whisky",
     "bourbon", "vodka", "gin", "rum", "tequila", "mezcal", "scotch",
     "margarita", "mojito", "martini", "old fashioned", "cider", "sake",
-    "liqueur", "brandy", "shot of", "ipa", "lager", "stout", "pilsner",
+    "liqueur", "brandy", "ipa", "lager", "stout", "pilsner",
     "rosé", "rose wine", "mimosa", "bloody mary", "moscow mule",
     "negroni", "aperol", "spritz", "hard seltzer", "white claw",
+]
+
+_ALCOHOL_NEGATIVE_FRAGMENTS = [
+    "non alcoholic", "non-alcoholic", "alcohol free", "alcohol-free", "zero proof", "mocktail", "virgin",
+    "root beer", "ginger beer", "near beer", "beer batter", "beer battered",
+    "wine vinegar", "cider vinegar", "apple cider vinegar", "cooking wine",
+    "cocktail sauce", "shrimp cocktail", "fruit cocktail",
+    "old fashioned oat", "old fashioned oatmeal",
+    "espresso shot", "shot of espresso",
 ]
 
 _PROCESSED_MEAT_FRAGMENTS = [
@@ -346,6 +355,17 @@ _MINIMALLY_PROCESSED_HINTS = [
 ]
 
 
+def _contains_phrase(normalized: str, phrase: str) -> bool:
+    pattern = r"(?<![a-z0-9])" + re.escape(phrase).replace(r"\ ", r"\s+") + r"(?![a-z0-9])"
+    return re.search(pattern, normalized) is not None
+
+
+def _detect_alcohol(normalized: str) -> bool:
+    if any(_contains_phrase(normalized, frag) for frag in _ALCOHOL_NEGATIVE_FRAGMENTS):
+        return False
+    return any(_contains_phrase(normalized, frag) for frag in _ALCOHOL_FRAGMENTS)
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def classify_food(raw_name: str) -> FoodClassification:
@@ -370,7 +390,7 @@ def classify_food(raw_name: str) -> FoodClassification:
     seafood = any(frag in normalized for frag in _SEAFOOD_FRAGMENTS)
     fruit = any(frag in normalized for frag in _FRUIT_FRAGMENTS)
     vegetable = any(frag in normalized for frag in _VEGETABLE_FRAGMENTS)
-    alcohol = any(frag in normalized for frag in _ALCOHOL_FRAGMENTS)
+    alcohol = _detect_alcohol(normalized)
     processed_meat = any(frag in normalized for frag in _PROCESSED_MEAT_FRAGMENTS)
     refined_grain = (
         not any(neg in normalized for neg in _REFINED_GRAIN_NEGATIVES)

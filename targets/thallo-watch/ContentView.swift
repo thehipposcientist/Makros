@@ -784,9 +784,13 @@ private struct MealsView: View {
                 Text("\(meals.actual.calories)")
                     .font(.system(size: 26, weight: .heavy, design: .rounded))
                     .foregroundColor(theme.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
                 Text("/ \(meals.targets.calories) kcal")
                     .font(.system(size: 10))
                     .foregroundColor(theme.textMuted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                 Spacer()
                 // Nutrition Score chip — same tier thresholds as the
                 // phone's NutritionCard: 70+/45+/else.
@@ -802,10 +806,13 @@ private struct MealsView: View {
                         .cornerRadius(6)
                 }
             }
-            HStack(spacing: 10) {
+            HStack(spacing: 6) {
                 macroLine(label: "P", actual: meals.actual.proteinG, target: meals.targets.proteinG, color: theme.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 macroLine(label: "C", actual: meals.actual.carbsG,   target: meals.targets.carbsG,   color: theme.warning)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 macroLine(label: "F", actual: meals.actual.fatG,     target: meals.targets.fatG,     color: theme.success)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(10)
@@ -831,6 +838,8 @@ private struct MealsView: View {
                     .font(.system(size: 9))
                     .foregroundColor(theme.textMuted)
             }
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
             ZStack(alignment: .leading) {
                 Rectangle()
                     .fill(color.opacity(0.18))
@@ -838,10 +847,10 @@ private struct MealsView: View {
                     .cornerRadius(1.5)
                 Rectangle()
                     .fill(color)
-                    .frame(width: max(2, CGFloat(pct) * 50), height: 3)
+                    .frame(width: max(2, CGFloat(pct) * 44), height: 3)
                     .cornerRadius(1.5)
             }
-            .frame(width: 50)
+            .frame(width: 44)
         }
     }
 

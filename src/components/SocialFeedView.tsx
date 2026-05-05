@@ -29,6 +29,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import type { AppThemeName } from '../types';
 import FadeInView from './FadeInView';
+import SocialAvatar from './SocialAvatar';
 import {
   FeedItem,
   getSocialFeed,
@@ -55,6 +56,7 @@ interface Props {
   shareEnabled?: boolean;
   myActivity?: { sessions: number; streak: number } | null;
   myDisplayName?: string;
+  myAvatarUrl?: string | null;
   bottomPadding?: number;
 }
 
@@ -88,7 +90,7 @@ function formatDuration(sec: number | undefined | null): string {
 
 export default function SocialFeedView({
   authToken, themeName, onViewAuthor, refreshKey, maxItems,
-  shareEnabled, myActivity, myDisplayName, bottomPadding = 8,
+  shareEnabled, myActivity, myDisplayName, myAvatarUrl, bottomPadding = 8,
 }: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
@@ -222,11 +224,15 @@ export default function SocialFeedView({
             hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
             style={styles.authorRow}
           >
-            <View style={styles.avatar}>
-              <Text style={styles.avatarText}>
-                {(author[0] ?? '?').toUpperCase()}
-              </Text>
-            </View>
+            <SocialAvatar
+              avatarUrl={item.avatar_url}
+              name={author}
+              username={item.username}
+              size={36}
+              backgroundColor={colors.surface}
+              borderColor={colors.border}
+              textColor={colors.textPrimary}
+            />
             <View style={{ flex: 1 }}>
               <Text style={styles.authorName} numberOfLines={1}>{author}</Text>
               <Text style={styles.authorMeta} numberOfLines={1}>
@@ -361,11 +367,15 @@ export default function SocialFeedView({
     <View style={[styles.card, styles.myActivityCard]}>
       <View style={styles.cardHeader}>
         <View style={styles.authorRow}>
-          <View style={[styles.avatar, styles.myAvatar]}>
-            <Text style={styles.avatarText}>
-              {((myDisplayName ?? '')[0] ?? 'Y').toUpperCase()}
-            </Text>
-          </View>
+          <SocialAvatar
+            avatarUrl={myAvatarUrl}
+            name={myDisplayName || 'You'}
+            username="you"
+            size={36}
+            backgroundColor={colors.primary + '20'}
+            borderColor={colors.primary + '55'}
+            textColor={colors.textPrimary}
+          />
           <View style={{ flex: 1 }}>
             <Text style={styles.authorName}>
               {myDisplayName || 'You'}
@@ -486,13 +496,6 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
     },
     cardHeader: { flexDirection: 'row', alignItems: 'center' },
     authorRow: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
-    avatar: {
-      width: 36, height: 36, borderRadius: 18,
-      backgroundColor: c.surface,
-      alignItems: 'center', justifyContent: 'center',
-      borderWidth: 1, borderColor: c.border,
-    },
-    avatarText: { fontSize: 14, fontWeight: '700', color: c.textPrimary },
     authorName: { fontSize: 14, fontWeight: '700', color: c.textPrimary },
     authorMeta: { fontSize: 11, color: c.textMuted, marginTop: 1 },
     caption: { fontSize: 14, color: c.textPrimary, lineHeight: 19 },
@@ -525,7 +528,6 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
     likeBtn: { flexDirection: 'row', alignItems: 'center', gap: 5 },
     likeCount: { fontSize: 12, color: c.textSecondary, fontWeight: '600', minWidth: 12 },
     myActivityCard: { borderColor: c.primary + '40' },
-    myAvatar: { backgroundColor: c.primary + '20', borderColor: c.primary + '40' },
     myLabel: { fontSize: 12, fontWeight: '400', color: c.textMuted },
     sharingBadge: {
       flexDirection: 'row', alignItems: 'center', gap: 3,

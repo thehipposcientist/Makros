@@ -54,6 +54,24 @@ tags:
 - waitForAnimationToEnd:
     timeout: 1000
 
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- waitForAnimationToEnd:
+    timeout: 1000
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- waitForAnimationToEnd:
+    timeout: 1000
+
 # If AuthScreen is visible, run the login steps. Otherwise assume we're
 # already signed in and skip straight to asserting the home tab.
 - runFlow:
@@ -166,6 +184,62 @@ tags:
     commands:
       - tapOn:
           id: "tutorial-skip"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- waitForAnimationToEnd:
+    timeout: 1000
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    when:
+      visible:
+        id: "auth-email-input"
+    commands:
+      - tapOn:
+          id: "auth-email-input"
+      - inputText: ${TEST_EMAIL}
+      - pressKey: enter
+
+      - runFlow:
+          when:
+            visible: "Speed up your typing"
+          commands:
+            - tapOn: "Continue"
+
+      - tapOn:
+          id: "auth-password-toggle"
+      - tapOn:
+          id: "auth-password-input"
+      - inputText: ${TEST_PASSWORD}
+      - pressKey: enter
+
+      - runFlow:
+          when:
+            visible: "Speed up your typing"
+          commands:
+            - tapOn: "Continue"
+
+      - runFlow:
+          when:
+            visible:
+              id: "auth-submit"
+          commands:
+            - tapOn: "Personalized training, nutrition, and AI coaching."
+            - tapOn:
+                id: "auth-submit"
+
+- waitForAnimationToEnd:
+    timeout: 3000
 
 - extendedWaitUntil:
     visible: "Plan tab"

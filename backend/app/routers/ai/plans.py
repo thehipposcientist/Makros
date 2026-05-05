@@ -16,7 +16,7 @@ from app.models import PlanJob, User
 from .router import router
 from .models import PlanRequest, WorkoutOnlyRequest, NutritionOnlyRequest, ParseWorkoutsRequest
 from .utils import (
-    get_openai_api_key, model_plan_generation, model_plan_update,
+    get_openai_api_key, model_image, model_plan_generation, model_plan_update,
     _build_chat_kwargs, _chat_create, _looks_truncated, _extract_json,
     _log_openai_error, enrich_foods_with_macros, compute_tdee_and_targets,
     map_goal_type, map_experience_level, map_progression_pace, map_recovery_level,
@@ -3144,13 +3144,57 @@ def parse_recent_workouts(
     body: ParseWorkoutsRequest,
     current_user: User = Depends(require_pro_feature("AI workout parsing")),
 ):
-    """Parse natural language like 'legs yesterday, recovery today' into WorkoutSession objects."""
+    """Parse text or a workout screenshot into review-first WorkoutSession data."""
     api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="OpenAI API key not configured")
 
     client = OpenAI(api_key=api_key)
     today = body.currentDate or __import__("datetime").date.today().isoformat()
+    photo_base64 = (body.photo_base64 or "").strip()
+
+    if photo_base64:
+        mime = (body.photo_mime_type or "image/jpeg").strip() or "image/jpeg"
+        image_data_url = photo_base64 if photo_base64.startswith("data:image/") else f"data:{mime};base64,{photo_base64}"
+        prompt = f"""Extract workout data from this screenshot/photo for review-first import.
+Today's date is {today}. The image may be from Peloton, Apple Fitness, Strava, Garmin, a workout notes app, or a camera photo of a class/template.
+
+Return a JSON object with a "sessions" array. Create only workouts clearly visible in the image.
+For each session:
+- "date": ISO date string (YYYY-MM-DD). Use {today} if no date is visible.
+- "focus": keep the visible title/type, e.g. "Peloton Ride", "Intervals", "Upper Body", "Push", "Run".
+- "completed": true when it looks like a completed workout.
+- "durationSeconds": duration in seconds when visible, otherwise 3600.
+- "distanceMiles": number when visible, otherwise omit.
+- "caloriesBurned": number when visible, otherwise omit.
+- "avgHeartRate": number when visible, otherwise omit.
+- "source": "peloton" when Peloton is visible, otherwise omit unless another source is obvious.
+- "exercises": strength exercises only if the image clearly lists them; each exercise has "name" and optional "sets".
+
+Never mutate an active plan. This endpoint only returns candidates for the user to review before saving.
+Return ONLY valid JSON: {{"sessions": []}} if nothing is parseable."""
+        try:
+            kwargs = _build_chat_kwargs(
+                model_image(),
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_data_url}},
+                    ],
+                }],
+                max_tokens=900,
+                timeout_secs=45,
+            )
+            resp = _chat_create(client, **kwargs)
+            raw = resp.choices[0].message.content or "{}"
+            data = _extract_json(raw)
+            sessions = data if isinstance(data, list) else data.get("sessions", data.get("workouts", []))
+            print(f"[parse-workouts] parsed {len(sessions)} sessions from workout photo")
+            return {"sessions": sessions}
+        except Exception as e:
+            print(f"[parse-workouts] photo error: {e}")
+            return {"sessions": []}
 
     prompt = f"""Parse the user's description of recent workouts into structured session data.
 Today's date is {today}.

@@ -29,11 +29,13 @@ class SocialMeRead(BaseModel):
     user_id: int
     username: str
     display_name: str | None
+    avatar_url: str | None
     share_activity_enabled: bool
 
 
 class SocialMeUpdate(BaseModel):
     display_name: str | None = None
+    avatar_url: str | None = None
     share_activity_enabled: bool | None = None
 
     @field_validator("display_name")
@@ -48,12 +50,32 @@ class SocialMeUpdate(BaseModel):
             raise ValueError("display_name too long (max 40)")
         return v
 
+    @field_validator("avatar_url")
+    @classmethod
+    def _trim_avatar(cls, v):
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if len(v) > 400_000:
+            raise ValueError("profile photo is too large")
+        lowered = v.lower()
+        if not (
+            lowered.startswith("data:image/")
+            or lowered.startswith("https://")
+            or lowered.startswith("http://")
+        ):
+            raise ValueError("avatar_url must be an image data URI or URL")
+        return v
+
 
 class FriendRead(BaseModel):
     friendship_id: int
     user_id: int
     username: str
     display_name: str | None
+    avatar_url: str | None
     goal: str | None
     last_active_within_48h: bool
     streak: int
@@ -64,6 +86,7 @@ class PendingRequestRead(BaseModel):
     user_id: int
     username: str
     display_name: str | None
+    avatar_url: str | None
     requested_at: datetime
     direction: str  # "incoming" | "outgoing"
 
@@ -89,12 +112,18 @@ class SearchHit(BaseModel):
     user_id: int
     username: str
     display_name: str | None
+    avatar_url: str | None
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _canonical_pair(a: int, b: int) -> tuple[int, int]:
     return (a, b) if a < b else (b, a)
+
+
+def _avatar_url(prof: UserSocialProfile | None) -> str | None:
+    value = prof.avatar_url if prof else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _get_or_create_profile(db: Session, user: User) -> UserSocialProfile:
@@ -152,6 +181,7 @@ def _hydrate_friend(db: Session, viewer_id: int, other_id: int, friendship_id: i
         user_id=other_id,
         username=other.username,
         display_name=(prof.display_name if prof and prof.display_name else other.username),
+        avatar_url=_avatar_url(prof),
         goal=(goal_row.goal_type.value if goal_row else None),
         last_active_within_48h=active_48h,
         streak=streak,
@@ -170,6 +200,7 @@ def get_me(
         user_id=current_user.id,
         username=current_user.username,
         display_name=prof.display_name,
+        avatar_url=_avatar_url(prof),
         share_activity_enabled=prof.share_activity_enabled,
     )
 
@@ -183,6 +214,8 @@ def patch_me(
     prof = _get_or_create_profile(db, current_user)
     if body.display_name is not None:
         prof.display_name = body.display_name
+    if body.avatar_url is not None or "avatar_url" in body.model_fields_set:
+        prof.avatar_url = body.avatar_url
     if body.share_activity_enabled is not None:
         prof.share_activity_enabled = body.share_activity_enabled
     prof.updated_at = datetime.now(timezone.utc)
@@ -193,6 +226,7 @@ def patch_me(
         user_id=current_user.id,
         username=current_user.username,
         display_name=prof.display_name,
+        avatar_url=_avatar_url(prof),
         share_activity_enabled=prof.share_activity_enabled,
     )
 
@@ -294,6 +328,7 @@ def list_friends(
             user_id=other_id,
             username=user_row.username,
             display_name=(prof.display_name if prof and prof.display_name else user_row.username),
+            avatar_url=_avatar_url(prof),
             goal=(goal_row.goal_type.value if goal_row else None),
             last_active_within_48h=active_48h,
             streak=streak,
@@ -311,6 +346,7 @@ def list_friends(
             user_id=other_id,
             username=other.username,
             display_name=(prof.display_name if prof and prof.display_name else other.username),
+            avatar_url=_avatar_url(prof),
             requested_at=r.requested_at,
             direction=("outgoing" if r.requested_by == current_user.id else "incoming"),
         ))
@@ -354,6 +390,7 @@ def request_friend(
                 user_id=target.id,
                 username=target.username,
                 display_name=(prof.display_name if prof and prof.display_name else target.username),
+                avatar_url=_avatar_url(prof),
                 requested_at=existing.requested_at,
                 direction=("outgoing" if existing.requested_by == current_user.id else "incoming"),
             )
@@ -375,6 +412,7 @@ def request_friend(
         user_id=target.id,
         username=target.username,
         display_name=(prof.display_name if prof and prof.display_name else target.username),
+        avatar_url=_avatar_url(prof),
         requested_at=fs.requested_at,
         direction="outgoing",
     )
@@ -526,6 +564,7 @@ def search_users(
             user_id=u.id,
             username=u.username,
             display_name=(prof.display_name if prof and prof.display_name else None),
+            avatar_url=_avatar_url(prof),
         ))
     return out
 
@@ -577,6 +616,7 @@ class FeedItemRead(BaseModel):
     user_id: int
     username: str
     display_name: str | None
+    avatar_url: str | None = None
     event_type: str
     payload: dict
     created_at: str
@@ -684,7 +724,7 @@ def get_feed(
     # feed render is one query each instead of N+1. Soft-deleted users
     # don't make the cache → their items render as "unknown" and the
     # client can decide whether to filter them.
-    user_cache: dict[int, tuple[str, str | None]] = {}
+    user_cache: dict[int, tuple[str, str | None, str | None]] = {}
     if rows:
         from sqlmodel import col
         author_ids = list({r.user_id for r in rows})
@@ -706,15 +746,17 @@ def get_feed(
             user_cache[uid] = (
                 u.username if u else "unknown",
                 p.display_name if p and p.display_name else None,
+                _avatar_url(p),
             )
     items: list[dict] = []
     for r in rows:
-        uname, dname = user_cache.get(r.user_id, ("unknown", None))
+        uname, dname, avatar_url = user_cache.get(r.user_id, ("unknown", None, None))
         items.append({
             "id": r.id,
             "user_id": r.user_id,
             "username": uname,
             "display_name": dname or uname,
+            "avatar_url": avatar_url,
             "event_type": r.event_type,
             "payload": _sanitize_feed_payload_for_read(r.event_type, r.payload),
             "created_at": r.created_at.isoformat() if r.created_at else "",
@@ -780,6 +822,7 @@ def get_user_feed(
     p = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == user_id)).first()
     uname = u.username if u else "unknown"
     dname = p.display_name if p and p.display_name else None
+    avatar_url = _avatar_url(p)
 
     items: list[dict] = []
     for r in rows:
@@ -788,6 +831,7 @@ def get_user_feed(
             "user_id": r.user_id,
             "username": uname,
             "display_name": dname or uname,
+            "avatar_url": avatar_url,
             "event_type": r.event_type,
             "payload": _sanitize_feed_payload_for_read(r.event_type, r.payload),
             "created_at": r.created_at.isoformat() if r.created_at else "",

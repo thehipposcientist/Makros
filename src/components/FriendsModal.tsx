@@ -17,6 +17,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { getContrastingTextColor, getTheme, radius, spacing } from '../constants/theme';
 import type { AppThemeName } from '../types';
 import { dynamicTextProps } from '../utils/dynamicType';
+import SocialAvatar from './SocialAvatar';
 import {
   acceptFriend,
   blockFriend,
@@ -410,6 +411,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
           shareEnabled={me?.share_activity_enabled ?? false}
           myActivity={digest?.you ?? null}
           myDisplayName={me?.display_name ?? me?.username ?? ''}
+          myAvatarUrl={me?.avatar_url ?? null}
           onViewAuthor={(uid, displayName) => {
             // Reuse the existing friend-detail surface — find the
             // matching digest entry so the parent can render their
@@ -419,6 +421,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
             const df = digest?.friends.find((d) => d.user_id === uid);
             const digestFriend = df ?? {
               user_id: uid, username: '', display_name: displayName,
+              avatar_url: null,
               goal: null, share_enabled: true,
               sessions: 0, streak: 0, last_active_within_48h: false,
             };
@@ -484,11 +487,15 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                   {incoming.map((p, i) => (
                     <FadeInView key={p.friendship_id} delay={i * 50} duration={250} slideDistance={6}>
                     <View style={styles.friendRow}>
-                      <View style={styles.avatar}>
-                        <Text style={styles.avatarText}>
-                          {(p.display_name?.[0] ?? p.username[0] ?? '?').toUpperCase()}
-                        </Text>
-                      </View>
+                      <SocialAvatar
+                        avatarUrl={p.avatar_url}
+                        name={p.display_name}
+                        username={p.username}
+                        size={36}
+                        backgroundColor={colors.primary + '22'}
+                        borderColor={colors.primary + '55'}
+                        textColor={colors.primary}
+                      />
                       <View style={{ flex: 1 }}>
                         <Text style={styles.friendName}>{p.display_name ?? p.username}</Text>
                         <Text style={styles.friendMeta}>@{p.username}</Text>
@@ -532,6 +539,7 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                           const digestFriend = df ?? {
                             user_id: f.user_id, username: f.username,
                             display_name: f.display_name ?? f.username,
+                            avatar_url: f.avatar_url ?? null,
                             goal: f.goal, share_enabled: true,
                             sessions: 0, streak: f.streak,
                             last_active_within_48h: f.last_active_within_48h,
@@ -541,17 +549,21 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                       }}
                       onLongPress={() => onFriendOptions(f)}
                     >
-                      <View style={styles.avatar}>
-                        <Text style={styles.avatarText}>
-                          {(f.display_name?.[0] ?? f.username[0] ?? '?').toUpperCase()}
-                        </Text>
+                      <SocialAvatar
+                        avatarUrl={f.avatar_url}
+                        name={f.display_name}
+                        username={f.username}
+                        size={36}
+                        backgroundColor={colors.primary + '22'}
+                        borderColor={colors.primary + '55'}
+                        textColor={colors.primary}>
                         <View
                           style={[
                             styles.activeDot,
                             { backgroundColor: f.last_active_within_48h ? colors.success : colors.border },
                           ]}
                         />
-                      </View>
+                      </SocialAvatar>
                       <View style={{ flex: 1 }}>
                         <Text style={styles.friendName}>{f.display_name ?? f.username}</Text>
                         <Text style={styles.friendMeta}>
@@ -571,11 +583,15 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                   <Text style={styles.sectionLabel}>SENT</Text>
                   {outgoing.map((p) => (
                     <View key={p.friendship_id} style={styles.friendRow}>
-                      <View style={styles.avatar}>
-                        <Text style={styles.avatarText}>
-                          {(p.display_name?.[0] ?? p.username[0] ?? '?').toUpperCase()}
-                        </Text>
-                      </View>
+                      <SocialAvatar
+                        avatarUrl={p.avatar_url}
+                        name={p.display_name}
+                        username={p.username}
+                        size={36}
+                        backgroundColor={colors.primary + '22'}
+                        borderColor={colors.primary + '55'}
+                        textColor={colors.primary}
+                      />
                       <View style={{ flex: 1 }}>
                         <Text style={styles.friendName}>{p.display_name ?? p.username}</Text>
                         <Text style={styles.friendMeta}>Pending…</Text>
@@ -632,11 +648,15 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
                   const alreadyPending = (list?.pending ?? []).some((p) => p.user_id === h.user_id);
                   return (
                     <View key={h.user_id} style={styles.friendRow}>
-                      <View style={styles.avatar}>
-                        <Text style={styles.avatarText}>
-                          {(h.display_name?.[0] ?? h.username[0] ?? '?').toUpperCase()}
-                        </Text>
-                      </View>
+                      <SocialAvatar
+                        avatarUrl={h.avatar_url}
+                        name={h.display_name}
+                        username={h.username}
+                        size={36}
+                        backgroundColor={colors.primary + '22'}
+                        borderColor={colors.primary + '55'}
+                        textColor={colors.primary}
+                      />
                       <View style={{ flex: 1 }}>
                         <Text style={styles.friendName}>{h.display_name ?? h.username}</Text>
                         <Text style={styles.friendMeta}>@{h.username}</Text>
@@ -808,17 +828,6 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       marginBottom: spacing.xs,
       gap: spacing.sm,
     },
-    avatar: {
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      backgroundColor: colors.primary + '22',
-      borderColor: colors.primary + '55',
-      borderWidth: 1,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    avatarText: { fontSize: 14, fontWeight: '800', color: colors.primary },
     activeDot: {
       position: 'absolute',
       bottom: -1,

@@ -300,8 +300,10 @@ class MealInstructionsRequest(BaseModel):
 
 class ParseWorkoutsRequest(BaseModel):
     """Parse natural language workout descriptions into structured sessions."""
-    text: str                   # e.g. "I did legs yesterday and recovery today"
+    text: str = ""              # e.g. "I did legs yesterday and recovery today"
     currentDate: str | None = None   # ISO date, defaults to today on server
+    photo_base64: str | None = None  # Optional workout screenshot/photo for review-first import
+    photo_mime_type: str | None = None
 
 
 class WorkoutSummaryRequest(BaseModel):

@@ -31,6 +31,8 @@ import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import StreakCounter from '../components/StreakCounter';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 import CollapsibleSection from '../components/CollapsibleSection';
+import SwipeableRow from '../components/SwipeableRow';
+import SocialAvatar from '../components/SocialAvatar';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const WATCH_WORKOUT_COMMAND_TTL_MS = 4 * 60 * 60_000;
@@ -69,6 +71,7 @@ import { cleanAiText } from '../utils/aiText';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MealSuggestion } from '../types';
 import WorkoutCard from '../components/WorkoutCard';
+import WorkoutFocusIcon from '../components/WorkoutFocusIcon';
 import NutritionCard from '../components/NutritionCard';
 import FuelingRecoveryCard from '../components/FuelingRecoveryCard';
 import IncompleteDayBanner from '../components/IncompleteDayBanner';
@@ -150,7 +153,7 @@ interface HomeScreenProps {
   onEditMealPlan: (initialTab?: 'foods' | 'supplements' | 'macros') => void;
   onEditThemes: () => void;
   onEditBody: () => void;
-  onStartWorkout: (workout: WorkoutDay) => void;
+  onStartWorkout: (workout: WorkoutDay, options?: { playCountdown?: boolean }) => void;
   onViewProgress: () => void;
   onViewAccount: () => void;
   onOpenSettings?: () => void;
@@ -2123,6 +2126,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [authToken]);
 
   useEffect(() => {
+    if (!authToken) {
+      setHydration(null);
+      setHydrationByDate({});
+      return;
+    }
+    refreshHydration(todayKey()).catch(() => {});
+  }, [authToken, refreshHydration]);
+
+  useEffect(() => {
     if (activeTab === 'meals' && mealsSubTab === 'plan') {
       refreshHydration(selectedMealDayKey).catch(() => {});
       if (selectedMealDayKey !== todayKey()) refreshHydration().catch(() => {});
@@ -4001,10 +4013,23 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       console.log('[loadPlans] skipping backend hydration — cleared planWeek so schedule uses fresh workoutPlan');
     }
 
+    const emptyWorkoutPlan: WorkoutPlan = {
+      name: 'No active plan',
+      totalDays: 0,
+      days: [],
+    };
     if (!aiWorkoutRaw) {
-      console.warn('[loadPlans] no saved aiWorkoutPlan — using local fallback');
+      if (tierIsFree || !authToken) {
+        console.warn('[loadPlans] no saved aiWorkoutPlan — using free/manual local scaffold');
+      } else {
+        console.warn('[loadPlans] no persisted workout plan — showing empty plan state');
+      }
     }
-    let baseWorkout = aiWorkoutRaw ? JSON.parse(aiWorkoutRaw) : generateWorkoutPlan(profile);
+    let baseWorkout: WorkoutPlan = aiWorkoutRaw
+      ? JSON.parse(aiWorkoutRaw)
+      : (tierIsFree || !authToken)
+        ? generateWorkoutPlan(profile)
+        : emptyWorkoutPlan;
 
     // Enrich all exercises with image URLs from the backend library.
     // This covers cached plans that were generated before image enrichment.
@@ -6315,6 +6340,58 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     profileAge: userProfile?.physicalStats?.age ?? null,
   };
 
+  const updateProfilePhoto = useCallback(async (mode: 'pick' | 'remove') => {
+    if (!authToken || !userProfile) return;
+    try {
+      let avatarUrl: string | null = null;
+      if (mode === 'pick') {
+        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (!perm.granted) {
+          Alert.alert('Photo access needed', 'Allow photo library access to choose a profile photo.');
+          return;
+        }
+        const result = await ImagePicker.launchImageLibraryAsync({
+          mediaTypes: ['images'] as any,
+          allowsEditing: true,
+          aspect: [1, 1],
+          quality: 0.45,
+          base64: true,
+          maxWidth: 512,
+          maxHeight: 512,
+        } as any);
+        if (result.canceled) return;
+        const asset = result.assets?.[0];
+        if (!asset?.base64) {
+          Alert.alert('Could not read photo', 'Choose a different image and try again.');
+          return;
+        }
+        const mime = (asset as any).mimeType || 'image/jpeg';
+        avatarUrl = `data:${mime};base64,${asset.base64}`;
+        if (avatarUrl.length > 400_000) {
+          Alert.alert('Photo too large', 'Choose a smaller image or crop tighter and try again.');
+          return;
+        }
+      }
+      const { updateSocialMe } = await import('../services/api');
+      const updated = await updateSocialMe(authToken, { avatar_url: avatarUrl });
+      onProfileUpdate?.({ avatarUrl: updated.avatar_url ?? undefined } as any, true);
+    } catch (e: any) {
+      Alert.alert('Could not update photo', e?.message ?? 'Please try again.');
+    }
+  }, [authToken, onProfileUpdate, userProfile]);
+
+  const openProfilePhotoActions = useCallback(() => {
+    if (!userProfile?.avatarUrl) {
+      updateProfilePhoto('pick');
+      return;
+    }
+    Alert.alert('Profile photo', undefined, [
+      { text: 'Change Photo', onPress: () => updateProfilePhoto('pick') },
+      { text: 'Remove Photo', style: 'destructive', onPress: () => updateProfilePhoto('remove') },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [updateProfilePhoto, userProfile?.avatarUrl]);
+
   if (!userProfile || !workoutPlan) return <View style={styles.container} />;
 
   const goalLabel = meta.goals.find(g => g.value === userProfile.goal)?.label
@@ -6353,6 +6430,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 
   const isLightTheme = isLightThemeName(userProfile.themePreference);
   const statusBarStyle = isLightTheme ? 'dark' : 'light';
+  const navMutedColor = isLightTheme ? themeColors.textMuted : themeColors.textSecondary;
 
   const headerGradientColors: [string, string] = isLightTheme
     ? [themeColors.surface, themeColors.surface]
@@ -6506,7 +6584,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           start={{ x: 0, y: 0 }}
           end={{ x: 0, y: 1 }}
           style={[styles.fixedSubTabBar, { top: insets.top + 68, borderBottomColor: 'transparent' }]}>
-          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: isLightTheme ? themeColors.border + '88' : themeColors.border, borderWidth: isLightTheme ? StyleSheet.hairlineWidth : 1 }]}>
             <SubTabBtn testID="workout-subtab-plan" label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
             <SubTabBtn testID="workout-subtab-library" label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setSelectedExercise(null); setShowExerciseLibrary(true); ensureExerciseLibrary().catch(() => {}); }} />
             <SubTabBtn testID="workout-subtab-settings" label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
@@ -6522,7 +6600,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           start={{ x: 0, y: 0 }}
           end={{ x: 0, y: 1 }}
           style={[styles.fixedSubTabBar, { top: insets.top + 68, borderBottomColor: 'transparent' }]}>
-          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+          <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: isLightTheme ? themeColors.border + '88' : themeColors.border, borderWidth: isLightTheme ? StyleSheet.hairlineWidth : 1 }]}>
             <SubTabBtn testID="meals-subtab-plan" label="Plan"    active={mealsSubTab === 'plan'}        tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('plan')} />
             <SubTabBtn testID="meals-subtab-foods" label="Foods"   active={mealsSubTab === 'foods'}       tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('foods')} />
             <SubTabBtn testID="meals-subtab-supplements" label="Supps" active={mealsSubTab === 'supplements'} tint={mealPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => setMealsSubTab('supplements')} />
@@ -7037,7 +7115,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 }}
                 onPress={() => {
                   import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
-                  if (workoutPlan?.days?.[0]) onStartWorkout(workoutPlan.days[0]);
+                  if (workoutPlan?.days?.[0]) onStartWorkout(workoutPlan.days[0], { playCountdown: false });
                 }}
                 activeOpacity={0.8}
               >
@@ -7096,6 +7174,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               />
             )}
 
+
+            {renderedWorkoutSubTab === 'plan' && !isFreeTier && scheduleForRender.length === 0 && (
+              <View style={[styles.emptyStateCard, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
+                <Ionicons name="calendar-clear-outline" size={34} color={workoutPalette.strong} />
+                <Text {...dynamicTextProps} style={[styles.emptyStateTitle, { color: themeColors.textPrimary }]}>No active workout plan</Text>
+                <Text {...dynamicTextProps} style={[styles.emptyStateBody, { color: themeColors.textSecondary }]}>
+                  Your generated plan is not available yet. Generate a plan from settings when you are ready.
+                </Text>
+              </View>
+            )}
 
             {renderedWorkoutSubTab === 'plan' && (() => {
               const splitRaw = (userProfile.preferredSplit || '').toLowerCase();
@@ -7767,11 +7855,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       }}
                       onLogActivity={() => setShowLogActivity(true)}
                       onEditPlan={() => setWorkoutSubTab('equipment')}
-                      plannedWorkout={item.workout && !isCompleted && !isSkipped ? item.workout : null}
-                      onStartPlanned={(workout) => {
-                        import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {});
-                        onStartWorkout(workout);
-                      }}
                       onNewTemplate={() => {
                         // Free-cap defense — backend helper also enforces.
                         if (isFreeTier && workoutTemplates.length >= 3) {
@@ -8282,7 +8365,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               const ate = hasBackendMeals ? true : !!checks[mealType];
                               const openMealEditor = () => setEditingMeal({ dateKey: d, type: mealType, meal: m, historyMealId });
                               return (
-                                <View key={(m as any)._localId ?? `${d}-${i}`} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                                <View
+                                  key={(m as any)._localId ?? `${d}-${i}`}
+                                  testID={`meal-history-row-${historyIdx}-meal-${i}`}
+                                  accessibilityLabel={`meal-history-row-${historyIdx}-meal-${i}`}
+                                  style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                                   <TouchableOpacity
                                     disabled={hasBackendMeals}
                                     onPress={() => handleToggleMeal(d, mealType)}
@@ -8843,7 +8930,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         <ErrorBoundary>
         <FadeInView key={viewingFriend ? `friend-${viewingFriend.user_id}` : 'social-home'} duration={280} slideDistance={10} style={{ flex: 1 }}>
           {viewingFriend ? (
-            <ScrollView testID="social-friend-detail-screen" style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 136 }}>
+            <ScrollView testID="social-friend-detail-screen" style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 166 }}>
               <TouchableOpacity
                 testID="social-friend-detail-back"
                 accessibilityLabel="social-friend-detail-back"
@@ -8862,16 +8949,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
                   borderRadius: 14, padding: 20, alignItems: 'center', marginBottom: 16,
                 }}>
-                <View style={{
-                  width: 56, height: 56, borderRadius: 28,
-                  backgroundColor: themeColors.primary + '22',
-                  borderColor: themeColors.primary + '55', borderWidth: 2,
-                  alignItems: 'center', justifyContent: 'center', marginBottom: 12,
-                }}>
-                  <Text style={{ fontSize: 22, fontWeight: '800', color: themeColors.primary }}>
-                    {(viewingFriend.display_name?.[0] ?? viewingFriend.username[0] ?? '?').toUpperCase()}
-                  </Text>
-                </View>
+                <SocialAvatar
+                  avatarUrl={viewingFriend.avatar_url}
+                  name={viewingFriend.display_name}
+                  username={viewingFriend.username}
+                  size={56}
+                  backgroundColor={themeColors.primary + '22'}
+                  borderColor={themeColors.primary + '55'}
+                  textColor={themeColors.primary}
+                  textSize={22}
+                  style={{ marginBottom: 12 }}
+                />
                 <Text style={{ fontSize: 18, fontWeight: '800', color: themeColors.textPrimary }}>
                   {viewingFriend.display_name || viewingFriend.username}
                 </Text>
@@ -9170,7 +9258,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const targetWeightLbs = numberValue(details?.targetWeightLbs ?? details?.target_weight_lbs);
         const profileGoalLabel = cleanText(goalLabel) || cleanText(userProfile.goal);
         const displayName = cleanText(userProfile.firstName) || cleanText(username) || 'Your Profile';
-        const avatarLetter = (cleanText(userProfile.firstName) || cleanText(username) || cleanText(userProfile.goal) || 'U')[0].toUpperCase();
         const metaParts = [
           profileGoalLabel || null,
 	          weightLbs != null && weightLbs > 0 ? formatWeight(weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }) : null,
@@ -9182,11 +9269,26 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         <ScrollView testID="you-tab-screen" style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
           {/* User info header */}
           <View style={[styles.profileHero, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
-            <View style={[styles.profileAvatar, { backgroundColor: themeColors.primary + '22', borderColor: themeColors.primary + '55' }]}>
-              <Text style={[styles.profileAvatarText, { color: themeColors.primary }]}>
-                {avatarLetter}
-              </Text>
-            </View>
+            <TouchableOpacity
+              onPress={openProfilePhotoActions}
+              activeOpacity={0.78}
+              accessibilityLabel="Update profile photo"
+              testID="profile-avatar-button">
+              <SocialAvatar
+                avatarUrl={userProfile.avatarUrl}
+                name={displayName}
+                username={username}
+                size={56}
+                backgroundColor={themeColors.primary + '22'}
+                borderColor={themeColors.primary + '55'}
+                textColor={themeColors.primary}
+                textSize={22}
+                style={styles.profileAvatar}>
+                <View style={[styles.profileAvatarEdit, { backgroundColor: themeColors.primary, borderColor: themeColors.surface }]}>
+                  <Ionicons name="camera" size={10} color={getContrastingTextColor(themeColors.primary)} />
+                </View>
+              </SocialAvatar>
+            </TouchableOpacity>
             <View style={{ flex: 1, gap: 2 }}>
               <Text style={[styles.profileHeroName, { color: themeColors.textPrimary }]}>
                 {displayName}
@@ -9418,6 +9520,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         visible={showLogActivity}
         onClose={() => setShowLogActivity(false)}
         themeName={userProfile.themePreference}
+        authToken={userProfile.subscriptionTier === 'pro' ? authToken : null}
         onSave={async (session) => {
           const { saveWorkoutSession, dateKey: dk } = await import('../utils/workoutHistory');
           await saveWorkoutSession(session);
@@ -9473,6 +9576,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       <WorkoutTemplateBuilderModal
         visible={templateBuilderOpen}
         themeName={userProfile.themePreference}
+        authToken={userProfile.subscriptionTier === 'pro' ? authToken : null}
         editTarget={templateBuilderTarget}
         onClose={() => {
           setTemplateBuilderOpen(false);
@@ -9725,13 +9829,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             //  1. Lands in React state (so `allFoodsWithCustom` picks it up
             //     on the next render and the food becomes visible in the
             //     meal-edit picker immediately),
-            //  2. Gets persisted to AsyncStorage, and
-            //  3. Syncs to the backend via `pushUserStateToBackend` so it
+            //  2. Is marked as a kitchen food for planning/search,
+            //  3. Gets persisted to AsyncStorage, and
+            //  4. Syncs to the backend via `pushUserStateToBackend` so it
             //     survives sign-out / cross-device.
             const existing = userProfile?.customFoods ?? [];
-            if (existing.some(f => f.name.toLowerCase() === item.name.toLowerCase())) return;
-            const next = [...existing, item];
-            onProfileUpdate?.({ customFoods: next } as any, true); // skipRegen
+            const customExists = existing.some(f => f.name.toLowerCase() === item.name.toLowerCase());
+            const nextCustomFoods = customExists ? existing : [...existing, item];
+            const existingKitchen = userProfile?.foodsAvailable ?? [];
+            const kitchenExists = existingKitchen.some(name => name.toLowerCase() === item.name.toLowerCase());
+            const nextFoodsAvailable = kitchenExists ? existingKitchen : [...existingKitchen, item.name];
+            if (customExists && kitchenExists) return;
+            onProfileUpdate?.({
+              customFoods: nextCustomFoods,
+              foodsAvailable: nextFoodsAvailable,
+            } as any, true); // skipRegen
           }}
         />
         );
@@ -12101,14 +12213,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         ]}>
         <LinearGradient
           colors={bottomBarGradientColors}
-          style={[styles.bottomBar, { borderColor: chromeColors.border }]}>
+          style={[styles.bottomBar, { borderColor: chromeColors.border, borderWidth: isLightTheme ? StyleSheet.hairlineWidth : 1.25 }]}>
           <BottomTabButton
             testID="bottom-tab-social"
             label="Social"
             iconName="people-outline"
             active={activeTab === 'friends'}
             tint={themeColors.primary}
-            mutedColor={themeColors.textMuted}
+            mutedColor={navMutedColor}
             onPress={() => setActiveTab('friends')}
             badge={pendingFriendCount > 0 ? pendingFriendCount : undefined}
           />
@@ -12118,7 +12230,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             iconName="barbell-outline"
             active={activeTab === 'workout'}
             tint={workoutPalette.strong}
-            mutedColor={themeColors.textMuted}
+            mutedColor={navMutedColor}
             onPress={() => setActiveTab('workout')}
           />
           <BottomTabButton
@@ -12127,7 +12239,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             iconName="nutrition-outline"
             active={activeTab === 'meals'}
             tint={mealPalette.strong}
-            mutedColor={themeColors.textMuted}
+            mutedColor={navMutedColor}
             onPress={() => setActiveTab('meals')}
           />
           <BottomTabButton
@@ -12136,7 +12248,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             iconName="trending-up-outline"
             active={activeTab === 'progress'}
             tint={themeColors.primary}
-            mutedColor={themeColors.textMuted}
+            mutedColor={navMutedColor}
             onPress={() => setActiveTab('progress')}
           />
           <BottomTabButton
@@ -12145,7 +12257,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             iconName="person-circle-outline"
             active={activeTab === 'you'}
             tint={themeColors.primary}
-            mutedColor={themeColors.textMuted}
+            mutedColor={navMutedColor}
             onPress={() => setActiveTab('you')}
           />
         </LinearGradient>
@@ -12164,6 +12276,9 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
 }) {
   const testPrefix = label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   const selected = items.find(item => item.key === selectedKey) ?? items[0];
+  const isLightMode = !bgIsDark(tc.background);
+  const quietTextColor = isLightMode ? tc.textMuted : tc.textSecondary;
+  const quietBorderColor = isLightMode ? tc.border + '88' : tc.border;
   const statusLabel = (state: WeekStripState) => {
     if (state === 'done') return 'Done';
     if (state === 'logged') return 'Logged';
@@ -12179,14 +12294,24 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
     return accent;
   };
   const currentDayKey = todayKey();
+  const selectedDateLabel = selected
+    ? `${selected.key === currentDayKey ? 'Today' : DAY_NAMES[selected.date.getDay()]} · ${MONTH_NAMES[selected.date.getMonth()]} ${selected.date.getDate()}`
+    : '';
+  const selectedSummary = selected
+    ? [
+        selectedDateLabel,
+        selected.title,
+        selected.key === currentDayKey && selected.state === 'today' ? null : statusLabel(selected.state),
+      ].filter(Boolean).join(' · ')
+    : '';
 
   return (
     <View testID={`${testPrefix}-strip`} style={styles.weekStripWrap}>
       <View style={styles.weekStripHeader}>
-        <Text style={[styles.weekStripLabel, { color: tc.textMuted }]}>{label}</Text>
+        <Text style={[styles.weekStripLabel, { color: quietTextColor }]}>{label}</Text>
         {selected ? (
           <Text style={[styles.weekStripSelection, { color: tc.textSecondary }]} numberOfLines={1}>
-            {selected.title} · {statusLabel(selected.state)}
+            {selectedSummary}
           </Text>
         ) : null}
       </View>
@@ -12214,7 +12339,8 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
                 styles.weekDayChip,
                 {
                   backgroundColor: active ? accent + '14' : tc.surface,
-                  borderColor: active ? accent : isToday ? accent + '66' : tc.border,
+                  borderColor: active ? accent : isToday ? accent + '66' : quietBorderColor,
+                  borderWidth: active ? 1 : isLightMode ? StyleSheet.hairlineWidth : 1,
                 },
               ]}>
               {isToday ? (
@@ -12225,7 +12351,7 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
               ) : null}
               <Text style={[
                 styles.weekDayName,
-                { color: active ? accent : isToday ? accent : tc.textMuted },
+                { color: active ? accent : isToday ? accent : quietTextColor },
               ]}>
                 {DAY_NAMES[item.date.getDay()]}
               </Text>
@@ -12832,15 +12958,13 @@ function activityIcon(session: WorkoutSession): string {
   return 'walk-outline';
 }
 
-const TodayWorkoutPlanActivityCards = React.memo(function TodayWorkoutPlanActivityCards({ themeName, distanceUnit = 'mi', sessions, onStartCustom, onLogActivity, onEditPlan, plannedWorkout = null, onStartPlanned, templates = [], isFreeTier = false, onStartTemplate, onDeleteTemplate, onNewTemplate, onEditTemplate }: {
+const TodayWorkoutPlanActivityCards = React.memo(function TodayWorkoutPlanActivityCards({ themeName, distanceUnit = 'mi', sessions, onStartCustom, onLogActivity, onEditPlan, templates = [], isFreeTier = false, onStartTemplate, onDeleteTemplate, onNewTemplate, onEditTemplate }: {
   themeName?: import('../types').AppThemeName;
   distanceUnit?: import('../utils/units').DistanceUnit;
   sessions: WorkoutSession[];
   onStartCustom: () => void;
   onLogActivity: () => void;
   onEditPlan: () => void;
-  plannedWorkout?: WorkoutDay | null;
-  onStartPlanned?: (workout: WorkoutDay) => void;
   templates?: SavedWorkoutTemplate[];
   isFreeTier?: boolean;
   onStartTemplate?: (template: SavedWorkoutTemplate) => void;
@@ -12902,17 +13026,6 @@ const TodayWorkoutPlanActivityCards = React.memo(function TodayWorkoutPlanActivi
       })}
 
       <View style={styles.todayActivityQuickRow}>
-        {plannedWorkout && onStartPlanned ? (
-          <TouchableOpacity
-            testID="start-workout-cta"
-            accessibilityLabel="start-workout-cta"
-            style={[styles.todayActivityQuickAction, { backgroundColor: tc.primary, borderColor: tc.primary }]}
-            onPress={() => onStartPlanned(plannedWorkout)}
-            activeOpacity={0.78}>
-            <Ionicons name="play-circle" size={15} color={getContrastingTextColor(tc.primary)} />
-            <Text style={[styles.todayActivityQuickText, { color: getContrastingTextColor(tc.primary) }]}>Plan</Text>
-          </TouchableOpacity>
-        ) : null}
         <TouchableOpacity
           testID="extra-workout-custom"
           accessibilityLabel="extra-workout-custom"
@@ -12990,8 +13103,26 @@ const TodayWorkoutPlanActivityCards = React.memo(function TodayWorkoutPlanActivi
               setCount > 0 ? `${setCount} set${setCount === 1 ? '' : 's'}` : null,
             ].filter(Boolean).join(' · ');
             return (
-              <View
+              <SwipeableRow
                 key={template.id}
+                enabled={!!(onDeleteTemplate || onEditTemplate)}
+                actions={[
+                  ...(onEditTemplate ? [{
+                    icon: 'create-outline',
+                    label: 'Edit',
+                    color: '#fff',
+                    bgColor: tc.primary,
+                    onPress: () => onEditTemplate(template),
+                  }] : []),
+                  ...(onDeleteTemplate ? [{
+                    icon: 'trash-outline',
+                    label: 'Delete',
+                    color: '#fff',
+                    bgColor: tc.error ?? '#EF4444',
+                    onPress: () => onDeleteTemplate(template),
+                  }] : []),
+                ]}>
+              <View
                 style={[styles.todayActivityLoggedCard, { backgroundColor: tc.surface, borderColor: tc.border }]}>
                 <TouchableOpacity
                   testID={`workout-template-card-${idx}`}
@@ -13043,6 +13174,7 @@ const TodayWorkoutPlanActivityCards = React.memo(function TodayWorkoutPlanActivi
                   <Ionicons name="play-circle" size={22} color={tc.primary} />
                 </TouchableOpacity>
               </View>
+              </SwipeableRow>
             );
           })}
         </View>
@@ -13098,6 +13230,18 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const workoutPalette = theme.sections.workout;
+  const isLightMode = isLightThemeName(theme.name);
+  const cardMetaColor = isLightMode ? tc.textMuted : tc.textSecondary;
+  const cardSecondaryColor = tc.textSecondary;
+  const quietBorderColor = isLightMode ? tc.border + '88' : tc.border;
+  const quietBorderWidth = isLightMode ? StyleSheet.hairlineWidth : 1;
+  const cardShadow = (hero: boolean) => ({
+    shadowColor: isLightMode ? '#0F172A' : '#000',
+    shadowOpacity: isLightMode ? (hero ? 0.12 : 0.045) : (hero ? 0.28 : 0.16),
+    shadowRadius: hero ? 22 : 12,
+    shadowOffset: { width: 0, height: hero ? 12 : 5 },
+    elevation: hero ? 8 : isLightMode ? 1 : 4,
+  });
   // Day-of-week label. Only "Today" gets a special name — for all
   // other days the date strip already disambiguates (e.g. "Mon · Apr 27"),
   // so adding "Yesterday" / "Tomorrow" reads as redundant noise.
@@ -13116,47 +13260,57 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
     // generation surface to expose, just the option to start filling the
     // day with their own exercises / templates / live tracker.
     const canSwitchOff = !!onChangeFocus;
+    const restHero = isToday;
     return (
       <View style={[
         styles.dayCard,
         {
-          backgroundColor: isToday ? tc.surfaceRaised : tc.surface,
-          borderColor: isToday ? workoutPalette.strong : tc.border,
-          borderWidth: isToday ? 2 : 1,
+          backgroundColor: restHero && !isLightMode ? tc.surfaceRaised : tc.surface,
+          borderColor: restHero ? workoutPalette.strong + (isLightMode ? 'AA' : '') : quietBorderColor,
+          borderWidth: restHero ? (isLightMode ? 1 : 1.5) : quietBorderWidth,
+          paddingBottom: restHero ? 18 : 14,
+          ...cardShadow(restHero),
         },
       ]}>
-        {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: workoutPalette.strong, height: 4 }]} />}
+        {isToday && <View style={[styles.dayCardTopAccent, { backgroundColor: workoutPalette.strong, height: isLightMode ? 3 : 4, opacity: isLightMode ? 0.72 : 1 }]} />}
         <View style={[styles.dayCardRow, { paddingTop: isToday ? 0 : 16 }]}>
-          <View style={styles.dayCardLeft}>
-            <Text style={[
-              styles.dayCardDow,
-              { color: isToday ? workoutPalette.strong : tc.textSecondary, fontSize: isToday ? 14 : 13, fontWeight: isToday ? '800' : '700' },
-            ]}>{dow}</Text>
-            <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
-          </View>
-          <View style={[styles.restBadge, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}>
-            <Text style={[styles.restBadgeText, { color: tc.textSecondary }]}>Rest Day</Text>
+          <WorkoutFocusIcon
+            focus="Rest Day"
+            stimulus="recovery"
+            color={workoutPalette.strong}
+            size={restHero ? 56 : 44}
+            muted={!isToday}
+            style={styles.dayFocusIcon}
+          />
+          <View style={styles.dayCardRight}>
+            <View style={styles.focusHeaderRow}>
+              {isToday && (
+                <View style={[styles.dayStatusPill, { backgroundColor: workoutPalette.strong + '18', borderColor: workoutPalette.strong + '55' }]}>
+                  <Text style={[styles.dayStatusPillText, { color: workoutPalette.strong }]}>TODAY</Text>
+                </View>
+              )}
+              <View style={[styles.restBadge, { backgroundColor: isLightMode ? tc.surface : tc.surfaceRaised, borderColor: quietBorderColor, borderWidth: quietBorderWidth }]}>
+                <Text style={[styles.restBadgeText, { color: cardSecondaryColor }]}>Rest Day</Text>
+              </View>
+            </View>
           </View>
         </View>
-        <Text style={[styles.restHint, { color: tc.textMuted }]}>Recovery & light stretching</Text>
+        <Text style={[styles.restHint, { color: cardMetaColor }]}>Recovery & light stretching</Text>
         {canSwitchOff && (
           <TouchableOpacity
             onPress={() => onChangeFocus?.('Custom')}
             activeOpacity={0.75}
             testID="switch-to-workout-cta"
             accessibilityLabel="switch-to-workout-cta"
-            style={{
-              marginTop: 10, alignSelf: 'flex-start',
-              flexDirection: 'row', alignItems: 'center', gap: 6,
-              paddingVertical: 7, paddingHorizontal: 12,
-              borderRadius: 8, borderWidth: 1,
-              borderColor: workoutPalette.strong + '55',
-              backgroundColor: workoutPalette.strong + '0E',
-            }}>
-            <Ionicons name="swap-horizontal-outline" size={14} color={workoutPalette.strong} />
-            <Text style={{ fontSize: 12, fontWeight: '700', color: workoutPalette.strong }}>
-              Switch to workout
-            </Text>
+            style={[styles.secondaryActionBtn, { marginTop: 12, backgroundColor: workoutPalette.strong + '10', borderColor: workoutPalette.strong + '40' }]}>
+            <View style={[styles.secondaryActionIcon, { backgroundColor: workoutPalette.strong + '18' }]}>
+              <Ionicons name="swap-horizontal-outline" size={16} color={workoutPalette.strong} />
+            </View>
+            <View style={styles.secondaryActionCopy}>
+              <Text style={[styles.secondaryActionTitle, { color: workoutPalette.strong }]}>Switch to workout</Text>
+              <Text style={[styles.secondaryActionSub, { color: cardMetaColor }]} numberOfLines={1}>Choose a training focus</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={workoutPalette.strong} />
           </TouchableOpacity>
         )}
       </View>
@@ -13169,18 +13323,28 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
     const skippedBadge = skippedDayBadgeLabel(skipReason);
     const skippedUndo = skippedDayUndoLabel(skipReason);
     return (
-      <View style={[styles.dayCard, styles.dayCardSkipped, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+      <View style={[styles.dayCard, styles.dayCardSkipped, { backgroundColor: tc.surface, borderColor: quietBorderColor, borderWidth: quietBorderWidth, ...cardShadow(false) }]}>
         <View style={[styles.dayCardRow, { paddingTop: 16 }]}>
-          <View style={styles.dayCardLeft}>
-            <Text style={[styles.dayCardDow, { color: tc.textSecondary }]}>{dow}</Text>
-            <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
-          </View>
+          <WorkoutFocusIcon
+            focus={item.workout?.focus ?? skippedTitle}
+            stimulus={item.workout?.stimulus}
+            color={tc.warning}
+            size={42}
+            muted
+            style={styles.dayFocusIcon}
+          />
           <View style={styles.dayCardRight}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <View style={styles.skippedFocusHeaderRow}>
+              {isToday && (
+                <View style={[styles.dayStatusPill, { backgroundColor: tc.warning + '18', borderColor: tc.warning + '55' }]}>
+                  <Text style={[styles.dayStatusPillText, { color: tc.warning }]}>TODAY</Text>
+                </View>
+              )}
               <Text
                 testID={workoutDayCardTitleTestID(skippedTitle)}
                 accessibilityLabel={skippedTitle}
                 style={[styles.focusLabel, { color: tc.textPrimary }]}
+                numberOfLines={2}
               >
                 {skippedTitle}
               </Text>
@@ -13208,7 +13372,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                 const stimLabel = stim === 'strength' ? 'HEAVY' : stim === 'hypertrophy' ? 'HYPERTROPHY' : stim === 'volume' ? 'VOLUME' : stim.toUpperCase();
                 const stimColor = stim === 'strength' ? '#EF4444' : stim === 'volume' ? '#8B5CF6' : tc.primary;
                 return (
-                  <View style={{ backgroundColor: stimColor + '18', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5 }}>
+                  <View style={[styles.stimulusBadge, { backgroundColor: stimColor + '18' }]}>
                     <Text style={{ fontSize: 9, fontWeight: '800', color: stimColor, letterSpacing: 0.5 }}>{stimLabel}</Text>
                   </View>
                 );
@@ -13232,9 +13396,12 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           <TouchableOpacity
             testID="workout-day-card-unskip"
             accessibilityLabel={skippedUndo}
-            style={[styles.unskipBtn, { backgroundColor: tc.surface, borderColor: tc.primary }]}
+            style={[styles.unskipBtn, { backgroundColor: tc.primary + '10', borderColor: tc.primary + (isLightMode ? '44' : '50'), borderWidth: quietBorderWidth }]}
             onPress={onUnskip}
           >
+            <View style={[styles.secondaryActionIcon, { backgroundColor: tc.primary + '18' }]}>
+              <Ionicons name="refresh" size={16} color={tc.primary} />
+            </View>
             <Text style={[styles.unskipBtnText, { color: tc.primary }]}>{skippedUndo}</Text>
           </TouchableOpacity>
         </View>
@@ -13242,20 +13409,27 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
     );
   }
 
-  // Today gets the strongest treatment: solid full-strength border, raised
-  // background, and a 4px accent strip up top. Completed-but-not-today gets
-  // a dashed border + reduced opacity so finished days visually recede,
-  // letting the user's eye land on today first.
+  // The active workout is the hero. Completed days keep the same visual
+  // language but shrink back so the live next action stays obvious.
   const accentColor = workoutPalette.strong;
+  const isHeroCard = isToday && !isCompleted;
+  const isCompletedPast = isCompleted && !isToday;
   const borderColor = isToday
-    ? workoutPalette.strong
+    ? accentColor + (isLightMode ? 'AA' : '')
     : isCompleted
-      ? workoutPalette.strong + '55'
-      : tc.border;
-  const cardBg = isToday ? tc.surfaceRaised : tc.surface;
-  const todayAccentHeight = isToday ? 4 : 3;
-  const completedDashed = isCompleted && !isToday;
+      ? isLightMode ? quietBorderColor : accentColor + '44'
+      : quietBorderColor;
+  const cardBg = isHeroCard && !isLightMode ? tc.surfaceRaised : tc.surface;
+  const todayAccentHeight = isHeroCard ? (isLightMode ? 3 : 4) : 2;
   const collapsedEstimateMinutes = estimateWorkoutMinutes(item.workout!, sessionMinutes);
+  const startWorkoutTextColor = getContrastingTextColor(accentColor);
+  const hasReadinessBadge = isToday && !isCompleted && readinessBadge && readinessBadge.label !== '—' && readinessBadge.score > 0;
+  const showRecoveringBadge = isToday && isCompleted;
+  const readinessColor = hasReadinessBadge
+    ? readinessBadge.label === 'Primed' || readinessBadge.label === 'Ready'
+      ? accentColor
+      : readinessBadge.label === 'Moderate' ? tc.warning : tc.error
+    : accentColor;
 
   return (
     <View
@@ -13264,13 +13438,15 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
         {
           backgroundColor: cardBg,
           borderColor,
-          borderWidth: isToday ? 2 : 1,
-          borderStyle: completedDashed ? 'dashed' : 'solid',
-          opacity: completedDashed ? 0.78 : 1,
+          borderWidth: isHeroCard ? (isLightMode ? 1 : 1.5) : quietBorderWidth,
+          borderStyle: 'solid',
+          opacity: isCompletedPast ? 0.86 : 1,
+          paddingBottom: isCompleted ? 12 : isHeroCard ? 18 : 16,
+          ...cardShadow(isHeroCard),
         },
       ]}>
       {(isToday || isCompleted) && (
-        <View style={[styles.dayCardTopAccent, { backgroundColor: accentColor, height: todayAccentHeight, opacity: completedDashed ? 0.55 : 1 }]} />
+        <View style={[styles.dayCardTopAccent, { backgroundColor: accentColor, height: todayAccentHeight, marginBottom: isHeroCard ? 14 : 10, opacity: isCompletedPast ? 0.38 : isLightMode ? 0.72 : 1 }]} />
       )}
       {/* Regen overlay while the deterministic planner swaps this day's
           exercises. Translucent so the card structure stays visible. */}
@@ -13289,31 +13465,58 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
         </View>
       )}
       <TouchableOpacity
-        style={[styles.dayCardRow, isToday && styles.dayCardRowToday, { paddingTop: (isToday || isCompleted) ? 0 : 16 }]}
+        style={[styles.dayCardRow, isHeroCard && styles.dayCardRowToday, { paddingTop: (isToday || isCompleted) ? 0 : 16 }]}
         onPress={onPress}
         activeOpacity={0.8}
         disabled={isRegenerating}
         accessibilityRole="button"
         accessibilityLabel={`${dow} ${dateStr} ${item.workout!.focus}`}>
-        <View style={[styles.dayCardLeft, isToday && styles.dayCardLeftToday]}>
-          <Text style={[
-            styles.dayCardDow,
-            isToday && styles.dayCardDowTodayCompact,
-            { color: isToday ? accentColor : tc.textSecondary, fontSize: isToday ? 12 : 14, fontWeight: isToday ? '800' : '700' },
-          ]}>{dow}</Text>
-          <Text style={[styles.dayCardDate, { color: tc.textMuted }]}>{dateStr}</Text>
-        </View>
-        <View style={[styles.dayCardRight, isToday && styles.dayCardRightToday]}>
-          <View style={[styles.focusHeaderRow, isToday && styles.focusHeaderRowToday]}>
+        <WorkoutFocusIcon
+          focus={item.workout!.focus}
+          stimulus={item.workout?.stimulus}
+          color={accentColor}
+          size={isHeroCard ? 60 : isCompleted ? 42 : 46}
+          muted={isCompletedPast}
+          style={[styles.dayFocusIcon, isHeroCard && styles.dayFocusIconToday]}
+        />
+        <View style={[styles.dayCardRight, isHeroCard && styles.dayCardRightToday]}>
+          <View style={[styles.focusHeaderRow, isHeroCard && styles.focusHeaderRowToday]}>
+            {isToday && (
+              <View style={[styles.dayStatusPill, { backgroundColor: accentColor + '18', borderColor: accentColor + '55' }]}>
+                <Text style={[styles.dayStatusPillText, { color: accentColor }]}>TODAY</Text>
+              </View>
+            )}
             <FocusLabelCrossfade
               focus={item.workout!.focus}
               testID={workoutDayCardTitleTestID(item.workout!.focus)}
               accessibilityLabel={item.workout!.focus}
               style={[
                 styles.focusLabel,
-                { color: completedDashed ? tc.textSecondary : tc.textPrimary, textDecorationLine: completedDashed ? 'line-through' : 'none', fontSize: isToday ? 19 : 16, fontWeight: isToday ? '800' : '700', lineHeight: isToday ? 23 : undefined },
+                {
+                  color: isCompletedPast ? cardSecondaryColor : tc.textPrimary,
+                  textDecorationLine: 'none',
+                  fontSize: isHeroCard ? 20 : isCompleted ? 15 : 16,
+                  fontWeight: isHeroCard ? '900' : '800',
+                  lineHeight: isHeroCard ? 24 : isCompleted ? 19 : undefined,
+                },
               ]}
             />
+            {hasReadinessBadge && (
+              <View style={[styles.readinessHeaderChip, { backgroundColor: readinessColor + '18', borderColor: readinessColor + '55' }]}>
+                <Ionicons name="battery-charging-outline" size={11} color={readinessColor} />
+                <Text style={[styles.readinessHeaderText, { color: readinessColor }]}>
+                  {readinessBadge.score} READY
+                </Text>
+              </View>
+            )}
+            {showRecoveringBadge && (
+              <View style={[styles.recoveringHeaderChip, { backgroundColor: tc.success + '18', borderColor: tc.success + '55' }]}>
+                <Ionicons name="leaf-outline" size={11} color={tc.success} />
+                <Text style={[styles.readinessHeaderText, { color: tc.success }]}>
+                  RECOVERING
+                </Text>
+              </View>
+            )}
             {(() => {
               const stim = item.workout?.stimulus;
               if (!stim || stim === 'conditioning' || stim === 'mobility' || stim === 'recovery') return null;
@@ -13341,21 +13544,21 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
             // to focus keywords for old cached plans.
             if (stim === 'mobility' || (!stim && ['mobility', 'stretch', 'yoga', 'flow'].some(kw => focusLower.includes(kw)))) {
               return (
-                <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
+                <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: cardMetaColor }]} numberOfLines={1}>
                   {countText} · Mobility
                 </Text>
               );
             }
             if (stim === 'recovery' || (!stim && ['recover', 'rest'].some(kw => focusLower.includes(kw)))) {
               return (
-                <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
+                <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: cardMetaColor }]} numberOfLines={1}>
                   {countText} · Recovery
                 </Text>
               );
             }
             if (stim === 'conditioning' || (!stim && ['cardio', 'zone2', 'zone 2', 'interval'].some(kw => focusLower.includes(kw)))) {
               return (
-                <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
+                <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: cardMetaColor }]} numberOfLines={1}>
                   {countText} · Cardio
                 </Text>
               );
@@ -13415,15 +13618,15 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
             const muscles = labels.slice(0, 3);
             const muscleText = muscles.length ? ` · ${muscles.join(', ')}` : '';
             return (
-              <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: tc.textMuted }]} numberOfLines={1}>
+              <Text testID="workout-estimated-duration" style={[styles.exerciseCount, { color: cardMetaColor }]} numberOfLines={1}>
                 {countText}{muscleText}
               </Text>
             );
           })()}
         </View>
         {isCompleted ? (
-          <View style={[styles.completeBadge, { backgroundColor: tc.success + '22', borderColor: tc.success }]}>
-            <Text style={[styles.completeBadgeText, { color: tc.success }]}>✓ Done</Text>
+          <View style={[styles.completeBadge, { backgroundColor: tc.success + '18', borderColor: tc.success + (isLightMode ? '66' : '77'), borderWidth: quietBorderWidth }]}>
+            <Text style={[styles.completeBadgeText, { color: tc.success }]}>Done</Text>
           </View>
         ) : (
           <View style={styles.chevron}>
@@ -13431,10 +13634,8 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           </View>
         )}
       </TouchableOpacity>
-      {isToday && readinessBadge && readinessBadge.label !== '—' && readinessBadge.score > 0 && (() => {
-        const rc = readinessBadge.label === 'Primed' || readinessBadge.label === 'Ready'
-          ? accentColor
-          : readinessBadge.label === 'Moderate' ? tc.warning : tc.error;
+      {hasReadinessBadge && (() => {
+        const rc = readinessColor;
         return (
           <TouchableOpacity
             onPress={onReadinessTap}
@@ -13443,7 +13644,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
               flexDirection: 'row', alignItems: 'center', gap: 10,
               paddingHorizontal: 14, paddingVertical: 13,
               marginTop: 8,
-              borderTopWidth: 1, borderTopColor: tc.border,
+              borderTopWidth: quietBorderWidth, borderTopColor: quietBorderColor,
             }}>
             <View style={{
               width: 32, height: 32, borderRadius: 16,
@@ -13455,7 +13656,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
             <View style={{ flex: 1 }}>
               <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary }}>Training Readiness · <Text style={{ color: rc }}>{readinessBadge.label}</Text></Text>
             </View>
-            <Ionicons name="chevron-forward" size={12} color={tc.textMuted} />
+            <Ionicons name="chevron-forward" size={12} color={cardMetaColor} />
           </TouchableOpacity>
         );
       })()}
@@ -13465,17 +13666,24 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
           <PulseView active intensity={0.02} duration={2000} style={{ flex: 2 }}>
             <PressableScale
               onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}
+              style={{ width: '100%' }}
               accessibilityRole="button"
               accessibilityLabel="start-workout-cta"
               testID="start-workout-cta">
-              <View testID="start-workout-cta-visible" style={[styles.startWorkoutBtn, { backgroundColor: workoutPalette.strong }]}>
-                <Ionicons name="play-circle" size={22} color={getContrastingTextColor(workoutPalette.strong)} />
-                <Text style={[styles.startWorkoutBtnText, { color: getContrastingTextColor(workoutPalette.strong) }]}>Start Workout</Text>
+              <View testID="start-workout-cta-visible" style={[styles.startWorkoutBtn, { shadowColor: accentColor }]}>
+                <View style={[styles.startWorkoutBody, { backgroundColor: accentColor }]}>
+                  <View style={[styles.startWorkoutIconBadge, { backgroundColor: startWorkoutTextColor + '24' }]}>
+                    <Ionicons name="play" size={17} color={startWorkoutTextColor} style={{ marginLeft: 2 }} />
+                  </View>
+                  <View style={styles.startWorkoutCopy}>
+                    <Text style={[styles.startWorkoutBtnText, { color: startWorkoutTextColor }]}>Start Workout</Text>
+                  </View>
+                </View>
               </View>
             </PressableScale>
           </PulseView>
           <Pressable
-            style={[styles.skipSecondaryBtn, { borderColor: tc.border, backgroundColor: tc.surface }]}
+            style={[styles.skipSecondaryBtn, { borderColor: quietBorderColor, borderWidth: quietBorderWidth, backgroundColor: isLightMode ? tc.surface : tc.surfaceRaised }]}
             hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
             onPress={() => {
               import('../utils/feedback').then(f => f.hapticWarning()).catch(() => {});
@@ -13483,8 +13691,10 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
             }}
             accessibilityRole="button"
             accessibilityLabel="Skip today's workout">
-            <Ionicons name="close-circle-outline" size={18} color={tc.textSecondary} />
-            <Text style={[styles.skipSecondaryBtnText, { color: tc.textSecondary }]}>Skip</Text>
+            <View style={[styles.skipActionIcon, { backgroundColor: tc.textMuted + '18' }]}>
+              <Ionicons name="close" size={15} color={cardSecondaryColor} />
+            </View>
+            <Text style={[styles.skipSecondaryBtnText, { color: cardSecondaryColor }]}>Skip</Text>
           </Pressable>
         </View>
       )}
@@ -13492,10 +13702,10 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
         <View style={styles.expandedContent}>
           {isCompleted ? (
             <View style={{ gap: 10 }}>
-              <View style={[styles.completedBanner, { backgroundColor: tc.success + '1A', borderColor: tc.success }]}>
+              <View style={[styles.completedBanner, { backgroundColor: tc.success + '14', borderColor: tc.success + (isLightMode ? '55' : '77'), borderWidth: quietBorderWidth }]}>
                 <Text style={[styles.completedBannerText, { color: tc.success }]}>
                   {isToday
-                    ? 'Workout completed today!'
+                    ? 'Completed today'
                     : `Workout completed ${DAY_NAMES[item.date.getDay()]}, ${MONTH_NAMES[item.date.getMonth()]} ${item.date.getDate()}`}
                 </Text>
               </View>
@@ -13519,31 +13729,26 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                       ],
                     );
                   }}
-                  style={{
-                    alignSelf: 'flex-start',
-                    paddingHorizontal: 12, paddingVertical: 6,
-                    borderRadius: 8,
-                    backgroundColor: tc.surfaceRaised,
-                    borderWidth: 1, borderColor: tc.border,
-                  }}>
-                  <Text style={{ fontSize: 11, fontWeight: '700', color: tc.textSecondary }}>
+                  style={[styles.quietActionBtn, { backgroundColor: isLightMode ? tc.surface : tc.surfaceRaised, borderColor: quietBorderColor, borderWidth: quietBorderWidth }]}>
+                  <Ionicons name="return-down-back-outline" size={14} color={cardSecondaryColor} />
+                  <Text style={[styles.quietActionText, { color: cardSecondaryColor }]}>
                     Mark as not done
                   </Text>
                 </TouchableOpacity>
               )}
               {completedSummary ? (
-                <View style={[styles.completedBanner, { backgroundColor: tc.surfaceRaised, borderColor: tc.border, gap: 8, alignItems: 'flex-start' }]}>
+                <View style={[styles.completedBanner, { backgroundColor: isLightMode ? tc.surface : tc.surfaceRaised, borderColor: quietBorderColor, borderWidth: quietBorderWidth, gap: 7, alignItems: 'flex-start' }]}>
                   <View style={{ flexDirection: 'row', gap: 12, flexWrap: 'wrap' }}>
                     <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
                       {completedSummary.totalSets} sets
                     </Text>
-                    <Text style={{ fontSize: 13, color: tc.textMuted }}>·</Text>
+                    <Text style={{ fontSize: 13, color: cardMetaColor }}>·</Text>
                     <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
                       {completedSummary.totalReps} reps
                     </Text>
                     {completedSummary.caloriesBurned > 0 && (
                       <>
-                        <Text style={{ fontSize: 13, color: tc.textMuted }}>·</Text>
+                        <Text style={{ fontSize: 13, color: cardMetaColor }}>·</Text>
                         <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
                           ~{completedSummary.caloriesBurned} kcal
                         </Text>
@@ -13551,14 +13756,14 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                     )}
                     {completedSummary.hrAvg && completedSummary.hrAvg > 0 && (
                       <>
-                        <Text style={{ fontSize: 13, color: tc.textMuted }}>·</Text>
+                        <Text style={{ fontSize: 13, color: cardMetaColor }}>·</Text>
                         <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>
                           {completedSummary.hrAvg} avg bpm
                         </Text>
                       </>
                     )}
                   </View>
-                  <Text style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 19 }}>
+                  <Text style={{ fontSize: 12, color: cardSecondaryColor, lineHeight: 18 }}>
                     {completedSummary.motivationMessage}
                   </Text>
                   {completedSummary.achievements?.length > 0 && (
@@ -13580,17 +13785,19 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                     <TouchableOpacity
                       testID="change-focus-toggle"
                       accessibilityLabel="change-focus-toggle"
-                      style={{
-                        flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-                        paddingVertical: 10, borderRadius: 10, borderWidth: 1.5,
-                        borderColor: workoutPalette.strong + '55', backgroundColor: tc.surface,
-                      }}
+                      style={[styles.secondaryActionBtn, { backgroundColor: workoutPalette.strong + '0E', borderColor: workoutPalette.strong + '40' }]}
                       onPress={onToggleSwitch}>
-                      <Ionicons name="swap-horizontal-outline" size={16} color={workoutPalette.strong} />
-                      <Text style={{ fontSize: 13, fontWeight: '700', color: workoutPalette.strong }}>Change Focus</Text>
+                      <View style={[styles.secondaryActionIcon, { backgroundColor: workoutPalette.strong + '18' }]}>
+                        <Ionicons name="swap-horizontal-outline" size={16} color={workoutPalette.strong} />
+                      </View>
+                      <View style={styles.secondaryActionCopy}>
+                        <Text style={[styles.secondaryActionTitle, { color: workoutPalette.strong }]}>Change Focus</Text>
+                        <Text style={[styles.secondaryActionSub, { color: cardMetaColor }]} numberOfLines={1}>Compare readiness by muscle group</Text>
+                      </View>
+                      <Ionicons name="chevron-down" size={16} color={workoutPalette.strong} />
                     </TouchableOpacity>
                   ) : (
-                    <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: tc.border }}>
+                    <View style={{ backgroundColor: isLightMode ? tc.surface : tc.surfaceRaised, borderRadius: 12, padding: 12, borderWidth: quietBorderWidth, borderColor: quietBorderColor }}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
                         <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>Change focus to:</Text>
                         <TouchableOpacity
@@ -13598,7 +13805,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                           testID="change-focus-close"
                           accessibilityLabel="change-focus-close"
                           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                          <Ionicons name="close-circle" size={20} color={tc.textMuted} />
+                          <Ionicons name="close-circle" size={20} color={cardMetaColor} />
                         </TouchableOpacity>
                       </View>
                       {/* Readiness dial grid — the circle + score is the
@@ -13606,7 +13813,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                           underneath. Uses a dashed inner ring and
                           transparent background so the tiles don't
                           visually repeat the day card below. */}
-                      <Text style={{ fontSize: 10, color: tc.textMuted, marginBottom: 8, fontStyle: 'italic' }}>
+                      <Text style={{ fontSize: 10, color: cardMetaColor, marginBottom: 8, fontStyle: 'italic' }}>
                         Numbers show today's readiness for that focus. Higher = fresher.
                       </Text>
                       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
@@ -13615,7 +13822,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                           const hasConflict = !!w?.conflict;
                           const lowReady = w?.readiness != null && w.readiness < 40;
                           const warned = hasConflict || lowReady;
-                          const tier = w?.readiness == null ? tc.textMuted
+                          const tier = w?.readiness == null ? cardMetaColor
                             : w.readiness >= 70 ? tc.success
                             : w.readiness >= 40 ? tc.warning
                             : tc.error;
@@ -13974,7 +14181,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 0,
     right: 0,
-    bottom: 104,     // above the bottom tab bar
+    bottom: 124,     // above the floating bottom tab bar
     zIndex: 4,
   },
 
@@ -13987,7 +14194,7 @@ const styles = StyleSheet.create({
   scrollContentBelowSubTab: {
     paddingHorizontal: 16,
     paddingTop: 78,  // clears the fixed sub-tab bar + a small gap
-    paddingBottom: 110,
+    paddingBottom: 166,
   },
 
   weekStripWrap: {
@@ -14021,7 +14228,7 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 58,
     borderRadius: 10,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
     justifyContent: 'center',
     paddingVertical: 6,
@@ -14091,7 +14298,17 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     alignItems: 'center', justifyContent: 'center',
   },
-  profileAvatarText: { fontSize: 22, fontWeight: '800' },
+  profileAvatarEdit: {
+    position: 'absolute',
+    right: -2,
+    bottom: -2,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   profileHeroName:   { fontSize: 17, fontWeight: '800', textTransform: 'capitalize' },
   profileHeroMeta:   { fontSize: 13, fontWeight: '500' },
 
@@ -14286,38 +14503,41 @@ const styles = StyleSheet.create({
   tabText:   { fontSize: 14, fontWeight: '700', letterSpacing: 0.2 },
 
   scrollView:    { flex: 1 },
-  scrollContent: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 110 },
+  scrollContent: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 166 },
 
-  dayCard:         { backgroundColor: colors.surface, borderRadius: 22, borderWidth: 1, borderColor: colors.border, paddingHorizontal: 16, paddingBottom: 16, paddingTop: 0, marginBottom: 14, overflow: 'hidden', ...elevations.card },
+  dayCard:         { backgroundColor: colors.surface, borderRadius: 22, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, paddingHorizontal: 16, paddingBottom: 16, paddingTop: 0, marginBottom: 16, overflow: 'hidden', ...elevations.card },
   dayCardTopAccent: { height: 3, marginBottom: 12, borderRadius: 0 },
   dayCardToday:    { borderColor: colors.primary },
   dayCardComplete: { borderColor: colors.success },
-  dayCardSkipped:  { opacity: 0.6 },
+  dayCardSkipped:  { opacity: 0.74 },
   dayCardRow:      { flexDirection: 'row', alignItems: 'center' },
   dayCardRowToday: { alignItems: 'flex-start' },
-  dayCardLeft:     { width: 70 },
-  dayCardLeftToday:{ width: 88, paddingTop: 3, marginRight: 6 },
-  dayCardRight:    { flex: 1 },
-  dayCardDow:      { fontSize: 14, fontWeight: '700', color: colors.textSecondary, marginBottom: 2 },
-  dayCardDowTodayCompact: { textTransform: 'uppercase', marginBottom: 4 },
-  dayCardDowToday: { color: colors.primary },
-  dayCardDate:     { fontSize: 12, color: colors.textMuted },
+  dayFocusIcon:    { marginRight: 10 },
+  dayFocusIconToday: { marginTop: 1 },
+  dayCardRight:    { flex: 1, minWidth: 0 },
 
-  focusLabel:    { fontSize: 16, fontWeight: '700', color: colors.textPrimary, marginBottom: 2 },
+  focusLabel:    { fontSize: 16, fontWeight: '700', color: colors.textPrimary, marginBottom: 2, flexShrink: 1 },
   dayCardRightToday: { paddingTop: 0 },
   focusHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
   focusHeaderRowToday: { alignItems: 'flex-start', gap: 8 },
+  skippedFocusHeaderRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0 },
+  stimulusBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5, flexShrink: 0 },
+  dayStatusPill: { borderRadius: 6, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 6, paddingVertical: 2 },
+  dayStatusPillText: { fontSize: 9, fontWeight: '900', letterSpacing: 0.6 },
+  readinessHeaderChip: { flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: 6, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 6, paddingVertical: 2 },
+  recoveringHeaderChip: { flexDirection: 'row', alignItems: 'center', gap: 3, borderRadius: 6, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 6, paddingVertical: 2 },
+  readinessHeaderText: { fontSize: 9, fontWeight: '900', letterSpacing: 0.4 },
   exerciseCount: { fontSize: 13, color: colors.textMuted },
   chevron:       { width: 22, height: 22, marginLeft: 8, alignItems: 'center', justifyContent: 'center' },
 
-  completeBadge:     { backgroundColor: colors.success + '22', borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.success },
-  completeBadgeText: { fontSize: 12, color: colors.success, fontWeight: '700' },
+  completeBadge:     { backgroundColor: colors.success + '22', borderRadius: radius.full, paddingHorizontal: 8, paddingVertical: 3, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.success },
+  completeBadgeText: { fontSize: 11, color: colors.success, fontWeight: '800' },
 
-  skippedBadge:     { backgroundColor: colors.warning + '22', borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.warning },
+  skippedBadge:     { backgroundColor: colors.warning + '22', borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: colors.warning, flexShrink: 0, marginLeft: 8 },
   skippedBadgeText: { fontSize: 12, color: colors.warning, fontWeight: '600' },
   skippedHint:      { fontSize: 12, color: colors.textMuted, marginTop: 10 },
 
-  restBadge:     { backgroundColor: colors.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: 1, borderColor: colors.border },
+  restBadge:     { backgroundColor: colors.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 12, paddingVertical: 4, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
   restBadgeText: { fontSize: 12, color: colors.textSecondary, fontWeight: '500' },
   restHint:      { fontSize: 12, color: colors.textMuted, marginTop: 8 },
 
@@ -14342,8 +14562,8 @@ const styles = StyleSheet.create({
   changeFocusRiskLabel: { fontSize: 8, fontWeight: '900', letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 2 },
   changeFocusRiskText: { fontSize: 9, lineHeight: 12, textAlign: 'center' },
 
-  completedBanner:     { backgroundColor: colors.success + '1A', borderRadius: radius.md, padding: 14, alignItems: 'center', borderWidth: 1, borderColor: colors.success },
-  completedBannerText: { fontSize: 14, fontWeight: '700', color: colors.success },
+  completedBanner:     { backgroundColor: colors.success + '1A', borderRadius: radius.md, paddingHorizontal: 12, paddingVertical: 9, alignItems: 'center', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.success },
+  completedBannerText: { fontSize: 12, fontWeight: '800', color: colors.success },
 
   todayPlanCardsWrap: { marginTop: -4, marginBottom: 12, gap: 10 },
   todayActivitySection: { gap: 8 },
@@ -14383,16 +14603,89 @@ const styles = StyleSheet.create({
   actionRow:       { flexDirection: 'row', gap: 10, marginTop: 12 },
   skipLink:        { alignSelf: 'center', paddingVertical: 8, paddingHorizontal: 4 },
   skipLinkText:    { fontSize: 12, fontWeight: '400', textDecorationLine: 'underline' },
+  secondaryActionBtn: {
+    minHeight: 50,
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  secondaryActionIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  secondaryActionCopy: { flex: 1, minWidth: 0 },
+  secondaryActionTitle: { fontSize: 13, fontWeight: '900', letterSpacing: 0.1 },
+  secondaryActionSub: { fontSize: 10, fontWeight: '700', marginTop: 1 },
+  quietActionBtn: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  quietActionText: { fontSize: 11, fontWeight: '800' },
   skipSecondaryBtn: {
     flex: 1,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    borderRadius: radius.lg, paddingVertical: 18, borderWidth: 1,
+    height: 58,
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    borderRadius: radius.lg,
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    borderWidth: StyleSheet.hairlineWidth,
   },
-  skipSecondaryBtnText: { fontSize: 14, fontWeight: '700', letterSpacing: 0.2 },
-  unskipBtn:       { backgroundColor: colors.surface, borderRadius: radius.md, paddingVertical: 14, paddingHorizontal: 16, alignItems: 'center', borderWidth: 1, borderColor: colors.primary, flex: 1 },
-  unskipBtnText:   { color: colors.primary, fontSize: 13, fontWeight: '700' },
-  startWorkoutBtn: { backgroundColor: colors.primary, borderRadius: radius.lg, paddingVertical: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4 },
-  startWorkoutBtnText: { color: '#FFFFFF', fontSize: 17, fontWeight: '800', letterSpacing: 0.3 },
+  skipActionIcon: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  skipSecondaryBtnText: { fontSize: 12, fontWeight: '800', letterSpacing: 0.2 },
+  unskipBtn:       { backgroundColor: colors.surface, borderRadius: radius.md, paddingVertical: 10, paddingHorizontal: 12, alignItems: 'center', justifyContent: 'center', borderWidth: StyleSheet.hairlineWidth, borderColor: colors.primary, flex: 1, flexDirection: 'row', gap: 9 },
+  unskipBtnText:   { color: colors.primary, fontSize: 13, fontWeight: '900' },
+  startWorkoutBtn: {
+    width: '100%',
+    borderRadius: radius.lg,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.34,
+    shadowRadius: 14,
+    elevation: 7,
+  },
+  startWorkoutBody: {
+    height: 58,
+    borderRadius: radius.lg,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    overflow: 'hidden',
+  },
+  startWorkoutIconBadge: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  startWorkoutCopy: { flex: 1, minWidth: 0 },
+  startWorkoutBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '900', letterSpacing: 0.1 },
 
   exerciseSummaryList:   { gap: 8 },
   exerciseSummaryRow:    { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },

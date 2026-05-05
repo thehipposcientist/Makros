@@ -717,6 +717,39 @@ def test_cardio_finisher_scales_monotonically():
     _ok(f"midpoints monotonic: {mids}")
 
 
+def test_interval_cardio_reps_render_per_work_bout():
+    """Interval rows show the per-repeat work duration, not the full
+    session duration in every set description."""
+    print("\n[test] interval cardio: reps render per work bout")
+    from app.services.workout.prescriptions import _prescribe_conditioning
+    from types import SimpleNamespace
+
+    slot = Slot("Interval Block", "cardio", None, "primary")
+    exercise = {
+        "name": "Jump Rope HIIT",
+        "movement_pattern": "cardio",
+        "primary_muscle": "cardio",
+    }
+    inputs = SimpleNamespace(
+        session_minutes=45,
+        user_equipment_capabilities={},
+        user_age=None,
+        resting_hr=None,
+    )
+
+    presc = _prescribe_conditioning(
+        DayArchetype.COND_INTERVALS_SHORT,
+        slot,
+        exercise,
+        inputs,
+    )
+
+    assert presc.sets > 1, f"expected interval repeats, got {presc.sets}"
+    assert "30-45s" in presc.reps, f"expected per-bout seconds, got {presc.reps!r}"
+    assert "min" not in presc.reps.lower(), f"interval reps should not render session minutes: {presc.reps!r}"
+    _ok(f"Jump Rope HIIT reps='{presc.reps}'")
+
+
 def test_lifting_set_density_starts_at_75_min():
     """The 45-60 min picker stores 60 as the upper bound; it should not
     receive the extended-session set bump reserved for 60-75+ min."""
@@ -770,6 +803,7 @@ cases = [
     test_cardio_finisher_extended_at_75_min,
     test_cardio_finisher_long_at_90_min,
     test_cardio_finisher_scales_monotonically,
+    test_interval_cardio_reps_render_per_work_bout,
     test_lifting_set_density_starts_at_75_min,
 ]
 

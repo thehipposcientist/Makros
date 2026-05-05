@@ -162,16 +162,22 @@ def get_calorie_ranges(
     prefs = session.exec(
         select(UserPreferences).where(UserPreferences.user_id == current_user.id)
     ).first()
+    latest_weight = session.exec(
+        select(WeightEntry)
+        .where(WeightEntry.user_id == current_user.id)
+        .where(WeightEntry.entry_date <= date.today())
+        .order_by(WeightEntry.entry_date.desc(), WeightEntry.created_at.desc())
+    ).first()
 
     gender_value = profile.gender.value if hasattr(profile.gender, "value") else str(profile.gender)
     inputs = CalorieInputs(
-        weight_lbs=profile.weight_lbs,
+        weight_lbs=latest_weight.weight_lbs if latest_weight else profile.weight_lbs,
         height_feet=profile.height_feet,
         height_inches=profile.height_inches,
         age=profile.age,
         gender=gender_value,
         training_days_per_week=prefs.days_per_week if prefs else 3,
-        session_minutes=60,
+        session_minutes=prefs.workout_duration_minutes if prefs else 60,
     )
     card = calculate_reference_ranges(inputs)
     return {
@@ -221,10 +227,12 @@ def _write_memory(session: Session, user_id: int, event_type: str, summary: str,
 
 
 def _weight_entry_payload(row: WeightEntry) -> dict:
+    logged_at = row.logged_at or row.created_at
     return {
         "date": row.entry_date.isoformat(),
         "weight_lbs": row.weight_lbs,
         "source": row.source,
+        "logged_at": logged_at.isoformat() if logged_at else None,
     }
 
 
@@ -435,6 +443,9 @@ def get_my_profile(
 
     coaching = _coaching_state(session, current_user.id)
     session.add(coaching)
+    social_profile = session.exec(
+        select(UserSocialProfile).where(UserSocialProfile.user_id == current_user.id)
+    ).first()
     payload = {
         "profile": _dump_model(profile),
         "goal": _dump_model(goal),
@@ -444,6 +455,7 @@ def get_my_profile(
         "last_name": current_user.last_name,
         "subscription_tier": current_user.subscription_tier or "free",
         "weight_entries": _recent_weight_entries(session, current_user.id),
+        "social_profile": _dump_model(social_profile) if social_profile else None,
     }
     session.commit()
     return payload
@@ -1080,6 +1092,7 @@ class WeightEntryBody(BaseModel):
     date: str
     weight_lbs: float
     source: str = "manual"
+    logged_at: datetime | None = None
 
 
 @router.get("/weight-entries")
@@ -1105,6 +1118,7 @@ def save_weight_entry(
     if body.weight_lbs <= 0:
         raise HTTPException(status_code=400, detail="weight_lbs must be positive")
     d = _d.fromisoformat(body.date)
+    logged_at = body.logged_at or datetime.now(timezone.utc)
     existing = db.exec(
         select(WeightEntry).where(
             WeightEntry.user_id == current_user.id,
@@ -1114,6 +1128,7 @@ def save_weight_entry(
     if existing:
         existing.weight_lbs = body.weight_lbs
         existing.source = body.source
+        existing.logged_at = logged_at
         db.add(existing)
     else:
         db.add(WeightEntry(
@@ -1121,6 +1136,7 @@ def save_weight_entry(
             entry_date=d,
             weight_lbs=body.weight_lbs,
             source=body.source,
+            logged_at=logged_at,
         ))
     db.flush()
     _promote_latest_weight_entry_to_profile(db, current_user.id)
@@ -1136,6 +1152,7 @@ def sync_weight_entries(
 ):
     """Bulk upsert from client's local weight history."""
     from datetime import date as _d
+    now = datetime.now(timezone.utc)
     for e in entries:
         if e.weight_lbs <= 0:
             raise HTTPException(status_code=400, detail="weight_lbs must be positive")
@@ -1149,6 +1166,7 @@ def sync_weight_entries(
         if existing:
             existing.weight_lbs = e.weight_lbs
             existing.source = e.source
+            existing.logged_at = e.logged_at or existing.logged_at or now
             db.add(existing)
         else:
             db.add(WeightEntry(
@@ -1156,6 +1174,7 @@ def sync_weight_entries(
                 entry_date=d,
                 weight_lbs=e.weight_lbs,
                 source=e.source,
+                logged_at=e.logged_at or now,
             ))
     db.flush()
     _promote_latest_weight_entry_to_profile(db, current_user.id)

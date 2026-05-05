@@ -6,7 +6,7 @@ weight unless the caller explicitly opts into promotion.
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import HTTPException
 from sqlalchemy.pool import StaticPool
@@ -339,6 +339,7 @@ def test_weight_entry_promotes_latest_profile_weight_and_profile_payload():
                 date=date.today().isoformat(),
                 weight_lbs=177.4,
                 source="manual",
+                logged_at=datetime(2026, 5, 5, 14, 35, tzinfo=timezone.utc),
             ),
             current_user=user,
             db=session,
@@ -349,6 +350,7 @@ def test_weight_entry_promotes_latest_profile_weight_and_profile_payload():
         assert _profile_weight(session, 50) == 177.4
         assert payload["profile"]["weight_lbs"] == 177.4
         assert payload["weight_entries"][-1]["weight_lbs"] == 177.4
+        assert payload["weight_entries"][-1]["logged_at"].startswith("2026-05-05T14:35:00")
     _ok("manual weight log updates profile and profile payload")
 
 
@@ -366,11 +368,13 @@ def test_weight_entry_sync_promotes_newest_entry_only():
                     date=(today - timedelta(days=1)).isoformat(),
                     weight_lbs=178.0,
                     source="manual",
+                    logged_at=datetime(2026, 5, 4, 7, 10, tzinfo=timezone.utc),
                 ),
                 profile_router.WeightEntryBody(
                     date=today.isoformat(),
                     weight_lbs=176.8,
                     source="watch",
+                    logged_at=datetime(2026, 5, 5, 8, 25, tzinfo=timezone.utc),
                 ),
             ],
             current_user=user,
@@ -380,7 +384,61 @@ def test_weight_entry_sync_promotes_newest_entry_only():
 
         assert len(rows) == 2
         assert _profile_weight(session, 51) == 176.8
+        assert {r.logged_at.strftime("%Y-%m-%dT%H:%M") for r in rows} == {
+            "2026-05-04T07:10",
+            "2026-05-05T08:25",
+        }
     _ok("bulk weight sync promotes the newest dated entry")
+
+
+def test_calorie_ranges_use_latest_weight_and_session_duration():
+    """Cut/maintain/bulk card should reflect the newest weigh-in and saved duration."""
+    print("\n[test] profile/calorie-ranges: latest weight + session duration")
+    from app.services.nutrition.calorie_calculator import CalorieInputs, calculate_reference_ranges
+
+    eng = _make_engine()
+    today = date.today()
+    with Session(eng) as session:
+        user = _seed_user_profile(session, user_id=52, weight_lbs=180.0)
+        prefs = session.exec(select(UserPreferences).where(UserPreferences.user_id == 52)).first()
+        assert prefs is not None
+        prefs.workout_duration_minutes = 90
+        session.add(prefs)
+        session.add(WeightEntry(
+            user_id=52,
+            entry_date=today,
+            weight_lbs=171.2,
+            source="manual",
+            logged_at=datetime(2026, 5, 5, 9, 15, tzinfo=timezone.utc),
+        ))
+        session.commit()
+
+        payload = profile_router.get_calorie_ranges(current_user=user, session=session)
+
+    expected = calculate_reference_ranges(CalorieInputs(
+        weight_lbs=171.2,
+        height_feet=5,
+        height_inches=10,
+        age=30,
+        gender="male",
+        training_days_per_week=4,
+        session_minutes=90,
+    ))
+    stale = calculate_reference_ranges(CalorieInputs(
+        weight_lbs=180.0,
+        height_feet=5,
+        height_inches=10,
+        age=30,
+        gender="male",
+        training_days_per_week=4,
+        session_minutes=60,
+    ))
+
+    assert payload["maintenance_calories"] == expected.maintenance_calories
+    assert payload["cut_calories"] == expected.cut_calories
+    assert payload["bulk_protein_g"] == expected.bulk_protein_g
+    assert payload["maintenance_calories"] != stale.maintenance_calories
+    _ok("calorie ranges use latest WeightEntry and persisted workout duration")
 
 
 cases = [
@@ -394,6 +452,7 @@ cases = [
     test_checkin_rejects_non_positive_weight,
     test_weight_entry_promotes_latest_profile_weight_and_profile_payload,
     test_weight_entry_sync_promotes_newest_entry_only,
+    test_calorie_ranges_use_latest_weight_and_session_duration,
 ]
 
 

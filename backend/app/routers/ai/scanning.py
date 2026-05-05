@@ -1777,6 +1777,128 @@ class GoalMatchRequest(_PydanticBaseModel):
     description: str
 
 
+_GOAL_MATCH_LABELS: dict[str, str] = {
+    "build_muscle": "Build muscle mass and size",
+    "lean_bulk": "Gain muscle with a smaller surplus",
+    "gain_weight": "Increase bodyweight",
+    "improve_aesthetics": "Build a balanced physique",
+    "build_glutes": "Prioritize glute growth",
+    "build_upper_body": "Prioritize upper body muscle",
+    "build_lower_body": "Prioritize lower body muscle",
+    "build_arms": "Prioritize arms",
+    "build_shoulders": "Prioritize shoulders",
+    "body_recomp": "Lose fat and gain muscle simultaneously",
+    "maintain_physique": "Maintain current physique",
+    "lose_fat": "Lose body fat",
+    "get_lean": "Get leaner with visible definition",
+    "cut": "Run a short fat-loss phase",
+    "preserve_muscle_cutting": "Lose fat while preserving muscle",
+    "build_strength": "Get stronger on compound lifts",
+    "increase_overall": "Increase overall strength",
+    "improve_1rm": "Improve one-rep max strength",
+    "powerlifting": "Train squat, bench, and deadlift",
+    "improve_squat": "Improve squat strength",
+    "improve_bench": "Improve bench strength",
+    "improve_deadlift": "Improve deadlift strength",
+    "improve_ohp": "Improve overhead press strength",
+    "improve_pullups": "Improve pull-ups",
+    "improve_grip": "Improve grip strength",
+    "functional_strength": "Build practical strength",
+    "explosive_strength": "Build explosive strength",
+    "relative_strength": "Get stronger without gaining bodyweight",
+    "improve_cardio": "Improve general cardio fitness",
+    "improve_conditioning": "Improve conditioning and work capacity",
+    "aerobic_base": "Build aerobic base",
+    "improve_vo2": "Improve VO2 max",
+    "increase_stamina": "Increase stamina",
+    "running_fitness": "Improve running fitness",
+    "train_5k": "Train for a 5K",
+    "train_10k": "Train for a 10K",
+    "train_half": "Train for a half marathon",
+    "train_marathon": "Train for a marathon",
+    "sprint_speed": "Improve sprint speed",
+    "interval_perf": "Improve interval performance",
+    "hiking_endurance": "Improve hiking endurance",
+    "cycling_endurance": "Improve cycling endurance",
+    "rowing_endurance": "Improve rowing endurance",
+    "swimming_endurance": "Improve swimming endurance",
+    "work_capacity": "Improve work capacity",
+    "improve_athleticism": "Build athleticism",
+    "improve_speed": "Improve speed",
+    "improve_agility": "Improve agility",
+    "improve_power": "Improve power",
+    "improve_vertical": "Improve vertical jump",
+    "improve_acceleration": "Improve acceleration",
+    "improve_cod": "Improve change of direction",
+    "improve_coordination": "Improve coordination",
+    "improve_balance": "Improve balance",
+    "sport_performance": "Sport-specific performance",
+    "offseason_training": "Off-season training",
+    "inseason_maintenance": "In-season maintenance",
+    "return_to_sport": "Return to sport conditioning",
+    "hyrox": "Train for HYROX or hybrid racing",
+    "general_health": "Balanced health and wellness",
+    "longevity": "Train for healthspan",
+    "healthy_aging": "Age well with strength and mobility",
+    "heart_health": "Improve heart health",
+    "metabolic_health": "Improve metabolic health",
+    "improve_energy": "Improve daily energy",
+    "daily_function": "Improve daily function",
+    "stay_active": "Stay active",
+    "maintain_mobility": "Maintain mobility",
+    "improve_mobility": "Improve mobility",
+    "improve_flexibility": "Improve flexibility",
+    "improve_posture": "Improve posture",
+    "bone_health": "Improve bone health",
+    "joint_health": "Improve joint health",
+    "stress_exercise": "Reduce stress through exercise",
+    "build_consistency": "Build consistency",
+    "beginner_fitness": "Beginner fitness",
+    "get_back_in_shape": "Get back into shape",
+    "quick_workouts": "Quick workouts",
+    "busy_schedule": "Exercise for a busy schedule",
+    "home_fitness": "Home fitness",
+    "travel_training": "Travel-friendly training",
+    "low_stress_training": "Low-stress training",
+    "minimal_equipment": "Minimal equipment fitness",
+    "habit_building": "Habit building",
+    "sustainable_routine": "Sustainable fitness routine",
+    "maintain": "Maintain fitness",
+}
+
+
+def _deterministic_goal_match(description: str) -> dict:
+    n = (description or "").lower()
+    checks: list[tuple[str, str, str]] = [
+        (r"\bmarathon\b", "train_marathon", "Matched your marathon-specific running goal."),
+        (r"\bhalf\b.*\bmarathon\b|\b13\.1\b", "train_half", "Matched your half-marathon running goal."),
+        (r"\b10k\b", "train_10k", "Matched your 10K running goal."),
+        (r"\b5k\b", "train_5k", "Matched your 5K running goal."),
+        (r"\b(peloton|spin|cycling|bike|biking|ride|riding)\b", "cycling_endurance", "Matched your cycling preference."),
+        (r"\b(run|runner|running|jog|jogging)\b", "running_fitness", "Matched your running preference."),
+        (r"\b(row|rowing|erg)\b", "rowing_endurance", "Matched your rowing preference."),
+        (r"\b(swim|swimming)\b", "swimming_endurance", "Matched your swimming preference."),
+        (r"\b(hike|hiking|trail)\b", "hiking_endurance", "Matched your hiking preference."),
+        (r"\b(vo2|max oxygen)\b", "improve_vo2", "Matched your VO2 max focus."),
+        (r"\b(cardio|endurance|stamina|conditioning)\b", "improve_cardio", "Matched your cardio and endurance focus."),
+        (r"\b(hyrox|deka|hybrid race)\b", "hyrox", "Matched your hybrid-race goal."),
+        (r"\b(athletic|basketball|soccer|tennis|sport|agility|vertical|power|speed)\b", "improve_athleticism", "Matched your athletic performance focus."),
+        (r"\b(powerlifting|squat|bench|deadlift|1rm|one rep|max strength)\b", "powerlifting", "Matched your compound-strength focus."),
+        (r"\b(strength|stronger|get strong)\b", "build_strength", "Matched your strength goal."),
+        (r"\b(glute|booty)\b", "build_glutes", "Matched your glute-building goal."),
+        (r"\b(shoulder|arms|upper body|lower body)\b", "improve_aesthetics", "Matched your physique-priority goal."),
+        (r"\b(recomp|tone|toned|lose fat.*muscle|muscle.*lose fat)\b", "body_recomp", "Matched your recomposition goal."),
+        (r"\b(lose|fat loss|weight loss|slim|belly|cut|lean)\b", "lose_fat", "Matched your fat-loss goal."),
+        (r"\b(muscle|bulk|size|gain mass|get bigger)\b", "build_muscle", "Matched your muscle-building goal."),
+        (r"\b(longevity|healthspan|aging|heart health|metabolic)\b", "longevity", "Matched your healthspan goal."),
+        (r"\b(beginner|habit|consistent|consistency|busy|quick|home)\b", "build_consistency", "Matched your consistency-focused goal."),
+    ]
+    for pattern, goal_id, reason in checks:
+        if re.search(pattern, n):
+            return {"goal_id": goal_id, "reason": reason}
+    return {"goal_id": "body_recomp", "reason": "Defaulted to body recomposition because it is the safest balanced starting point."}
+
+
 @router.post("/match-goal")
 def match_goal(
     body: GoalMatchRequest,
@@ -1787,18 +1909,9 @@ def match_goal(
     Cheap call: ~100 input / ~50 output tokens."""
     api_key = get_openai_api_key()
     if not api_key:
-        return {"goal_id": "body_recomp", "reason": "Default recommendation"}
+        return _deterministic_goal_match(body.description)
 
-    goals_list = (
-        "build_muscle: Build muscle mass and size\n"
-        "build_strength: Get stronger on compound lifts\n"
-        "body_recomp: Lose fat and gain muscle simultaneously\n"
-        "lose_fat: Lose weight and body fat\n"
-        "endurance: Improve cardiovascular endurance and stamina\n"
-        "athletic_performance: Build sport-ready fitness with power and conditioning\n"
-        "general_health: Balanced fitness for longevity and wellness\n"
-        "mental_wellness: Low-intensity movement for stress relief and mood\n"
-    )
+    goals_list = "\n".join(f"{goal_id}: {label}" for goal_id, label in _GOAL_MATCH_LABELS.items())
     try:
         client = OpenAI(api_key=api_key)
         resp = client.chat.completions.create(
@@ -1819,14 +1932,15 @@ def match_goal(
         result = json.loads(resp.choices[0].message.content or "{}")
         goal_id = result.get("goal_id", "body_recomp")
         reason = result.get("reason", "")
-        valid_ids = {"build_muscle", "build_strength", "body_recomp", "lose_fat",
-                     "endurance", "athletic_performance", "general_health", "mental_wellness"}
+        valid_ids = set(_GOAL_MATCH_LABELS)
         if goal_id not in valid_ids:
-            goal_id = "body_recomp"
+            fallback = _deterministic_goal_match(body.description)
+            goal_id = fallback["goal_id"]
+            reason = fallback["reason"]
         return {"goal_id": goal_id, "reason": reason}
     except Exception as e:
         print(f"[match-goal] failed: {e}")
-        return {"goal_id": "body_recomp", "reason": "Default recommendation"}
+        return _deterministic_goal_match(body.description)
 
 
 @router.post("/parse-meal-text")

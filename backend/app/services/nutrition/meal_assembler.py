@@ -753,8 +753,11 @@ def _balanced_meal_fallback(
     """
     if not allowed_foods:
         return []
-    used = used or set()
-    available = [f for f in allowed_foods if f not in used] or list(allowed_foods)
+    used_lower = {str(f).lower() for f in (used or set())}
+    available = [
+        f for f in allowed_foods
+        if str(f).lower() not in used_lower
+    ] or list(allowed_foods)
 
     def pick(keywords: set[str], excluded: set[str] | None = None) -> str | None:
         excl = excluded or set()

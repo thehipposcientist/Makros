@@ -93,6 +93,13 @@ _ROLE_KEYWORDS: dict[str, set[str]] = {
     "fat": _FAT_KEYWORDS,
 }
 
+_PLANT_KEYWORDS = _VEG_KEYWORDS | {
+    "apple", "banana", "berries", "berry", "blueberry", "blueberries",
+    "strawberry", "strawberries", "raspberry", "raspberries", "orange",
+    "grapefruit", "melon", "pineapple", "mango", "pear", "peach",
+}
+_ROLE_KEYWORDS["plant"] = _PLANT_KEYWORDS
+
 # Archetype shape: list of roles that the pantry resolver will fill.
 # The resolver walks roles in order and returns as many filled picks as
 # it can — missing roles degrade gracefully instead of failing the meal.
@@ -366,6 +373,67 @@ def _fallback_meal(pantry: list[str], used: set[str]) -> list[str]:
     return pick_from[:2]
 
 
+def _meal_has_role(food_refs: list[str], role: str) -> bool:
+    keywords = _ROLE_KEYWORDS.get(role)
+    if not keywords:
+        return False
+    return any(_food_matches_keywords(food, keywords) for food in food_refs)
+
+
+def _append_missing_role(
+    picks: list[str],
+    role: str,
+    pantry: list[str],
+    used_in_template: set[str],
+    meal_used: set[str],
+    rotation_offset: int,
+    preferred_foods: set[str] | None,
+) -> None:
+    if _meal_has_role(picks, role):
+        return
+    food = _pick_role(
+        role,
+        pantry,
+        used_in_template | meal_used,
+        rotation_offset,
+        preferred_foods=preferred_foods,
+    )
+    if food and food.lower() not in meal_used:
+        picks.append(food)
+        meal_used.add(food.lower())
+
+
+def _ensure_full_meal_balance(
+    picks: list[str],
+    pantry: list[str],
+    used_in_template: set[str],
+    meal_used: set[str],
+    rotation_offset: int,
+    slot_type: str,
+    preferred_foods: set[str] | None,
+) -> None:
+    if slot_type not in {"breakfast", "lunch", "dinner"}:
+        return
+    _append_missing_role(
+        picks, "protein", pantry, used_in_template, meal_used,
+        rotation_offset + 17, preferred_foods,
+    )
+    _append_missing_role(
+        picks, "plant", pantry, used_in_template, meal_used,
+        rotation_offset + 19, preferred_foods,
+    )
+    if any(_meal_has_role(picks, role) for role in ("carb_whole", "carb", "fat")):
+        return
+    for role in ("carb_whole", "carb", "fat"):
+        before = len(picks)
+        _append_missing_role(
+            picks, role, pantry, used_in_template, meal_used,
+            rotation_offset + 23, preferred_foods,
+        )
+        if len(picks) > before:
+            break
+
+
 def _build_meal(
     archetype: list[str],
     pantry: list[str],
@@ -399,6 +467,17 @@ def _build_meal(
 
     if not picks:
         picks = _fallback_meal(pantry, used_in_template)
+        meal_used.update(f.lower() for f in picks)
+
+    _ensure_full_meal_balance(
+        picks,
+        pantry,
+        used_in_template,
+        meal_used,
+        rotation_offset,
+        slot_type,
+        preferred_foods,
+    )
 
     # Human-readable name built from the slot type + meal index. Downstream
     # formatting / display reuses `skeleton.name` verbatim, so keep it

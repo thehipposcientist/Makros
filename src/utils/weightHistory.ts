@@ -14,12 +14,13 @@ export async function loadWeightHistory(): Promise<WeightEntry[]> {
   }
 }
 
-export async function loadWeightEntries(): Promise<Array<{ date: string; weight_lbs: number; source?: string }>> {
+export async function loadWeightEntries(): Promise<Array<{ date: string; weight_lbs: number; source?: string; logged_at?: string }>> {
   const history = await loadWeightHistory();
   return history.map(entry => ({
     date: entry.date,
     weight_lbs: entry.weightLbs,
     source: entry.source,
+    logged_at: entry.loggedAt,
   }));
 }
 
@@ -30,7 +31,12 @@ export async function saveWeightEntry(
   const history = await loadWeightHistory();
   const today = new Date().toISOString().slice(0, 10);
   const existing = history.findIndex(e => e.date === today);
-  const entry: WeightEntry = { date: today, weightLbs: Math.round(weightLbs * 10) / 10, source };
+  const entry: WeightEntry = {
+    date: today,
+    weightLbs: Math.round(weightLbs * 10) / 10,
+    source,
+    loggedAt: new Date().toISOString(),
+  };
   if (existing >= 0) {
     history[existing] = entry;
   } else {
@@ -55,7 +61,12 @@ export async function deleteWeightEntry(date: string): Promise<WeightEntry[]> {
 export async function updateWeightEntry(date: string, weightLbs: number): Promise<WeightEntry[]> {
   const history = await loadWeightHistory();
   const idx = history.findIndex(e => e.date === date);
-  const entry: WeightEntry = { date, weightLbs: Math.round(weightLbs * 10) / 10, source: 'manual' };
+  const entry: WeightEntry = {
+    date,
+    weightLbs: Math.round(weightLbs * 10) / 10,
+    source: 'manual',
+    loggedAt: new Date().toISOString(),
+  };
   if (idx >= 0) history[idx] = entry; else history.push(entry);
   history.sort((a, b) => a.date.localeCompare(b.date));
   await AsyncStorage.setItem(KEY, JSON.stringify(history));

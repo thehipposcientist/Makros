@@ -370,6 +370,10 @@ import HomeScreen from '../src/screens/HomeScreen';
 import EditProfileScreen from '../src/screens/EditProfileScreen';
 import ActiveWorkoutScreen from '../src/screens/ActiveWorkoutScreen';
 import SettingsScreen from '../src/screens/SettingsScreen';
+
+function serverTierOf(profile: UserProfile | null | undefined): 'free' | 'pro' {
+  return profile?.subscriptionTier === 'pro' ? 'pro' : 'free';
+}
 import ProgressScreen from '../src/screens/ProgressScreen';
 import SupplementsScreen from '../src/screens/SupplementsScreen';
 import RecoveryQuestionModal from '../src/components/RecoveryQuestionModal';
@@ -579,6 +583,7 @@ export default function Index() {
   }, [!!userProfile]);
 
   const [activeWorkout, setActiveWorkoutRaw] = useState<WorkoutDay | null>(null);
+  const [playStartCountdown, setPlayStartCountdown] = useState(false);
   const [resumeWorkoutData, setResumeWorkoutData] = useState<{ workout: any; loggedCount: number } | null>(null);
   const startWorkoutInitialUrlHandledRef = useRef(false);
   const setActiveWorkout = useCallback((w: WorkoutDay | null) => {
@@ -595,10 +600,12 @@ export default function Index() {
   // include onStartWorkout) — leaking listeners and opening race
   // windows where a watch tap could land between cleanup and the new
   // async listener registration.
-  const handleStartWorkout = useCallback((workout: WorkoutDay) => {
+  const handleStartWorkout = useCallback((workout: WorkoutDay, options?: { playCountdown?: boolean }) => {
+    setPlayStartCountdown(options?.playCountdown !== false);
     setActiveWorkout(workout);
   }, [setActiveWorkout]);
   const handleCancelActiveWorkout = useCallback(() => {
+    setPlayStartCountdown(false);
     setActiveWorkout(null);
   }, [setActiveWorkout]);
   const handleStartWorkoutDeepLink = useCallback(async () => {
@@ -607,6 +614,7 @@ export default function Index() {
       const plan = raw ? JSON.parse(raw) : null;
       const today = plan?.days?.[0] as WorkoutDay | undefined;
       if (today) {
+        setPlayStartCountdown(true);
         setActiveWorkout(today);
       } else {
         Alert.alert('Workout not ready', 'Open the Workout tab once so Thallo can load today’s plan.');
@@ -965,6 +973,7 @@ export default function Index() {
       date: entry.date,
       weight_lbs: entry.weightLbs,
       source: entry.source,
+      logged_at: entry.loggedAt,
     }));
     return {
       ...profile,
@@ -1023,7 +1032,7 @@ export default function Index() {
     profile: UserProfile,
     weightLbs: number,
   ): Promise<void> => {
-    if (!authToken || tierOf(profile) === 'free') {
+    if (!authToken || serverTierOf(profile) === 'free') {
       setPlanRefreshKey(k => k + 1);
       return;
     }
@@ -1326,13 +1335,11 @@ export default function Index() {
 
   const handleProfileComplete = async (profile: UserProfile) => {
     const stamped = stampGoalStart(profile, null);
-    // Beta default: every new sign-up starts on Pro so the AI plan
-    // generator (a Pro-gated backend feature) doesn't 403 the very
-    // first request. Backend `register` endpoint persists the same
-    // value, and `getMe` below overwrites with the authoritative
-    // server tier. Flip back to 'free' when paid tiers ship.
-    let stampedWithTier: UserProfile = { ...stamped, subscriptionTier: stamped.subscriptionTier ?? 'pro' };
-    await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
+    // Beta UI can show Pro affordances locally, but plan generation is
+    // server-gated. `getMe` below must grant Pro before any Pro-only
+    // generation calls run.
+    let stampedWithTier: UserProfile = { ...stamped, subscriptionTier: stamped.subscriptionTier ?? 'free' };
+    await AsyncStorage.setItem('userProfile', JSON.stringify(stampedWithTier));
 
     if (!authToken) {
       setUserProfile(stampedWithTier);
@@ -1359,7 +1366,7 @@ export default function Index() {
     } catch {}
     syncOnboarding(authToken, stampedWithTier).catch(() => null);
 
-    if (tierOf(stampedWithTier) === 'free') {
+    if (serverTierOf(stampedWithTier) === 'free') {
       await clearAllPlanCache().catch(() => null);
       await clearPlanGenMarker().catch(() => null);
       try {
@@ -1489,6 +1496,7 @@ export default function Index() {
     setShowProgress(false);
     setShowAccount(false);
     setShowSupplements(false);
+    setPlayStartCountdown(false);
     setActiveWorkout(null);
     // Keep trainerNote / nutritionistNote / supplementStack in memory so if
     // the same user signs back in they don't flicker away — they'll be
@@ -1498,7 +1506,7 @@ export default function Index() {
   // Refreshes generated Pro plans after the server reports a Pro tier.
   // Client-side tier changes are intentionally ignored.
   const handleUpgradeToPro = async (updated: UserProfile) => {
-    if (!authToken || tierOf(updated) !== 'pro') return;
+    if (!authToken || serverTierOf(updated) !== 'pro') return;
     setIsWorkoutUpdating(true);
     setIsNutritionUpdating(true);
     holdPlanGenAwake();
@@ -1830,6 +1838,7 @@ export default function Index() {
   };
 
   const handleWorkoutFinish = (_session: WorkoutSession) => {
+    setPlayStartCountdown(false);
     setActiveWorkout(null);
     // Bump refresh key so HomeScreen re-checks workout status from
     // the backend DB. Without this, todayDone stays false until the
@@ -1917,6 +1926,7 @@ export default function Index() {
         weightLbs={userProfile.physicalStats.weightLbs}
         weightUnit={userProfile.weightUnit ?? 'lbs'}
         distanceUnit={userProfile.distanceUnit ?? 'mi'}
+        playStartCountdown={playStartCountdown}
         onFinish={handleWorkoutFinish}
         onCancel={handleCancelActiveWorkout}
         onDislikeExercise={(name) => {
@@ -2273,6 +2283,7 @@ export default function Index() {
                 <TouchableOpacity
                   style={{ flex: 1, backgroundColor: tc.primary, borderRadius: 10, paddingVertical: 11, alignItems: 'center' }}
                   onPress={() => {
+                    setPlayStartCountdown(false);
                     setActiveWorkout(resumeWorkoutData.workout);
                     setResumeWorkoutData(null);
                   }}>

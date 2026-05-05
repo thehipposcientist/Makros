@@ -576,10 +576,15 @@ export default function StreakConsistencyWidget({ authToken, themeName, displayN
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const [data, setData] = useState<StreakSummary | null>(null);
+  const motto = getDailyMotto(displayName);
 
   const lastAnimatedStreak = useRef<number | null>(null);
   const streakScale = useRef(new Animated.Value(1)).current;
   const flamePulse = useRef(new Animated.Value(1)).current;
+  const mottoOpacity = useRef(new Animated.Value(0)).current;
+  const mottoTranslateY = useRef(new Animated.Value(6)).current;
+  const mottoRailScale = useRef(new Animated.Value(0.2)).current;
+  const quoteMarkScale = useRef(new Animated.Value(0.9)).current;
 
   useEffect(() => {
     let alive = true;
@@ -622,7 +627,21 @@ export default function StreakConsistencyWidget({ authToken, themeName, displayN
     return () => { loop.stop(); };
   }, [onFire, flamePulse]);
 
-  const motto = getDailyMotto(displayName);
+  useEffect(() => {
+    mottoOpacity.setValue(0);
+    mottoTranslateY.setValue(6);
+    mottoRailScale.setValue(0.2);
+    quoteMarkScale.setValue(0.9);
+    Animated.sequence([
+      Animated.delay(120),
+      Animated.parallel([
+        Animated.timing(mottoOpacity, { toValue: 1, duration: 320, useNativeDriver: true }),
+        Animated.timing(mottoTranslateY, { toValue: 0, duration: 320, useNativeDriver: true }),
+        Animated.timing(mottoRailScale, { toValue: 1, duration: 380, useNativeDriver: true }),
+        Animated.spring(quoteMarkScale, { toValue: 1, friction: 6, tension: 120, useNativeDriver: true }),
+      ]),
+    ]).start();
+  }, [motto, mottoOpacity, mottoTranslateY, mottoRailScale, quoteMarkScale]);
 
   return (
     <View style={{
@@ -654,14 +673,50 @@ export default function StreakConsistencyWidget({ authToken, themeName, displayN
         </View>
       )}
       {/* Daily personalized motto */}
-      <View style={{ flex: 1, borderLeftWidth: 2, borderLeftColor: tc.primary + '66', paddingLeft: 10 }}>
-        <Text
+      <Animated.View
+        style={{
+          flex: 1,
+          minWidth: 0,
+          paddingLeft: 14,
+          opacity: mottoOpacity,
+          transform: [{ translateY: mottoTranslateY }],
+        }}
+      >
+        <Animated.View
+          pointerEvents="none"
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: 1,
+            bottom: 1,
+            width: 2,
+            borderRadius: 2,
+            backgroundColor: tc.primary + '66',
+            transform: [{ scaleY: mottoRailScale }],
+          }}
+        />
+        <Animated.Text
+          pointerEvents="none"
+          style={{
+            position: 'absolute',
+            left: 7,
+            top: -6,
+            fontSize: 18,
+            lineHeight: 20,
+            fontWeight: '900',
+            color: tc.primary + '55',
+            transform: [{ scale: quoteMarkScale }],
+          }}
+        >
+          “
+        </Animated.Text>
+        <Animated.Text
           style={{ fontSize: 12, lineHeight: 17, color: tc.textSecondary, fontWeight: '600', fontStyle: 'italic' }}
           numberOfLines={2}
         >
           “{motto}”
-        </Text>
-      </View>
+        </Animated.Text>
+      </Animated.View>
     </View>
   );
 }

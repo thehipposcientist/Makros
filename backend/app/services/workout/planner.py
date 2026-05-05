@@ -57,6 +57,7 @@ from typing import Iterable
 # what we need (plus the `Slot` type for `_find_best_accessory_host_day`
 # signatures) so removed Layer 4 block can stay removed.
 from .slots import Slot, density_adjust_slots  # noqa: F401
+from .archetypes import DayArchetype
 from .cardio import classify_cardio
 from .equipment import expand_owned_equipment_aliases
 
@@ -1154,6 +1155,39 @@ _CANONICAL_PLANNED_EXERCISE_KEYS: tuple[str, ...] = (
 )
 
 
+_PLUS_CARDIO_ARCHETYPES: set[DayArchetype] = {
+    DayArchetype.LIFT_PUSH_PLUS_CARDIO,
+    DayArchetype.LIFT_PULL_PLUS_CARDIO,
+    DayArchetype.LIFT_UPPER_PLUS_CARDIO,
+    DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
+}
+
+
+def _display_focus_for_exercises(
+    archetype: DayArchetype,
+    default_focus: str,
+    exercises: list[dict],
+) -> str:
+    if archetype not in _PLUS_CARDIO_ARCHETYPES:
+        return default_focus
+
+    has_cardio = any(
+        (str(ex.get("_primary_muscle") or "").lower() == "cardio")
+        or str(ex.get("prescriptionType") or "").startswith("cardio_")
+        for ex in exercises
+    )
+    if has_cardio:
+        return default_focus
+
+    base_focus = default_focus.replace(" + Cardio", "").strip() or default_focus
+    has_core = any(
+        str(ex.get("_primary_muscle") or "").lower() == "core"
+        or str(ex.get("_role") or "").lower() == "core"
+        for ex in exercises
+    )
+    return f"{base_focus} + Core" if has_core else base_focus
+
+
 def build_planner_exercise(
     exercise: dict,
     *,
@@ -1672,7 +1706,7 @@ def generate_workout_plan(
 
         days_out.append({
             "day": day_name,
-            "focus": focus,
+            "focus": _display_focus_for_exercises(archetype, focus, exercises_out),
             "archetype": archetype.value,
             "category": meta.category,
             "stimulus": meta.training_type,

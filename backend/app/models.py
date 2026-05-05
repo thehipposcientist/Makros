@@ -627,6 +627,7 @@ class WeightEntry(SQLModel, table=True):
     entry_date: date = Field(index=True)
     weight_lbs: float
     source: str = Field(default="manual")
+    logged_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -1412,6 +1413,7 @@ class UserSocialProfile(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", unique=True, index=True)
     display_name: str | None = Field(default=None)
+    avatar_url: str | None = Field(default=None)
     # Off until the user explicitly opts in. Gates whether friends see any
     # of this user's training activity in the weekly digest.
     share_activity_enabled: bool = Field(default=False)

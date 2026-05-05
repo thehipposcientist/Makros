@@ -47,6 +47,16 @@ class Prescription:
     cardio_guidance: dict | None = None
 
 
+def _interval_work_text(base_reps: str) -> str:
+    text = str(base_reps or "").strip()
+    if not text:
+        return text
+    lowered = text.lower()
+    if any(term in lowered for term in ("hard", "sprint", "burst", "work", "on /", "easy", "rest")):
+        return text
+    return f"{text} hard"
+
+
 def prescribe_for_slot(
     archetype: DayArchetype,
     slot,            # app.services.workout.planner.Slot — typed loosely to avoid cycle
@@ -314,7 +324,11 @@ def _prescribe_conditioning(
             guidance["duration_min"] = int(_range_match.group(2))
         elif _single_match:
             guidance["duration_min"] = int(_single_match.group(1))
-        rep_text = render_cardio_prescription_text(guidance, ex_name)
+        rep_text = (
+            _interval_work_text(base_reps)
+            if p_type == "cardio_intervals" and sets > 1
+            else render_cardio_prescription_text(guidance, ex_name)
+        )
         return Prescription(
             sets=sets,
             reps=rep_text or base_reps,

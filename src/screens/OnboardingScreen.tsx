@@ -401,6 +401,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const [goalQuery, setGoalQuery] = useState('');
   const [goalMatchLoading, setGoalMatchLoading] = useState(false);
   const [goalMatchReason, setGoalMatchReason] = useState<string | null>(null);
+  const [goalQueryApplied, setGoalQueryApplied] = useState('');
 
   // Step 2 — Goal refinement (modifiers + target focus + pace)
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>([]);
@@ -644,6 +645,25 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     }
   };
 
+  const applyGoalQueryMatch = async (): Promise<string | null> => {
+    const query = goalQuery.trim();
+    if (!query || goalQueryApplied === query) return selectedGoal;
+    setGoalMatchLoading(true);
+    try {
+      const res = await matchGoal(query);
+      selectGoal(res.goal_id);
+      setGoalMatchReason(res.reason);
+      setGoalQueryApplied(query);
+      Keyboard.dismiss();
+      setTimeout(scrollCarouselIntoView, 340);
+      return res.goal_id;
+    } catch {
+      return selectedGoal;
+    } finally {
+      setGoalMatchLoading(false);
+    }
+  };
+
   // toggleModifier removed — modifiers are gone.
   const toggleEquipment = (eq: string) => {
     setSelectedEquipment(prev =>
@@ -656,7 +676,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     setSelectedEquipTemplate(template.id);
   };
 
-  const validate = (): string | null => {
+  const validate = (goalOverride?: string | null): string | null => {
+    const activeGoal = goalOverride || selectedGoal;
     switch (currentStepKey) {
       case 'goal': {
         // Target weight is required for any weight-change goal so the
@@ -665,7 +686,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           'lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting',
           'build_muscle', 'lean_bulk', 'gain_weight',
         ]);
-        if (weightChange.has(selectedGoal)) {
+        if (weightChange.has(activeGoal)) {
           if (!targetWeight?.trim()) return 'Set a target weight — needed for your calorie target and ETA.';
           const tw = parseFloat(targetWeight);
           if (isNaN(tw) || tw < 50 || tw > 500) return 'Enter a valid target weight (50–500 lbs)';
@@ -681,8 +702,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           if (!isNaN(cw) && cw > 0) {
             const cutGoals  = new Set(['lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting']);
             const bulkGoals = new Set(['build_muscle', 'lean_bulk', 'gain_weight']);
-            if (cutGoals.has(selectedGoal) && tw >= cw) return `For fat-loss goals, target weight must be less than current (${cw} lb)`;
-            if (bulkGoals.has(selectedGoal) && tw <= cw) return `For weight-gain goals, target weight must be greater than current (${cw} lb)`;
+            if (cutGoals.has(activeGoal) && tw >= cw) return `For fat-loss goals, target weight must be less than current (${cw} lb)`;
+            if (bulkGoals.has(activeGoal) && tw <= cw) return `For weight-gain goals, target weight must be greater than current (${cw} lb)`;
           }
         }
         return null;
@@ -712,8 +733,12 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     }
   };
 
-  const handleNext = () => {
-    const error = validate();
+  const handleNext = async () => {
+    if (goalMatchLoading) return;
+    const goalForValidation = currentStepKey === 'goal'
+      ? await applyGoalQueryMatch()
+      : selectedGoal;
+    const error = validate(goalForValidation);
     if (error) {
       setStepError(error);
       requestAnimationFrame(() => scrollRef.current?.scrollToEnd({ animated: true }));
@@ -967,7 +992,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             placeholder="e.g. I want to lose my belly but keep muscle, train 4 days a week, and feel athletic for pickup basketball"
             placeholderTextColor={colors.textMuted}
             value={goalQuery}
-            onChangeText={t => { setGoalQuery(t); setGoalMatchReason(null); }}
+            onChangeText={t => { setGoalQuery(t); setGoalMatchReason(null); setGoalQueryApplied(''); }}
             multiline
             scrollEnabled
           />
@@ -982,15 +1007,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             disabled={goalMatchLoading || !goalQuery.trim()}
             onPress={async () => {
               if (!goalQuery.trim()) return;
-              setGoalMatchLoading(true);
-              try {
-                const res = await matchGoal(goalQuery.trim());
-                selectGoal(res.goal_id);
-                setGoalMatchReason(res.reason);
-                Keyboard.dismiss();
-                setTimeout(scrollCarouselIntoView, 340);
-              } catch {}
-              setGoalMatchLoading(false);
+              await applyGoalQueryMatch();
             }}>
             {goalMatchLoading
               ? <ActivityIndicator size="small" color="#fff" />

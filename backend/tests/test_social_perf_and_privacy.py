@@ -61,10 +61,18 @@ def _friendship(s: Session, a: int, b: int) -> Friendship:
     return f
 
 
-def _seed_share_profile(s: Session, uid: int, *, share: bool = True, name: str | None = None) -> None:
+def _seed_share_profile(
+    s: Session,
+    uid: int,
+    *,
+    share: bool = True,
+    name: str | None = None,
+    avatar_url: str | None = None,
+) -> None:
     s.add(UserSocialProfile(
         user_id=uid,
         display_name=name or f"User {uid}",
+        avatar_url=avatar_url,
         share_activity_enabled=share,
     ))
 
@@ -207,6 +215,39 @@ def test_digest_respects_share_toggle():
     _ok("share toggle hides stats for opted-out friends")
 
 
+def test_digest_includes_avatar_url_without_sensitive_data():
+    """Avatar URLs are public social-profile metadata; private training
+    and body metrics still must not cross the digest boundary."""
+    print("\n[test] digest: friend avatar travels with social metadata only")
+    eng = _make_engine()
+    avatar = "data:image/jpeg;base64,abc123"
+    with Session(eng) as s:
+        _user(s, 1)
+        _user(s, 2, username="avatarfriend")
+        _seed_share_profile(s, 1)
+        _seed_share_profile(s, 2, avatar_url=avatar)
+        _seed_goal(s, 1)
+        _seed_goal(s, 2)
+        _friendship(s, 1, 2)
+        s.add(WorkoutCompletion(
+            user_id=2,
+            workout_date=date.today(),
+            focus_label="Push",
+            duration_seconds=2400,
+        ))
+        s.commit()
+
+        digest = compute_digest(s, user_id=1)
+
+    friend = digest["friends"][0]
+    assert friend["username"] == "avatarfriend"
+    assert friend["avatar_url"] == avatar
+    dumped = json.dumps(friend).lower()
+    assert "weight" not in dumped
+    assert "calorie" not in dumped
+    _ok("avatar URL appears without leaking sensitive fields")
+
+
 def test_feed_sanitizer_removes_sensitive_workout_fields():
     """Activity feed payloads must never expose lift/body/nutrition data."""
     print("\n[test] feed: sanitizer removes sensitive workout fields")
@@ -266,6 +307,7 @@ cases = [
     test_digest_query_count_is_constant,
     test_digest_with_zero_friends_doesnt_crash,
     test_digest_respects_share_toggle,
+    test_digest_includes_avatar_url_without_sensitive_data,
     test_feed_sanitizer_removes_sensitive_workout_fields,
     test_feed_sanitizer_removes_sensitive_post_fields,
 ]

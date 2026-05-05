@@ -290,8 +290,8 @@ def test_plus_cardio_finisher_drops_before_lift_slots_on_short_sessions():
         SEED_EXERCISES,
     )["workout_plan"]["days"]
 
-    short_plus = next((d for d in short if "+ Cardio" in (d.get("focus") or "")), None)
-    medium_plus = next((d for d in medium if "+ Cardio" in (d.get("focus") or "")), None)
+    short_plus = next((d for d in short if str(d.get("archetype") or "").endswith("_plus_cardio")), None)
+    medium_plus = next((d for d in medium if str(d.get("archetype") or "").endswith("_plus_cardio")), None)
     assert short_plus is not None, f"short plan missing PLUS_CARDIO day: {[d.get('focus') for d in short]}"
     assert medium_plus is not None, f"medium plan missing PLUS_CARDIO day: {[d.get('focus') for d in medium]}"
     assert "Legs" not in short_plus["focus"], f"legs should never carry PLUS_CARDIO: {short_plus['focus']}"

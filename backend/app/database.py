@@ -1017,6 +1017,10 @@ def _ensure_social_tables() -> None:
     try:
         with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             conn.execute(text(
+                "ALTER TABLE user_social_profiles "
+                "ADD COLUMN IF NOT EXISTS avatar_url TEXT"
+            ))
+            conn.execute(text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_friendship_pair "
                 "ON friendships (user_a_id, user_b_id)"
             ))
@@ -1043,6 +1047,23 @@ def _ensure_exercise_set_duration_columns() -> None:
             ))
     except Exception as e:
         print(f"[migration] exercise_sets duration columns failed (non-fatal): {e}")
+
+
+def _ensure_weight_entry_logged_at_column() -> None:
+    """Add logged_at to weight_entries so same-day weigh-ins keep the
+    actual log time while entry_date remains the trend bucket."""
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE weight_entries ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ",
+            ))
+            conn.execute(text(
+                "UPDATE weight_entries SET logged_at = created_at WHERE logged_at IS NULL",
+            ))
+    except Exception as e:
+        print(f"[migration] weight_entries logged_at column failed (non-fatal): {e}")
 
 
 def _ensure_exercise_set_cardio_hr_columns() -> None:
@@ -1747,6 +1768,7 @@ def create_db_and_tables():
     _ensure_daily_nutrition_metrics_v2_columns()
     _ensure_nutrition_v3_columns()
     _ensure_meal_consumed_at_column()
+    _ensure_weight_entry_logged_at_column()
     _ensure_user_profile_birthdate_column()
     _ensure_food_metadata_amounts_columns()
     _ensure_exercise_set_actual_rir_column()

@@ -57,4 +57,16 @@ describe('meal gap suggestion', () => {
 
     expect(suggestion).toBe(null);
   });
+
+  it('keeps pantry suggestions close to a small remaining calorie gap', () => {
+    const suggestion = buildGapMealSuggestion({
+      targets: { calories: 2200, protein: 160, carbs: 240, fat: 70 },
+      consumed: { calories: 2110, protein: 115, carbs: 240, fat: 70 },
+      pantryFoods,
+      seed: 'small-gap',
+    });
+
+    expect(suggestion?.source).toBe('pantry');
+    expect((suggestion?.meal.calories ?? 0) <= 180).toBe(true);
+  });
 });

@@ -8,8 +8,9 @@ import { getContrastingTextColor, getTheme } from '../constants/theme';
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import {
   AppThemeName, WorkoutSession,
-  ActivityCategory, ActivityIntensity, CardioStyle,
+  ActivityCategory, ActivityIntensity, ActivitySource, CardioStyle,
 } from '../types';
+import { parseWorkoutPhoto } from '../services/api';
 import PressableScale from './PressableScale';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -147,6 +148,7 @@ export interface LogActivityPrefill {
   avgHeartRate?: number | null;
   startedAtISO?: string;
   endedAtISO?: string;
+  source?: ActivitySource;
 }
 
 interface Props {
@@ -158,9 +160,10 @@ interface Props {
    *  finishing a live-tracker session, etc). When present the user
    *  lands directly on the classification step. */
   prefill?: LogActivityPrefill | null;
+  authToken?: string | null;
 }
 
-export default function LogActivityModal({ visible, onClose, onSave, themeName, prefill }: Props) {
+export default function LogActivityModal({ visible, onClose, onSave, themeName, prefill, authToken }: Props) {
   const tc = getTheme(themeName).colors;
 
   const [step, setStep] = useState<1 | 2>(1);
@@ -177,6 +180,8 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
   const [distance, setDistance] = useState('');
   const [calories, setCalories] = useState('');
   const [heartRate, setHeartRate] = useState('');
+  const [sourceOverride, setSourceOverride] = useState<ActivitySource | undefined>(undefined);
+  const [photoImporting, setPhotoImporting] = useState(false);
 
   const reset = useCallback(() => {
     setStep(1);
@@ -193,6 +198,8 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
     setDistance('');
     setCalories('');
     setHeartRate('');
+    setSourceOverride(undefined);
+    setPhotoImporting(false);
   }, []);
 
   // Seed state from prefill when the modal opens. Only runs on
@@ -244,6 +251,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
     if (prefill.distanceMiles != null) setDistance(String(prefill.distanceMiles));
     if (prefill.caloriesBurned != null) setCalories(String(Math.round(prefill.caloriesBurned)));
     if (prefill.avgHeartRate != null) setHeartRate(String(Math.round(prefill.avgHeartRate)));
+    if (prefill.source) setSourceOverride(prefill.source);
     // Intensity inference — HK doesn't label intensity, but we can
     // derive it. Prefer HR zones when we have HR + a decent signal;
     // otherwise fall back to cardio_style (intervals=hard, steady=
@@ -311,6 +319,73 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
     return def?.label ?? subtype;
   })();
 
+  const handleImportPhoto = async () => {
+    if (!authToken) return;
+    setPhotoImporting(true);
+    try {
+      const ImagePicker = await import('expo-image-picker');
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Photo access needed', 'Allow photo access to import a workout screenshot.');
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: false,
+        base64: true,
+        quality: 0.85,
+      });
+      if (result.canceled) return;
+      const asset = result.assets?.[0];
+      if (!asset?.base64) {
+        Alert.alert('Could not read photo', 'Choose a different screenshot and try again.');
+        return;
+      }
+      const parsed = await parseWorkoutPhoto(authToken, asset.base64, (asset as any).mimeType || 'image/jpeg');
+      const session = parsed.sessions?.[0];
+      if (!session) {
+        Alert.alert('No workout found', 'I could not find a completed workout in that image.');
+        return;
+      }
+
+      const focus = String(session.focus || 'Imported workout');
+      const n = focus.toLowerCase();
+      const isRide = /\b(peloton|spin|ride|cycling|bike)\b/.test(n);
+      const isRun = /\b(run|running|treadmill|5k|10k|marathon)\b/.test(n);
+      const isCardio = isRide || isRun || /\b(cardio|row|swim|hike|walk|elliptical)\b/.test(n);
+      const nextCategory: ActivityCategory = isCardio ? 'cardio' : 'strength';
+      const nextSubtype = isRide ? 'spin' : isRun ? 'run' : isCardio ? 'other' : 'full_body';
+      const nextSource: ActivitySource = String(session.source || '').toLowerCase() === 'peloton' || n.includes('peloton')
+        ? 'peloton'
+        : 'manual';
+
+      setCategory(nextCategory);
+      setSubtype(nextSubtype);
+      setCustomSubtype('');
+      setCardioStyle(nextCategory === 'cardio' ? (isRide ? 'class' : 'steady') : undefined);
+      setDurationMin(Math.max(5, Math.round((Number(session.durationSeconds) || 3600) / 60)));
+      if (session.date) {
+        const imported = new Date(`${String(session.date).slice(0, 10)}T12:00:00`);
+        const today = new Date();
+        const msPerDay = 24 * 60 * 60 * 1000;
+        const importedMidnight = new Date(imported.getFullYear(), imported.getMonth(), imported.getDate()).getTime();
+        const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+        setDateOffset(Math.max(-14, Math.min(0, Math.round((importedMidnight - todayMidnight) / msPerDay))));
+      }
+      if (session.distanceMiles != null) setDistance(String(Math.round(Number(session.distanceMiles) * 100) / 100));
+      if (session.caloriesBurned != null) setCalories(String(Math.round(Number(session.caloriesBurned))));
+      if (session.avgHeartRate != null) setHeartRate(String(Math.round(Number(session.avgHeartRate))));
+      setNotes(`Imported for review: ${focus}`);
+      setSourceOverride(nextSource);
+      setShowAdvanced(false);
+      setStep(2);
+    } catch (e: any) {
+      Alert.alert('Import failed', String(e?.message ?? 'Could not import that screenshot.'));
+    } finally {
+      setPhotoImporting(false);
+    }
+  };
+
   const handleSave = async () => {
     if (!category) {
       Alert.alert('Select a category', 'Pick what type of activity this was.');
@@ -352,6 +427,7 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
           // Tag the source so the UI + analytics can distinguish
           // imported HK workouts, live-tracker sessions, and plain
           // manual-retro entries.
+          ...(sourceOverride ? { source: sourceOverride } : {}),
           ...(prefill?.externalId?.startsWith('hk_') ? { source: 'apple_health' as any } : {}),
           ...(prefill?.externalId?.startsWith('live_') ? { source: 'live_tracker' as any } : {}),
         },
@@ -402,21 +478,41 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
 
             {/* ── Step 1: Category Selection ─────────────────────────── */}
             {step === 1 && (
-              <View style={s.catGrid}>
-                {CATEGORIES.map(cat => (
+              <>
+                <View style={s.catGrid}>
+                  {CATEGORIES.map(cat => (
+                    <TouchableOpacity
+                      key={cat.key}
+                      testID={`activity-category-${cat.key}`}
+                      accessibilityLabel={`activity-category-${cat.key}`}
+                      style={[s.catCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}
+                      onPress={() => selectCategory(cat.key)}
+                      activeOpacity={0.7}>
+                      <Ionicons name={cat.icon as any} size={28} color={tc.primary} />
+                      <Text style={[s.catLabel, { color: tc.textPrimary }]}>{cat.label}</Text>
+                      <Text style={[s.catDesc, { color: tc.textMuted }]}>{cat.desc}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                {authToken ? (
                   <TouchableOpacity
-                    key={cat.key}
-                    testID={`activity-category-${cat.key}`}
-                    accessibilityLabel={`activity-category-${cat.key}`}
-                    style={[s.catCard, { backgroundColor: tc.surfaceRaised, borderColor: tc.border }]}
-                    onPress={() => selectCategory(cat.key)}
-                    activeOpacity={0.7}>
-                    <Ionicons name={cat.icon as any} size={28} color={tc.primary} />
-                    <Text style={[s.catLabel, { color: tc.textPrimary }]}>{cat.label}</Text>
-                    <Text style={[s.catDesc, { color: tc.textMuted }]}>{cat.desc}</Text>
+                    testID="activity-import-photo"
+                    accessibilityLabel="activity-import-photo"
+                    style={[s.importBtn, { backgroundColor: tc.surfaceRaised, borderColor: tc.border, opacity: photoImporting ? 0.65 : 1 }]}
+                    onPress={handleImportPhoto}
+                    disabled={photoImporting}
+                    activeOpacity={0.75}>
+                    {photoImporting ? (
+                      <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textSecondary }}>Importing...</Text>
+                    ) : (
+                      <>
+                        <Ionicons name="image-outline" size={18} color={tc.primary} />
+                        <Text style={{ fontSize: 13, fontWeight: '700', color: tc.textPrimary }}>Import screenshot</Text>
+                      </>
+                    )}
                   </TouchableOpacity>
-                ))}
-              </View>
+                ) : null}
+              </>
             )}
 
             {/* ── Step 2: Details ─────────────────────────────────────── */}
@@ -709,6 +805,7 @@ const s = StyleSheet.create({
   catCard: { width: '47%', borderRadius: 14, borderWidth: 1, padding: 16, alignItems: 'center', gap: 6 },
   catLabel: { fontSize: 15, fontWeight: '700' },
   catDesc: { fontSize: 11, textAlign: 'center' },
+  importBtn: { marginBottom: 18, borderRadius: 12, borderWidth: 1, paddingVertical: 13, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8 },
 
   // Step 2: Chips
   chipGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },

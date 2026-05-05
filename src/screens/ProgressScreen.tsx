@@ -36,6 +36,7 @@ import Zone2TargetCard from '../components/Zone2TargetCard';
 import WeeklyCheckinCard from '../components/WeeklyCheckinCard';
 import { setAppleHealthEnabled as persistAppleHealthEnabled } from '../utils/workoutHistory';
 import LogActivityModal from '../components/LogActivityModal';
+import SwipeableRow from '../components/SwipeableRow';
 import RecoveryCard from '../components/RecoveryCard';
 import AdherenceTrendCard from '../components/AdherenceTrendCard';
 import { RECOVERY_LABELS } from '../utils/healthScore';
@@ -251,6 +252,13 @@ interface StrengthPoint {
 function formatDate(isoString: string): string {
   const d = new Date(isoString);
   return `${DAY_NAMES[d.getDay()]} ${MONTH_NAMES[d.getMonth()]} ${d.getDate()}`;
+}
+
+function formatLoggedTime(loggedAt?: string): string {
+  if (!loggedAt) return '';
+  const d = new Date(loggedAt);
+  if (Number.isNaN(d.getTime())) return '';
+  return ` · ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
 }
 
 function formatDuration(seconds: number): string {
@@ -1348,6 +1356,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const primaryButtonTextColor = getContrastingTextColor(tc.primary);
   const meta = useMetaData();
   const isProTier = tierOf(userProfile) === 'pro';
+  const hasServerProTier = userProfile.subscriptionTier === 'pro';
   const weightUnit = resolveWeightUnit(userProfile);
   const distanceUnit = resolveDistanceUnit(userProfile);
   const [tab, setTab] = useState<ProgressTab>('today');
@@ -2355,7 +2364,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     Math.round(rangeMin + (rangeDelta * (i / (gridLines - 1))))
                   );
                   return (
-                    <View style={styles.graphCard}>
+                    <View testID="progress-selected-exercise-chart" style={styles.graphCard}>
                       <View style={styles.graphHeader}>
                         <Text style={styles.graphTitle}>{selectedExercise}</Text>
                         <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
@@ -2438,7 +2447,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 const maxVal = Math.max(...values, 1);
                 const unit = effectiveMode === 'weight' ? ` ${weightUnit}` : effectiveMode === 'duration' ? ' min' : '';
                 return (
-                  <View style={styles.graphCard}>
+                  <View testID="progress-selected-exercise-chart" style={styles.graphCard}>
                     <View style={styles.graphHeader}>
                       <Text style={styles.graphTitle}>{selectedExercise}</Text>
                       <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
@@ -3182,8 +3191,43 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 // workout twice across import attempts; the index makes
                 // the key unique even on collision so React stops warning.
                 const rowKey = `${session.id ?? 'sess'}-${i}`;
+                const deleteSession = () => {
+                  if (!session.id) return;
+                  Alert.alert(
+                    'Delete this workout?',
+                    'Removes this workout from your history (sets + summary + backend record). This affects your fatigue and weekly volume calculations. Cannot be undone.',
+                    [
+                      { text: 'Cancel', style: 'cancel' },
+                      { text: 'Delete', style: 'destructive', onPress: async () => {
+                        try {
+                          await deleteWorkoutSession(session.id!);
+                          await deleteWorkoutSummary(session.id!).catch(() => null);
+                          if (authToken && session.date) {
+                            const dateISO = session.date.slice(0, 10);
+                            const { deleteWorkoutCompletion } = await import('../services/api');
+                            await deleteWorkoutCompletion(authToken, dateISO).catch(() => null);
+                          }
+                          setHistory(prev => prev.filter(x => x.id !== session.id));
+                          setSummaries(prev => prev.filter(x => x.id !== session.id));
+                          import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+                        } catch (err: any) {
+                          Alert.alert('Could not delete', String(err?.message ?? err));
+                        }
+                      }},
+                    ],
+                  );
+                };
                 return (
                   <FadeInView key={rowKey} delay={i * 60}>
+                  <SwipeableRow
+                    enabled={!!session.id}
+                    actions={session.id ? [{
+                      icon: 'trash-outline',
+                      label: 'Delete',
+                      color: '#fff',
+                      bgColor: tc.error ?? '#EF4444',
+                      onPress: deleteSession,
+                    }] : []}>
                   <TouchableOpacity
                     style={styles.sessionCard}
                     activeOpacity={0.8}
@@ -3215,29 +3259,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                             // Stop the row's expand toggle from firing
                             // when the user taps the delete glyph.
                             e.stopPropagation?.();
-                            Alert.alert(
-                              'Delete this workout?',
-                              'Removes this workout from your history (sets + summary + backend record). This affects your fatigue and weekly volume calculations. Cannot be undone.',
-                              [
-                                { text: 'Cancel', style: 'cancel' },
-                                { text: 'Delete', style: 'destructive', onPress: async () => {
-                                  try {
-                                    await deleteWorkoutSession(session.id!);
-                                    await deleteWorkoutSummary(session.id!).catch(() => null);
-                                    if (authToken && session.date) {
-                                      const dateISO = session.date.slice(0, 10);
-                                      const { deleteWorkoutCompletion } = await import('../services/api');
-                                      await deleteWorkoutCompletion(authToken, dateISO).catch(() => null);
-                                    }
-                                    setHistory(prev => prev.filter(x => x.id !== session.id));
-                                    setSummaries(prev => prev.filter(x => x.id !== session.id));
-                                    import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
-                                  } catch (err: any) {
-                                    Alert.alert('Could not delete', String(err?.message ?? err));
-                                  }
-                                }},
-                              ],
-                            );
+                            deleteSession();
                           }}
                           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                           style={{ paddingHorizontal: 8, paddingVertical: 4, marginLeft: 6 }}>
@@ -3344,6 +3366,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       </View>
                     )}
                   </TouchableOpacity>
+                  </SwipeableRow>
                   </FadeInView>
                 );
               })}
@@ -3464,8 +3487,45 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Text style={styles.emptyBody}>Complete a workout to see your AI-generated summary here.</Text>
                   </View>
                 ) : (<>
-                {visible.map((s, i) => (
-            <View key={`${s.id ?? 'sum'}-${i}`} style={[styles.sessionCard, { gap: 8 }]}>
+                {visible.map((s, i) => {
+                  const deleteSummary = () => {
+                    if (!s.id) return;
+                    Alert.alert(
+                      'Delete this workout?',
+                      'Removes this workout from your history (sets + summary + backend record). This affects your fatigue and weekly volume calculations. Cannot be undone.',
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        { text: 'Delete', style: 'destructive', onPress: async () => {
+                          try {
+                            await deleteWorkoutSummary(s.id!);
+                            await deleteWorkoutSession(s.id!).catch(() => null);
+                            if (authToken && s.date) {
+                              const dateISO = s.date.slice(0, 10);
+                              const { deleteWorkoutCompletion } = await import('../services/api');
+                              await deleteWorkoutCompletion(authToken, dateISO).catch(() => null);
+                            }
+                            setSummaries(prev => prev.filter(x => x.id !== s.id));
+                            setHistory(prev => prev.filter(x => x.id !== s.id));
+                            import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+                          } catch (e: any) {
+                            Alert.alert('Could not delete', String(e?.message ?? e));
+                          }
+                        }},
+                      ],
+                    );
+                  };
+                  return (
+            <SwipeableRow
+              key={`${s.id ?? 'sum'}-${i}`}
+              enabled={!!s.id}
+              actions={s.id ? [{
+                icon: 'trash-outline',
+                label: 'Delete',
+                color: '#fff',
+                bgColor: tc.error ?? '#EF4444',
+                onPress: deleteSummary,
+              }] : []}>
+            <View style={[styles.sessionCard, { gap: 8 }]}>
               <View style={styles.sessionHeader}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.sessionFocus}>{s.focus}</Text>
@@ -3482,35 +3542,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 {s.id && (
                   <TouchableOpacity
                     onPress={() => {
-                      Alert.alert(
-                        'Delete this workout?',
-                        'Removes this workout from your history (sets + summary + backend record). This affects your fatigue and weekly volume calculations. Cannot be undone.',
-                        [
-                          { text: 'Cancel', style: 'cancel' },
-                          { text: 'Delete', style: 'destructive', onPress: async () => {
-                            try {
-                              // 1. Local: nuke summary + session.
-                              await deleteWorkoutSummary(s.id!);
-                              await deleteWorkoutSession(s.id!).catch(() => null);
-                              // 2. Backend: nuke the completion row +
-                              //    associated session/exercise/set rows.
-                              //    Without this the workout would
-                              //    re-appear after a sync (server is
-                              //    source of truth for fatigue).
-                              if (authToken && s.date) {
-                                const dateISO = s.date.slice(0, 10);
-                                const { deleteWorkoutCompletion } = await import('../services/api');
-                                await deleteWorkoutCompletion(authToken, dateISO).catch(() => null);
-                              }
-                              setSummaries(prev => prev.filter(x => x.id !== s.id));
-                              setHistory(prev => prev.filter(x => x.id !== s.id));
-                              import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
-                            } catch (e: any) {
-                              Alert.alert('Could not delete', String(e?.message ?? e));
-                            }
-                          }},
-                        ],
-                      );
+                      deleteSummary();
                     }}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                     style={{ paddingHorizontal: 8, paddingVertical: 4, marginLeft: 6 }}>
@@ -3599,7 +3631,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
               )}
             </View>
-          ))}
+            </SwipeableRow>
+                  );
+                })}
                 {remaining > 0 && (
                   <TouchableOpacity
                     onPress={() => setVisibleSummaryCount(c => c + 30)}
@@ -4787,6 +4821,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     </Text>
                     <Text style={{ fontSize: 11, color: tc.textMuted }}>
                       {new Date(weightEntries[weightEntries.length - 1].date + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                      {formatLoggedTime(weightEntries[weightEntries.length - 1].loggedAt)}
                     </Text>
                   </View>
                   {weightEntries.length >= 2 && (() => {
@@ -4869,6 +4904,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <View key={e.date} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6, borderTopWidth: i > 0 ? 1 : 0, borderTopColor: tc.border }}>
                     <Text style={{ flex: 1, fontSize: 13, color: tc.textSecondary }}>
                       {new Date(e.date + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                      {formatLoggedTime(e.loggedAt)}
                     </Text>
                     <Text style={{ fontSize: 13, fontWeight: '600', color: tc.textPrimary }}>
                       {formatWeight(e.weightLbs, weightUnit)}
@@ -5566,6 +5602,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         visible={showLogActivity}
         onClose={() => setShowLogActivity(false)}
         themeName={themeName}
+        authToken={hasServerProTier ? authToken : null}
         onSave={async (session) => {
           await saveWorkoutSession(session);
           const sessionDate = dateKey(new Date(session.date));

@@ -3,10 +3,10 @@
 // invokes `onComplete` so the parent can unmount it.
 //
 // Animation rhythm:
-//  • Each tick lives 700ms. The numeral enters scaled 1.3x + fully
-//    opaque, then eases down to 1.0x / 0 alpha.
-//  • Final message ticks for ~1100ms so it reads as a resolution, not
-//    another count.
+//  • Each number lives on an even beat. It enters scaled up, settles,
+//    then fades out before the next beat.
+//  • Final message is only slightly longer than the counts so the
+//    workout opens without a laggy pause.
 //  • Every tick fires a haptic — light for the numbers, heavy for the
 //    go message — so users who aren't watching still feel the beat.
 //
@@ -43,14 +43,14 @@ export default function StartCountdownOverlay({ themeName, onComplete, finalMess
   const phrase = useRef<string>(finalMessage ?? pickPhrase()).current;
 
   const ticks: Tick[] = [
-    { label: '3', duration: 700, isFinal: false },
-    { label: '2', duration: 700, isFinal: false },
-    { label: '1', duration: 700, isFinal: false },
-    { label: phrase, duration: 1100, isFinal: true },
+    { label: '3', duration: 640, isFinal: false },
+    { label: '2', duration: 640, isFinal: false },
+    { label: '1', duration: 640, isFinal: false },
+    { label: phrase, duration: 760, isFinal: true },
   ];
 
   const [idx, setIdx] = useState(0);
-  const scale = useRef(new Animated.Value(1.35)).current;
+  const scale = useRef(new Animated.Value(1.22)).current;
   const opacity = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -65,39 +65,42 @@ export default function StartCountdownOverlay({ themeName, onComplete, finalMess
       else f.hapticLight?.();
     }).catch(() => {});
 
-    // Reset and animate: pop in (scale 1.35 → 1.0, opacity 0 → 1)
-    // then hold briefly then fade out (opacity 1 → 0).
-    scale.setValue(1.35);
+    // Reset and animate as one sequence so the beat doesn't drift
+    // between fade and advance timers.
+    scale.setValue(tick.isFinal ? 1.12 : 1.22);
     opacity.setValue(0);
-    Animated.parallel([
-      Animated.timing(scale, {
-        toValue: 1.0,
-        duration: Math.min(260, tick.duration * 0.4),
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
-      }),
-      Animated.timing(opacity, {
-        toValue: 1,
-        duration: 180,
-        useNativeDriver: true,
-      }),
-    ]).start();
-
-    const fadeStart = setTimeout(() => {
+    const enterMs = tick.isFinal ? 190 : 170;
+    const exitMs = 170;
+    const holdMs = Math.max(80, tick.duration - enterMs - exitMs);
+    const animation = Animated.sequence([
+      Animated.parallel([
+        Animated.timing(scale, {
+          toValue: 1.0,
+          duration: enterMs,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+        Animated.timing(opacity, {
+          toValue: 1,
+          duration: enterMs,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.delay(holdMs),
       Animated.timing(opacity, {
         toValue: 0,
-        duration: 220,
+        duration: exitMs,
+        easing: Easing.in(Easing.quad),
         useNativeDriver: true,
-      }).start();
-    }, tick.duration - 220);
-
-    const advance = setTimeout(() => {
-      setIdx(i => i + 1);
-    }, tick.duration);
+      }),
+    ]);
+    animation.start(({ finished }) => {
+      if (finished) setIdx(i => i + 1);
+    });
 
     return () => {
-      clearTimeout(fadeStart);
-      clearTimeout(advance);
+      animation.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idx]);

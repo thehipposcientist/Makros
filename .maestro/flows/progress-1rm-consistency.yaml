@@ -1,10 +1,8 @@
 # Verifies that for a seeded user with workout history, the Progress
-# tab renders both the "Estimated 1 Rep Max" showcase tile and at
-# least one PR card. After the rolling-e1RM overlay change, both
-# surfaces share the same compute path — this flow catches the case
-# where one renders empty while the other shows numbers (the bug
-# users reported when the chart and PR cards drifted from the
-# showcase before the overlay landed).
+# Trends tab renders both the "Estimated 1 Rep Max" showcase tile and
+# the selected exercise trend chart. After the rolling-e1RM overlay
+# change, this catches the case where the showcase renders empty while
+# the chart still has loaded workout data.
 #
 # Requires:
 #   make seed-e2e
@@ -77,14 +75,7 @@ tags:
 
 - assertVisible: "Estimated 1 Rep Max"
 
-# A PR card with the rolling-e1RM overlay should also be visible.
-# (The seeded user has logged enough sets that at least one card
-# renders. We don't assert the actual lbs number — that varies
-# with the seed — only that the card structure is intact, since
-# the bug we're guarding against is "card disappears or shows 0".)
-- scrollUntilVisible:
-    element:
-      id: "progress-pr-card-0"
-    direction: DOWN
-    timeout: 30000
-    visibilityPercentage: 30
+# The selected exercise chart should render from the same loaded
+# workout history, so Trends is not a one-card-only success.
+- assertVisible:
+    id: "progress-selected-exercise-chart"

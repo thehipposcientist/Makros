@@ -173,6 +173,23 @@ def test_beer_alcohol_flag():
     assert c.alcohol_flag is True
 
 
+def test_non_alcohol_food_names_do_not_set_alcohol_flag():
+    print("\n[test] non-alcohol food phrases → NOT alcohol_flag")
+    from app.services.nutrition.food_classifier import classify_food
+    names = [
+        "Apple Cider Vinegar",
+        "Red Wine Vinegar",
+        "Root Beer",
+        "Ginger Beer",
+        "Shrimp Cocktail",
+        "Fruit Cocktail",
+        "Old Fashioned Oats",
+        "Shot of Espresso",
+    ]
+    flagged = [name for name in names if classify_food(name).alcohol_flag]
+    assert flagged == [], flagged
+
+
 def test_bacon_processed_meat_flag():
     print("\n[test] bacon → processed_meat_flag")
     from app.services.nutrition.food_classifier import classify_food

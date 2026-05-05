@@ -156,7 +156,7 @@ Pulled from Apple Health (see [Cycle Phase](#9-cycle-phase-not-scored)):
 - strength: 45 / 30 / 25
 
 ### Versioning
-`SCORE_VERSION=3`, `METRICS_VERSION=3`, `CLASSIFIER_VERSION=3`. Bumping any one invalidates `FoodMetadata` cache and re-runs classification on next meal write.
+`SCORE_VERSION=3`, `METRICS_VERSION=3`, `CLASSIFIER_VERSION=5`. Bumping any one invalidates `FoodMetadata` cache and re-runs classification on next meal write.
 
 ### Design rules
 - Protein gets full credit at ≥95% (not 100%) to avoid false penalties for hitting "close enough"

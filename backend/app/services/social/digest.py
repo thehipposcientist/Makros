@@ -144,6 +144,11 @@ def compute_digest(
                 "user_id": fid,
                 "username": user_row.username,
                 "display_name": (prof.display_name if prof and prof.display_name else user_row.username),
+                "avatar_url": (
+                    prof.avatar_url.strip()
+                    if prof and isinstance(prof.avatar_url, str) and prof.avatar_url.strip()
+                    else None
+                ),
                 "goal": goal_row.goal_type.value if goal_row else None,
                 "share_enabled": share,
                 "sessions": sessions,

@@ -331,6 +331,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const [barcodeFallback, setBarcodeFallback] = useState<string | null>(null);
   const [aiSearchLoading, setAiSearchLoading] = useState(false);
   const [aiResults, setAiResults] = useState<FoodSearchResult[]>([]);
+  const [searchFeedback, setSearchFeedback] = useState<{ name: string; status: 'added' | 'duplicate' } | null>(null);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [foodSearchFocused, setFoodSearchFocused] = useState(false);
   const scrollRef = useRef<ScrollView | null>(null);
@@ -366,6 +367,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       userEdited.current = false;
       setSearch('');
       setAiResults([]);
+      setSearchFeedback(null);
       setFoodSearchFocused(false);
       setKeyboardHeight(0);
       setUnitPickerIdx(null);
@@ -646,7 +648,10 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     setUnitPickerIdx(null);
   };
   const addFood = (name: string) => {
-    if (items.some(it => it.name.toLowerCase() === name.toLowerCase())) return;
+    if (items.some(it => it.name.toLowerCase() === name.toLowerCase())) {
+      setSearchFeedback({ name, status: 'duplicate' });
+      return;
+    }
     const lib = lookupFood(name, allFoods);
     const parsed = splitFoodString(name);
     const cleanName = parsed.name || name;
@@ -681,7 +686,9 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       baseFat:      lib?.fat      ?? 0,
     };
     userEdited.current = true;
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setItems(prev => [...prev, newItem]);
+    setSearchFeedback({ name: cleanName, status: 'added' });
   };
   const updateItem = (idx: number, patch: Partial<MealItem>) => {
     userEdited.current = true;
@@ -890,38 +897,44 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   };
 
   const addAiFood = (aiItem: FoodSearchResult) => {
-    if (!items.some(it => it.name.toLowerCase() === aiItem.name.toLowerCase())) {
-      const parsed = aiItem.serving
-        ? splitFoodString(`${aiItem.serving} ${aiItem.name}`)
-        : { quantity: 1, unit: 'serving' as FoodUnit };
-      const qty = parsed.quantity ?? 1;
-      const cal = Math.round(aiItem.calories);
-      const prot = Math.round(aiItem.protein);
-      const carb = Math.round(aiItem.carbs);
-      const fat = Math.round(aiItem.fat);
-      const newItem: MealItem = {
-        name: aiItem.name,
-        quantity: qty,
-        unit: parsed.unit ?? 'serving',
-        calories: cal, protein: prot, carbs: carb, fat,
-        baseQuantity: qty > 0 ? qty : 1,
-        baseCalories: cal, baseProtein: prot, baseCarbs: carb, baseFat: fat,
-        food_id: aiItem.food_id ?? null,
-        serving_id: aiItem.serving_id ?? null,
-        serving_grams: aiItem.serving_grams ?? null,
-        source: aiItem.source,
-        fdc_id: aiItem.fdc_id ?? aiItem.external_id ?? null,
-        external_id: aiItem.external_id ?? aiItem.fdc_id ?? null,
-        brand: aiItem.brand ?? null,
-        is_verified: aiItem.is_verified,
-        ...(aiItem.micronutrients ? { micronutrients: aiItem.micronutrients } : {}),
-      };
-      setItems(prev => {
-        const next = [...prev, newItem];
-        persistNow(next);
-        return next;
-      });
+    if (items.some(it => it.name.toLowerCase() === aiItem.name.toLowerCase())) {
+      setSearchFeedback({ name: aiItem.name, status: 'duplicate' });
+      return;
     }
+    const parsed = aiItem.serving
+      ? splitFoodString(`${aiItem.serving} ${aiItem.name}`)
+      : { quantity: 1, unit: 'serving' as FoodUnit };
+    const qty = parsed.quantity ?? 1;
+    const cal = Math.round(aiItem.calories);
+    const prot = Math.round(aiItem.protein);
+    const carb = Math.round(aiItem.carbs);
+    const fat = Math.round(aiItem.fat);
+    const newItem: MealItem = {
+      name: aiItem.name,
+      quantity: qty,
+      unit: parsed.unit ?? 'serving',
+      calories: cal, protein: prot, carbs: carb, fat,
+      baseQuantity: qty > 0 ? qty : 1,
+      baseCalories: cal, baseProtein: prot, baseCarbs: carb, baseFat: fat,
+      food_id: aiItem.food_id ?? null,
+      serving_id: aiItem.serving_id ?? null,
+      serving_grams: aiItem.serving_grams ?? null,
+      source: aiItem.source,
+      fdc_id: aiItem.fdc_id ?? aiItem.external_id ?? null,
+      external_id: aiItem.external_id ?? aiItem.fdc_id ?? null,
+      brand: aiItem.brand ?? null,
+      is_verified: aiItem.is_verified,
+      ...(aiItem.micronutrients ? { micronutrients: aiItem.micronutrients } : {}),
+    };
+    userEdited.current = true;
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setItems(prev => {
+      if (prev.some(it => it.name.toLowerCase() === aiItem.name.toLowerCase())) return prev;
+      const next = [...prev, newItem];
+      persistNow(next);
+      return next;
+    });
+    setSearchFeedback({ name: aiItem.name, status: 'added' });
     if (aiItem.source !== 'seed' && aiItem.source !== 'user') {
       onAddCustomFood?.({
         name: aiItem.name,
@@ -1467,7 +1480,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                 testID="meal-edit-food-search"
                 style={[s.searchInput, { flex: 1, marginBottom: 0 }]}
                 value={search}
-                onChangeText={(t) => { setSearch(t); setAiResults([]); if (barcodeFallback) setBarcodeFallback(null); }}
+                onChangeText={(t) => { setSearch(t); setAiResults([]); setSearchFeedback(null); if (barcodeFallback) setBarcodeFallback(null); }}
                 placeholder="Search foods..."
                 placeholderTextColor={colors.textMuted}
                 returnKeyType="search"
@@ -1476,7 +1489,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                 onSubmitEditing={authToken && search.length > 1 ? () => handleAiSearch() : undefined}
               />
               {search.length > 0 && (
-                <TouchableOpacity style={s.clearBtn} onPress={() => { setSearch(''); setAiResults([]); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <TouchableOpacity style={s.clearBtn} onPress={() => { setSearch(''); setAiResults([]); setSearchFeedback(null); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                   <Ionicons name="close-circle" size={18} color={colors.textMuted} />
                 </TouchableOpacity>
               )}
@@ -1492,6 +1505,65 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               )}
             </View>
 
+            {foodSearchActive && items.length > 0 && (
+              <View style={s.searchCurrentFoodsCard}>
+                <View style={s.searchCurrentFoodsHeader}>
+                  <Text style={s.searchCurrentFoodsTitle}>Current Foods</Text>
+                  <TouchableOpacity
+                    onPress={() => {
+                      setSearch('');
+                      setAiResults([]);
+                      setSearchFeedback(null);
+                      setFoodSearchFocused(false);
+                      Keyboard.dismiss();
+                    }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Text style={s.searchCurrentFoodsAction}>View/Edit</Text>
+                  </TouchableOpacity>
+                </View>
+                {searchFeedback && (
+                  <View
+                    style={[
+                      s.searchFeedbackPill,
+                      searchFeedback.status === 'duplicate' && s.searchFeedbackPillMuted,
+                    ]}>
+                    <Ionicons
+                      name={searchFeedback.status === 'added' ? 'checkmark-circle' : 'information-circle-outline'}
+                      size={13}
+                      color={searchFeedback.status === 'added' ? colors.primary : colors.textSecondary}
+                    />
+                    <Text
+                      numberOfLines={1}
+                      style={[
+                        s.searchFeedbackText,
+                        searchFeedback.status === 'duplicate' && s.searchFeedbackTextMuted,
+                      ]}>
+                      {searchFeedback.status === 'added'
+                        ? `Added ${searchFeedback.name}`
+                        : `${searchFeedback.name} is already in this meal`}
+                    </Text>
+                  </View>
+                )}
+                <View style={s.searchCurrentFoodChips}>
+                  {items.slice(-4).reverse().map((it, idx) => {
+                    const highlighted = searchFeedback?.status === 'added'
+                      && it.name.toLowerCase() === searchFeedback.name.toLowerCase();
+                    return (
+                      <View
+                        key={`${it.name}-${items.length - idx}`}
+                        style={[s.searchCurrentFoodChip, highlighted && s.searchCurrentFoodChipActive]}>
+                        <Text
+                          numberOfLines={1}
+                          style={[s.searchCurrentFoodChipText, highlighted && s.searchCurrentFoodChipTextActive]}>
+                          {it.name}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
+
             {/* Hint when search has text but the user hasn't tapped Search yet
                 (or the AI returned nothing). Replaces the old "No local matches"
                 copy from when there was an inline category list to filter. */}
@@ -1500,6 +1572,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                 <Text style={s.sectionLabel}>From Your Foods</Text>
                 {localSearchResults.map((item, idx) => {
                   const badgeLabel = badgeLabelForSource(item.source);
+                  const alreadyInMeal = items.some(it => it.name.toLowerCase() === item.name.toLowerCase());
                   return (
                     <TouchableOpacity testID={`meal-edit-local-search-result-${idx}`} key={`${item.source ?? ''}-${item.name}-${idx}`} style={s.aiResultRow} onPress={() => addAiFood(item)}>
                       <View style={{ flex: 1 }}>
@@ -1516,7 +1589,9 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                           {Math.round(item.calories)} cal · {Math.round(item.protein)}g pro · {Math.round(item.carbs)}g carbs · {Math.round(item.fat)}g fat
                         </Text>
                       </View>
-                      <Text style={s.aiResultAdd}>+ Add</Text>
+                      <Text style={[s.aiResultAdd, alreadyInMeal && s.aiResultAdded]}>
+                        {alreadyInMeal ? 'Added' : '+ Add'}
+                      </Text>
                     </TouchableOpacity>
                   );
                 })}
@@ -1545,6 +1620,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                   const isUsda = item.source === 'usda';
                   const isAi = item.source === 'ai';
                   const badgeLabel = badgeLabelForSource(item.source);
+                  const alreadyInMeal = items.some(it => it.name.toLowerCase() === item.name.toLowerCase());
                   return (
                     <TouchableOpacity testID={`meal-edit-search-result-${idx}`} key={`${item.source ?? ''}-${item.name}-${idx}`} style={s.aiResultRow} onPress={() => addAiFood(item)}>
                       <View style={{ flex: 1 }}>
@@ -1563,7 +1639,9 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                           {Math.round(item.calories)} cal · {Math.round(item.protein)}g pro · {Math.round(item.carbs)}g carbs · {Math.round(item.fat)}g fat
                         </Text>
                       </View>
-                      <Text style={s.aiResultAdd}>+ Add</Text>
+                      <Text style={[s.aiResultAdd, alreadyInMeal && s.aiResultAdded]}>
+                        {alreadyInMeal ? 'Added' : '+ Add'}
+                      </Text>
                     </TouchableOpacity>
                   );
                 })}
@@ -1578,12 +1656,6 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               </View>
               );
             })()}
-
-            {foodSearchActive && items.length > 0 && (
-              <Text style={[s.emptyText, { marginTop: 4 }]}>
-                Clear search to edit the foods already in this meal.
-              </Text>
-            )}
 
             {/* Current foods — structured editable rows */}
             {!foodSearchActive && (<>
@@ -2061,6 +2133,85 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     padding: 12, fontSize: 14, color: colors.textPrimary,
     backgroundColor: colors.surface, marginBottom: 14,
   },
+  searchCurrentFoodsCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 10,
+    marginBottom: 14,
+    gap: 8,
+  },
+  searchCurrentFoodsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  searchCurrentFoodsTitle: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  searchCurrentFoodsAction: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: colors.primary,
+  },
+  searchFeedbackPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    alignSelf: 'flex-start',
+    maxWidth: '100%',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: radius.full,
+    backgroundColor: colors.primary + '16',
+    borderWidth: 1,
+    borderColor: colors.primary + '55',
+  },
+  searchFeedbackPillMuted: {
+    backgroundColor: colors.surfaceRaised,
+    borderColor: colors.border,
+  },
+  searchFeedbackText: {
+    flexShrink: 1,
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.primary,
+  },
+  searchFeedbackTextMuted: {
+    color: colors.textSecondary,
+  },
+  searchCurrentFoodChips: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  searchCurrentFoodChip: {
+    maxWidth: '48%',
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: radius.full,
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  searchCurrentFoodChipActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  searchCurrentFoodChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textSecondary,
+  },
+  searchCurrentFoodChipTextActive: {
+    color: getContrastingTextColor(colors.primary),
+  },
   clearBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: colors.border, alignItems: 'center', justifyContent: 'center' },
   clearBtnText: { fontSize: 13, color: colors.textSecondary, fontWeight: '700' },
 
@@ -2082,6 +2233,7 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   aiResultServing: { fontSize: 11, color: colors.textMuted, marginTop: 2 },
   aiResultMacros:  { fontSize: 11, color: colors.textSecondary, marginTop: 2 },
   aiResultAdd:     { fontSize: 13, fontWeight: '700', color: colors.primary, marginLeft: 8 },
+  aiResultAdded:   { color: colors.textMuted },
 
   sourceBadge: {
     paddingHorizontal: 6, paddingVertical: 2, borderRadius: radius.sm ?? 4,

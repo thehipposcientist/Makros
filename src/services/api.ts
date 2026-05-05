@@ -451,6 +451,7 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
           date: String(entry.date ?? '').slice(0, 10),
           weight_lbs: Math.round(Number(entry.weight_lbs) * 10) / 10,
           source: entry.source ?? 'manual',
+          logged_at: entry.logged_at ?? undefined,
         }))
         .filter((entry: any) => entry.date && Number.isFinite(entry.weight_lbs) && entry.weight_lbs > 0)
       : undefined;
@@ -458,6 +459,7 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
     return {
       firstName:  data.first_name ?? undefined,
       lastName:   data.last_name ?? undefined,
+      avatarUrl:  data.social_profile?.avatar_url ?? undefined,
       subscriptionTier: data.subscription_tier === 'pro' ? 'pro' : 'free',
       goal:       goalTrack,
       goalDetails: {
@@ -486,6 +488,7 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
         date: entry.date,
         weightLbs: entry.weight_lbs,
         source: entry.source,
+        loggedAt: entry.logged_at,
       })),
     };
   } catch {
@@ -2438,6 +2441,24 @@ export async function parseRecentWorkouts(
   }, 30000);
 }
 
+/** Parse a workout screenshot/photo into review-first session candidates. */
+export async function parseWorkoutPhoto(
+  token: string,
+  photoBase64: string,
+  mimeType = 'image/jpeg',
+): Promise<{ sessions: Array<{ date: string; focus: string; completed: boolean; durationSeconds: number; exercises: any[]; distanceMiles?: number; caloriesBurned?: number; avgHeartRate?: number; source?: string }> }> {
+  return request<any>('/ai/parse-workouts', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      text: 'Workout screenshot import',
+      currentDate: new Date().toISOString().slice(0, 10),
+      photo_base64: photoBase64,
+      photo_mime_type: mimeType,
+    }),
+  }, 45000);
+}
+
 export async function askTrainerQuestion(
   token: string,
   payload: {
@@ -3399,6 +3420,7 @@ export interface WeightEntryAPI {
   date: string;
   weight_lbs: number;
   source: string;
+  logged_at?: string;
 }
 
 export async function getWeightEntries(token: string): Promise<WeightEntryAPI[]> {
@@ -3408,11 +3430,11 @@ export async function getWeightEntries(token: string): Promise<WeightEntryAPI[]>
   }, 30000, 30000);
 }
 
-export async function saveWeightEntryAPI(token: string, date: string, weightLbs: number, source = 'manual'): Promise<void> {
+export async function saveWeightEntryAPI(token: string, date: string, weightLbs: number, source = 'manual', loggedAt = new Date().toISOString()): Promise<void> {
   await request('/profile/weight-entries', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ date, weight_lbs: weightLbs, source }),
+    body: JSON.stringify({ date, weight_lbs: weightLbs, source, logged_at: loggedAt }),
   });
 }
 
@@ -4401,6 +4423,7 @@ export interface SocialMe {
   user_id: number;
   username: string;
   display_name: string | null;
+  avatar_url: string | null;
   share_activity_enabled: boolean;
 }
 
@@ -4409,6 +4432,7 @@ export interface SocialFriend {
   user_id: number;
   username: string;
   display_name: string | null;
+  avatar_url: string | null;
   goal: string | null;
   last_active_within_48h: boolean;
   streak: number;
@@ -4419,6 +4443,7 @@ export interface SocialPendingRequest {
   user_id: number;
   username: string;
   display_name: string | null;
+  avatar_url: string | null;
   requested_at: string;
   direction: 'incoming' | 'outgoing';
 }
@@ -4432,6 +4457,7 @@ export interface SocialDigestFriend {
   user_id: number;
   username: string;
   display_name: string;
+  avatar_url?: string | null;
   goal: string | null;
   share_enabled: boolean;
   sessions: number;
@@ -4457,6 +4483,7 @@ export interface SocialSearchHit {
   user_id: number;
   username: string;
   display_name: string | null;
+  avatar_url: string | null;
 }
 
 export async function getSocialMe(token: string): Promise<SocialMe> {
@@ -4467,7 +4494,7 @@ export async function getSocialMe(token: string): Promise<SocialMe> {
 
 export async function updateSocialMe(
   token: string,
-  body: { display_name?: string | null; share_activity_enabled?: boolean },
+  body: { display_name?: string | null; avatar_url?: string | null; share_activity_enabled?: boolean },
 ): Promise<SocialMe> {
   return request<SocialMe>('/social/me', {
     method: 'PATCH',
@@ -4554,6 +4581,7 @@ export interface FeedItem {
   user_id: number;
   username: string;
   display_name: string | null;
+  avatar_url?: string | null;
   event_type: string;
   payload: {
     focus?: string;

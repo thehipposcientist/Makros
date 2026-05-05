@@ -73,6 +73,7 @@ export interface WeightEntry {
   date: string;   // ISO date YYYY-MM-DD
   weightLbs: number;
   source?: 'manual' | 'onboarding' | 'coach' | 'checkin' | 'watch';
+  loggedAt?: string;
 }
 
 export interface GoalDetails {
@@ -248,7 +249,7 @@ export interface UserProfile {
   lastWorkoutContext?: string;   // what user last trained and when (new user onboarding context)
   customMacros?: CustomMacros;   // user-set macro overrides (replace computed TDEE targets)
   weightHistory?: WeightEntry[];
-  weightEntries?: Array<{ date: string; weight_lbs: number; source?: string }>;
+  weightEntries?: Array<{ date: string; weight_lbs: number; source?: string; logged_at?: string }>;
   allergies?: string[];           // allergen categories the user avoids
   dislikedExercises?: string[];  // exercise names excluded from plan generation
   /** Subscription tier. `free` = manual tracking and starter tools;
@@ -256,6 +257,9 @@ export interface UserProfile {
    *  Missing/unknown tiers must be treated as `free` by clients so
    *  unlocked features only come from explicit state. */
   subscriptionTier?: 'free' | 'pro';
+  /** Social/profile avatar. Usually a compact image data URI persisted
+   *  through UserSocialProfile so friends see it anywhere initials render. */
+  avatarUrl?: string;
 }
 
 // ─── Workout plan types ───────────────────────────────────────────────────────
