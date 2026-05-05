@@ -143,7 +143,11 @@ export default function TutorialOverlay({
       <Animated.View style={[styles.container, { opacity: fade }]}>
         {/* Top bar — Skip + step counter */}
         <View style={styles.topBar}>
-          <TouchableOpacity testID="tutorial-skip" onPress={goSkip} hitSlop={12}>
+          <TouchableOpacity
+            testID="tutorial-skip"
+            accessibilityLabel="tutorial-skip"
+            onPress={goSkip}
+            hitSlop={12}>
             <Text style={styles.skipText}>Skip</Text>
           </TouchableOpacity>
           <Text style={styles.counterText}>
@@ -184,16 +188,30 @@ export default function TutorialOverlay({
         <View style={styles.ctaRow}>
           {showUpgradeCTA ? (
             <>
-              <TouchableOpacity style={styles.secondaryBtn} onPress={() => onClose({ completed: true })}>
+              <TouchableOpacity
+                testID="tutorial-maybe-later"
+                accessibilityLabel="tutorial-maybe-later"
+                style={styles.secondaryBtn}
+                onPress={() => onClose({ completed: true })}>
                 <Text style={styles.secondaryBtnText}>Maybe later</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.primaryBtn} onPress={handleUpgrade} activeOpacity={0.85}>
+              <TouchableOpacity
+                testID="tutorial-upgrade"
+                accessibilityLabel="tutorial-upgrade"
+                style={styles.primaryBtn}
+                onPress={handleUpgrade}
+                activeOpacity={0.85}>
                 <Text style={styles.primaryBtnText}>See Pro</Text>
                 <Ionicons name="sparkles" size={14} color="#fff" style={{ marginLeft: 6 }} />
               </TouchableOpacity>
             </>
           ) : (
-            <TouchableOpacity style={styles.primaryBtn} onPress={goNext} activeOpacity={0.85}>
+            <TouchableOpacity
+              testID="tutorial-next"
+              accessibilityLabel={isLast ? 'tutorial-done' : 'tutorial-next'}
+              style={styles.primaryBtn}
+              onPress={goNext}
+              activeOpacity={0.85}>
               <Text style={styles.primaryBtnText}>
                 {isLast ? 'Get started' : 'Next'}
               </Text>

@@ -417,8 +417,13 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
 
   useEffect(() => {
     if (!foodSearchActive) return;
+    // When search is active, the Current Foods + Saved Meals + action
+    // buttons collapse, so the search input sits at the top of the
+    // remaining content. Scroll to y=0 so the input + first results are
+    // visible above the keyboard. (Older logic used scrollToEnd, which
+    // hid the input behind the keyboard once results arrived.)
     const timer = setTimeout(() => {
-      scrollRef.current?.scrollToEnd({ animated: true });
+      scrollRef.current?.scrollTo({ y: 0, animated: true });
     }, Platform.OS === 'ios' ? 120 : 180);
     return () => clearTimeout(timer);
   }, [foodSearchActive, aiResults.length, localSearchResults.length, aiSearchLoading]);
@@ -1340,12 +1345,25 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
             keyboardShouldPersistTaps="handled">
 
+            {/* While the user is actively searching for a food we collapse
+                Current Foods + Saved Meals so the search input + results
+                sit near the top, fully above the keyboard. The "{N} foods
+                already added" hint keeps a hint of context without taking
+                up the screen. */}
+            {foodSearchActive && items.length > 0 && (
+              <Text style={[s.emptyText, { marginBottom: 6 }]}>
+                {items.length} food{items.length === 1 ? '' : 's'} already added — clear search to view & edit
+              </Text>
+            )}
+
             {/* Current foods — structured editable rows */}
+            {!foodSearchActive && (<>
             <Text style={s.sectionLabel}>Current Foods</Text>
             {items.length === 0 && (
               <Text style={s.emptyText}>No foods — add some below</Text>
             )}
-            {items.map((it, idx) => (
+            </>)}
+            {!foodSearchActive && items.map((it, idx) => (
               <View key={`${it.name}-${idx}`} style={s.currentFoodRow}>
                 <View style={s.currentFoodInfo}>
                   {/* Food name — read-only. Renaming a food breaks its
@@ -1439,7 +1457,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               </View>
             ))}
 
-            {savedMeals.length > 0 && (
+            {!foodSearchActive && savedMeals.length > 0 && (
               <>
                 <Text style={[s.sectionLabel, { marginTop: 24 }]}>Saved Meals</Text>
                 {savedMeals.map((template) => (
@@ -1469,9 +1487,11 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             )}
 
             {/* Food picker */}
-            <Text style={[s.sectionLabel, { marginTop: 24 }]}>Add Foods</Text>
+            {!foodSearchActive && (
+              <Text style={[s.sectionLabel, { marginTop: 24 }]}>Add Foods</Text>
+            )}
 
-            {authToken && (
+            {authToken && !foodSearchActive && (
               <>
                 <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
                   <TouchableOpacity

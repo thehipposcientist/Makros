@@ -1524,6 +1524,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     meta.foodCategories,
     customFoods,
   );
+  const selectedKitchenFoodCount = selectedKitchenFoodGroups.reduce((acc, g) => acc + g.foods.length, 0);
   const foodSearchLower = foodSearch.trim().toLowerCase();
   const filteredFoodCategories = foodSearchLower ? meta.foodCategories
     .filter(category => foodCategoryFilter === 'all' || category.key === foodCategoryFilter)
@@ -2924,35 +2925,48 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             )}
             {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
               <>
-                <View style={styles.chipGroup}>
-                  <Text style={styles.chipGroupLabel}>In Your Kitchen</Text>
-                  {selectedKitchenFoodGroups.length > 0 ? (
-                    <View style={{ gap: 12 }}>
-                      {selectedKitchenFoodGroups.map(group => (
-                        <View key={group.key}>
-                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
-                            {group.icon.includes('-') ? <Ionicons name={group.icon as any} size={15} color={colors.textSecondary} /> : <Text style={{ fontSize: 15 }}>{group.icon}</Text>}
-                            <Text style={styles.chipGroupLabel}>{group.label}</Text>
+                {/* When the user is actively searching, collapse the
+                    "In Your Kitchen" current-selection panel so the AI
+                    search button + catalog results sit immediately below
+                    the search input instead of being pushed to the bottom
+                    of the screen. A short hint preserves context. */}
+                {!foodSearchLower ? (
+                  <View style={styles.chipGroup}>
+                    <Text style={styles.chipGroupLabel}>In Your Kitchen</Text>
+                    {selectedKitchenFoodGroups.length > 0 ? (
+                      <View style={{ gap: 12 }}>
+                        {selectedKitchenFoodGroups.map(group => (
+                          <View key={group.key}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                              {group.icon.includes('-') ? <Ionicons name={group.icon as any} size={15} color={colors.textSecondary} /> : <Text style={{ fontSize: 15 }}>{group.icon}</Text>}
+                              <Text style={styles.chipGroupLabel}>{group.label}</Text>
+                            </View>
+                            <View style={styles.chips}>
+                              {group.foods.map(({ name, item }) => (
+                                <TouchableOpacity
+                                  key={name}
+                                  style={[styles.chip, styles.chipActive]}
+                                  onPress={() => toggleFood(name)}>
+                                  <Text style={[styles.chipText, styles.chipTextActive]}>
+                                    {name}{item?.calories ? ` (${Math.round(item.calories)} cal)` : ''} <Ionicons name="close" size={12} />
+                                  </Text>
+                                </TouchableOpacity>
+                              ))}
+                            </View>
                           </View>
-                          <View style={styles.chips}>
-                            {group.foods.map(({ name, item }) => (
-                              <TouchableOpacity
-                                key={name}
-                                style={[styles.chip, styles.chipActive]}
-                                onPress={() => toggleFood(name)}>
-                                <Text style={[styles.chipText, styles.chipTextActive]}>
-                                  {name}{item?.calories ? ` (${Math.round(item.calories)} cal)` : ''} <Ionicons name="close" size={12} />
-                                </Text>
-                              </TouchableOpacity>
-                            ))}
-                          </View>
-                        </View>
-                      ))}
-                    </View>
-                  ) : (
-                    <Text style={styles.emptySearchText}>No foods selected yet.</Text>
-                  )}
-                </View>
+                        ))}
+                      </View>
+                    ) : (
+                      <Text style={styles.emptySearchText}>No foods selected yet.</Text>
+                    )}
+                  </View>
+                ) : (
+                  selectedKitchenFoodCount > 0 && (
+                    <Text style={[styles.emptySearchText, { marginBottom: 8 }]}>
+                      {selectedKitchenFoodCount} food{selectedKitchenFoodCount === 1 ? '' : 's'} in your kitchen — clear search to view & edit
+                    </Text>
+                  )
+                )}
 
                 {foodSearchLower ? (
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>

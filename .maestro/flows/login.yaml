@@ -101,14 +101,16 @@ tags:
 
 - runFlow:
     when:
-      visible: "Welcome to Thallo Pro"
+      visible:
+        id: "tutorial-skip"
     commands:
       - tapOn:
           id: "tutorial-skip"
 
 - runFlow:
     when:
-      visible: "Start with manual tracking"
+      visible:
+        id: "tutorial-skip"
     commands:
       - tapOn:
           id: "tutorial-skip"
@@ -124,14 +126,16 @@ tags:
 
 - runFlow:
     when:
-      visible: "Welcome to Thallo Pro"
+      visible:
+        id: "tutorial-skip"
     commands:
       - tapOn:
           id: "tutorial-skip"
 
 - runFlow:
     when:
-      visible: "Start with manual tracking"
+      visible:
+        id: "tutorial-skip"
     commands:
       - tapOn:
           id: "tutorial-skip"
