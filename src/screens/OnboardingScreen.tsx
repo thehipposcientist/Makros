@@ -44,11 +44,12 @@ import {
   Goal, GoalPace, Gender, UserProfile, PhysicalStats, GoalDetails, GoalSelection, StrengthEquipmentSettings,
 } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
-import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal, getMe } from '../services/api';
+import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal, getMe, searchFoodNutrition, type FoodSearchResult } from '../services/api';
 import { requirePro, type ProFeature } from '../utils/subscription';
 import { APPLE_HEALTH_PERMISSION_COPY, isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistHealthEnabled } from '../utils/workoutHistory';
 import { groupKitchenFoodsByCategory } from '../utils/foodGrouping';
+import { badgeLabelForSource } from '../utils/customFoodSearch';
 import {
   DEFAULT_ADJUSTABLE_DUMBBELLS,
   DEFAULT_PLATE_PAIRS_LBS,
@@ -60,6 +61,7 @@ import {
 import { dynamicTextProps } from '../utils/dynamicType';
 import {
   LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, ENDURANCE_EVENT_GOALS,
+  SIGNUP_GOAL_MATCH_IDS,
   goalCategory,
   isEnduranceEventGoal,
   launchGoalIdFor,
@@ -456,6 +458,9 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const [foodsAvailable, setFoodsAvailable] = useState<string[]>([]);
   const [foodScanLoading, setFoodScanLoading] = useState(false);
   const [scannedFoods, setScannedFoods] = useState<{ name: string; selected: boolean }[]>([]);
+  const [foodCatalogSearchLoading, setFoodCatalogSearchLoading] = useState(false);
+  const [foodCatalogResults, setFoodCatalogResults] = useState<FoodSearchResult[]>([]);
+  const [foodCatalogSearchError, setFoodCatalogSearchError] = useState<string | null>(null);
 
   // Allergies / dietary restrictions — plumbed through to UserProfile.allergies
   // and read by the meal-planner so suggested meals filter these out. Stored
@@ -650,13 +655,14 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     if (!query || goalQueryApplied === query) return selectedGoal;
     setGoalMatchLoading(true);
     try {
-      const res = await matchGoal(query);
-      selectGoal(res.goal_id);
+      const res = await matchGoal(query, SIGNUP_GOAL_MATCH_IDS);
+      const matchedGoalId = SIGNUP_GOAL_MATCH_IDS.includes(res.goal_id) ? res.goal_id : selectedGoal;
+      selectGoal(matchedGoalId);
       setGoalMatchReason(res.reason);
       setGoalQueryApplied(query);
       Keyboard.dismiss();
       setTimeout(scrollCarouselIntoView, 340);
-      return res.goal_id;
+      return matchedGoalId;
     } catch {
       return selectedGoal;
     } finally {
@@ -1910,6 +1916,40 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     setFoodsAvailable(prev => prev.includes(name) ? prev : [...prev, name]);
   };
 
+  const handleFoodSearchChange = (text: string) => {
+    setFoodSearch(text);
+    setFoodCatalogResults([]);
+    setFoodCatalogSearchError(null);
+  };
+
+  const handleFoodCatalogSearch = async () => {
+    const query = foodSearch.trim();
+    if (!authToken || query.length < 3 || foodCatalogSearchLoading) return;
+    setFoodCatalogSearchLoading(true);
+    setFoodCatalogSearchError(null);
+    try {
+      const res = await searchFoodNutrition(authToken, query, { allowAiFallback: false });
+      setFoodCatalogResults(res.results ?? []);
+      if (!res.results?.length) {
+        setFoodCatalogSearchError(`No USDA matches for "${query}".`);
+      }
+    } catch (e: any) {
+      setFoodCatalogResults([]);
+      setFoodCatalogSearchError(e?.message ?? 'Food search failed.');
+    } finally {
+      setFoodCatalogSearchLoading(false);
+    }
+  };
+
+  const addFoodSearchResultToKitchen = (item: FoodSearchResult) => {
+    addFoodToKitchen(item.name);
+    setFoodCatalogResults(prev => prev.filter(result => {
+      const sameId = (result.food_id ?? result.fdc_id ?? result.external_id ?? null)
+        === (item.food_id ?? item.fdc_id ?? item.external_id ?? null);
+      return result.name.toLowerCase() !== item.name.toLowerCase() || !sameId;
+    }));
+  };
+
   const toggleFood = (food: string) => {
     setFoodsAvailable(prev =>
       prev.includes(food) ? prev.filter(f => f !== food) : [...prev, food]
@@ -1932,6 +1972,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       .filter(category => category.foods.length > 0) : [];
     const exactSearchKnown = meta.allFoods.some(f => f.name.toLowerCase() === foodSearchLower);
     const canAddSearchTerm = !!foodSearchTerm && !selectedFoodNameSet.has(foodSearchLower) && !exactSearchKnown;
+    const visibleFoodCatalogResults = foodCatalogResults.filter(item => !selectedFoodNameSet.has(item.name.toLowerCase()));
 
     return (
     <View style={styles.stepContainer}>
@@ -2083,34 +2124,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         })}
       </ScrollView>
 
-      <Text style={styles.sectionHeading}>In your kitchen</Text>
-      {foodsAvailable.length > 0 ? (
-        <View style={{ marginBottom: 18, gap: 12 }}>
-          {selectedKitchenGroups.map(group => (
-            <View key={group.key} style={styles.foodCategory}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                {group.icon.includes('-') ? <Ionicons name={group.icon as any} size={16} color={colors.textSecondary} /> : <Text style={{ fontSize: 16 }}>{group.icon}</Text>}
-                <Text style={styles.foodCategoryLabel}>{group.label}</Text>
-              </View>
-              <View style={styles.foodChips}>
-                {group.foods.map(({ name }) => (
-                  <TouchableOpacity
-                    key={name}
-                    style={[styles.foodChip, styles.foodChipActive]}
-                    onPress={() => toggleFood(name)}>
-                    <Text style={[styles.foodChipText, styles.foodChipTextActive]}>
-                      {name} <Ionicons name="close" size={12} />
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-          ))}
-        </View>
-      ) : (
-        <Text style={[styles.hint, { marginBottom: 18, marginTop: 0 }]}>No foods selected yet.</Text>
-      )}
-
       <Text style={styles.sectionHeading}>Add food</Text>
       <View style={styles.searchRow}>
         <TextInput
@@ -2118,18 +2131,16 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           placeholder="Search foods..."
           placeholderTextColor={colors.textMuted}
           value={foodSearch}
-          onChangeText={setFoodSearch}
+          onChangeText={handleFoodSearchChange}
           autoCapitalize="none"
           onSubmitEditing={() => {
-            if (canAddSearchTerm) {
-              addFoodToKitchen(foodSearchTerm);
-              setFoodSearch('');
-            }
+            if (foodSearchTerm.length >= 3) handleFoodCatalogSearch();
+            else if (canAddSearchTerm) addFoodToKitchen(foodSearchTerm);
           }}
-          returnKeyType="done"
+          returnKeyType="search"
         />
         {foodSearch.length > 0 && (
-          <TouchableOpacity style={styles.clearBtn} onPress={() => setFoodSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <TouchableOpacity style={styles.clearBtn} onPress={() => { setFoodSearch(''); setFoodCatalogResults([]); setFoodCatalogSearchError(null); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <Text style={styles.clearBtnText}><Ionicons name="close" size={16} /></Text>
           </TouchableOpacity>
         )}
@@ -2138,6 +2149,61 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
       ) : (
         <>
+          {authToken && foodSearchTerm.length >= 3 && (
+            <TouchableOpacity
+              style={[styles.scanBtnSecondary, { marginBottom: 12, borderColor: colors.primary, backgroundColor: colors.primary + '12' }, foodCatalogSearchLoading && { opacity: 0.6 }]}
+              onPress={handleFoodCatalogSearch}
+              disabled={foodCatalogSearchLoading}>
+              {foodCatalogSearchLoading
+                ? <ActivityIndicator size="small" color={colors.primary} />
+                : <Text style={[styles.scanBtnSecondaryText, { color: colors.primary }]}>Search USDA catalog for "{foodSearchTerm}"</Text>}
+            </TouchableOpacity>
+          )}
+          {foodCatalogSearchError ? (
+            <Text style={[styles.hint, { marginTop: 0, marginBottom: 12 }]}>{foodCatalogSearchError}</Text>
+          ) : null}
+          {visibleFoodCatalogResults.length > 0 ? (
+            <View style={{ marginBottom: 16 }}>
+              <Text style={[styles.foodCategoryLabel, { marginBottom: 8 }]}>USDA Search Results</Text>
+              {visibleFoodCatalogResults.map((item, idx) => {
+                const sourceLabel = badgeLabelForSource(item.source);
+                return (
+                  <TouchableOpacity
+                    key={`${item.name}-${item.fdc_id ?? item.food_id ?? idx}`}
+                    activeOpacity={0.78}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      backgroundColor: colors.surface,
+                      borderRadius: radius.md,
+                      borderWidth: 1,
+                      borderColor: colors.primary + '44',
+                      padding: 12,
+                      marginBottom: 8,
+                    }}
+                    onPress={() => addFoodSearchResultToKitchen(item)}>
+                    <View style={{ flex: 1 }}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                        <Text style={{ flex: 1, fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>
+                          {item.name}
+                        </Text>
+                        {sourceLabel ? (
+                          <Text style={{ fontSize: 10, fontWeight: '800', color: colors.primary }}>
+                            {sourceLabel}
+                          </Text>
+                        ) : null}
+                      </View>
+                      <Text style={{ fontSize: 11, color: colors.textMuted }}>{item.serving}</Text>
+                      <Text style={{ fontSize: 11, color: colors.textSecondary, marginTop: 2 }}>
+                        {Math.round(item.calories)} cal · {Math.round(item.protein)}g pro · {Math.round(item.carbs)}g carbs · {Math.round(item.fat)}g fat
+                      </Text>
+                    </View>
+                    <Text style={{ fontSize: 13, fontWeight: '800', color: colors.primary, marginLeft: 10 }}>+ Add</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          ) : null}
           {canAddSearchTerm && (
             <TouchableOpacity
               style={[styles.foodChip, { alignSelf: 'flex-start', marginBottom: 14, borderColor: colors.primary }]}
@@ -2172,6 +2238,34 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             </View>
           ))}
         </>
+      )}
+
+      <Text style={styles.sectionHeading}>In your kitchen</Text>
+      {foodsAvailable.length > 0 ? (
+        <View style={{ marginBottom: 18, gap: 12 }}>
+          {selectedKitchenGroups.map(group => (
+            <View key={group.key} style={styles.foodCategory}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                {group.icon.includes('-') ? <Ionicons name={group.icon as any} size={16} color={colors.textSecondary} /> : <Text style={{ fontSize: 16 }}>{group.icon}</Text>}
+                <Text style={styles.foodCategoryLabel}>{group.label}</Text>
+              </View>
+              <View style={styles.foodChips}>
+                {group.foods.map(({ name }) => (
+                  <TouchableOpacity
+                    key={name}
+                    style={[styles.foodChip, styles.foodChipActive]}
+                    onPress={() => toggleFood(name)}>
+                    <Text style={[styles.foodChipText, styles.foodChipTextActive]}>
+                      {name} <Ionicons name="close" size={12} />
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          ))}
+        </View>
+      ) : (
+        <Text style={[styles.hint, { marginBottom: 18, marginTop: 0 }]}>No foods selected yet.</Text>
       )}
 
       <Text style={styles.hint}>Skip to use default meal suggestions</Text>

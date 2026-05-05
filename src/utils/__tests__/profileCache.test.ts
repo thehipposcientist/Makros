@@ -58,6 +58,55 @@ describe('profile cache merge', () => {
     });
   });
 
+  it('lets newer pulled weight entries update the cached physical weight', () => {
+    const pulled = {
+      goal: 'body_recomp',
+      physicalStats: { weightLbs: 150, heightFeet: 5 },
+      weightEntries: [
+        { date: '2026-05-05', weight_lbs: 171.4, logged_at: '2026-05-05T14:00:00.000Z' },
+      ],
+    };
+    const current = {
+      physicalStats: { weightLbs: 181, age: 31 },
+      weightHistory: [
+        { date: '2026-04-28', weightLbs: 181, loggedAt: '2026-04-28T14:00:00.000Z' },
+      ],
+    };
+
+    expect(mergePulledUserProfileWithCurrentStats(pulled, JSON.stringify(current))).toEqual({
+      goal: 'body_recomp',
+      physicalStats: {
+        weightLbs: 171.4,
+        heightFeet: 5,
+        age: 31,
+      },
+      weightEntries: [
+        { date: '2026-05-05', weight_lbs: 171.4, logged_at: '2026-05-05T14:00:00.000Z' },
+      ],
+    });
+  });
+
+  it('keeps newer local weight history when the pulled profile is stale', () => {
+    const encoded = encodePulledStateValueForStorage(
+      'userProfile',
+      {
+        goal: 'body_recomp',
+        physicalStats: { weightLbs: 175 },
+        weightEntries: [
+          { date: '2026-05-01', weight_lbs: 175, logged_at: '2026-05-01T14:00:00.000Z' },
+        ],
+      },
+      JSON.stringify({
+        physicalStats: { weightLbs: 172.2 },
+        weightHistory: [
+          { date: '2026-05-05', weightLbs: 172.2, loggedAt: '2026-05-05T14:00:00.000Z' },
+        ],
+      }),
+    );
+
+    expect(JSON.parse(encoded).physicalStats.weightLbs).toBe(172.2);
+  });
+
   it('keeps local preferredSplit when the pulled profile is missing it', () => {
     const encoded = encodePulledStateValueForStorage(
       'userProfile',

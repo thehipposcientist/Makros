@@ -38,14 +38,14 @@ def get_openai_api_key() -> str | None:
 
 # ── Model selectors (all configurable via .env) ───────────────────────────────
 # Model-selection policy (2026-Q2):
-#   - gpt-5.4-mini is ONLY used for image tasks (food photo, meal photo,
+#   - gpt-5 is ONLY used for image tasks (food photo, meal photo,
 #     body scan, form photo, supplement label). Vision-specialized.
 #   - Everything else runs on gpt-4o-mini for cost + latency.
 # Override any via .env.
 def model_image() -> str:
     """Vision / image-analysis model. Used only when the prompt includes
     an image_url content part."""
-    return os.getenv("MODEL_IMAGE", "gpt-5.4-mini")
+    return os.getenv("MODEL_IMAGE", "gpt-5")
 
 def model_plan_generation() -> str:
     return os.getenv("MODEL_PLAN_GENERATION", "gpt-4o-mini")

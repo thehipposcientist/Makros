@@ -58,6 +58,7 @@ import {
 import { workoutFromTemplateForToday } from '../utils/workoutTemplates';
 import { workoutSessionToLoggedPayload } from '../utils/workoutLogPayload';
 import { HYDRATION_QUICK_ADD_OUNCES, formatHydrationQuickAddLabel } from '../utils/hydration';
+import { applyCachedHydrationDelta, loadCachedHydration, loadHydrationCache, pendingCachedHydrationRows, removeCachedHydration, saveCachedHydration } from '../utils/hydrationCache';
 import { buildUserFoodCategories } from '../utils/customFoodSearch';
 import { enqueueActiveWatchCommand, hasActiveWatchCommandConsumer, isActiveWorkoutWatchCommand } from '../utils/watchCommandBacklog';
 import { applyWatchLogSetToActiveWorkoutStorage } from '../utils/watchWorkoutMirror';
@@ -87,7 +88,6 @@ import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
 import SupplementStackScreen from '../components/SupplementStackScreen';
 import RecoveryCard from '../components/RecoveryCard';
-import WeeklyDigestCard from '../components/WeeklyDigestCard';
 import WeeklyCheckinCard from '../components/WeeklyCheckinCard';
 import TrainingReadinessCard from '../components/TrainingReadinessCard';
 import BirthdateBackfillCard from '../components/BirthdateBackfillCard';
@@ -1739,10 +1739,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       if (authToken) {
         (async () => {
           try {
-            const { listFriends } = await import('../services/api');
-            const list = await listFriends(authToken);
+            const { listFriends, listSocialNotifications } = await import('../services/api');
+            const [list, notifications] = await Promise.all([
+              listFriends(authToken),
+              listSocialNotifications(authToken),
+            ]);
             setFriendCount(list.friends.length);
             setPendingFriendCount(list.pending.filter(p => p.direction === 'incoming').length);
+            setSocialUnreadCount(notifications.unread_count);
           } catch {
             // silent — entry row falls back to "Friends"
           }
@@ -2102,6 +2106,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [readinessBadge, setReadinessBadge] = useState<{ score: number; label: string } | null>(null);
   const [pendingFriendCount, setPendingFriendCount] = useState(0);
   const [friendCount, setFriendCount] = useState(0);
+  const [socialUnreadCount, setSocialUnreadCount] = useState(0);
 
   // Next-day unlogged-meals prompt. Populated once per day when yesterday
   // had a plan with unchecked meals and the dismissal flag isn't set.
@@ -2113,15 +2118,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const unloggedPromptCheckedRef = useRef(false);
   // Legacy local check-in state removed; PlanWeekCheckin is server-backed.
 
-  const refreshHydration = useCallback(async (dateISO: string = todayKey()) => {
-    if (!authToken) return;
+  const refreshHydration = useCallback(async (dateISO: string = todayKey()): Promise<HydrationSummary | null> => {
+    if (!authToken) return null;
     try {
+      const pendingLocal = await loadCachedHydration(dateISO).catch(() => null);
+      if (pendingLocal?.pending) {
+        setHydrationByDate(prev => ({ ...prev, [pendingLocal.date]: pendingLocal }));
+        if (pendingLocal.date === todayKey()) setHydration(pendingLocal);
+        return pendingLocal;
+      }
       const result = await getHydration(authToken, dateISO);
+      await saveCachedHydration(result).catch(() => {});
       setHydrationByDate(prev => ({ ...prev, [result.date]: result }));
       if (result.date === todayKey()) setHydration(result);
+      return result;
     } catch {
       // Hydration is additive context; keep the last visible value if the
       // endpoint is temporarily unavailable.
+      return null;
     }
   }, [authToken]);
 
@@ -2131,7 +2145,38 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       setHydrationByDate({});
       return;
     }
-    refreshHydration(todayKey()).catch(() => {});
+    let alive = true;
+    (async () => {
+      const cachedRows = await loadHydrationCache();
+      if (!alive) return;
+      if (Object.keys(cachedRows).length > 0) {
+        setHydrationByDate(cachedRows);
+        const todayRow = cachedRows[todayKey()];
+        if (todayRow) setHydration(todayRow);
+      }
+
+      const pendingRows = await pendingCachedHydrationRows();
+      for (const row of pendingRows) {
+        try {
+          const result = await logHydration(authToken, row.ounces, row.date);
+          const fresh = await getHydration(authToken, result.date).catch(() => null);
+          const saved = fresh ?? {
+            date: result.date,
+            ounces: result.ounces,
+            target_ounces: row.target_ounces ?? 64,
+          };
+          await saveCachedHydration(saved);
+          if (!alive) continue;
+          setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
+          if (saved.date === todayKey()) setHydration(saved);
+        } catch {
+          // Keep the pending local row; the next app open/sign-in will retry.
+        }
+      }
+
+      if (alive) refreshHydration(todayKey()).catch(() => {});
+    })();
+    return () => { alive = false; };
   }, [authToken, refreshHydration]);
 
   useEffect(() => {
@@ -2191,6 +2236,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           : { date: dateISO, ounces: next, target_ounces: fallbackTarget };
       });
     }
+    await applyCachedHydrationDelta(dateISO, deltaOz, fallbackTarget).catch(() => null);
     try {
       const result = await logHydrationDelta(authToken, deltaOz, dateISO);
       const fresh = await getHydration(authToken, result.date).catch(() => null);
@@ -2199,6 +2245,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         ounces: result.ounces,
         target_ounces: fallbackTarget,
       };
+      await saveCachedHydration(saved).catch(() => null);
       setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
       if (saved.date === todayISO) setHydration(saved);
       if (saved.date === todayISO) pushHydrationSnapshotToWatch(saved.date, saved).catch(() => {});
@@ -2217,6 +2264,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           ? { ...prev, ounces: Math.max(0, Math.round((prev.ounces - deltaOz) * 10) / 10) }
           : prev);
       }
+      await applyCachedHydrationDelta(dateISO, -deltaOz, fallbackTarget, { pending: false }).catch(() => null);
       Alert.alert('Hydration not saved', 'Could not update water intake right now.');
     } finally {
       setHydrationLoading(false);
@@ -2234,6 +2282,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       : { date: dateISO, ounces: next, target_ounces: 64 };
     setHydrationByDate(prev => ({ ...prev, [dateISO]: optimistic }));
     if (dateISO === todayKey()) setHydration(optimistic);
+    await saveCachedHydration(optimistic, { pending: true }).catch(() => null);
     try {
       const result = await logHydration(authToken, next, dateISO);
       const fresh = await getHydration(authToken, result.date).catch(() => null);
@@ -2244,6 +2293,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           ounces: result.ounces,
           target_ounces: currentRow?.target_ounces ?? hydration?.target_ounces ?? 64,
       };
+      await saveCachedHydration(saved).catch(() => null);
       setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
       if (saved.date === todayKey()) setHydration(saved);
       if (saved.date === todayKey()) pushHydrationSnapshotToWatch(saved.date, saved).catch(() => {});
@@ -2251,6 +2301,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       if (currentRow) {
         setHydrationByDate(prev => ({ ...prev, [dateISO]: { ...currentRow, ounces: current } }));
         if (dateISO === todayKey()) setHydration({ ...currentRow, ounces: current });
+        await saveCachedHydration({ ...currentRow, ounces: current }).catch(() => null);
       } else {
         setHydrationByDate(prev => {
           const nextRows = { ...prev };
@@ -2258,6 +2309,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           return nextRows;
         });
         if (dateISO === todayKey()) setHydration(null);
+        await removeCachedHydration(dateISO).catch(() => null);
       }
       Alert.alert('Hydration not saved', 'Could not update water intake right now.');
     } finally {
@@ -3460,6 +3512,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 };
                 setHydrationByDate(prev => ({ ...prev, [dateISO]: optimistic }));
                 if (dateISO === todayKey()) setHydration(optimistic);
+                await saveCachedHydration(optimistic, { pending: true }).catch(() => null);
                 const result = await logHydration(authToken, next, dateISO);
                 const fresh = await getHydration(authToken, result.date).catch(() => null);
                 const saved: HydrationSummary = fresh
@@ -3469,6 +3522,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     ounces: result.ounces,
                     target_ounces: currentRow?.target_ounces ?? 64,
                   };
+                await saveCachedHydration(saved).catch(() => null);
                 setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
                 if (saved.date === todayKey()) setHydration(saved);
                 if (Number.isFinite(commandTsMs) && commandTsMs > 0) {
@@ -3487,6 +3541,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 if (restored) {
                   setHydrationByDate(prev => ({ ...prev, [restored.date]: restored }));
                   if (restored.date === todayKey()) setHydration(restored);
+                  await saveCachedHydration(restored).catch(() => null);
                 } else {
                   setHydrationByDate(prev => {
                     const nextRows = { ...prev };
@@ -3494,6 +3549,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     return nextRows;
                   });
                   if (rollbackDateISO === todayKey()) setHydration(null);
+                  await removeCachedHydration(rollbackDateISO).catch(() => null);
                 }
                 const { pushHydrationToWatch } = await import('../utils/watchSync');
                 await pushHydrationToWatch({
@@ -7028,12 +7084,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               onAddHydration={() => handleHydrationDelta(16, todayKey())}
             />
 
-            {/* Weekly digest card — only renders Sunday / post-6pm (Feature 3) */}
-            {renderedWorkoutSubTab === 'plan' && !isFreeTier && authToken && (
-              <WeeklyDigestCard authToken={authToken} themeName={userProfile.themePreference} />
-            )}
-
-
             {/* Active injuries banner */}
             {renderedWorkoutSubTab === 'plan' && (() => {
               const active = activeProfileInjuries;
@@ -9105,21 +9155,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                 const usableSets = (ex.sets ?? []).filter(
                                   s => s.reps != null && Number(s.reps) > 0,
                                 );
-                                // Group consecutive sets with same weight into "NxR @ W"
-                                const groups: Array<{ weight: number | null; count: number; reps: number }> = [];
+                                const groups: Array<{ count: number; reps: number }> = [];
                                 for (const s of usableSets) {
-                                  const w = s.weight ? Math.round(Number(s.weight)) : null;
                                   const r = Math.round(Number(s.reps));
                                   const last = groups[groups.length - 1];
-                                  if (last && last.weight === w && last.reps === r) {
+                                  if (last && last.reps === r) {
                                     last.count++;
                                   } else {
-                                    groups.push({ weight: w, count: 1, reps: r });
+                                    groups.push({ count: 1, reps: r });
                                   }
                                 }
                                 const setStr = groups.length
                                   ? groups.map(g =>
-                                      `${g.count > 1 ? `${g.count}×` : ''}${g.reps} reps${g.weight ? ` @ ${g.weight} lbs` : ''}`,
+                                      `${g.count > 1 ? `${g.count}×` : ''}${g.reps} reps`,
                                     ).join('  ·  ')
                                   : `${ex.sets?.length ?? 0} sets`;
                                 return (
@@ -9160,6 +9208,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               onClose={() => {}}
               themeName={userProfile.themePreference}
               inline
+              onSocialCountsChange={({ friends, pending, unread }) => {
+                setFriendCount(friends);
+                setPendingFriendCount(pending);
+                setSocialUnreadCount(unread);
+              }}
               onViewFriend={(userId, displayName, digestFriend) => {
                 if (digestFriend) {
                   setViewingFriend(digestFriend);
@@ -11206,15 +11259,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           if (authToken) {
             (async () => {
               try {
-                const { listFriends } = await import('../services/api');
-                const list = await listFriends(authToken);
+                const { listFriends, listSocialNotifications } = await import('../services/api');
+                const [list, notifications] = await Promise.all([
+                  listFriends(authToken),
+                  listSocialNotifications(authToken),
+                ]);
                 setFriendCount(list.friends.length);
                 setPendingFriendCount(list.pending.filter(p => p.direction === 'incoming').length);
+                setSocialUnreadCount(notifications.unread_count);
               } catch { /* silent */ }
             })();
           }
         }}
         themeName={userProfile.themePreference}
+        onSocialCountsChange={({ friends, pending, unread }) => {
+          setFriendCount(friends);
+          setPendingFriendCount(pending);
+          setSocialUnreadCount(unread);
+        }}
       />
 
       {/* Goal editor — opened from Profile tab row */}
@@ -12222,7 +12284,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             tint={themeColors.primary}
             mutedColor={navMutedColor}
             onPress={() => setActiveTab('friends')}
-            badge={pendingFriendCount > 0 ? pendingFriendCount : undefined}
+            badge={Math.max(pendingFriendCount, socialUnreadCount) > 0 ? Math.max(pendingFriendCount, socialUnreadCount) : undefined}
           />
           <BottomTabButton
             testID="bottom-tab-workouts"

@@ -7,7 +7,7 @@ This is the running launch-readiness list for Thallo. The doc was originally wri
 
 The short version remains the same: Thallo has a real product foundation. The next work should not be a broad feature push. It should be a launch-readiness pass — legal/account basics, signed-build native reliability, production entitlements, observability, and performance cleanup around the biggest screens.
 
-Beta decision as of 2026-05-01: external beta is free. `app.json` sets `expo.extra.freeBetaFullAccess=true` for client UI gates, and the backend must explicitly set `BETA_FULL_ACCESS_ENABLED=1` if beta users should receive server-side Pro access without StoreKit/RevenueCat.
+Beta decision as of 2026-05-01: external beta is free. `app.json` sets `expo.extra.freeBetaFullAccess=true` for client UI gates, and the backend defaults `BETA_FULL_ACCESS_ENABLED=1` so beta users receive server-side Pro access without StoreKit/RevenueCat.
 
 ## Highest Priority Summary
 

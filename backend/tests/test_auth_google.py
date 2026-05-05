@@ -84,7 +84,7 @@ def test_google_login_creates_new_user():
             assert user.last_name == "Hopper"
             assert user.email_verified_at is not None
             assert user.terms_version == "2026-04-29.2"
-            assert user.subscription_tier == "free"
+            assert user.subscription_tier == "pro"
     finally:
         auth_router._verify_google_identity_token = original
         _restore_beta_full_access(previous_beta)
@@ -92,9 +92,9 @@ def test_google_login_creates_new_user():
     print("PASS test_google_login_creates_new_user")
 
 
-def test_google_login_beta_flag_creates_pro_user():
+def test_google_login_beta_opt_out_creates_free_user():
     engine = _engine()
-    previous_beta = _set_beta_full_access("1")
+    previous_beta = _set_beta_full_access("0")
     original = _with_google_claims({
         "sub": "google-sub-beta",
         "email": "beta-google@example.com",
@@ -111,12 +111,12 @@ def test_google_login_beta_flag_creates_pro_user():
             )
             user = session.exec(select(User).where(User.google_sub == "google-sub-beta")).first()
             assert user is not None
-            assert user.subscription_tier == "pro"
+            assert user.subscription_tier == "free"
     finally:
         auth_router._verify_google_identity_token = original
         _restore_beta_full_access(previous_beta)
         engine.dispose()
-    print("PASS test_google_login_beta_flag_creates_pro_user")
+    print("PASS test_google_login_beta_opt_out_creates_free_user")
 
 
 def test_google_login_links_existing_email_user():

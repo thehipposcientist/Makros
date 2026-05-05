@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
   TextInput, Alert, Image, Linking, Modal, Animated,
@@ -20,6 +20,7 @@ import StreakCounter from '../components/StreakCounter';
 import AnimatedNumber from '../components/AnimatedNumber';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 import { configureExpandAnimation } from '../utils/layoutAnim';
+import { TIMING_SMOOTH, TIMING_STANDARD, staggerDelay, useReducedMotion } from '../utils/motion';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -44,6 +45,7 @@ import { getMealChecks } from '../utils/mealTracker';
 import { computePlantDiversity, computeFiberToday, recommendedFiberTarget } from '../utils/gutHealth';
 import { proteinTimingInsights } from '../utils/nutritionInsights';
 import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
+import { buildGoalTrajectory } from '../utils/goalTrajectory';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
@@ -136,6 +138,95 @@ function formatCoachMemorySummary(memory: any): string {
   }
   const raw = String(memory?.summary ?? '');
   return humanizeInlineIdentifiers(raw.replace(/^User accepted recommendation:/i, 'Accepted recommendation:'));
+}
+
+type CoachInsightVisual = {
+  key: string;
+  label: string;
+  value: string;
+  detail: string;
+  icon: any;
+  color: string;
+};
+
+function cleanCoachInsightText(raw: unknown): string {
+  const text = humanizeInlineIdentifiers(String(raw ?? ''))
+    .replace(/\bPlanWeek\b/g, 'active week')
+    .replace(/\bUserPreferences\b/g, 'preferences')
+    .replace(/\bUserDayState\b/g, 'day state')
+    .replace(/\bAsyncStorage\b/g, 'local cache')
+    .replace(/[{}[\]"]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text || 'No extra detail yet.';
+}
+
+function buildCoachInsightVisuals(
+  insights: any | null,
+  guardrails: string[],
+  coachMemory: any[],
+  progressionHint: string,
+): CoachInsightVisual[] {
+  const rows: CoachInsightVisual[] = [];
+  const workoutPct = Number(insights?.adherence?.workout_7d_pct);
+  const mealPct = Number(insights?.adherence?.meal_7d_pct);
+
+  if (Number.isFinite(workoutPct)) {
+    rows.push({
+      key: 'workout-adherence',
+      label: 'Workouts',
+      value: `${Math.round(workoutPct)}%`,
+      detail: '7-day completion signal',
+      icon: 'barbell-outline',
+      color: workoutPct >= 80 ? '#22C55E' : workoutPct >= 55 ? '#F59E0B' : '#EF4444',
+    });
+  }
+
+  if (Number.isFinite(mealPct)) {
+    rows.push({
+      key: 'meal-adherence',
+      label: 'Meals',
+      value: `${Math.round(mealPct)}%`,
+      detail: '7-day logging signal',
+      icon: 'nutrition-outline',
+      color: mealPct >= 80 ? '#22C55E' : mealPct >= 55 ? '#F59E0B' : '#EF4444',
+    });
+  }
+
+  if (guardrails.length > 0) {
+    rows.push({
+      key: 'guardrails',
+      label: 'Watch',
+      value: `${guardrails.length}`,
+      detail: cleanCoachInsightText(guardrails[0]),
+      icon: 'shield-checkmark-outline',
+      color: '#F59E0B',
+    });
+  }
+
+  if (coachMemory.length > 0) {
+    rows.push({
+      key: 'coach-memory',
+      label: 'Saved',
+      value: `${coachMemory.length}`,
+      detail: cleanCoachInsightText(formatCoachMemorySummary(coachMemory[0])),
+      icon: 'checkmark-done-outline',
+      color: '#14B8A6',
+    });
+  }
+
+  if (progressionHint) {
+    rows.push({
+      key: 'progression',
+      label: 'Next',
+      value: 'Cue',
+      detail: cleanCoachInsightText(progressionHint.replace(/^Progression:\s*/i, '')),
+      icon: 'trending-up-outline',
+      color: '#6366F1',
+    });
+  }
+
+  return rows.slice(0, 4);
 }
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -590,7 +681,7 @@ function OneRepMaxTrendCard({
   return (
     <View style={styles.graphCard}>
       <View style={styles.graphHeader}>
-        <Text style={styles.graphTitle}>{title}</Text>
+        <Text style={styles.graphTitle} numberOfLines={2}>{title}</Text>
         <Text style={{ fontSize: 12, fontWeight: '800', color: deltaColor }}>
           {formatSignedWeightDelta(delta, weightUnit)}
         </Text>
@@ -749,6 +840,57 @@ function buildProgressMilestones(
   return cards.slice(0, 4);
 }
 
+function strengthIndexDelta(history: WorkoutSession[]): { value: string; detail: string; color: string } | null {
+  const now = Date.now();
+  const currentStart = now - 7 * 86400000;
+  const previousStart = now - 14 * 86400000;
+  const bestByExercise = (startMs: number, endMs: number): Map<string, number> => {
+    const out = new Map<string, number>();
+    for (const session of history) {
+      if (!session.completed || session.skipped) continue;
+      const sessionMs = parseDateKeyMs(session.date);
+      if (!sessionMs || sessionMs < startMs || sessionMs > endMs) continue;
+      for (const exercise of session.exercises ?? []) {
+        const key = exercise.name?.trim().toLowerCase();
+        if (!key) continue;
+        for (const set of exercise.sets ?? []) {
+          const weight = Number((set as any).weightLbs ?? (set as any).weight_lbs ?? (set as any).actual_weight_lbs);
+          const reps = Number((set as any).reps ?? (set as any).actual_reps);
+          const rir = Number((set as any).rir ?? (set as any).actual_rir);
+          const e1rm = estimate1RM(weight, reps, { rir: Number.isFinite(rir) ? rir : null });
+          if (e1rm == null || e1rm <= 0) continue;
+          out.set(key, Math.max(out.get(key) ?? 0, e1rm));
+        }
+      }
+    }
+    return out;
+  };
+
+  const current = bestByExercise(currentStart, now);
+  const previous = bestByExercise(previousStart, currentStart);
+  if (current.size === 0) return null;
+
+  const common = Array.from(current.keys()).filter(key => (previous.get(key) ?? 0) > 0);
+  if (common.length > 0) {
+    const currentTotal = common.reduce((sum, key) => sum + (current.get(key) ?? 0), 0);
+    const previousTotal = common.reduce((sum, key) => sum + (previous.get(key) ?? 0), 0);
+    if (previousTotal > 0) {
+      const deltaPct = Math.round(((currentTotal - previousTotal) / previousTotal) * 100);
+      return {
+        value: `${deltaPct >= 0 ? '+' : ''}${deltaPct}%`,
+        detail: `overall strength, last 7d vs prior 7d (${common.length} matched lift${common.length === 1 ? '' : 's'})`,
+        color: deltaPct >= 0 ? '#22C55E' : '#EF4444',
+      };
+    }
+  }
+
+  return {
+    value: 'New',
+    detail: `${current.size} strength baseline${current.size === 1 ? '' : 's'} logged this week`,
+    color: '#6366F1',
+  };
+}
+
 function buildProgressAnalytics(
   history: WorkoutSession[],
   summaries: StoredWorkoutSummary[],
@@ -756,34 +898,6 @@ function buildProgressAnalytics(
   plateaus: PlateauEntry[],
 ): ProgressAnalyticsItem[] {
   const completed = history.filter(s => s.completed && !s.skipped);
-  const activeDayKeys = new Set<string>();
-  for (const session of completed) activeDayKeys.add(session.date.slice(0, 10));
-  for (const summary of summaries) {
-    if (isActiveWorkoutSummary(summary)) activeDayKeys.add(summary.date.slice(0, 10));
-  }
-
-  const dayKeys = Array.from(activeDayKeys).sort();
-  let bestStreak = 0;
-  let runningStreak = 0;
-  let prevTime: number | null = null;
-  for (const key of dayKeys) {
-    const t = +new Date(`${key}T00:00:00`);
-    runningStreak = prevTime != null && Math.round((t - prevTime) / 86400000) === 1 ? runningStreak + 1 : 1;
-    bestStreak = Math.max(bestStreak, runningStreak);
-    prevTime = t;
-  }
-
-  let latestStreak = 0;
-  if (dayKeys.length > 0) {
-    const localDayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    let expected = new Date(`${dayKeys[dayKeys.length - 1]}T00:00:00`);
-    for (let i = dayKeys.length - 1; i >= 0; i--) {
-      if (dayKeys[i] !== localDayKey(expected)) break;
-      latestStreak += 1;
-      expected = new Date(+expected - 86400000);
-    }
-  }
-
   const workRows = (summaries.length > 0
     ? summaries.map(s => ({
         date: s.date,
@@ -799,14 +913,15 @@ function buildProgressAnalytics(
     .sort((a, b) => a.date.localeCompare(b.date));
 
   const rows: ProgressAnalyticsItem[] = [];
-  if (bestStreak > 0) {
+  const strength = strengthIndexDelta(history);
+  if (strength) {
     rows.push({
-      key: 'streaks',
-      label: 'Training streaks',
-      value: `${bestStreak}d`,
-      detail: latestStreak > 1 ? `latest streak ${latestStreak} days` : `${dayKeys.length} total active days`,
-      icon: 'flame-outline',
-      color: '#F59E0B',
+      key: 'strength-index',
+      label: 'Strength',
+      value: strength.value,
+      detail: strength.detail,
+      icon: 'barbell-outline',
+      color: strength.color,
     });
   }
 
@@ -1333,6 +1448,7 @@ function AnimatedChartBar({
   delay?: number;
   style?: any;
 }) {
+  const reducedMotion = useReducedMotion();
   const height = useRef(new Animated.Value(0)).current;
   const prevTarget = useRef<number>(0);
   useEffect(() => {
@@ -1340,14 +1456,162 @@ function AnimatedChartBar({
     // on theme/pallette re-renders.
     if (prevTarget.current === targetHeight) return;
     prevTarget.current = targetHeight;
+    if (reducedMotion) {
+      height.setValue(targetHeight);
+      return;
+    }
     Animated.timing(height, {
       toValue: targetHeight,
       duration: 800,
       delay,
       useNativeDriver: false,
     }).start();
-  }, [targetHeight, delay, height]);
+  }, [targetHeight, delay, height, reducedMotion]);
   return <Animated.View style={[style, { height }]} />;
+}
+
+function AnimatedProgressFill({
+  pct,
+  color,
+  style,
+  delay = 0,
+  minPct = 0,
+  duration = TIMING_SMOOTH.duration,
+}: {
+  pct: number;
+  color: string;
+  style?: any;
+  delay?: number;
+  minPct?: number;
+  duration?: number;
+}) {
+  const reducedMotion = useReducedMotion();
+  const numericPct = Number.isFinite(pct) ? pct : 0;
+  const targetPct = numericPct <= 0 ? 0 : Math.max(minPct, Math.min(100, numericPct));
+  const width = useRef(new Animated.Value(reducedMotion ? targetPct : 0)).current;
+
+  useEffect(() => {
+    if (reducedMotion) {
+      width.setValue(targetPct);
+      return;
+    }
+    Animated.timing(width, {
+      toValue: targetPct,
+      duration,
+      delay,
+      easing: TIMING_SMOOTH.easing,
+      useNativeDriver: false,
+    }).start();
+  }, [delay, duration, reducedMotion, targetPct, width]);
+
+  const animatedWidth = width.interpolate({
+    inputRange: [0, 100],
+    outputRange: ['0%', '100%'],
+  });
+
+  return (
+    <Animated.View
+      style={[
+        style,
+        {
+          width: animatedWidth,
+          backgroundColor: color,
+        },
+      ]}
+    />
+  );
+}
+
+function PulseOnChange({
+  children,
+  trigger,
+  style,
+}: {
+  children: ReactNode;
+  trigger: string | number | boolean | null | undefined;
+  style?: any;
+}) {
+  const reducedMotion = useReducedMotion();
+  const scale = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    if (reducedMotion) return;
+    scale.setValue(0.98);
+    Animated.spring(scale, {
+      toValue: 1,
+      damping: 14,
+      stiffness: 220,
+      mass: 0.8,
+      useNativeDriver: true,
+    }).start();
+  }, [reducedMotion, scale, trigger]);
+
+  return (
+    <Animated.View style={[style, { transform: [{ scale }] }]}>
+      {children}
+    </Animated.View>
+  );
+}
+
+function AnimatedPressable({
+  children,
+  onPress,
+  style,
+  scaleDown = 0.96,
+  disabled = false,
+  accessibilityLabel,
+  accessibilityRole,
+  accessibilityState,
+  hitSlop,
+  testID,
+}: {
+  children: ReactNode;
+  onPress: () => void;
+  style?: any;
+  scaleDown?: number;
+  disabled?: boolean;
+  accessibilityLabel?: string;
+  accessibilityRole?: any;
+  accessibilityState?: any;
+  hitSlop?: any;
+  testID?: string;
+}) {
+  const reducedMotion = useReducedMotion();
+  const scale = useRef(new Animated.Value(1)).current;
+  const translateY = useRef(new Animated.Value(0)).current;
+
+  const pressIn = () => {
+    if (reducedMotion || disabled) return;
+    Animated.parallel([
+      Animated.spring(scale, { toValue: scaleDown, damping: 18, stiffness: 300, mass: 0.8, useNativeDriver: true }),
+      Animated.spring(translateY, { toValue: -1, damping: 18, stiffness: 300, mass: 0.8, useNativeDriver: true }),
+    ]).start();
+  };
+  const pressOut = () => {
+    if (reducedMotion || disabled) return;
+    Animated.parallel([
+      Animated.spring(scale, { toValue: 1, damping: 18, stiffness: 300, mass: 0.8, useNativeDriver: true }),
+      Animated.spring(translateY, { toValue: 0, damping: 18, stiffness: 300, mass: 0.8, useNativeDriver: true }),
+    ]).start();
+  };
+
+  return (
+    <Animated.View style={[style, { transform: [{ scale }, { translateY }] }]}>
+      <TouchableOpacity
+        testID={testID}
+        activeOpacity={1}
+        disabled={disabled}
+        onPress={onPress}
+        onPressIn={pressIn}
+        onPressOut={pressOut}
+        accessibilityLabel={accessibilityLabel}
+        accessibilityRole={accessibilityRole}
+        accessibilityState={accessibilityState}
+        hitSlop={hitSlop}>
+        {children}
+      </TouchableOpacity>
+    </Animated.View>
+  );
 }
 
 export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true, planWeekWindow }: ProgressScreenProps) {
@@ -1545,6 +1809,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     () => buildProgressAnalytics(history, summaries, prs, plateaus),
     [history, plateaus, prs, summaries],
   );
+  const coachInsightVisuals = useMemo(
+    () => buildCoachInsightVisuals(insights, guardrails, coachMemory, progressionHint),
+    [coachMemory, guardrails, insights, progressionHint],
+  );
   const progressWeekWindow = useMemo(
     () => buildProgressDateWindow(planWeekWindow),
     [planWeekWindow?.startDate, planWeekWindow?.endDate],
@@ -1553,6 +1821,31 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory, weightUnit, distanceUnit, progressWeekWindow),
     [distanceUnit, history, mealHistory, paceHistory, progressWeekWindow, prs, summaries, weightEntries, weightUnit],
   );
+  const goalTrajectory = useMemo(
+    () => buildGoalTrajectory({
+      profile: userProfile,
+      weightEntries,
+      history,
+      summaries,
+      mealAverages,
+      mealHistory,
+      paceHistory,
+      oneRepMaxLifts: displayedOneRepMaxLifts,
+      weightUnit,
+      distanceUnit,
+    }),
+    [displayedOneRepMaxLifts, distanceUnit, history, mealAverages, mealHistory, paceHistory, summaries, userProfile, weightEntries, weightUnit],
+  );
+  const goalTrajectoryColor = goalTrajectory.tone === 'success'
+    ? tc.success
+    : goalTrajectory.tone === 'warning'
+      ? tc.warning
+      : tc.primary;
+  const goalTrajectoryConfidenceColor = goalTrajectory.confidence === 'high'
+    ? tc.success
+    : goalTrajectory.confidence === 'medium'
+      ? tc.warning
+      : tc.textMuted;
   const planWeekZone2 = useMemo(() => {
     const current = summaries
       .filter(row => dateInWindow(row.date, progressWeekWindow.startDate, progressWeekWindow.endDate))
@@ -2150,11 +2443,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           ['body', 'Body'],
           ['health', 'Health'],
         ] as const).map(([key, label]) => (
-          <TouchableOpacity
+          <AnimatedPressable
             key={key}
             testID={`progress-subtab-${key}`}
-            activeOpacity={0.7}
             style={[styles.tab, tab === key && styles.tabActive]}
+            scaleDown={0.94}
             accessibilityRole="tab"
             accessibilityLabel={label}
             accessibilityState={{ selected: tab === key }}
@@ -2164,7 +2457,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               setTab(key);
             }}>
             <Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label}</Text>
-          </TouchableOpacity>
+          </AnimatedPressable>
         ))}
       </View>
 
@@ -2186,13 +2479,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
             {thisWeekOverview.length > 0 ? (
               <View style={styles.weekOverviewGrid}>
-                {thisWeekOverview.map(item => (
-                  <TouchableOpacity
+                {thisWeekOverview.map((item, index) => (
+                  <FadeInView
+                    key={item.key}
+                    delay={staggerDelay(index, 45)}
+                    duration={TIMING_STANDARD.duration}
+                    slideDistance={6}
+                    style={{ flexGrow: 1, flexBasis: '47%' }}
+                  >
+                  <AnimatedPressable
                     key={item.key}
                     testID={LEGACY_PROGRESS_OVERVIEW_TEST_IDS[item.key] ?? `progress-today-${item.key}`}
                     accessibilityRole="button"
                     accessibilityLabel={item.key === 'week-prs' ? 'PRs' : `${item.label}: ${item.value}. ${item.detail}`}
-                    activeOpacity={0.82}
                     style={styles.weekOverviewTile}
                     onPress={() => {
                       import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
@@ -2207,9 +2506,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     >
                       {item.label}
                     </Text>
-                    <Text style={styles.weekOverviewValue} numberOfLines={1}>{item.value}</Text>
+                    <PulseOnChange trigger={`${item.key}-${item.value}`}>
+                      <Text style={styles.weekOverviewValue} numberOfLines={1}>{item.value}</Text>
+                    </PulseOnChange>
                     <Text style={styles.weekOverviewDetail} numberOfLines={2}>{item.detail}</Text>
-                  </TouchableOpacity>
+                  </AnimatedPressable>
+                  </FadeInView>
                 ))}
               </View>
             ) : (
@@ -2219,6 +2521,105 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         </ScrollView>
       ) : tab === 'trends' ? (
         <ScrollView contentContainerStyle={styles.content}>
+          <View testID="progress-goal-trajectory-card" style={styles.goalTrajectoryCard}>
+            <View style={styles.goalTrajectoryHeader}>
+              <View style={[styles.goalTrajectoryIcon, { backgroundColor: goalTrajectoryColor + '22' }]}>
+                <Ionicons name="speedometer-outline" size={18} color={goalTrajectoryColor} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.goalTrajectoryEyebrow}>PERFORMANCE OUTLOOK</Text>
+                <Text style={styles.goalTrajectoryTitle}>6-week trajectory</Text>
+              </View>
+              <View style={[styles.goalConfidencePill, { borderColor: goalTrajectoryConfidenceColor + '88', backgroundColor: goalTrajectoryConfidenceColor + '16' }]}>
+                <Text style={[styles.goalConfidenceText, { color: goalTrajectoryConfidenceColor }]}>{goalTrajectory.confidence}</Text>
+              </View>
+            </View>
+            <Text testID="progress-goal-trajectory-headline" style={styles.goalTrajectoryHeadline} numberOfLines={2}>
+              {goalTrajectory.headline}
+            </Text>
+            <Text style={styles.goalTrajectorySubheadline} numberOfLines={2}>
+              {goalTrajectory.subheadline}
+            </Text>
+            <View style={styles.goalProgressTrack}>
+              <AnimatedProgressFill
+                pct={Math.round(goalTrajectory.progressPct * 100)}
+                minPct={4}
+                color={goalTrajectoryColor}
+                delay={120}
+                style={styles.goalProgressFill}
+              />
+            </View>
+            <View style={styles.goalProgressMeta}>
+              <Text style={styles.goalProgressLabel}>{goalTrajectory.progressLabel}</Text>
+              <Text style={styles.goalProgressConfidence}>{goalTrajectory.confidenceDetail}</Text>
+            </View>
+            <View style={styles.goalTrajectoryStats}>
+              {goalTrajectory.stats.map((stat, index) => (
+                <FadeInView
+                  key={stat.label}
+                  delay={staggerDelay(index, 40)}
+                  duration={TIMING_STANDARD.duration}
+                  slideDistance={5}
+                  style={styles.goalTrajectoryStat}
+                >
+                  <Text style={styles.goalTrajectoryStatLabel} numberOfLines={1}>{stat.label}</Text>
+                  <PulseOnChange trigger={`${stat.label}-${stat.value}`}>
+                    <Text style={styles.goalTrajectoryStatValue} numberOfLines={1}>{stat.value}</Text>
+                  </PulseOnChange>
+                  <Text style={styles.goalTrajectoryStatDetail} numberOfLines={2}>{stat.detail}</Text>
+                </FadeInView>
+              ))}
+            </View>
+            <View style={styles.goalTrajectoryLever}>
+              <Ionicons name="arrow-forward-circle-outline" size={16} color={goalTrajectoryColor} />
+              <Text style={styles.goalTrajectoryLeverText} numberOfLines={2}>{goalTrajectory.lever}</Text>
+            </View>
+          </View>
+
+          {progressAnalytics.length > 0 && (
+            <View style={styles.performanceGaugeCard}>
+              <View style={styles.performanceGaugeHeader}>
+                <Ionicons name="speedometer-outline" size={17} color={tc.primary} />
+                <Text style={styles.performanceGaugeTitle}>Performance gauges</Text>
+              </View>
+              <View style={styles.performanceGaugeGrid}>
+                {progressAnalytics.map((item, index) => {
+                  const numeric = Number(String(item.value).replace(/[^0-9.-]/g, ''));
+                  const fill = Number.isFinite(numeric)
+                    ? item.value.includes('%') ? Math.min(100, Math.abs(numeric)) : Math.min(100, Math.abs(numeric) * 10)
+                    : 30;
+                  return (
+                    <FadeInView
+                      key={item.key}
+                      delay={staggerDelay(index, 45)}
+                      duration={TIMING_STANDARD.duration}
+                      slideDistance={6}
+                      style={styles.performanceGaugeTile}
+                    >
+                      <View style={[styles.performanceGaugeIcon, { backgroundColor: item.color + '1F' }]}>
+                        <Ionicons name={item.icon} size={15} color={item.color} />
+                      </View>
+                      <Text style={styles.performanceGaugeLabel} numberOfLines={1}>{item.label}</Text>
+                      <PulseOnChange trigger={`${item.key}-${item.value}`}>
+                        <Text style={[styles.performanceGaugeValue, { color: item.color }]} numberOfLines={1}>{item.value}</Text>
+                      </PulseOnChange>
+                      <View style={styles.performanceGaugeTrack}>
+                        <AnimatedProgressFill
+                          pct={fill}
+                          minPct={5}
+                          color={item.color}
+                          delay={120 + index * 40}
+                          style={styles.performanceGaugeFill}
+                        />
+                      </View>
+                      <Text style={styles.performanceGaugeDetail} numberOfLines={2}>{item.detail}</Text>
+                    </FadeInView>
+                  );
+                })}
+              </View>
+            </View>
+          )}
+
           {displayedOneRepMaxLifts.length > 0 && (() => {
             const topLift = displayedOneRepMaxLifts[0];
             return (
@@ -2264,19 +2665,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               {chartExerciseOptions.length > 0 && (
                 <>
                   <Text style={styles.sectionLabel}>Filter by muscle</Text>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={styles.exerciseChipScroller}>
                     {CHART_MUSCLE_BUCKETS.map(b => {
                       const active = chartMuscleFilter === b.id;
                       return (
-                        <TouchableOpacity
+                        <AnimatedPressable
                           key={b.id}
                           style={[styles.exerciseChip, active && styles.exerciseChipActive]}
                           onPress={() => setChartMuscleFilter(b.id)}
-                          activeOpacity={0.75}>
-                          <Text style={[styles.exerciseChipText, active && styles.exerciseChipTextActive]}>
+                          scaleDown={0.95}>
+                          <Text style={[styles.exerciseChipText, active && styles.exerciseChipTextActive]} numberOfLines={1}>
                             {b.label}
                           </Text>
-                        </TouchableOpacity>
+                        </AnimatedPressable>
                       );
                     })}
                   </ScrollView>
@@ -2287,16 +2688,21 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       No {activeChartBucket.label.toLowerCase()} exercises with enough data yet.
                     </Text>
                   ) : (
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={{ gap: 8, paddingBottom: 12 }}>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" contentContainerStyle={styles.exerciseChipScroller}>
                       {filteredChartExercises.map(option => (
-                        <TouchableOpacity
+                        <AnimatedPressable
                           key={option.key}
                           style={[styles.exerciseChip, selectedExercise === option.name && styles.exerciseChipActive]}
-                          onPress={() => setSelectedExercise(option.name)}>
-                          <Text style={[styles.exerciseChipText, selectedExercise === option.name && styles.exerciseChipTextActive]}>
+                          onPress={() => setSelectedExercise(option.name)}
+                          scaleDown={0.95}>
+                          <Text
+                            style={[styles.exerciseChipText, selectedExercise === option.name && styles.exerciseChipTextActive]}
+                            numberOfLines={1}
+                            ellipsizeMode="tail"
+                          >
                             {option.name}
                           </Text>
-                        </TouchableOpacity>
+                        </AnimatedPressable>
                       ))}
                     </ScrollView>
                   )}
@@ -2366,21 +2772,21 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   return (
                     <View testID="progress-selected-exercise-chart" style={styles.graphCard}>
                       <View style={styles.graphHeader}>
-                        <Text style={styles.graphTitle}>{selectedExercise}</Text>
-                        <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+                        <Text style={styles.graphTitle} numberOfLines={2}>{selectedExercise}</Text>
+                        <View style={styles.chartModeGroup}>
                           {hasWeight && (
-                            <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('weight')} activeOpacity={0.75}>
+                            <AnimatedPressable style={[styles.chartModeBtn]} onPress={() => setChartMode('weight')} scaleDown={0.94}>
                               <Text style={styles.chartModeBtnText}>Weight</Text>
-                            </TouchableOpacity>
+                            </AnimatedPressable>
                           )}
                           {hasWeight && (
-                            <TouchableOpacity style={[styles.chartModeBtn]} onPress={() => setChartMode('volume')} activeOpacity={0.75}>
+                            <AnimatedPressable style={[styles.chartModeBtn]} onPress={() => setChartMode('volume')} scaleDown={0.94}>
                               <Text style={styles.chartModeBtnText}>Volume</Text>
-                            </TouchableOpacity>
+                            </AnimatedPressable>
                           )}
-                          <TouchableOpacity style={[styles.chartModeBtn, styles.chartModeBtnActive]} onPress={() => {}}>
+                          <AnimatedPressable style={[styles.chartModeBtn, styles.chartModeBtnActive]} onPress={() => {}} scaleDown={0.94}>
                             <Text style={[styles.chartModeBtnText, styles.chartModeBtnTextActive]}>Est. 1RM</Text>
-                          </TouchableOpacity>
+                          </AnimatedPressable>
                         </View>
                       </View>
                       <Text style={styles.graphSubtitle}>Estimated 1-rep max ({weightUnit}) over time</Text>
@@ -2449,35 +2855,39 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 return (
                   <View testID="progress-selected-exercise-chart" style={styles.graphCard}>
                     <View style={styles.graphHeader}>
-                      <Text style={styles.graphTitle}>{selectedExercise}</Text>
-                      <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+                      <Text style={styles.graphTitle} numberOfLines={2}>{selectedExercise}</Text>
+                      <View style={styles.chartModeGroup}>
                         {hasWeight && (
-                          <TouchableOpacity
+                          <AnimatedPressable
                             style={[styles.chartModeBtn, effectiveMode === 'weight' && styles.chartModeBtnActive]}
-                            onPress={() => setChartMode('weight')}>
+                            onPress={() => setChartMode('weight')}
+                            scaleDown={0.94}>
                             <Text style={[styles.chartModeBtnText, effectiveMode === 'weight' && styles.chartModeBtnTextActive]}>Weight</Text>
-                          </TouchableOpacity>
+                          </AnimatedPressable>
                         )}
                         {hasWeight && (
-                          <TouchableOpacity
+                          <AnimatedPressable
                             style={[styles.chartModeBtn, effectiveMode === 'volume' && styles.chartModeBtnActive]}
-                            onPress={() => setChartMode('volume')}>
+                            onPress={() => setChartMode('volume')}
+                            scaleDown={0.94}>
                             <Text style={[styles.chartModeBtnText, effectiveMode === 'volume' && styles.chartModeBtnTextActive]}>Volume</Text>
-                          </TouchableOpacity>
+                          </AnimatedPressable>
                         )}
                         {hasDuration && (
-                          <TouchableOpacity
+                          <AnimatedPressable
                             style={[styles.chartModeBtn, effectiveMode === 'duration' && styles.chartModeBtnActive]}
-                            onPress={() => setChartMode('duration')}>
+                            onPress={() => setChartMode('duration')}
+                            scaleDown={0.94}>
                             <Text style={[styles.chartModeBtnText, effectiveMode === 'duration' && styles.chartModeBtnTextActive]}>Duration</Text>
-                          </TouchableOpacity>
+                          </AnimatedPressable>
                         )}
                         {hasE1rm && (
-                          <TouchableOpacity
+                          <AnimatedPressable
                             style={[styles.chartModeBtn]}
-                            onPress={() => setChartMode('e1rm')}>
+                            onPress={() => setChartMode('e1rm')}
+                            scaleDown={0.94}>
                             <Text style={styles.chartModeBtnText}>Est. 1RM</Text>
-                          </TouchableOpacity>
+                          </AnimatedPressable>
                         )}
                       </View>
                     </View>
@@ -2541,12 +2951,18 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       <Text style={[styles.graphTitle, { flex: 1 }]}>Endurance trend</Text>
                     </View>
                     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                      {cardioInsightsMemo.map(item => (
-                        <View key={item.label} style={{ flexGrow: 1, flexBasis: '47%', backgroundColor: tc.surface, borderRadius: 10, borderWidth: 1, borderColor: tc.border, padding: 10 }}>
+                      {cardioInsightsMemo.map((item, index) => (
+                        <FadeInView
+                          key={item.label}
+                          delay={staggerDelay(index, 45)}
+                          duration={TIMING_STANDARD.duration}
+                          slideDistance={5}
+                          style={{ flexGrow: 1, flexBasis: '47%', backgroundColor: tc.surface, borderRadius: 10, borderWidth: 1, borderColor: tc.border, padding: 10 }}
+                        >
                           <Text style={{ fontSize: 18, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
                           <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.4, textTransform: 'uppercase', marginTop: 2 }}>{item.label}</Text>
                           <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 4 }} numberOfLines={2}>{item.detail}</Text>
-                        </View>
+                        </FadeInView>
                       ))}
                     </View>
                   </View>
@@ -2561,7 +2977,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       if (pts.length < 2) return null;
                       return (
                         <View key={exName} style={[styles.graphCard, { marginBottom: 10 }]}>
-                          <Text style={[styles.graphTitle, { marginBottom: 8 }]}>{exName}</Text>
+                          <Text style={[styles.graphTitle, { marginBottom: 8 }]} numberOfLines={2}>{exName}</Text>
                           <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 4, height: 80 }}>
                             {pts.map((p, pi) => {
                               const h = Math.max(8, Math.round((p.distance! / maxDist) * 70));
@@ -2572,7 +2988,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                                   <Text style={{ fontSize: 9, color: isLast ? tc.primary : tc.textSecondary, fontWeight: '600' }}>
                                     {p.distance!.toFixed(1)}
                                   </Text>
-                                  <View style={{ width: '80%', height: h, backgroundColor: isLast ? tc.primary : tc.accent, borderRadius: 4, marginVertical: 2 }} />
+                                  <AnimatedChartBar
+                                    targetHeight={h}
+                                    delay={pi * 35}
+                                    style={{ width: '80%', backgroundColor: isLast ? tc.primary : tc.accent, borderRadius: 4, marginVertical: 2 }}
+                                  />
                                   <Text style={{ fontSize: 8, color: tc.textMuted }}>{d.getMonth() + 1}/{d.getDate()}</Text>
                                 </View>
                               );
@@ -2593,22 +3013,32 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         </ScrollView>
       ) : tab === 'history' ? (
         <ScrollView contentContainerStyle={styles.content} style={!noHeader ? { backgroundColor: tc.background } : undefined}>
-          {(insights || guardrails.length > 0 || coachMemory.length > 0) && (
+          {coachInsightVisuals.length > 0 && (
             <View style={styles.insightsCard}>
-              <Text style={styles.insightsTitle}>Coach Insights</Text>
-              {insights?.adherence && (
-                <Text style={styles.insightsLine}>
-                  Rolling 7-day adherence: workouts {insights.adherence.workout_7d_pct}%
-                  {insights.adherence.meal_7d_pct != null ? ` · meals ${insights.adherence.meal_7d_pct}%` : ''}
-                </Text>
-              )}
-              {guardrails.map((w, i) => (
-                <Text key={i} style={styles.guardrailText}>• {w}</Text>
-              ))}
-              {coachMemory.map((m, i) => (
-                <Text key={i} style={styles.memoryText}>{formatCoachMemorySummary(m)}</Text>
-              ))}
-              {progressionHint ? <Text style={styles.progressionHint}>Progression: {progressionHint}</Text> : null}
+              <View style={styles.insightsHeader}>
+                <Ionicons name="sparkles-outline" size={16} color={tc.primary} />
+                <Text style={styles.insightsTitle}>Coach Insights</Text>
+              </View>
+              <View style={styles.coachInsightGrid}>
+                {coachInsightVisuals.map((item, index) => (
+                  <FadeInView
+                    key={item.key}
+                    delay={staggerDelay(index, 45)}
+                    duration={TIMING_STANDARD.duration}
+                    slideDistance={5}
+                    style={styles.coachInsightTile}
+                  >
+                    <View style={[styles.coachInsightIcon, { backgroundColor: item.color + '1F' }]}>
+                      <Ionicons name={item.icon} size={15} color={item.color} />
+                    </View>
+                    <Text style={styles.coachInsightLabel} numberOfLines={1}>{item.label}</Text>
+                    <PulseOnChange trigger={`${item.key}-${item.value}`}>
+                      <Text style={[styles.coachInsightValue, { color: item.color }]} numberOfLines={1}>{item.value}</Text>
+                    </PulseOnChange>
+                    <Text style={styles.coachInsightDetail} numberOfLines={2}>{item.detail}</Text>
+                  </FadeInView>
+                ))}
+              </View>
             </View>
           )}
 
@@ -2672,11 +3102,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <View style={{ marginBottom: 16 }}>
               <Text style={styles.sectionLabel}>Progress Milestones</Text>
               <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                {progressMilestones.map(item => (
-                  <View
+                {progressMilestones.map((item, index) => (
+                  <FadeInView
                     key={item.key}
                     testID={`progress-milestone-${item.key}`}
-                    accessibilityLabel={`${item.title}: ${item.value}. ${item.detail}`}
+                    delay={staggerDelay(index, 45)}
+                    duration={TIMING_STANDARD.duration}
+                    slideDistance={6}
                     style={{
                       flexGrow: 1,
                       flexBasis: '47%',
@@ -2695,11 +3127,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         {item.title}
                       </Text>
                     </View>
-                    <Text style={{ fontSize: 22, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
+                    <PulseOnChange trigger={`${item.key}-${item.value}`}>
+                      <Text style={{ fontSize: 22, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
+                    </PulseOnChange>
                     <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 4, lineHeight: 15 }} numberOfLines={2}>
                       {item.detail}
                     </Text>
-                  </View>
+                  </FadeInView>
                 ))}
               </View>
             </View>
@@ -2709,8 +3143,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <View style={{ marginBottom: 16 }}>
               <Text style={styles.sectionLabel}>Trend Summary</Text>
               <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
-                {progressAnalytics.map(item => (
-                  <View key={item.key} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                {progressAnalytics.map((item, index) => (
+                  <FadeInView key={item.key} delay={staggerDelay(index, 35)} duration={TIMING_STANDARD.duration} slideDistance={4}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                     <View style={{ width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '1F' }}>
                       <Ionicons name={item.icon} size={16} color={item.color} />
                     </View>
@@ -2722,8 +3157,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         {item.detail}
                       </Text>
                     </View>
-                    <Text style={{ fontSize: 19, fontWeight: '900', color: item.color }}>{item.value}</Text>
+                    <PulseOnChange trigger={`${item.key}-${item.value}`}>
+                      <Text style={{ fontSize: 19, fontWeight: '900', color: item.color }}>{item.value}</Text>
+                    </PulseOnChange>
                   </View>
+                  </FadeInView>
                 ))}
               </View>
             </View>
@@ -2732,8 +3170,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           <View style={{ marginBottom: 16 }}>
             <Text style={styles.sectionLabel}>Training Signals</Text>
             <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
-              {trainingSignals.map(item => (
-                <View key={item.key} style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              {trainingSignals.map((item, index) => (
+                <FadeInView key={item.key} delay={staggerDelay(index, 35)} duration={TIMING_STANDARD.duration} slideDistance={4}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
                   <View style={{ width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '1F' }}>
                     <Ionicons name={item.icon} size={16} color={item.color} />
                   </View>
@@ -2749,6 +3188,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     {item.value}
                   </Text>
                 </View>
+                </FadeInView>
               ))}
             </View>
           </View>
@@ -2847,12 +3287,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                             backgroundColor: tc.surface,
                             overflow: 'hidden',
                           }}>
-                            <View style={{
-                              width: `${Math.round(fillPct * 100)}%`,
-                              height: '100%',
-                              borderRadius: 999,
-                              backgroundColor: tc.primary,
-                            }} />
+                            <AnimatedProgressFill
+                              pct={Math.round(fillPct * 100)}
+                              minPct={18}
+                              color={tc.primary}
+                              delay={120}
+                              style={{ height: '100%', borderRadius: 999 }}
+                            />
                           </View>
                         </View>
                       );
@@ -3747,7 +4188,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
           {!isProTier && (
-            <View style={styles.vitalsCard}>
+            <FadeInView delay={0} duration={TIMING_STANDARD.duration} slideDistance={6} style={styles.vitalsCard}>
               <View style={{ alignItems: 'center', paddingVertical: 12 }}>
                 <Ionicons name="lock-closed-outline" size={32} color={tc.textMuted} />
                 <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary, marginTop: 8 }}>Health insights are Pro</Text>
@@ -3755,16 +4196,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   Free keeps manual weight, body, workout, and meal history. Pro adds Apple Health, readiness, sleep, and nutrition scoring.
                 </Text>
               </View>
-            </View>
+            </FadeInView>
           )}
           {isProTier && authToken && (
+            <FadeInView delay={0} duration={TIMING_STANDARD.duration} slideDistance={6}>
             <WeeklyCheckinCard
               authToken={authToken}
               themeName={userProfile.themePreference}
             />
+            </FadeInView>
           )}
           {isProTier && authToken && (() => {
             return (
+              <FadeInView delay={50} duration={TIMING_STANDARD.duration} slideDistance={6}>
               <Zone2TargetCard
                 authToken={authToken}
                 themeName={userProfile.themePreference}
@@ -3774,6 +4218,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 weekLabel={progressWeekWindow.label}
                 previousWeekLabel={progressWeekWindow.previousLabel}
               />
+              </FadeInView>
             );
           })()}
 
@@ -3794,6 +4239,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           )}
 
           {isProTier && isHealthKitAvailable() && (
+            <FadeInView delay={100} duration={TIMING_STANDARD.duration} slideDistance={6}>
             <DetectedWorkoutsCard
               themeName={userProfile.themePreference}
               appleWorkouts={healthSummary?.workoutDetails ?? null}
@@ -3810,6 +4256,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 })();
               }}
             />
+            </FadeInView>
           )}
           {/* Apple Health vitals */}
           {isProTier && isHealthKitAvailable() && (() => {
@@ -4071,11 +4518,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 {/* Compact calibration progress (only while building baseline). */}
                 {!isPersonalized && (
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                    <View style={{ flex: 1, height: 4, borderRadius: 2, backgroundColor: tc.border }}>
-                      <View style={{
-                        width: `${Math.min(100, (nightsLogged / 14) * 100)}%` as any,
-                        height: 4, borderRadius: 2, backgroundColor: tc.primary,
-                      }} />
+                  <View style={{ flex: 1, height: 4, borderRadius: 2, backgroundColor: tc.border }}>
+                      <AnimatedProgressFill
+                        pct={Math.min(100, (nightsLogged / 14) * 100)}
+                        color={tc.primary}
+                        delay={100}
+                        style={{ height: 4, borderRadius: 2 }}
+                      />
                     </View>
                     <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '600' }}>
                       {Math.min(14, nightsLogged)}/14 nights
@@ -4089,13 +4538,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   backgroundColor: tc.border,
                 }}>
                   {ss.stages.deep > 0 && (
-                    <View style={{ width: `${deepPct}%` as any, backgroundColor: STAGE_COLOR.deep }} />
+                    <AnimatedProgressFill pct={deepPct} color={STAGE_COLOR.deep} delay={80} style={{ height: '100%' }} />
                   )}
                   {ss.stages.core > 0 && (
-                    <View style={{ width: `${corePct}%` as any, backgroundColor: STAGE_COLOR.core }} />
+                    <AnimatedProgressFill pct={corePct} color={STAGE_COLOR.core} delay={130} style={{ height: '100%' }} />
                   )}
                   {ss.stages.rem > 0 && (
-                    <View style={{ width: `${remPct}%` as any, backgroundColor: STAGE_COLOR.rem }} />
+                    <AnimatedProgressFill pct={remPct} color={STAGE_COLOR.rem} delay={180} style={{ height: '100%' }} />
                   )}
                 </FadeInView>
                 {/* Stage legend — each row in one line. */}
@@ -4211,7 +4660,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           : 'Waiting on the server nutrition score before unlocking this card'}
                   </Text>
                   <View style={{ width: '100%', height: 4, borderRadius: 2, backgroundColor: tc.border, marginTop: 12 }}>
-                    <View style={{ width: `${Math.min(100, (daysOfData / DAYS_REQUIRED) * 100)}%` as any, height: 4, borderRadius: 2, backgroundColor: tc.primary }} />
+                    <AnimatedProgressFill
+                      pct={Math.min(100, (daysOfData / DAYS_REQUIRED) * 100)}
+                      color={tc.primary}
+                      delay={120}
+                      style={{ height: 4, borderRadius: 2 }}
+                    />
                   </View>
                   <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 4 }}>
                     Training {Math.min(daysOfData, DAYS_REQUIRED)} / {DAYS_REQUIRED} days · Nutrition {Math.min(nutritionDays, MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE)} / {MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE} days
@@ -4250,7 +4704,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                       <Text style={{ fontSize: 12, fontWeight: '600', color: tc.textSecondary, width: 70 }}>{s.label}</Text>
                       <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
-                        <View style={{ width: `${Math.min(100, s.value)}%` as any, height: 6, borderRadius: 3, backgroundColor: s.color }} />
+                        <AnimatedProgressFill
+                          pct={Math.min(100, s.value)}
+                          color={s.color}
+                          delay={s.label === 'Activity' ? 120 : 180}
+                          style={{ height: 6, borderRadius: 3 }}
+                        />
                       </View>
                       <Text style={{ fontSize: 11, fontWeight: '700', color: s.color, width: 28, textAlign: 'right' }}>{s.value}</Text>
                     </View>
@@ -4432,14 +4891,19 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 2 }}>
                         RECENT LOGGED DAYS
                       </Text>
-                      {dailyRows.map(row => {
+                      {dailyRows.map((row, rowIndex) => {
                         const d = new Date(`${row.date}T12:00:00`);
                         const label = `${d.getMonth() + 1}/${d.getDate()}`;
                         return (
                           <View key={row.date} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                             <Text style={{ width: 36, fontSize: 10, fontWeight: '700', color: tc.textMuted }}>{label}</Text>
                             <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                              <View style={{ width: `${Math.min(100, (row.calories / barMax) * 100)}%` as any, height: 5, borderRadius: 3, backgroundColor: tc.primary }} />
+                              <AnimatedProgressFill
+                                pct={Math.min(100, (row.calories / barMax) * 100)}
+                                color={tc.primary}
+                                delay={staggerDelay(rowIndex, 35)}
+                                style={{ height: 5, borderRadius: 3 }}
+                              />
                             </View>
                             <Text style={{ width: 92, fontSize: 10, color: tc.textSecondary, textAlign: 'right' }}>
                               {Math.round(row.calories)} cal · {Math.round(row.protein_g)}g P
@@ -4472,7 +4936,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <Text style={{ fontSize: 11, fontWeight: '700', color: fiberColor }}>{gutHealthWindow.avg_fiber_g}g / day</Text>
                         </View>
                         <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                          <View style={{ width: `${Math.min(100, (gutHealthWindow.avg_fiber_g / 28) * 100)}%` as any, height: 5, borderRadius: 3, backgroundColor: fiberColor }} />
+                          <AnimatedProgressFill
+                            pct={Math.min(100, (gutHealthWindow.avg_fiber_g / 28) * 100)}
+                            color={fiberColor}
+                            delay={100}
+                            style={{ height: 5, borderRadius: 3 }}
+                          />
                         </View>
                         <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 3 }}>
                           {gutHealthWindow.avg_fiber_per_1000_kcal}g per 1k cal · Hit target {gutHealthWindow.pct_days_fiber_target}% of days
@@ -4492,7 +4961,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <Text style={{ fontSize: 11, fontWeight: '700', color: color }}>{count} / 30 plants</Text>
                         </View>
                         <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                          <View style={{ width: `${Math.min(100, (count / 30) * 100)}%` as any, height: 5, borderRadius: 3, backgroundColor: color }} />
+                          <AnimatedProgressFill
+                            pct={Math.min(100, (count / 30) * 100)}
+                            color={color}
+                            delay={140}
+                            style={{ height: 5, borderRadius: 3 }}
+                          />
                         </View>
                         <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 3 }}>
                           30+ distinct plants/week linked to improved microbiome diversity
@@ -4568,8 +5042,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           <Text style={{ fontSize: 11, fontWeight: '700', color: plantColor }}>{plantPct}% plant</Text>
                         </View>
                         <View style={{ flexDirection: 'row', height: 8, borderRadius: 4, overflow: 'hidden', backgroundColor: tc.border }}>
-                          {gutHealthWindow.plant_protein_g > 0 && <View style={{ width: `${plantPct}%` as any, backgroundColor: '#22C55E' }} />}
-                          {gutHealthWindow.animal_protein_g > 0 && <View style={{ width: `${100 - plantPct}%` as any, backgroundColor: tc.primary }} />}
+                          {gutHealthWindow.plant_protein_g > 0 && (
+                            <AnimatedProgressFill pct={plantPct} color="#22C55E" delay={80} style={{ height: '100%' }} />
+                          )}
+                          {gutHealthWindow.animal_protein_g > 0 && (
+                            <AnimatedProgressFill pct={100 - plantPct} color={tc.primary} delay={120} style={{ height: '100%' }} />
+                          )}
                         </View>
                         <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 3 }}>
                           <Text style={{ fontSize: 9, color: '#22C55E', fontWeight: '700' }}>Plant</Text>
@@ -4641,7 +5119,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   {gutHealthWindow.processing_counts && Object.keys(gutHealthWindow.processing_counts).length > 0 && (
                     <View style={{ paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '33' }}>
                       <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>FOOD PROCESSING MIX</Text>
-                      {['minimally_processed', 'processed', 'ultra_processed', 'unknown'].map(b => {
+                      {['minimally_processed', 'processed', 'ultra_processed', 'unknown'].map((b, i) => {
                         const count = gutHealthWindow.processing_counts[b] ?? 0;
                         if (count === 0) return null;
                         const total = Object.values(gutHealthWindow.processing_counts).reduce((s, v) => s + v, 0) || 1;
@@ -4652,7 +5130,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                             <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color }} />
                             <Text style={{ width: 120, fontSize: 11, color: tc.textSecondary }}>{b.replace(/_/g, ' ')}</Text>
                             <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: tc.border }}>
-                              <View style={{ width: `${Math.max(3, pct)}%` as any, height: 6, borderRadius: 3, backgroundColor: color }} />
+                              <AnimatedProgressFill
+                                pct={pct}
+                                minPct={3}
+                                color={color}
+                                delay={staggerDelay(i, 30)}
+                                style={{ height: 6, borderRadius: 3 }}
+                              />
                             </View>
                             <Text style={{ width: 45, fontSize: 11, fontWeight: '600', color: tc.textSecondary, textAlign: 'right' }}>{pct}%</Text>
                           </View>
@@ -4677,11 +5161,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       </Text>
                     </View>
                     <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                      <View style={{
-                        width: `${Math.min(100, (gutInsights.plantCount / 30) * 100)}%` as any,
-                        height: 5, borderRadius: 3,
-                        backgroundColor: gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444',
-                      }} />
+                      <AnimatedProgressFill
+                        pct={Math.min(100, (gutInsights.plantCount / 30) * 100)}
+                        color={gutInsights.plantTier === 'on_track' ? '#22C55E' : gutInsights.plantTier === 'building' ? '#F59E0B' : '#EF4444'}
+                        delay={100}
+                        style={{ height: 5, borderRadius: 3 }}
+                      />
                     </View>
                     <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>{gutInsights.plantMessage}</Text>
                   </View>
@@ -4693,11 +5178,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       </Text>
                     </View>
                     <View style={{ height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                      <View style={{
-                        width: `${Math.min(100, gutInsights.fiberToday.pct)}%` as any,
-                        height: 5, borderRadius: 3,
-                        backgroundColor: gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B',
-                      }} />
+                      <AnimatedProgressFill
+                        pct={Math.min(100, gutInsights.fiberToday.pct)}
+                        color={gutInsights.fiberToday.pct >= 80 ? '#22C55E' : '#F59E0B'}
+                        delay={140}
+                        style={{ height: 5, borderRadius: 3 }}
+                      />
                     </View>
                   </View>
                   {gutInsights.proteinFlag && (
@@ -4773,11 +5259,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 2 }}>
                       {muscleBalance.period_days}d / {Math.round(muscleBalance.total_sets)} total sets
                     </Text>
-                    {entries.map(([muscle, data]) => (
+                    {entries.map(([muscle, data], index) => (
                       <View key={muscle} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                         <Text style={{ width: 72, fontSize: 11, fontWeight: '600', color: tc.textSecondary, textTransform: 'capitalize' }}>{muscle.replace(/_/g, ' ')}</Text>
                         <View style={{ flex: 1, height: 8, borderRadius: 4, backgroundColor: tc.border }}>
-                          <View style={{ width: `${Math.max(3, (data.sets / maxSets) * 100)}%` as any, height: 8, borderRadius: 4, backgroundColor: barColor(muscle, data.pct) }} />
+                          <AnimatedProgressFill
+                            pct={(data.sets / maxSets) * 100}
+                            minPct={3}
+                            color={barColor(muscle, data.pct)}
+                            delay={staggerDelay(index, 28)}
+                            style={{ height: 8, borderRadius: 4 }}
+                          />
                         </View>
                         <Text style={{ width: 36, fontSize: 11, fontWeight: '700', color: tc.textPrimary, textAlign: 'right' }}>{Math.round(data.sets)}</Text>
                       </View>
@@ -4789,6 +5281,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {/* Weight Trend */}
+          <FadeInView delay={60} duration={TIMING_STANDARD.duration} slideDistance={6}>
           <View
             testID="progress-weight-card"
             style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
@@ -5015,8 +5508,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </View>
             )}
           </View>
+          </FadeInView>
 
           {/* Body Measurements */}
+          <FadeInView delay={110} duration={TIMING_STANDARD.duration} slideDistance={6}>
           <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 16, marginBottom: 14, borderWidth: 1, borderColor: tc.border }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <Ionicons name="body-outline" size={22} color={tc.primary} />
@@ -5037,38 +5532,41 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </Text>
             </View>
           </View>
+          </FadeInView>
 
           {/* Scan buttons */}
-          {isProTier && <View style={styles.bodyScanPrompt}>
+          {isProTier && <FadeInView delay={160} duration={TIMING_STANDARD.duration} slideDistance={6} style={styles.bodyScanPrompt}>
             <Ionicons name="body-outline" size={40} color={tc.primary} style={{ alignSelf: 'center' }} />
             <Text style={styles.bodyScanPromptTitle}>Body Check</Text>
             <Text style={styles.bodyScanPromptText}>
               Take a front-facing photo to estimate body fat percentage, muscle mass, and get personalized feedback.
             </Text>
             <View style={{ flexDirection: 'row', gap: 10, marginTop: 8 }}>
-              <TouchableOpacity
+              <AnimatedPressable
                 style={[styles.bodyScanBtn, { flex: 1 }, bodyScanLoading && { opacity: 0.55 }]}
                 onPress={() => setBodyScanPrepSource('camera')}
-                disabled={bodyScanLoading}>
+                disabled={bodyScanLoading}
+                scaleDown={0.96}>
                 <View style={styles.bodyScanBtnContent}>
                   <Ionicons name="camera-outline" size={16} color={primaryButtonTextColor} />
                   <Text style={[styles.bodyScanBtnText, { color: primaryButtonTextColor }]}>Camera</Text>
                 </View>
-              </TouchableOpacity>
-              <TouchableOpacity
+              </AnimatedPressable>
+              <AnimatedPressable
                 style={[styles.bodyScanBtn, { flex: 1, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border }, bodyScanLoading && { opacity: 0.55 }]}
                 onPress={() => setBodyScanPrepSource('library')}
-                disabled={bodyScanLoading}>
+                disabled={bodyScanLoading}
+                scaleDown={0.96}>
                 <View style={styles.bodyScanBtnContent}>
                   <Ionicons name="images-outline" size={16} color={tc.textPrimary} />
                   <Text style={[styles.bodyScanBtnText, { color: tc.textPrimary }]}>Library</Text>
                 </View>
-              </TouchableOpacity>
+              </AnimatedPressable>
             </View>
             <Text style={{ fontSize: 10, color: tc.textMuted, textAlign: 'center', marginTop: 6, lineHeight: 14 }}>
               For best results: front-facing, good lighting, form-fitting clothing. Do not submit nude photos. Accuracy varies with lighting and angle.
             </Text>
-          </View>}
+          </FadeInView>}
 
           {/* Loading */}
           {isProTier && bodyScanLoading && (
@@ -5152,8 +5650,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       ? tc.textMuted
                       : delta < 0 ? tc.primary : delta > 0 ? (tc.warning ?? tc.textSecondary) : tc.textMuted;
                     return (
-                      <View
+                      <FadeInView
                         key={entry.id}
+                        delay={staggerDelay(idx, 35)}
+                        duration={TIMING_STANDARD.duration}
+                        slideDistance={5}
                         style={{
                           width: 116,
                           borderRadius: 12,
@@ -5184,7 +5685,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         <Text style={{ fontSize: 10, color: deltaColor, fontWeight: '800', marginTop: 2 }}>
                           {delta == null ? 'First scan' : `${delta > 0 ? '+' : ''}${delta.toFixed(1)}% BF`}
                         </Text>
-                      </View>
+                      </FadeInView>
                     );
                   })}
                 </ScrollView>
@@ -5442,7 +5943,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   ? tc.textMuted
                   : scanDelta < 0 ? tc.primary : scanDelta > 0 ? (tc.warning ?? tc.textSecondary) : tc.textMuted;
                 return (
-                  <View key={entry.id} style={styles.bodyScanHistoryCard}>
+                  <FadeInView
+                    key={entry.id}
+                    delay={staggerDelay(idx, 45)}
+                    duration={TIMING_STANDARD.duration}
+                    slideDistance={6}
+                    style={styles.bodyScanHistoryCard}
+                  >
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                       <View>
                         <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }}>{entry.category}</Text>
@@ -5462,7 +5969,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       </View>
                     </View>
                     <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 6, lineHeight: 17 }}>{entry.assessment}</Text>
-                  </View>
+                  </FadeInView>
                 );
               })}
             </>
@@ -5734,6 +6241,215 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     padding: 14,
     marginBottom: 16,
   },
+  goalTrajectoryCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
+    marginBottom: 16,
+    ...elevations.subtle,
+  },
+  goalTrajectoryHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  goalTrajectoryIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  goalTrajectoryEyebrow: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+    color: colors.textMuted,
+  },
+  goalTrajectoryTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginTop: 1,
+  },
+  goalConfidencePill: {
+    borderWidth: 1,
+    borderRadius: radius.full,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+  },
+  goalConfidenceText: {
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  goalTrajectoryHeadline: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    lineHeight: 25,
+  },
+  goalTrajectorySubheadline: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    lineHeight: 17,
+    marginTop: 5,
+  },
+  goalProgressTrack: {
+    height: 8,
+    borderRadius: radius.full,
+    backgroundColor: colors.border,
+    overflow: 'hidden',
+    marginTop: 12,
+  },
+  goalProgressFill: {
+    height: '100%',
+    borderRadius: radius.full,
+  },
+  goalProgressMeta: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginTop: 7,
+  },
+  goalProgressLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  goalProgressConfidence: {
+    flex: 1,
+    fontSize: 11,
+    color: colors.textMuted,
+    textAlign: 'right',
+    lineHeight: 15,
+  },
+  goalTrajectoryStats: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 12,
+  },
+  goalTrajectoryStat: {
+    flex: 1,
+    minHeight: 72,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    padding: 9,
+  },
+  goalTrajectoryStatLabel: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  goalTrajectoryStatValue: {
+    fontSize: 17,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginTop: 3,
+  },
+  goalTrajectoryStatDetail: {
+    fontSize: 10,
+    color: colors.textSecondary,
+    lineHeight: 14,
+    marginTop: 2,
+  },
+  goalTrajectoryLever: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 7,
+    marginTop: 12,
+    padding: 10,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  goalTrajectoryLeverText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textSecondary,
+    lineHeight: 17,
+  },
+  performanceGaugeCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
+    marginBottom: 16,
+  },
+  performanceGaugeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
+  performanceGaugeTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: colors.textPrimary,
+  },
+  performanceGaugeGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  performanceGaugeTile: {
+    flexGrow: 1,
+    flexBasis: '47%',
+    minHeight: 128,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    padding: 10,
+  },
+  performanceGaugeIcon: {
+    width: 27,
+    height: 27,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 7,
+  },
+  performanceGaugeLabel: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  performanceGaugeValue: {
+    fontSize: 23,
+    fontWeight: '900',
+    marginTop: 2,
+  },
+  performanceGaugeTrack: {
+    height: 6,
+    borderRadius: radius.full,
+    overflow: 'hidden',
+    backgroundColor: colors.border,
+    marginTop: 7,
+  },
+  performanceGaugeFill: {
+    height: '100%',
+    borderRadius: radius.full,
+  },
+  performanceGaugeDetail: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    lineHeight: 15,
+    marginTop: 7,
+  },
   weekOverviewHeader: {
     flexDirection: 'row',
     alignItems: 'flex-end',
@@ -5854,11 +6570,58 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     padding: 14,
     marginBottom: 12,
   },
-  insightsTitle: { fontSize: 14, fontWeight: '700', color: colors.textPrimary, marginBottom: 8 },
+  insightsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 10,
+  },
+  insightsTitle: { fontSize: 14, fontWeight: '800', color: colors.textPrimary },
   insightsLine: { fontSize: 12, color: colors.textSecondary, marginBottom: 4 },
   guardrailText: { fontSize: 12, color: colors.warning, marginBottom: 3 },
   memoryText: { fontSize: 12, color: colors.textSecondary, marginBottom: 3 },
   progressionHint: { fontSize: 12, color: colors.primary, marginTop: 4, fontWeight: '600' },
+  coachInsightGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  coachInsightTile: {
+    flexGrow: 1,
+    flexBasis: '47%',
+    minHeight: 116,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    padding: 10,
+  },
+  coachInsightIcon: {
+    width: 27,
+    height: 27,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 7,
+  },
+  coachInsightLabel: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  coachInsightValue: {
+    fontSize: 21,
+    fontWeight: '900',
+    marginTop: 2,
+  },
+  coachInsightDetail: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    lineHeight: 15,
+    marginTop: 5,
+  },
 
   weightCard: {
     backgroundColor: colors.surface,
@@ -5908,8 +6671,8 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     marginBottom: 12,
     ...elevations.card,
   },
-  graphHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 },
-  graphTitle: { fontSize: 15, fontWeight: '700', color: colors.textPrimary },
+  graphHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 4 },
+  graphTitle: { flex: 1, minWidth: 0, fontSize: 15, fontWeight: '700', color: colors.textPrimary, lineHeight: 19 },
   graphScore: { fontSize: 20, fontWeight: '800', color: colors.primary },
   graphSubtitle: { fontSize: 12, color: colors.textSecondary, marginBottom: 10 },
   graphBars: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 6, minHeight: 120 },
@@ -5936,15 +6699,30 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   exName:   { fontSize: 13, color: colors.textPrimary },
   exBest:   { fontSize: 13, color: colors.primary, fontWeight: '600' },
 
+  exerciseChipScroller: {
+    gap: 8,
+    paddingBottom: 12,
+    paddingRight: 16,
+  },
   exerciseChip: {
+    maxWidth: 190,
     paddingHorizontal: 12, paddingVertical: 8,
     borderRadius: radius.full,
     borderWidth: 1, borderColor: colors.border,
     backgroundColor: colors.surfaceRaised,
   },
   exerciseChipActive: { borderColor: colors.primary, backgroundColor: colors.primary + '20' },
-  exerciseChipText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600' },
+  exerciseChipText: { fontSize: 12, color: colors.textSecondary, fontWeight: '600', flexShrink: 1 },
   exerciseChipTextActive: { color: colors.primary },
+
+  chartModeGroup: {
+    flexShrink: 0,
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 6,
+    flexWrap: 'wrap',
+    maxWidth: 190,
+  },
 
   chartModeBtn: {
     paddingHorizontal: 10, paddingVertical: 5,

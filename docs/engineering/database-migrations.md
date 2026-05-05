@@ -1,6 +1,6 @@
 # Database Migrations
 
-Last updated: 2026-05-04
+Last updated: 2026-05-05
 
 ## Pattern
 
@@ -28,7 +28,7 @@ Startup is for schema readiness only. Data scans, seed refreshes, enrichments, a
 | `_ensure_food_metadata_classifier_v2_columns` | `protein_source` + `probiotic_flag` on `FoodMetadata`. |
 | `_ensure_daily_nutrition_metrics_v2_columns` | `plant_protein_g`, `animal_protein_g`, `probiotic_servings` on `DailyNutritionMetrics`. |
 | `_ensure_nutrition_v3_columns` | `FoodNutrition.added_sugar_g` + `FoodMetadata` v3 flags (seafood/fruit/vegetable/alcohol/processed_meat/refined_grain) + `DailyNutritionMetrics` tag servings + `recovery_flags` JSONB + `energy_availability` + `max_meal_protein_pct`. |
-| `_ensure_social_tables` | `friendships` canonical pair index + `weekly_digest_cache` per-user-per-week index. Tables built by `create_all`; this helper guarantees the indexes on legacy DBs. |
+| `_ensure_social_tables` | `friendships` canonical pair index + `weekly_digest_cache` per-user-per-week index + `social_notifications` actor/subject dedupe and inbox indexes. Tables built by `create_all`; this helper guarantees the indexes on legacy DBs. |
 | `_ensure_exercise_set_actual_rir_column` | `ExerciseSet.actual_rir DOUBLE PRECISION`. |
 | `_ensure_skip_reason_columns` | `UserDayState.skip_reason` + `PlanDay.skip_reason` for manual skips. |
 | `_backfill_user_preferences_preferred_split` | Fills missing `UserPreferences.preferred_split` from synced `user_state.userProfile.preferredSplit`, then explicit `PlanWeek.preferred_split`; does not infer from day labels. |

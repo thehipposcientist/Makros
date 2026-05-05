@@ -16,7 +16,7 @@ from app.models import PlanJob, User
 from .router import router
 from .models import PlanRequest, WorkoutOnlyRequest, NutritionOnlyRequest, ParseWorkoutsRequest
 from .utils import (
-    get_openai_api_key, model_image, model_plan_generation, model_plan_update,
+    get_openai_api_key, model_image, model_plan_generation,
     _build_chat_kwargs, _chat_create, _looks_truncated, _extract_json,
     _log_openai_error, enrich_foods_with_macros, compute_tdee_and_targets,
     map_goal_type, map_experience_level, map_progression_pace, map_recovery_level,
@@ -752,15 +752,9 @@ def _build_deterministic_workout(
             pass
 
     # ── Recent-history query (unconditional) ───────────────────────
-    # MUST run regardless of whether the AI plan review is enabled,
-    # because the trainer-note LLM call reads it too. Previously this
-    # query lived inside the review try-block, so when review was
-    # disabled (or when the block raised early) the trainer note
-    # received `_recent_completed=None` and told the user they had
-    # no recent sessions even when they had three. The result is
-    # stashed on `plan["_recent_completed"]` so downstream consumers
-    # (trainer note, optional review, optional AI regenerate) all
-    # read from the same source.
+    # MUST run regardless of whether the AI plan review is enabled. The
+    # result is stashed on `plan["_recent_completed"]` so optional review
+    # and optional AI-regenerate paths can read from the same source.
     recent_completed_rows: list[dict] = []
     if db is not None and user_id is not None:
         try:
@@ -898,10 +892,7 @@ def _build_deterministic_workout(
             for r in (recent_focus_buckets or ())
         ]
 
-    # Stash unconditionally so the trainer-note call downstream (which
-    # runs AFTER _build_deterministic_workout returns) reads real data
-    # whether or not the AI review/regenerate is enabled. Underscore-
-    # prefixed so nothing client-side renders it and the plan
+    # Underscore-prefixed so nothing client-side renders it and the plan
     # validators leave it alone.
     plan["_recent_completed"] = recent_completed_rows
     print(
@@ -2267,14 +2258,9 @@ async def run_full_plan_generation(
     endpoint and the async background job worker. No auth, no HTTP — pure
     data in, data out. Raises ValueError on validation / generation errors.
 
-    Runs enrichment, workout, and nutrition concurrently. The old flow
-    waited for enrichment+workout before starting nutrition, turning a
-    ~30s workout + ~30s nutrition into ~55s total wall time. Running all
-    three in parallel drops it to ~max(workout, nutrition) ≈ 30s. The
-    nutrition prompt is built *without* the enriched food block — the AI
-    estimates macros on its own, which we've been doing successfully in
-    production already. Enriched data still gets used for the
-    `custom_foods` backfill at the end.
+    Builds the deterministic workout plan and hybrid nutrition templates.
+    Trainer/nutrition copy notes are intentionally not generated; those
+    fields stay empty for response compatibility.
     """
     api_key = get_openai_api_key()
     if not api_key:
@@ -2282,7 +2268,7 @@ async def run_full_plan_generation(
 
     client = OpenAI(api_key=api_key)
     _m = model_plan_generation()
-    print(f"[plan-gen] parallel — goal={req.goal}, days={req.daysPerWeek}, model={_m}")
+    print(f"[plan-gen] deterministic — goal={req.goal}, days={req.daysPerWeek}, model={_m}")
     # Loud diagnostic — routine accounting inputs. If this prints
     # `routineMacros=None routineSlots=[] mealRoutine=None` when the
     # user expects routines, the client → backend plumbing dropped
@@ -2339,13 +2325,11 @@ async def run_full_plan_generation(
         )
         return {"enriched": enriched_local, "nutrition": nut}
 
-    nutrition_bundle, trainer_note = await asyncio.gather(
-        _run_nutrition(),
-        asyncio.to_thread(_generate_trainer_note, client, req, workout_data, _m),
-    )
+    nutrition_bundle = await _run_nutrition()
     enriched = nutrition_bundle["enriched"]
     nutrition_data = nutrition_bundle["nutrition"]
-    workout_data["trainerNote"] = trainer_note
+    workout_data["trainerNote"] = ""
+    nutrition_data["nutritionistNote"] = ""
     # Deterministic planner already emits canonical names and equipment
     # labels straight from the seed — no canonicalization pass needed.
 
@@ -2458,31 +2442,7 @@ async def run_full_plan_generation(
             if summary:
                 print(f"[plan-gen] normalized template {idx}: {summary}")
 
-    # ── Grounded nutritionist note (mirrors the trainer note) ──
-    # Regenerate the nutritionist note now that templates are reviewed
-    # + normalized, so the note can reference the FINAL macros + meals
-    # the user will actually see, plus any reviewer corrections. Falls
-    # back to whatever the assembler produced if this call fails.
-    try:
-        grounded_note = await asyncio.to_thread(
-            _generate_nutritionist_note,
-            client,
-            req,
-            {"nutrition_plans": plans_list},
-            nutrition_target_macros,
-            _nutrition_review_summary,
-            _m,
-        )
-        if grounded_note:
-            nutrition_data["nutritionistNote"] = grounded_note
-            print(f"[plan-gen] grounded nutritionist note generated ({len(grounded_note)} chars)")
-            print(f"[plan-gen] note preview: {grounded_note[:200]}...")
-        else:
-            print("[plan-gen] grounded nutritionist note returned empty — keeping assembler's note")
-    except Exception as exc:
-        import traceback
-        print(f"[plan-gen] grounded nutritionist note FAILED: {exc}")
-        traceback.print_exc()
+    nutrition_data["nutritionistNote"] = ""
 
     # Stamp the current planner version onto the workout plan dict so
     # clients can detect staleness directly off the returned payload.
@@ -2852,9 +2812,8 @@ async def run_workout_only_generation(
     """Shared workout-only generator — callable from sync endpoint and job worker.
 
     Same deterministic-planner pipeline as `run_full_plan_generation`.
-    The trainer note is generated by a small AI call that sees the
-    already-built plan; failures there are non-fatal and return an empty
-    string."""
+    Trainer copy notes are no longer generated; the field remains empty for
+    response compatibility."""
     print(f"[plan-gen workout] goal={plan_req.goal}, days={plan_req.daysPerWeek}")
     # Wrap the deterministic+review+regenerate pipeline in a thread so
     # its internal SYNC OpenAI calls (plan_review, ai_regenerate) don't
@@ -2863,14 +2822,7 @@ async def run_workout_only_generation(
     # matching note in `run_full_plan_generation`.
     workout_data = await asyncio.to_thread(_build_deterministic_workout, plan_req, db, user_id)
 
-    api_key = get_openai_api_key()
-    note = ""
-    if api_key:
-        client = OpenAI(api_key=api_key)
-        note = await asyncio.to_thread(
-            _generate_trainer_note, client, plan_req, workout_data, model_plan_update(),
-        )
-    workout_data["trainerNote"] = note
+    workout_data["trainerNote"] = ""
     # Stamp the current planner version onto the plan itself so clients
     # can detect staleness without a DB round-trip. Mirrors the row we
     # write below into `workout_plans`.
@@ -2937,7 +2889,6 @@ async def run_nutrition_only_generation(
     if not api_key:
         raise ValueError("OpenAI API key not configured")
     client = OpenAI(api_key=api_key)
-    _m = model_plan_update()
     print(f"[plan-gen nutrition] goal={plan_req.goal}, foods={len(plan_req.foodsAvailable)}")
     foods_for_enrichment = food_names_for_generation(plan_req, plan_req.foodsAvailable)
     enriched = await asyncio.to_thread(
@@ -2977,28 +2928,7 @@ async def run_nutrition_only_generation(
             summary = _normalize_template_to_target(np_, t_kcal, t_prot, t_carbs, t_fat)
             if summary:
                 print(f"[plan-gen nutrition] normalized template {idx}: {summary}")
-    # ── Grounded nutritionist note (same as full plan gen path) ──
-    # Without this, nutrition-only regens keep the skeleton AI's generic
-    # note, which doesn't cite actual numbers, nutrients, or supplements.
-    try:
-        _focused = (
-            getattr(plan_req.goalSelection, "targetFocus", None)
-            if plan_req.goalSelection else plan_req.focusedMuscleGroup
-        )
-        grounded_note = await asyncio.to_thread(
-            _generate_nutritionist_note,
-            client,
-            plan_req,
-            {"nutrition_plans": plans_list, "supplementStack": nutrition_data.get("supplementStack", [])},
-            nutrition_target_macros,
-            [],  # no review summary on nutrition-only path
-            _m,
-        )
-        if grounded_note:
-            nutrition_data["nutritionistNote"] = grounded_note
-            print(f"[plan-gen nutrition] grounded note generated ({len(grounded_note)} chars)")
-    except Exception as exc:
-        print(f"[plan-gen nutrition] grounded note skipped: {exc}")
+    nutrition_data["nutritionistNote"] = ""
 
     # Stamp each template with the current planner version so the client
     # can detect staleness off the returned payload — mirrors the

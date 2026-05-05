@@ -136,21 +136,30 @@ def _call_ai(prompt: str) -> dict | None:
     """Synchronous AI call. Returns parsed JSON or None on failure.
     Errors are logged + non-fatal — caller falls through to no AI recs."""
     try:
-        from app.routers.ai.utils import get_openai_api_key, get_chat_model
+        from app.routers.ai.utils import (
+            _build_chat_kwargs,
+            _chat_create,
+            get_openai_api_key,
+            model_chat,
+        )
         api_key = get_openai_api_key()
         if not api_key:
             return None
         from openai import OpenAI
         client = OpenAI(api_key=api_key)
-        resp = client.chat.completions.create(
-            model=get_chat_model(),
-            messages=[
-                {"role": "system", "content": "You return only valid JSON. No prose, no markdown fences."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-            response_format={"type": "json_object"},
-            timeout=30,
+        messages = [
+            {"role": "system", "content": "You return only valid JSON. No prose, no markdown fences."},
+            {"role": "user", "content": prompt},
+        ]
+        kwargs = _build_chat_kwargs(
+            model_chat(),
+            messages,
+            max_tokens=900,
+            timeout_secs=30,
+        )
+        resp = _chat_create(
+            client,
+            **kwargs,
         )
         text = resp.choices[0].message.content or "{}"
         return json.loads(text)

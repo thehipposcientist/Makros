@@ -441,6 +441,13 @@ def get_my_profile(
             profile.updated_at = datetime.now(timezone.utc)
             session.add(profile)
 
+    _promote_latest_weight_entry_to_profile(session, current_user.id)
+    profile = session.exec(
+        select(UserProfile).where(UserProfile.user_id == current_user.id)
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
     coaching = _coaching_state(session, current_user.id)
     session.add(coaching)
     social_profile = session.exec(

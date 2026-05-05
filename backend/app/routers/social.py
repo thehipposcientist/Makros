@@ -13,14 +13,14 @@ from app.database import get_session
 from sqlalchemy import func as sa_func
 from app.models import (
     User, UserSocialProfile, Friendship, UserReport, WeeklyDigestCache, UserGoal,
-    ActivityFeedItem, FeedLike,
+    ActivityFeedItem, FeedLike, SocialNotification,
 )
 from app.services.social.digest import compute_digest, week_start_for, _accepted_friend_ids
 
 router = APIRouter(prefix="/social", tags=["social"])
 _SOCIAL_FEED_FLAG = os.getenv("SOCIAL_FEED_ENABLED", "1").strip().lower()
 SOCIAL_FEED_ENABLED = _SOCIAL_FEED_FLAG not in {"0", "false", "no", "off"}
-FEED_EVENT_TYPES = ("workout_completed", "workout_post")
+FEED_EVENT_TYPES = ("workout_completed", "workout_post", "pr_achieved")
 
 
 # ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -115,6 +115,25 @@ class SearchHit(BaseModel):
     avatar_url: str | None
 
 
+class SocialNotificationRead(BaseModel):
+    id: int
+    notification_type: str
+    subject_type: str
+    subject_id: int
+    actor_user_id: int
+    actor_username: str
+    actor_display_name: str | None
+    actor_avatar_url: str | None
+    payload: dict
+    read_at: datetime | None
+    created_at: datetime
+
+
+class SocialNotificationsRead(BaseModel):
+    items: list[SocialNotificationRead]
+    unread_count: int
+
+
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def _canonical_pair(a: int, b: int) -> tuple[int, int]:
@@ -186,6 +205,110 @@ def _hydrate_friend(db: Session, viewer_id: int, other_id: int, friendship_id: i
         last_active_within_48h=active_48h,
         streak=streak,
     )
+
+
+def _create_social_notification(
+    db: Session,
+    *,
+    user_id: int,
+    actor_user_id: int,
+    notification_type: str,
+    subject_type: str,
+    subject_id: int,
+    payload: dict | None = None,
+) -> SocialNotification | None:
+    if user_id == actor_user_id:
+        return None
+    existing = db.exec(
+        select(SocialNotification).where(
+            SocialNotification.user_id == user_id,
+            SocialNotification.actor_user_id == actor_user_id,
+            SocialNotification.notification_type == notification_type,
+            SocialNotification.subject_type == subject_type,
+            SocialNotification.subject_id == subject_id,
+        )
+    ).first()
+    if existing:
+        return existing
+    n = SocialNotification(
+        user_id=user_id,
+        actor_user_id=actor_user_id,
+        notification_type=notification_type,
+        subject_type=subject_type,
+        subject_id=subject_id,
+        payload=payload or {},
+    )
+    db.add(n)
+    return n
+
+
+def _feed_notification_payload(item: ActivityFeedItem) -> dict:
+    clean = _sanitize_feed_payload_for_read(item.event_type, item.payload)
+    payload: dict = {
+        "feed_item_id": item.id,
+        "event_type": item.event_type,
+    }
+    if item.event_type == "workout_post":
+        summary = clean.get("workout_summary") if isinstance(clean.get("workout_summary"), dict) else {}
+        if clean.get("caption"):
+            payload["caption"] = str(clean["caption"])[:80]
+    else:
+        summary = clean
+    if isinstance(summary, dict):
+        for key in ("focus", "date"):
+            value = summary.get(key)
+            if isinstance(value, str) and value:
+                payload[key] = value
+    return payload
+
+
+def _notification_unread_count(db: Session, user_id: int) -> int:
+    value = db.exec(
+        select(sa_func.count(SocialNotification.id)).where(
+            SocialNotification.user_id == user_id,
+            SocialNotification.read_at.is_(None),  # type: ignore[union-attr]
+        )
+    ).first()
+    return int(value or 0)
+
+
+def _hydrate_notifications(db: Session, rows: list[SocialNotification]) -> list[SocialNotificationRead]:
+    if not rows:
+        return []
+    from sqlmodel import col
+
+    actor_ids = list({r.actor_user_id for r in rows})
+    users_by_id = {
+        u.id: u for u in db.exec(
+            select(User)
+            .where(col(User.id).in_(actor_ids))
+            .where(User.is_active == True)  # noqa: E712
+        ).all()
+    }
+    profs_by_id = {
+        p.user_id: p for p in db.exec(
+            select(UserSocialProfile).where(col(UserSocialProfile.user_id).in_(actor_ids))
+        ).all()
+    }
+    out: list[SocialNotificationRead] = []
+    for row in rows:
+        actor = users_by_id.get(row.actor_user_id)
+        prof = profs_by_id.get(row.actor_user_id)
+        username = actor.username if actor else "unknown"
+        out.append(SocialNotificationRead(
+            id=row.id,
+            notification_type=row.notification_type,
+            subject_type=row.subject_type,
+            subject_id=row.subject_id,
+            actor_user_id=row.actor_user_id,
+            actor_username=username,
+            actor_display_name=(prof.display_name if prof and prof.display_name else username),
+            actor_avatar_url=_avatar_url(prof),
+            payload=row.payload if isinstance(row.payload, dict) else {},
+            read_at=row.read_at,
+            created_at=row.created_at,
+        ))
+    return out
 
 
 # ─── /social/me ──────────────────────────────────────────────────────────────
@@ -382,6 +505,15 @@ def request_friend(
                 existing.status = "accepted"
                 existing.accepted_at = datetime.now(timezone.utc)
                 db.add(existing)
+                _create_social_notification(
+                    db,
+                    user_id=target.id,
+                    actor_user_id=current_user.id,
+                    notification_type="friend_accept",
+                    subject_type="friendship",
+                    subject_id=existing.id,
+                    payload={"friendship_id": existing.id},
+                )
                 _invalidate_digest(db, existing.user_a_id, existing.user_b_id)
                 db.commit()
             prof = db.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == target.id)).first()
@@ -403,6 +535,16 @@ def request_friend(
         requested_by=current_user.id,
     )
     db.add(fs)
+    db.flush()
+    _create_social_notification(
+        db,
+        user_id=target.id,
+        actor_user_id=current_user.id,
+        notification_type="friend_request",
+        subject_type="friendship",
+        subject_id=fs.id,
+        payload={"friendship_id": fs.id},
+    )
     _invalidate_digest(db, current_user.id, target.id)
     db.commit()
     db.refresh(fs)
@@ -452,6 +594,15 @@ def accept_friend(
     fs.status = "accepted"
     fs.accepted_at = datetime.now(timezone.utc)
     db.add(fs)
+    _create_social_notification(
+        db,
+        user_id=fs.requested_by,
+        actor_user_id=current_user.id,
+        notification_type="friend_accept",
+        subject_type="friendship",
+        subject_id=fs.id,
+        payload={"friendship_id": fs.id},
+    )
     _invalidate_digest(db, fs.user_a_id, fs.user_b_id)
     db.commit()
     return {"ok": True}
@@ -609,6 +760,67 @@ def get_digest(
     return payload
 
 
+# ─── Notifications ──────────────────────────────────────────────────────────
+
+@router.get("/notifications", response_model=SocialNotificationsRead)
+def list_notifications(
+    limit: int = 30,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    rows = db.exec(
+        select(SocialNotification)
+        .where(SocialNotification.user_id == current_user.id)
+        .order_by(SocialNotification.created_at.desc())  # type: ignore[union-attr]
+        .limit(max(1, min(limit, 50)))
+    ).all()
+    return SocialNotificationsRead(
+        items=_hydrate_notifications(db, rows),
+        unread_count=_notification_unread_count(db, current_user.id),
+    )
+
+
+@router.post("/notifications/{notification_id}/read")
+def mark_notification_read(
+    notification_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    n = db.exec(
+        select(SocialNotification).where(
+            SocialNotification.id == notification_id,
+            SocialNotification.user_id == current_user.id,
+        )
+    ).first()
+    if not n:
+        raise HTTPException(404, "notification not found")
+    if n.read_at is None:
+        n.read_at = datetime.now(timezone.utc)
+        db.add(n)
+        db.commit()
+    return {"ok": True}
+
+
+@router.post("/notifications/read-all")
+def mark_all_notifications_read(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    rows = db.exec(
+        select(SocialNotification).where(
+            SocialNotification.user_id == current_user.id,
+            SocialNotification.read_at.is_(None),  # type: ignore[union-attr]
+        )
+    ).all()
+    now = datetime.now(timezone.utc)
+    for n in rows:
+        n.read_at = now
+        db.add(n)
+    if rows:
+        db.commit()
+    return {"ok": True, "updated": len(rows)}
+
+
 # ─── Activity Feed ──────────────────────────────────────────────────────────
 
 class FeedItemRead(BaseModel):
@@ -657,6 +869,14 @@ def _sanitize_feed_payload_for_read(event_type: str, payload: dict | None) -> di
             "date": str(raw.get("date") or "")[:10],
             "exercise_count": int(raw.get("exercise_count") or len(exercises)),
             "exercises": exercises,
+        }
+
+    if event_type == "pr_achieved":
+        return {
+            "exercise": str(raw.get("exercise") or "Exercise")[:80],
+            "pr_type": str(raw.get("pr_type") or "")[:40],
+            "unit": str(raw.get("unit") or "lbs")[:20],
+            "date": str(raw.get("date") or "")[:10],
         }
 
     return {}
@@ -975,5 +1195,14 @@ def toggle_like(
         db.commit()
         return {"liked": False}
     db.add(FeedLike(user_id=current_user.id, feed_item_id=item_id))
+    _create_social_notification(
+        db,
+        user_id=item.user_id,
+        actor_user_id=current_user.id,
+        notification_type="feed_like",
+        subject_type="feed_item",
+        subject_id=item.id,
+        payload=_feed_notification_payload(item),
+    )
     db.commit()
     return {"liked": True}

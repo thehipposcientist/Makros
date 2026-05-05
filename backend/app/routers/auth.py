@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from app.database import get_session
-from app.entitlements import default_subscription_tier
+from app.entitlements import beta_full_access_enabled, default_subscription_tier
 from app.limiter import limiter
 from app.logging_setup import get_logger, set_request_context
 from app.models import User, UserCreate, UserRead, LoginRequest, Token
@@ -57,6 +57,18 @@ def _user_read(user: User) -> UserRead:
         ai_disclaimer_version=user.ai_disclaimer_version,
         subscription_tier=user.subscription_tier or "free",
     )
+
+
+def _ensure_beta_subscription_tier(user: User, session: Session) -> User:
+    if not beta_full_access_enabled():
+        return user
+    if (user.subscription_tier or "").strip().lower() == "pro":
+        return user
+    user.subscription_tier = "pro"
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
 
 
 def _normalize_answer(ans: str) -> str:
@@ -602,8 +614,11 @@ def login_with_google(
 
 
 @router.get("/me", response_model=UserRead)
-def me(current_user: User = Depends(get_current_user)):
-    return _user_read(current_user)
+def me(
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    return _user_read(_ensure_beta_subscription_tier(current_user, session))
 
 
 class UpdateEmailBody(BaseModel):

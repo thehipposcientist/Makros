@@ -1775,6 +1775,7 @@ def list_body_scans(
 
 class GoalMatchRequest(_PydanticBaseModel):
     description: str
+    available_goal_ids: list[str] | None = None
 
 
 _GOAL_MATCH_LABELS: dict[str, str] = {
@@ -1866,37 +1867,103 @@ _GOAL_MATCH_LABELS: dict[str, str] = {
     "maintain": "Maintain fitness",
 }
 
+_DEFAULT_SIGNUP_GOAL_IDS = (
+    "build_muscle",
+    "body_recomp",
+    "lose_fat",
+    "build_strength",
+    "improve_cardio",
+    "improve_athleticism",
+    "hyrox",
+    "longevity",
+    "maintain",
+    "train_5k",
+    "train_10k",
+    "train_half",
+    "train_marathon",
+)
 
-def _deterministic_goal_match(description: str) -> dict:
+_GOAL_MATCH_PARENT_ORDER = (
+    "body_recomp",
+    "build_muscle",
+    "lose_fat",
+    "build_strength",
+    "improve_cardio",
+    "improve_athleticism",
+    "hyrox",
+    "longevity",
+    "maintain",
+)
+
+
+def _goal_match_allowed_ids(available_goal_ids: list[str] | None = None) -> list[str]:
+    source = available_goal_ids or list(_DEFAULT_SIGNUP_GOAL_IDS)
+    allowed: list[str] = []
+    for raw in source:
+        goal_id = str(raw).strip()
+        if goal_id in _GOAL_MATCH_LABELS and goal_id not in allowed:
+            allowed.append(goal_id)
+    return allowed or list(_DEFAULT_SIGNUP_GOAL_IDS)
+
+
+def _goal_match_result(
+    goal_id: str,
+    reason: str,
+    allowed_goal_ids: list[str],
+    *,
+    fallback_goal_id: str | None = None,
+    fallback_reason: str | None = None,
+) -> dict:
+    if goal_id in allowed_goal_ids:
+        return {"goal_id": goal_id, "reason": reason}
+    if fallback_goal_id and fallback_goal_id in allowed_goal_ids:
+        return {"goal_id": fallback_goal_id, "reason": fallback_reason or reason}
+    for candidate in _GOAL_MATCH_PARENT_ORDER:
+        if candidate in allowed_goal_ids:
+            return {"goal_id": candidate, "reason": fallback_reason or reason}
+    return {"goal_id": allowed_goal_ids[0], "reason": fallback_reason or reason}
+
+
+def _deterministic_goal_match(description: str, available_goal_ids: list[str] | None = None) -> dict:
+    allowed_goal_ids = _goal_match_allowed_ids(available_goal_ids)
     n = (description or "").lower()
-    checks: list[tuple[str, str, str]] = [
-        (r"\bmarathon\b", "train_marathon", "Matched your marathon-specific running goal."),
-        (r"\bhalf\b.*\bmarathon\b|\b13\.1\b", "train_half", "Matched your half-marathon running goal."),
-        (r"\b10k\b", "train_10k", "Matched your 10K running goal."),
-        (r"\b5k\b", "train_5k", "Matched your 5K running goal."),
-        (r"\b(peloton|spin|cycling|bike|biking|ride|riding)\b", "cycling_endurance", "Matched your cycling preference."),
-        (r"\b(run|runner|running|jog|jogging)\b", "running_fitness", "Matched your running preference."),
-        (r"\b(row|rowing|erg)\b", "rowing_endurance", "Matched your rowing preference."),
-        (r"\b(swim|swimming)\b", "swimming_endurance", "Matched your swimming preference."),
-        (r"\b(hike|hiking|trail)\b", "hiking_endurance", "Matched your hiking preference."),
-        (r"\b(vo2|max oxygen)\b", "improve_vo2", "Matched your VO2 max focus."),
-        (r"\b(cardio|endurance|stamina|conditioning)\b", "improve_cardio", "Matched your cardio and endurance focus."),
-        (r"\b(hyrox|deka|hybrid race)\b", "hyrox", "Matched your hybrid-race goal."),
-        (r"\b(athletic|basketball|soccer|tennis|sport|agility|vertical|power|speed)\b", "improve_athleticism", "Matched your athletic performance focus."),
-        (r"\b(powerlifting|squat|bench|deadlift|1rm|one rep|max strength)\b", "powerlifting", "Matched your compound-strength focus."),
-        (r"\b(strength|stronger|get strong)\b", "build_strength", "Matched your strength goal."),
-        (r"\b(glute|booty)\b", "build_glutes", "Matched your glute-building goal."),
-        (r"\b(shoulder|arms|upper body|lower body)\b", "improve_aesthetics", "Matched your physique-priority goal."),
-        (r"\b(recomp|tone|toned|lose fat.*muscle|muscle.*lose fat)\b", "body_recomp", "Matched your recomposition goal."),
-        (r"\b(lose|fat loss|weight loss|slim|belly|cut|lean)\b", "lose_fat", "Matched your fat-loss goal."),
-        (r"\b(muscle|bulk|size|gain mass|get bigger)\b", "build_muscle", "Matched your muscle-building goal."),
-        (r"\b(longevity|healthspan|aging|heart health|metabolic)\b", "longevity", "Matched your healthspan goal."),
-        (r"\b(beginner|habit|consistent|consistency|busy|quick|home)\b", "build_consistency", "Matched your consistency-focused goal."),
+    checks: list[tuple[str, str, str, str | None, str | None]] = [
+        (r"\bmarathon\b", "train_marathon", "Matched your marathon-specific running goal.", "improve_cardio", "Matched your running and endurance goal."),
+        (r"\bhalf\b.*\bmarathon\b|\b13\.1\b", "train_half", "Matched your half-marathon running goal.", "improve_cardio", "Matched your running and endurance goal."),
+        (r"\b10k\b", "train_10k", "Matched your 10K running goal.", "improve_cardio", "Matched your running and endurance goal."),
+        (r"\b5k\b", "train_5k", "Matched your 5K running goal.", "improve_cardio", "Matched your running and endurance goal."),
+        (r"\b(peloton|spin|cycling|bike|biking|ride|riding)\b", "improve_cardio", "Matched your cardio and endurance focus.", None, None),
+        (r"\b(run|runner|running|jog|jogging)\b", "improve_cardio", "Matched your running and endurance focus.", None, None),
+        (r"\b(row|rowing|erg)\b", "improve_cardio", "Matched your cardio and endurance focus.", None, None),
+        (r"\b(swim|swimming)\b", "improve_cardio", "Matched your cardio and endurance focus.", None, None),
+        (r"\b(hike|hiking|trail)\b", "improve_cardio", "Matched your cardio and endurance focus.", None, None),
+        (r"\b(vo2|max oxygen)\b", "improve_cardio", "Matched your cardio and endurance focus.", None, None),
+        (r"\b(cardio|endurance|stamina|conditioning)\b", "improve_cardio", "Matched your cardio and endurance focus.", None, None),
+        (r"\b(hyrox|deka|hybrid race)\b", "hyrox", "Matched your hybrid-race goal.", "improve_athleticism", "Matched your athletic performance focus."),
+        (r"\b(athletic|basketball|soccer|tennis|sport|agility|vertical|power|speed)\b", "improve_athleticism", "Matched your athletic performance focus.", None, None),
+        (r"\b(powerlifting|squat|bench|deadlift|1rm|one rep|max strength)\b", "build_strength", "Matched your compound-strength focus.", None, None),
+        (r"\b(strength|stronger|get strong)\b", "build_strength", "Matched your strength goal.", None, None),
+        (r"\b(glutes?|booty|shoulders?|arms|upper body|lower body)\b", "build_muscle", "Matched your muscle-building goal.", None, None),
+        (r"\b(recomp|tone|toned|lose fat.*muscle|muscle.*lose fat)\b", "body_recomp", "Matched your recomposition goal.", None, None),
+        (r"\b(lose|fat loss|weight loss|slim|belly|cut|lean)\b", "lose_fat", "Matched your fat-loss goal.", None, None),
+        (r"\b(muscle|bulk|size|gain mass|get bigger)\b", "build_muscle", "Matched your muscle-building goal.", None, None),
+        (r"\b(longevity|healthspan|aging|heart health|metabolic)\b", "longevity", "Matched your healthspan goal.", "maintain", "Matched your long-term health goal."),
+        (r"\b(beginner|habit|consistent|consistency|busy|quick|home|maintain|stay active)\b", "maintain", "Matched your consistency-focused goal.", None, None),
     ]
-    for pattern, goal_id, reason in checks:
+    for pattern, goal_id, reason, fallback_goal_id, fallback_reason in checks:
         if re.search(pattern, n):
-            return {"goal_id": goal_id, "reason": reason}
-    return {"goal_id": "body_recomp", "reason": "Defaulted to body recomposition because it is the safest balanced starting point."}
+            return _goal_match_result(
+                goal_id,
+                reason,
+                allowed_goal_ids,
+                fallback_goal_id=fallback_goal_id,
+                fallback_reason=fallback_reason,
+            )
+    return _goal_match_result(
+        "body_recomp",
+        "Defaulted to body recomposition because it is the safest balanced starting point.",
+        allowed_goal_ids,
+    )
 
 
 @router.post("/match-goal")
@@ -1907,21 +1974,28 @@ def match_goal(
 
     No auth required — used during onboarding before the user has an account.
     Cheap call: ~100 input / ~50 output tokens."""
+    allowed_goal_ids = _goal_match_allowed_ids(body.available_goal_ids)
     api_key = get_openai_api_key()
     if not api_key:
-        return _deterministic_goal_match(body.description)
+        return _deterministic_goal_match(body.description, allowed_goal_ids)
 
-    goals_list = "\n".join(f"{goal_id}: {label}" for goal_id, label in _GOAL_MATCH_LABELS.items())
+    goals_list = "\n".join(f"{goal_id}: {_GOAL_MATCH_LABELS[goal_id]}" for goal_id in allowed_goal_ids)
     try:
         client = OpenAI(api_key=api_key)
         resp = client.chat.completions.create(
             model=model_chat(),
             messages=[
-                {"role": "system", "content": "You match user fitness descriptions to goals. Return JSON only."},
+                {"role": "system", "content": (
+                    "You match user fitness descriptions to the app's signup goals. "
+                    "Return JSON only. You must choose exactly one listed goal_id; "
+                    "do not invent goals or use hidden/internal/unsupported goal ids."
+                )},
                 {"role": "user", "content": (
                     f"The user said: \"{body.description}\"\n\n"
-                    f"Available goals:\n{goals_list}\n"
-                    "Pick the single best goal_id. Also return a one-sentence reason.\n"
+                    f"Available signup goals, and the only valid goal_id choices:\n{goals_list}\n"
+                    "Pick the single best listed goal_id. If the user asks for a more specific "
+                    "goal that is not listed, choose the closest listed parent goal. "
+                    "Also return a one-sentence reason.\n"
                     '{"goal_id": "...", "reason": "..."}'
                 )},
             ],
@@ -1932,15 +2006,14 @@ def match_goal(
         result = json.loads(resp.choices[0].message.content or "{}")
         goal_id = result.get("goal_id", "body_recomp")
         reason = result.get("reason", "")
-        valid_ids = set(_GOAL_MATCH_LABELS)
-        if goal_id not in valid_ids:
-            fallback = _deterministic_goal_match(body.description)
+        if goal_id not in allowed_goal_ids:
+            fallback = _deterministic_goal_match(body.description, allowed_goal_ids)
             goal_id = fallback["goal_id"]
             reason = fallback["reason"]
         return {"goal_id": goal_id, "reason": reason}
     except Exception as e:
         print(f"[match-goal] failed: {e}")
-        return _deterministic_goal_match(body.description)
+        return _deterministic_goal_match(body.description, allowed_goal_ids)
 
 
 @router.post("/parse-meal-text")

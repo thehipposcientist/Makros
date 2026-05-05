@@ -154,6 +154,7 @@ const USER_SCOPED_KEYS = [
   'groceryRemoved_v2',
   'mealCheckTimestamps',
   'periodSymptomLogs_v1',
+  'hydrationByDate_v1',
   'injury_checkins_v1',
   'plateauDismissedAt',
   'emailBannerDismissedAt',
@@ -228,6 +229,7 @@ const SYNCED_STATE_KEYS = [
   // workoutSummaries excluded — local-only derivative of workoutHistory
   'preservedCompletedWorkouts', 'preservedCheckedMeals',
   'healthSummary', 'healthScoreResult',
+  'hydrationByDate_v1',
 ];
 
 function workoutCompletionKey(dateISO?: string | null, focus?: string | null): string | null {
@@ -363,7 +365,7 @@ import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem }
 import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, getAIRemainingWeekNutritionPlan, repairPlanWeekInjuryConflicts, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName, saveWeightEntryAPI } from '../src/services/api';
 import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday, clearSavedNutritionPlansForDates, clearPreservedMealsForDates, clearMealChecksForDates } from '../src/utils/mealTracker';
 import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
-import { encodePulledStateValueForStorage, preserveLocalPreferredSplitWhenRemoteMissing } from '../src/utils/profileCache';
+import { encodePulledStateValueForStorage, mergePulledUserProfileWithCurrentStats, preserveLocalPreferredSplitWhenRemoteMissing } from '../src/utils/profileCache';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
@@ -726,14 +728,10 @@ export default function Index() {
       ]);
       await AsyncStorage.setItem('cacheVersion', CACHE_VERSION);
     }
-    // Load persisted coach notes
-    const [tn, nn, ss] = await Promise.all([
-      AsyncStorage.getItem('trainerNote'),
-      AsyncStorage.getItem('nutritionistNote'),
-      AsyncStorage.getItem('supplementStack'),
-    ]);
-    if (tn) setTrainerNote(tn);
-    if (nn) setNutritionistNote(nn);
+    await AsyncStorage.multiRemove(['trainerNote', 'nutritionistNote']);
+    setTrainerNote(null);
+    setNutritionistNote(null);
+    const ss = await AsyncStorage.getItem('supplementStack');
     if (ss) { try { setSupplementStack(JSON.parse(ss)); } catch {} }
 
     // Restore active workout if user was mid-session when the app was killed.
@@ -860,6 +858,9 @@ export default function Index() {
       else if (hasWorkout) await clearWorkoutCache();
       else if (hasNutrition) await clearMealCache();
     } catch {}
+    await AsyncStorage.multiRemove(['trainerNote', 'nutritionistNote']);
+    setTrainerNote(null);
+    setNutritionistNote(null);
     if (aiPlans?.workout_plan) {
       await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
       await AsyncStorage.setItem('_skipNextPlanHydration', '1');
@@ -873,8 +874,6 @@ export default function Index() {
         const todayKey = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
         await AsyncStorage.removeItem(`freshDayGenerated_${todayKey}`);
       } catch {}
-      const tnNote = aiPlans.trainerNote ?? aiPlans.workout_plan?.trainerNote;
-      if (tnNote) { await AsyncStorage.setItem('trainerNote', tnNote); setTrainerNote(tnNote); }
     }
     // Canonical nutrition shape: `nutrition_plans` as a dynamic-length array.
     // Fall back to the legacy A/B/C keys if the server still uses the old
@@ -917,7 +916,6 @@ export default function Index() {
       if (plansList[2]) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(plansList[2]));
       else await AsyncStorage.removeItem('aiNutritionPlanC');
     }
-    if (aiPlans?.nutritionistNote) { await AsyncStorage.setItem('nutritionistNote', aiPlans.nutritionistNote); setNutritionistNote(aiPlans.nutritionistNote); }
     if (aiPlans?.supplementStack?.length) {
       await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
       setSupplementStack(aiPlans.supplementStack);
@@ -949,10 +947,8 @@ export default function Index() {
       if (plansList[2]) await AsyncStorage.setItem('aiNutritionPlanC', JSON.stringify(plansList[2]));
       else await AsyncStorage.removeItem('aiNutritionPlanC');
     }
-    if (aiPlans?.nutritionistNote) {
-      await AsyncStorage.setItem('nutritionistNote', aiPlans.nutritionistNote);
-      setNutritionistNote(aiPlans.nutritionistNote);
-    }
+    await AsyncStorage.removeItem('nutritionistNote');
+    setNutritionistNote(null);
     if (aiPlans?.supplementStack?.length) {
       await AsyncStorage.setItem('supplementStack', JSON.stringify(aiPlans.supplementStack));
       setSupplementStack(aiPlans.supplementStack);
@@ -1168,6 +1164,9 @@ export default function Index() {
         customFoods: remote.customFoods?.length ? remote.customFoods : (profile.customFoods ?? []),
         savedMeals: remote.savedMeals?.length ? remote.savedMeals : (profile.savedMeals ?? []),
       } : remote;
+      if (localProfile) {
+        profile = mergePulledUserProfileWithCurrentStats(profile, localProfile) as UserProfile;
+      }
       profile = preserveLocalPreferredSplitWhenRemoteMissing(profile, localProfile) as UserProfile;
       await AsyncStorage.setItem('userProfile', JSON.stringify(profile));
     }
@@ -1205,15 +1204,12 @@ export default function Index() {
 
     // Rehydrate in-memory caches that sign-out cleared — these live in
     // AsyncStorage persistently, but the React state got reset when the
-    // user signed out, so the coach notes / supplements need re-setting.
+    // user signed out, so supplements need re-setting.
     try {
-      const [tn, nn, ss] = await Promise.all([
-        AsyncStorage.getItem('trainerNote'),
-        AsyncStorage.getItem('nutritionistNote'),
-        AsyncStorage.getItem('supplementStack'),
-      ]);
-      if (tn) setTrainerNote(tn);
-      if (nn) setNutritionistNote(nn);
+      await AsyncStorage.multiRemove(['trainerNote', 'nutritionistNote']);
+      setTrainerNote(null);
+      setNutritionistNote(null);
+      const ss = await AsyncStorage.getItem('supplementStack');
       if (ss) { try { setSupplementStack(JSON.parse(ss)); } catch {} }
     } catch {}
 

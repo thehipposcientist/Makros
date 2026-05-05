@@ -163,6 +163,11 @@ export const ENDURANCE_EVENT_GOALS = [
   { id: 'train_marathon',   label: 'Marathon', targetEvent: 'Marathon' },
 ] as const;
 
+export const SIGNUP_GOAL_MATCH_IDS = Array.from(new Set([
+  ...LAUNCH_GOALS.map(g => g.id),
+  ...ENDURANCE_EVENT_GOALS.map(g => g.id),
+]));
+
 const ENDURANCE_EVENT_GOAL_SET = new Set<string>(ENDURANCE_EVENT_GOALS.map(g => g.id));
 
 export function isEnduranceEventGoal(goalId: string): boolean {

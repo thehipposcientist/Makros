@@ -1487,6 +1487,33 @@ class FeedLike(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class SocialNotification(SQLModel, table=True):
+    __tablename__ = "social_notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "actor_user_id",
+            "notification_type",
+            "subject_type",
+            "subject_id",
+            name="uq_social_notification_actor_subject",
+        ),
+        Index("ix_social_notifications_user_created", "user_id", "created_at"),
+        Index("ix_social_notifications_user_read", "user_id", "read_at"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    actor_user_id: int = Field(foreign_key="user.id", index=True)
+    # friend_request | friend_accept | feed_like
+    notification_type: str = Field(index=True)
+    # friendship | feed_item
+    subject_type: str = Field(index=True)
+    subject_id: int = Field(index=True)
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    read_at: datetime | None = Field(default=None, index=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
 # ─── Request / Response schemas ───────────────────────────────────────────────
 
 class UserCreate(SQLModel):

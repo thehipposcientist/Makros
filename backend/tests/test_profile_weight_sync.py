@@ -147,6 +147,29 @@ def test_profile_me_returns_dumped_profile_payload():
     _ok("profile/me returns concrete profile, goal, preferences, and coaching fields")
 
 
+def test_profile_me_promotes_latest_weight_entry_before_payload():
+    """Profile reads should self-heal if a weight entry is newer than profile.weight_lbs."""
+    print("\n[test] profile/me: latest weight entry is promoted before payload")
+    eng = _make_engine()
+    with Session(eng) as session:
+        user = _seed_user_profile(session, user_id=11, weight_lbs=181.5)
+        session.add(WeightEntry(
+            user_id=11,
+            entry_date=date.today(),
+            weight_lbs=174.2,
+            source="manual",
+            logged_at=datetime(2026, 5, 5, 9, 15, tzinfo=timezone.utc),
+        ))
+        session.commit()
+
+        payload = profile_router.get_my_profile(current_user=user, session=session)
+
+        assert payload["profile"]["weight_lbs"] == 174.2
+        assert _profile_weight(session, 11) == 174.2
+        assert payload["weight_entries"][-1]["weight_lbs"] == 174.2
+    _ok("profile/me self-heals profile weight from latest weight log")
+
+
 def test_onboarding_sync_keeps_unchanged_goal_idempotent():
     """Repeated profile syncs must not create fake UserGoal history rows."""
     print("\n[test] profile/onboarding: unchanged goal is idempotent")
@@ -443,6 +466,7 @@ def test_calorie_ranges_use_latest_weight_and_session_duration():
 
 cases = [
     test_profile_me_returns_dumped_profile_payload,
+    test_profile_me_promotes_latest_weight_entry_before_payload,
     test_onboarding_sync_keeps_unchanged_goal_idempotent,
     test_onboarding_sync_records_goal_history_only_on_change,
     test_onboarding_sync_updates_planner_preferences,

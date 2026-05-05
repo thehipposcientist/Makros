@@ -13,13 +13,11 @@ def tier_of(user: User | None) -> str:
 
 
 def beta_full_access_enabled() -> bool:
-    return os.getenv("BETA_FULL_ACCESS_ENABLED", "0").strip() == "1"
+    return os.getenv("BETA_FULL_ACCESS_ENABLED", "1").strip() == "1"
 
 
 def default_subscription_tier() -> str:
-    """Fail closed for new accounts unless the backend explicitly opts
-    into free beta access. The client beta flag only affects local UI
-    gates; server entitlements must be explicit."""
+    """Give beta signups Pro unless the backend explicitly opts out."""
     return "pro" if beta_full_access_enabled() else "free"
 
 

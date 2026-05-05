@@ -23,7 +23,10 @@ import {
   blockFriend,
   getSocialDigest,
   getSocialMe,
+  listSocialNotifications,
   listFriends,
+  markAllSocialNotificationsRead,
+  markSocialNotificationRead,
   rejectFriend,
   removeFriend,
   reportUser,
@@ -34,6 +37,7 @@ import {
   type SocialFriend,
   type SocialFriendsList,
   type SocialMe,
+  type SocialNotification,
   type SocialSearchHit,
 } from '../services/api';
 import SocialFeedView from './SocialFeedView';
@@ -49,6 +53,7 @@ interface Props {
    *  Used by the Friends tab so the content fills the tab area. */
   inline?: boolean;
   onViewFriend?: (userId: number, displayName: string, digestFriend?: import('../services/api').SocialDigestFriend) => void;
+  onSocialCountsChange?: (counts: { friends: number; pending: number; unread: number }) => void;
 }
 
 const goalLabel = (g: string | null | undefined): string => {
@@ -66,7 +71,57 @@ function e2eId(value: string | number | null | undefined): string {
     .replace(/^_+|_+$/g, '');
 }
 
-export default function FriendsModal({ visible, authToken, onClose, themeName, inline, onViewFriend }: Props) {
+type IoniconName = keyof typeof Ionicons.glyphMap;
+
+function formatNotificationTime(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '';
+  const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (diffSec < 60) return 'now';
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h`;
+  if (diffSec < 86400 * 7) return `${Math.floor(diffSec / 86400)}d`;
+  return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function notificationActorName(n: SocialNotification): string {
+  return n.actor_display_name || n.actor_username || 'Someone';
+}
+
+function notificationIconName(n: SocialNotification): IoniconName {
+  if (n.notification_type === 'friend_request') return 'person-add-outline';
+  if (n.notification_type === 'friend_accept') return 'people-outline';
+  if (n.notification_type === 'feed_like') return 'heart-outline';
+  return 'notifications-outline';
+}
+
+function notificationTitle(n: SocialNotification): string {
+  const name = notificationActorName(n);
+  if (n.notification_type === 'friend_request') return `${name} sent you a friend request`;
+  if (n.notification_type === 'friend_accept') return `${name} accepted your request`;
+  if (n.notification_type === 'feed_like') return `${name} liked your workout`;
+  return 'New social update';
+}
+
+function notificationBody(n: SocialNotification): string {
+  if (n.notification_type === 'friend_request') return 'Tap to review the request.';
+  if (n.notification_type === 'friend_accept') return "You're now connected on Social.";
+  if (n.notification_type === 'feed_like') {
+    const focus = n.payload?.focus;
+    return focus ? `${focus} got some love.` : 'Tap to jump back to Activity.';
+  }
+  return 'Tap to view Social.';
+}
+
+export default function FriendsModal({
+  visible,
+  authToken,
+  onClose,
+  themeName,
+  inline,
+  onViewFriend,
+  onSocialCountsChange,
+}: Props) {
   const theme = getTheme(themeName);
   const colors = theme.colors;
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -74,6 +129,10 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
   const [me, setMe] = useState<SocialMe | null>(null);
   const [list, setList] = useState<SocialFriendsList | null>(null);
   const [digest, setDigest] = useState<SocialDigest | null>(null);
+  const [notifications, setNotifications] = useState<SocialNotification[]>([]);
+  const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [notificationTrayOpen, setNotificationTrayOpen] = useState(false);
+  const [notificationActionPending, setNotificationActionPending] = useState<number | 'all' | null>(null);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
@@ -93,20 +152,34 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [m, l, d] = await Promise.allSettled([
+      const [m, l, d, n] = await Promise.allSettled([
         getSocialMe(authToken),
         listFriends(authToken),
         getSocialDigest(authToken),
+        listSocialNotifications(authToken),
       ]);
       if (m.status === 'fulfilled') setMe(m.value);
-      if (l.status === 'fulfilled') setList(l.value);
+      if (l.status === 'fulfilled') {
+        setList(l.value);
+      }
       if (d.status === 'fulfilled') setDigest(d.value);
+      if (n.status === 'fulfilled') {
+        setNotifications(n.value.items);
+        setUnreadNotifications(n.value.unread_count);
+      }
+      if (l.status === 'fulfilled' && n.status === 'fulfilled') {
+        onSocialCountsChange?.({
+          friends: l.value.friends.length,
+          pending: l.value.pending.filter(p => p.direction === 'incoming').length,
+          unread: n.value.unread_count,
+        });
+      }
     } catch {
       // silent — user sees empty state
     } finally {
       setLoading(false);
     }
-  }, [authToken]);
+  }, [authToken, onSocialCountsChange]);
 
   useEffect(() => {
     if (!visible && !inline) return;
@@ -332,6 +405,59 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
   const outgoing = list?.pending.filter((p) => p.direction === 'outgoing') ?? [];
   const friends = list?.friends ?? [];
 
+  const updateLocalUnread = useCallback(
+    (nextUnread: number, nextNotifications?: SocialNotification[]) => {
+      setUnreadNotifications(nextUnread);
+      if (nextNotifications) setNotifications(nextNotifications);
+      onSocialCountsChange?.({
+        friends: friends.length,
+        pending: incoming.length,
+        unread: nextUnread,
+      });
+    },
+    [friends.length, incoming.length, onSocialCountsChange],
+  );
+
+  const onNotificationPress = useCallback(
+    async (n: SocialNotification) => {
+      setNotificationActionPending(n.id);
+      try {
+        if (!n.read_at) {
+          await markSocialNotificationRead(authToken, n.id);
+          const updated = notifications.map(item =>
+            item.id === n.id ? { ...item, read_at: new Date().toISOString() } : item,
+          );
+          updateLocalUnread(Math.max(0, unreadNotifications - 1), updated);
+        }
+      } catch {
+        // Keep navigation responsive; the next refresh will reconcile.
+      } finally {
+        setNotificationActionPending(null);
+      }
+      if (n.notification_type === 'friend_request') {
+        setActiveTab('friends');
+        setNotificationTrayOpen(false);
+        return;
+      }
+      setActiveTab('activity');
+      setNotificationTrayOpen(false);
+    },
+    [authToken, notifications, unreadNotifications, updateLocalUnread],
+  );
+
+  const onMarkAllNotificationsRead = useCallback(async () => {
+    setNotificationActionPending('all');
+    try {
+      await markAllSocialNotificationsRead(authToken);
+      const now = new Date().toISOString();
+      updateLocalUnread(0, notifications.map(n => n.read_at ? n : { ...n, read_at: now }));
+    } catch (e: any) {
+      Alert.alert('Could not update notifications', e?.message ?? 'Try again');
+    } finally {
+      setNotificationActionPending(null);
+    }
+  }, [authToken, notifications, updateLocalUnread]);
+
   const summary = digest?.summary;
   const headlineLines: string[] = [];
   if (summary && summary.friend_count > 0) {
@@ -371,6 +497,96 @@ export default function FriendsModal({ visible, authToken, onClose, themeName, i
           </TouchableOpacity>
         </View>
       )}
+
+      <View style={styles.socialToolbar}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.toolbarLabel}>SOCIAL</Text>
+          <Text style={styles.toolbarMeta}>
+            {unreadNotifications > 0
+              ? `${unreadNotifications} new update${unreadNotifications === 1 ? '' : 's'}`
+              : incoming.length > 0
+                ? `${incoming.length} request${incoming.length === 1 ? '' : 's'} waiting`
+                : 'Activity, friends, and requests'}
+          </Text>
+        </View>
+        <TouchableOpacity
+          testID="social-notifications-toggle"
+          accessibilityLabel="Social notifications"
+          accessibilityRole="button"
+          accessibilityState={{ expanded: notificationTrayOpen }}
+          onPress={() => setNotificationTrayOpen(v => !v)}
+          style={[styles.notificationButton, notificationTrayOpen && styles.notificationButtonActive]}
+          activeOpacity={0.75}
+        >
+          <Ionicons
+            name={unreadNotifications > 0 ? 'notifications' : 'notifications-outline'}
+            size={18}
+            color={notificationTrayOpen ? colors.primary : colors.textSecondary}
+          />
+          {unreadNotifications > 0 ? (
+            <View style={styles.notificationBadge}>
+              <Text style={styles.notificationBadgeText}>
+                {unreadNotifications > 9 ? '9+' : unreadNotifications}
+              </Text>
+            </View>
+          ) : null}
+        </TouchableOpacity>
+      </View>
+
+      {notificationTrayOpen ? (
+        <View testID="social-notifications-panel" style={styles.notificationPanel}>
+          <View style={styles.notificationPanelHeader}>
+            <Text style={styles.notificationPanelTitle}>Notifications</Text>
+            {unreadNotifications > 0 ? (
+              <TouchableOpacity
+                onPress={onMarkAllNotificationsRead}
+                disabled={notificationActionPending === 'all'}
+                style={styles.markReadButton}
+                activeOpacity={0.75}
+              >
+                <Text style={styles.markReadText}>
+                  {notificationActionPending === 'all' ? 'Updating...' : 'Mark read'}
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+          </View>
+          {notifications.length === 0 ? (
+            <View style={styles.notificationEmpty}>
+              <Ionicons name="checkmark-circle-outline" size={18} color={colors.textMuted} />
+              <Text style={styles.notificationEmptyText}>No social notifications yet.</Text>
+            </View>
+          ) : (
+            notifications.slice(0, 8).map((n) => {
+              const unread = !n.read_at;
+              return (
+                <TouchableOpacity
+                  key={n.id}
+                  style={[styles.notificationRow, unread && styles.notificationRowUnread]}
+                  onPress={() => onNotificationPress(n)}
+                  disabled={notificationActionPending === n.id}
+                  activeOpacity={0.78}
+                >
+                  <View style={styles.notificationIconBubble}>
+                    <Ionicons name={notificationIconName(n)} size={16} color={colors.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <View style={styles.notificationTitleRow}>
+                      <Text style={styles.notificationTitle} numberOfLines={2}>
+                        {notificationTitle(n)}
+                      </Text>
+                      <Text style={styles.notificationTime}>{formatNotificationTime(n.created_at)}</Text>
+                    </View>
+                    <Text style={styles.notificationBody} numberOfLines={2}>
+                      {notificationBody(n)}
+                    </Text>
+                  </View>
+                  {unread ? <View style={styles.unreadDot} /> : null}
+                </TouchableOpacity>
+              );
+            })
+          )}
+        </View>
+      ) : null}
 
       {/* Friends / Activity tab strip. "Activity" is a bounded digest
           (latest 10 shares from friends), not an open scrolling feed —
@@ -750,6 +966,153 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       marginBottom: spacing.md,
     },
     title: { fontSize: 20, fontWeight: '800', color: colors.textPrimary },
+    socialToolbar: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      marginBottom: spacing.sm,
+    },
+    toolbarLabel: {
+      fontSize: 10,
+      fontWeight: '800',
+      color: colors.textMuted,
+      letterSpacing: 0.7,
+    },
+    toolbarMeta: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      marginTop: 2,
+      fontWeight: '600',
+    },
+    notificationButton: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surface,
+    },
+    notificationButtonActive: {
+      borderColor: colors.primary + '55',
+      backgroundColor: colors.primary + '12',
+    },
+    notificationBadge: {
+      position: 'absolute',
+      top: -3,
+      right: -2,
+      minWidth: 16,
+      height: 16,
+      borderRadius: 8,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 4,
+      backgroundColor: colors.error,
+      borderWidth: 1,
+      borderColor: colors.surface,
+    },
+    notificationBadgeText: {
+      fontSize: 9,
+      fontWeight: '900',
+      color: '#fff',
+    },
+    notificationPanel: {
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1,
+      borderRadius: radius.md,
+      padding: spacing.sm,
+      marginBottom: spacing.md,
+      gap: spacing.xs,
+    },
+    notificationPanelHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: 2,
+      marginBottom: 2,
+    },
+    notificationPanelTitle: {
+      fontSize: 13,
+      fontWeight: '800',
+      color: colors.textPrimary,
+    },
+    markReadButton: {
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 5,
+      borderRadius: radius.full,
+      backgroundColor: colors.primary + '14',
+    },
+    markReadText: {
+      fontSize: 11,
+      fontWeight: '800',
+      color: colors.primary,
+    },
+    notificationEmpty: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.xs,
+      paddingVertical: spacing.sm,
+      paddingHorizontal: 2,
+    },
+    notificationEmptyText: {
+      fontSize: 12,
+      color: colors.textMuted,
+      fontWeight: '600',
+    },
+    notificationRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      borderRadius: radius.md,
+      paddingVertical: spacing.sm,
+      paddingHorizontal: spacing.sm,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: 'transparent',
+    },
+    notificationRowUnread: {
+      backgroundColor: colors.primary + '0F',
+      borderColor: colors.primary + '20',
+    },
+    notificationIconBubble: {
+      width: 30,
+      height: 30,
+      borderRadius: 15,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colors.primary + '14',
+    },
+    notificationTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: spacing.xs,
+    },
+    notificationTitle: {
+      flex: 1,
+      fontSize: 12,
+      fontWeight: '800',
+      color: colors.textPrimary,
+      lineHeight: 16,
+    },
+    notificationTime: {
+      fontSize: 10,
+      fontWeight: '700',
+      color: colors.textMuted,
+      marginTop: 1,
+    },
+    notificationBody: {
+      fontSize: 11,
+      color: colors.textSecondary,
+      lineHeight: 15,
+      marginTop: 2,
+    },
+    unreadDot: {
+      width: 7,
+      height: 7,
+      borderRadius: 4,
+      backgroundColor: colors.primary,
+    },
     tabStrip: {
       flexDirection: 'row',
       gap: 2,

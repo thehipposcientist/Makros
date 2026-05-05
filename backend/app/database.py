@@ -1008,7 +1008,7 @@ def _ensure_user_profile_birthdate_column() -> None:
 def _ensure_social_tables() -> None:
     """Create indexes for the social tables on legacy DBs. SQLModel
     create_all builds the tables themselves; this just guarantees the
-    pair-uniqueness + week-uniqueness constraints exist.
+    pair-uniqueness + week-uniqueness + notification indexes exist.
 
     Idempotent — safe on every startup.
     """
@@ -1027,6 +1027,18 @@ def _ensure_social_tables() -> None:
             conn.execute(text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_weekly_digest_user_week "
                 "ON weekly_digest_cache (user_id, week_start)"
+            ))
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_social_notification_actor_subject "
+                "ON social_notifications (user_id, actor_user_id, notification_type, subject_type, subject_id)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_social_notifications_user_created "
+                "ON social_notifications(user_id, created_at DESC)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_social_notifications_user_read "
+                "ON social_notifications(user_id, read_at)"
             ))
     except Exception as e:
         print(f"[migration] social indexes ensure failed (non-fatal): {e}")
@@ -1745,7 +1757,7 @@ def startup_data_maintenance_settings(
 
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
-    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, ClientTelemetryEvent, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, PlanWeek, PlanDay, UserEquipmentProfile, GearItem
+    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, ClientTelemetryEvent, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, SocialNotification, PlanWeek, PlanDay, UserEquipmentProfile, GearItem
 
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()

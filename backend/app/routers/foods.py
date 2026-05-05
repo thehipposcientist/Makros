@@ -220,6 +220,7 @@ def search_food_catalog(
     limit: int = Query(default=20, ge=1, le=50),
     include_remote: bool = Query(default=True),
     force_ai: bool = Query(default=False),
+    allow_ai: bool = Query(default=True),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
@@ -271,7 +272,7 @@ def search_food_catalog(
     )
 
     ai_results: list[dict] = []
-    if include_remote and can_search_remote and not merged:
+    if allow_ai and include_remote and can_search_remote and not merged:
         ensure_pro(current_user, "AI food lookup")
         ai_results = _search_ai(query)
         merged = merge_food_search_results(

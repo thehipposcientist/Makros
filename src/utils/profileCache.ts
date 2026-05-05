@@ -11,6 +11,44 @@ function isRecord(value: unknown): value is Record<string, any> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function finitePositiveNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 10) / 10 : null;
+}
+
+function timeValue(value: unknown): number {
+  if (typeof value !== 'string' || !value.trim()) return 0;
+  const t = new Date(value).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+function latestWeightEvidence(profile: unknown): { weightLbs: number; sortMs: number } | null {
+  const parsed = parseJsonIfString(profile);
+  if (!isRecord(parsed)) return null;
+  const rows = [
+    ...(Array.isArray(parsed.weightEntries) ? parsed.weightEntries : []),
+    ...(Array.isArray(parsed.weightHistory) ? parsed.weightHistory : []),
+  ];
+  let latest: { weightLbs: number; sortMs: number } | null = null;
+  for (const row of rows) {
+    if (!isRecord(row)) continue;
+    const weightLbs = finitePositiveNumber(row.weight_lbs ?? row.weightLbs);
+    if (weightLbs == null) continue;
+    const sortMs = Math.max(timeValue(row.logged_at ?? row.loggedAt), timeValue(row.date));
+    if (!latest || sortMs >= latest.sortMs) latest = { weightLbs, sortMs };
+  }
+  return latest;
+}
+
+function freshestWeightFromProfiles(pulledProfile: unknown, currentProfile: unknown): number | null {
+  const pulled = latestWeightEvidence(pulledProfile);
+  const current = latestWeightEvidence(currentProfile);
+  if (pulled && current) return pulled.sortMs >= current.sortMs ? pulled.weightLbs : current.weightLbs;
+  if (pulled) return pulled.weightLbs;
+  if (current) return current.weightLbs;
+  return null;
+}
+
 const VALID_PREFERRED_SPLITS = new Set([
   'full_body',
   'upper_lower',
@@ -44,16 +82,27 @@ export function mergePulledUserProfileWithCurrentStats(
   if (!isRecord(pulledProfile)) return pulledValue;
 
   const currentProfile = parseJsonIfString(currentStoredValue);
+  const freshestWeightLbs = freshestWeightFromProfiles(pulledProfile, currentProfile);
   if (!isRecord(currentProfile) || !isRecord(currentProfile.physicalStats)) {
-    return preserveLocalPreferredSplitWhenRemoteMissing(pulledProfile, currentProfile);
+    const merged = freshestWeightLbs == null ? pulledProfile : {
+      ...pulledProfile,
+      physicalStats: {
+        ...(isRecord(pulledProfile.physicalStats) ? pulledProfile.physicalStats : {}),
+        weightLbs: freshestWeightLbs,
+      },
+    };
+    return preserveLocalPreferredSplitWhenRemoteMissing(merged, currentProfile);
   }
+
+  const mergedPhysicalStats = {
+    ...(isRecord(pulledProfile.physicalStats) ? pulledProfile.physicalStats : {}),
+    ...currentProfile.physicalStats,
+    ...(freshestWeightLbs == null ? {} : { weightLbs: freshestWeightLbs }),
+  };
 
   return preserveLocalPreferredSplitWhenRemoteMissing({
     ...pulledProfile,
-    physicalStats: {
-      ...(isRecord(pulledProfile.physicalStats) ? pulledProfile.physicalStats : {}),
-      ...currentProfile.physicalStats,
-    },
+    physicalStats: mergedPhysicalStats,
   }, currentProfile);
 }
 

@@ -26,6 +26,7 @@ _TEST_MODULES = (
     "tests.test_deterministic_skeleton",
     "tests.test_workout_planner",
     "tests.test_workout_goals",
+    "tests.test_goal_matcher",
     "tests.test_workout_archetypes",
     "tests.test_focus_differentiation",
     "tests.test_set_programming",
@@ -68,6 +69,7 @@ _TEST_MODULES = (
     "tests.test_hydration_delta",
     "tests.test_live_workout_recommendations",
     "tests.test_social_digest",
+    "tests.test_social_notifications",
     # Cardio prescription — modality detection, capability hierarchy, prescription_type tagging.
     "tests.test_cardio_prescription",
     # Weekly calorie budget smoothing — formula, caps, macro redistribution.
@@ -82,7 +84,7 @@ _TEST_MODULES = (
     "tests.test_plan_week_goal_change",
     # Auth: DEV_EMAIL_TOKENS gating — dev tokens must not leak in prod.
     "tests.test_auth_dev_token_isolation",
-    # Entitlements: unknown/default users fail closed to Free; beta is explicit.
+    # Entitlements: unknown users fail closed; beta signups default to Pro.
     "tests.test_entitlements",
     # CORS: prod must fail closed instead of wildcard+credentials.
     "tests.test_cors_config",

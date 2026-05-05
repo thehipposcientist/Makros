@@ -65,6 +65,20 @@ interface Props {
 const DEFAULT_MAX_ITEMS = 10;
 
 type GroupedItem = { workout: FeedItem; prs: FeedItem[] };
+type FeedWorkoutExercise = {
+  name?: string;
+  equipment?: string | null;
+  sets?: Array<{ reps?: number | null }>;
+};
+type FeedWorkoutSummary = {
+  focus?: string | null;
+  duration_seconds?: number | null;
+  date?: string | null;
+  exercises?: FeedWorkoutExercise[];
+  total_sets?: number | null;
+  total_reps?: number | null;
+  training_rating?: string | null;
+};
 
 function formatRelative(iso: string): string {
   if (!iso) return '';
@@ -88,6 +102,60 @@ function formatDuration(sec: number | undefined | null): string {
   return rm ? `${h}h ${rm}m` : `${h}h`;
 }
 
+function setReps(set: { reps?: number | null } | undefined): number | null {
+  const reps = Number(set?.reps);
+  return Number.isFinite(reps) && reps > 0 ? Math.round(reps) : null;
+}
+
+function exerciseSetCount(exercises: FeedWorkoutExercise[]): number {
+  return exercises.reduce((total, ex) => total + (ex.sets?.length ?? 0), 0);
+}
+
+function exerciseRepCount(exercises: FeedWorkoutExercise[]): number {
+  return exercises.reduce(
+    (total, ex) => total + (ex.sets ?? []).reduce((sum, set) => sum + (setReps(set) ?? 0), 0),
+    0,
+  );
+}
+
+function normalizeWorkoutSummary(item: FeedItem): FeedWorkoutSummary | null {
+  const summary = item.payload.workout_summary;
+  if (summary) {
+    const exercises = summary.exercises ?? [];
+    return {
+      ...summary,
+      exercises,
+      total_sets: summary.total_sets ?? exerciseSetCount(exercises),
+      total_reps: summary.total_reps ?? exerciseRepCount(exercises),
+    };
+  }
+  if (item.event_type !== 'workout_completed') return null;
+  const exercises = (item.payload.exercises ?? []).map((ex) => ({
+    name: ex.name,
+    sets: ex.sets ?? [],
+  }));
+  return {
+    focus: item.payload.focus ?? 'Workout',
+    duration_seconds: item.payload.duration_seconds ?? 0,
+    date: item.payload.date ?? '',
+    exercises,
+    total_sets: exerciseSetCount(exercises),
+    total_reps: exerciseRepCount(exercises),
+  };
+}
+
+function formatExerciseSets(ex: FeedWorkoutExercise): string {
+  const sets = ex.sets ?? [];
+  const reps = sets.map(setReps).filter((value): value is number => value != null);
+  if (!reps.length) {
+    const count = sets.length;
+    return `${count} set${count === 1 ? '' : 's'}`;
+  }
+  return reps
+    .map((value, index) => `Set ${index + 1}: ${value} rep${value === 1 ? '' : 's'}`)
+    .join('  ·  ');
+}
+
 export default function SocialFeedView({
   authToken, themeName, onViewAuthor, refreshKey, maxItems,
   shareEnabled, myActivity, myDisplayName, myAvatarUrl, bottomPadding = 8,
@@ -100,6 +168,8 @@ export default function SocialFeedView({
   const [items, setItems] = useState<FeedItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [expandedWorkoutIds, setExpandedWorkoutIds] = useState<Record<number, boolean>>({});
+  const [privacyExpanded, setPrivacyExpanded] = useState(false);
   // Optimistic like state — keyed by item id. Lets the heart
   // animate instantly while the network call is in flight; rolls back
   // on failure.
@@ -189,26 +259,10 @@ export default function SocialFeedView({
   const renderItem = useCallback(({ item: grouped, index }: { item: GroupedItem; index: number }) => {
     const { workout: item, prs } = grouped;
     const author = item.display_name ?? item.username;
-
-    // workout_post has explicit workout_summary; workout_completed stores
-    // the same data at the top level of payload — normalise to one shape.
-    const summary = item.payload.workout_summary ?? (
-      item.event_type === 'workout_completed' ? {
-        focus: item.payload.focus ?? 'Workout',
-        duration_seconds: item.payload.duration_seconds ?? 0,
-        date: item.payload.date ?? '',
-        exercises: (item.payload.exercises ?? []).map((ex: any) => ({
-          name: ex.name,
-          sets: (ex.sets ?? []).map((s: any) => ({ reps: s.reps })),
-        })),
-        total_sets: (item.payload.exercises ?? [])
-          .reduce((t: number, ex: any) => t + (ex.sets?.length ?? 0), 0),
-        total_reps: (item.payload.exercises ?? [])
-          .reduce((t: number, ex: any) =>
-            t + (ex.sets ?? []).reduce((r: number, s: any) => r + (s.reps || 0), 0), 0),
-        training_rating: undefined as string | undefined,
-      } : null
-    );
+    const summary = normalizeWorkoutSummary(item);
+    const exercises = summary?.exercises ?? [];
+    const hasExerciseDetails = exercises.length > 0;
+    const isExpanded = !!expandedWorkoutIds[item.id];
 
     const caption = item.payload.caption;
     const photo = item.payload.photo_base64;
@@ -287,6 +341,43 @@ export default function SocialFeedView({
                 </>
               ) : null}
             </View>
+            {hasExerciseDetails ? (
+              <TouchableOpacity
+                testID={`social-feed-workout-details-${index}`}
+                accessibilityLabel={`social-feed-workout-details-${index}`}
+                accessibilityRole="button"
+                onPress={() => {
+                  setExpandedWorkoutIds(prev => ({ ...prev, [item.id]: !prev[item.id] }));
+                }}
+                style={styles.detailsToggle}
+                activeOpacity={0.75}
+              >
+                <Text style={styles.detailsToggleText}>
+                  {isExpanded ? 'Hide workout details' : 'Show workout details'}
+                </Text>
+                <Ionicons
+                  name={isExpanded ? 'chevron-up' : 'chevron-down'}
+                  size={15}
+                  color={colors.textMuted}
+                />
+              </TouchableOpacity>
+            ) : null}
+            {isExpanded ? (
+              <View style={styles.exerciseList}>
+                {exercises.map((ex, exerciseIndex) => (
+                  <View key={`${item.id}-${exerciseIndex}-${ex.name ?? 'exercise'}`} style={styles.exerciseRow}>
+                    <View style={styles.exerciseBullet} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.exerciseName}>
+                        {ex.name || 'Exercise'}
+                        {ex.equipment ? <Text style={styles.exerciseEquipment}>  ·  {ex.equipment}</Text> : null}
+                      </Text>
+                      <Text style={styles.exerciseSets}>{formatExerciseSets(ex)}</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : null}
           </View>
         ) : null}
 
@@ -350,7 +441,7 @@ export default function SocialFeedView({
       </View>
       </FadeInView>
     );
-  }, [styles, colors, pendingLikes, onViewAuthor, handleLike]);
+  }, [styles, colors, expandedWorkoutIds, pendingLikes, onViewAuthor, handleLike]);
 
   const keyExtractor = useCallback((it: GroupedItem) => String(it.workout.id), []);
 
@@ -415,11 +506,25 @@ export default function SocialFeedView({
     </FadeInView>
   ) : null;
   const privacyHeader = (
-    <View style={styles.privacyStrip}>
-      <Ionicons name="shield-checkmark-outline" size={16} color={colors.primary} />
-      <Text style={styles.privacyText}>
-        Friends only see workouts, streaks, and optional shares. Calories, macros, meals, body weight, and measurements stay private.
-      </Text>
+    <View style={styles.privacyWrap}>
+      <TouchableOpacity
+        testID="social-feed-privacy-toggle"
+        accessibilityLabel="Social privacy details"
+        accessibilityRole="button"
+        accessibilityState={{ expanded: privacyExpanded }}
+        onPress={() => setPrivacyExpanded(v => !v)}
+        style={styles.privacyIconButton}
+        activeOpacity={0.75}
+      >
+        <Ionicons name="shield-checkmark-outline" size={17} color={colors.primary} />
+      </TouchableOpacity>
+      {privacyExpanded ? (
+        <View style={styles.privacyBubble}>
+          <Text style={styles.privacyText}>
+            Friends only see workouts, streaks, and optional shares. Calories, macros, meals, body weight, and measurements stay private.
+          </Text>
+        </View>
+      ) : null}
     </View>
   );
   const listHeader = (
@@ -475,12 +580,27 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
     empty: { paddingVertical: 60, alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 28 },
     emptyTitle: { fontSize: 16, fontWeight: '700', color: c.textPrimary, marginTop: 8 },
     emptyBody: { fontSize: 13, color: c.textSecondary, textAlign: 'center', lineHeight: 18 },
-    privacyStrip: {
+    privacyWrap: {
+      alignItems: 'flex-end',
+      gap: 6,
+      marginBottom: 2,
+    },
+    privacyIconButton: {
+      width: 30,
+      height: 30,
+      borderRadius: 15,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.primary + '12',
+      borderColor: c.primary + '30',
+      borderWidth: 1,
+    },
+    privacyBubble: {
       flexDirection: 'row',
       alignItems: 'flex-start',
       gap: 8,
-      backgroundColor: c.primary + '12',
-      borderColor: c.primary + '30',
+      backgroundColor: c.surface,
+      borderColor: c.border,
       borderWidth: 1,
       borderRadius: radius.md,
       padding: 12,
@@ -516,6 +636,34 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
     summaryStat: { fontSize: 12, color: c.textSecondary },
     summaryStatNum: { fontWeight: '700', color: c.textPrimary },
     summaryStatDot: { fontSize: 12, color: c.textMuted },
+    detailsToggle: {
+      marginTop: 2,
+      paddingTop: 8,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: c.border,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 8,
+    },
+    detailsToggleText: { fontSize: 12, fontWeight: '700', color: c.textPrimary },
+    exerciseList: {
+      gap: 10,
+      paddingTop: 8,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: c.border,
+    },
+    exerciseRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 9 },
+    exerciseBullet: {
+      width: 5,
+      height: 5,
+      borderRadius: 3,
+      backgroundColor: c.primary,
+      marginTop: 6,
+    },
+    exerciseName: { fontSize: 13, fontWeight: '700', color: c.textPrimary, lineHeight: 18 },
+    exerciseEquipment: { fontSize: 11, fontWeight: '600', color: c.textMuted },
+    exerciseSets: { fontSize: 11, color: c.textSecondary, lineHeight: 16, marginTop: 2 },
     prRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
     prBadge: {
       flexDirection: 'row', alignItems: 'center', gap: 4,

@@ -153,7 +153,7 @@ Use a branded sender for beta if possible: `support@thallo.app` through Google W
 
 Set `CORS_ORIGINS` only for browser clients, as a comma-separated list of exact HTTPS origins such as `https://thallo.app,https://www.thallo.app`. For native-app-only production deployments, leave it unset; production then allows no browser origins. Never set `CORS_ORIGINS=*` in production.
 
-For a free external beta, set `BETA_FULL_ACCESS_ENABLED=1` on the backend. Leave it unset or `0` before paid launch so new accounts fail closed to Free unless a server-side entitlement grants Pro.
+For a free external beta, `BETA_FULL_ACCESS_ENABLED` defaults to `1` so new accounts receive server-side Pro access. Set it to `0` before paid launch so new accounts fail closed to Free unless a server-side entitlement grants Pro.
 
 ### Networking
 - Incoming: Public endpoint.
@@ -249,7 +249,7 @@ Edit `app.json` → `expo.extra.apiBaseUrl` → paste your App Runner URL:
   "freeBetaFullAccess": true
 }
 ```
-`freeBetaFullAccess` only opens client-side UI gates. For the free external beta, the backend also needs `BETA_FULL_ACCESS_ENABLED=1`; otherwise newly registered users correctly remain Free server-side. Turn both beta flags off when StoreKit/RevenueCat and server-side entitlement checks are ready.
+`freeBetaFullAccess` only opens client-side UI gates. For the free external beta, the backend defaults `BETA_FULL_ACCESS_ENABLED` to `1` so newly registered users receive server-side Pro access for plan generation. Turn both beta flags off when StoreKit/RevenueCat and server-side entitlement checks are ready.
 Commit and push.
 
 For Google sign-in, add the OAuth client IDs to the EAS build environment before building. These IDs are public identifiers, not secrets, and `app.config.js` exposes them to the app through Expo `extra`.

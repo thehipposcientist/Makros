@@ -455,6 +455,12 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
         }))
         .filter((entry: any) => entry.date && Number.isFinite(entry.weight_lbs) && entry.weight_lbs > 0)
       : undefined;
+    const latestWeightEntry = weightEntries?.length
+      ? [...weightEntries].sort((a: any, b: any) =>
+          String(a.logged_at ?? a.date).localeCompare(String(b.logged_at ?? b.date)),
+        )[weightEntries.length - 1]
+      : null;
+    const currentWeightLbs = latestWeightEntry?.weight_lbs ?? data.profile.weight_lbs;
     // Map backend snake_case → frontend UserProfile shape
     return {
       firstName:  data.first_name ?? undefined,
@@ -468,7 +474,7 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
         timelineWeeks:    data.goal.timeline_weeks ?? undefined,
       },
       physicalStats: {
-        weightLbs:    data.profile.weight_lbs,
+        weightLbs:    currentWeightLbs,
         heightFeet:   data.profile.height_feet,
         heightInches: data.profile.height_inches,
         age:          age ?? data.profile.age,
@@ -2336,11 +2342,12 @@ export async function getMealSwap(token: string, meal_type: string, foods: strin
 /** Match a natural language fitness description to the best goal. No auth needed. */
 export async function matchGoal(
   description: string,
+  availableGoalIds?: string[],
 ): Promise<{ goal_id: string; reason: string }> {
   return request<any>('/ai/match-goal', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ description }),
+    body: JSON.stringify({ description, available_goal_ids: availableGoalIds }),
   }, 12000);
 }
 
@@ -2381,12 +2388,13 @@ export type FoodSearchResult = {
 export async function searchFoodNutrition(
   token: string,
   query: string,
-  opts?: { forceAi?: boolean },
+  opts?: { forceAi?: boolean; allowAiFallback?: boolean },
 ): Promise<{ results: FoodSearchResult[]; sources?: { local: number; usda: number; ai: number }; preferred_foods?: string[] }> {
   const params = new URLSearchParams({
     q: query,
     include_remote: 'true',
     force_ai: String(opts?.forceAi ?? false),
+    allow_ai: String(opts?.allowAiFallback ?? true),
   });
   return request<any>(`/foods/search?${params.toString()}`, {
     method: 'GET',
@@ -4486,6 +4494,32 @@ export interface SocialSearchHit {
   avatar_url: string | null;
 }
 
+export interface SocialNotification {
+  id: number;
+  notification_type: 'friend_request' | 'friend_accept' | 'feed_like' | string;
+  subject_type: 'friendship' | 'feed_item' | string;
+  subject_id: number;
+  actor_user_id: number;
+  actor_username: string;
+  actor_display_name: string | null;
+  actor_avatar_url: string | null;
+  payload: {
+    friendship_id?: number;
+    feed_item_id?: number;
+    event_type?: string;
+    focus?: string;
+    date?: string;
+    caption?: string;
+  };
+  read_at: string | null;
+  created_at: string;
+}
+
+export interface SocialNotificationsResponse {
+  items: SocialNotification[];
+  unread_count: number;
+}
+
 export async function getSocialMe(token: string): Promise<SocialMe> {
   return request<SocialMe>('/social/me', {
     headers: { Authorization: `Bearer ${token}` },
@@ -4572,6 +4606,26 @@ export async function searchUsers(token: string, q: string): Promise<SocialSearc
 
 export async function getSocialDigest(token: string): Promise<SocialDigest> {
   return request<SocialDigest>('/social/digest', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function listSocialNotifications(token: string): Promise<SocialNotificationsResponse> {
+  return request<SocialNotificationsResponse>('/social/notifications', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function markSocialNotificationRead(token: string, notificationId: number): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/social/notifications/${notificationId}/read`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function markAllSocialNotificationsRead(token: string): Promise<{ ok: boolean; updated: number }> {
+  return request<{ ok: boolean; updated: number }>('/social/notifications/read-all', {
+    method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   });
 }

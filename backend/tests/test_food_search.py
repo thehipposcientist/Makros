@@ -514,6 +514,56 @@ def test_short_food_queries_do_not_hit_remote_or_ai() -> None:
     _ok("1-2 character searches avoid remote latency and AI gating")
 
 
+def test_food_search_can_disable_ai_fallback_for_signup() -> None:
+    print("\n[test] food search: signup can use USDA without AI fallback")
+    from app.routers import foods as food_router
+
+    engine = make_seed_test_engine()
+    original_usda = food_router._search_usda
+    original_ai = food_router._search_ai
+    calls: list[tuple[str, str]] = []
+
+    def fake_usda(query: str, *args, **kwargs) -> list[dict]:
+        calls.append(("usda", query))
+        return []
+
+    def fake_ai(query: str) -> list[dict]:
+        calls.append(("ai", query))
+        return [{
+            "name": "AI Only Food",
+            "serving": "1 serving",
+            "calories": 100,
+            "protein": 5,
+            "carbs": 10,
+            "fat": 3,
+            "source": "ai",
+        }]
+
+    food_router._search_usda = fake_usda
+    food_router._search_ai = fake_ai
+    try:
+        with Session(engine) as session:
+            u = _user(session, email="signup-food-search@example.com")
+
+            response = food_router.search_food_catalog(
+                q="obscure signup food",
+                limit=10,
+                include_remote=True,
+                force_ai=False,
+                allow_ai=False,
+                current_user=u,
+                db=session,
+            )
+
+            assert response["results"] == [], response
+            assert calls == [("usda", "obscure signup food")], calls
+            assert response["sources"] == {"local": 0, "usda": 0, "ai": 0}, response
+    finally:
+        food_router._search_usda = original_usda
+        food_router._search_ai = original_ai
+    _ok("allow_ai=false returns local/USDA results only")
+
+
 def test_usda_fatty_acid_mapping_uses_real_nutrients() -> None:
     print("\n[test] food search: USDA fatty acid mapping")
     from app.services.usda_fdc import _extract_nutrients
@@ -546,6 +596,7 @@ cases = [
     test_food_search_does_not_leak_other_users_private_foods,
     test_food_search_supports_out_of_order_tokens,
     test_short_food_queries_do_not_hit_remote_or_ai,
+    test_food_search_can_disable_ai_fallback_for_signup,
     test_usda_fatty_acid_mapping_uses_real_nutrients,
 ]
 
