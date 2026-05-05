@@ -1029,6 +1029,10 @@ def _ensure_social_tables() -> None:
                 "ON weekly_digest_cache (user_id, week_start)"
             ))
             conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_feed_like_user_item "
+                "ON feed_likes (user_id, feed_item_id)"
+            ))
+            conn.execute(text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_social_notification_actor_subject "
                 "ON social_notifications (user_id, actor_user_id, notification_type, subject_type, subject_id)"
             ))

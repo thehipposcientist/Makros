@@ -81,7 +81,7 @@ Certain red-flag nights cap the final score after pillar summing so one good sig
 - Missing data → neutral, never punished
 
 ### Persistence
-- Per-night sleep snapshots are mirrored to backend `SleepLog` table on every `healthDataSummary` refresh via `POST /sleep/nightly`.
+- Per-night sleep snapshots are mirrored to backend `SleepLog` table on every `healthDataSummary` refresh via `POST /sleep/nightly`; the 30-night history backfills via `POST /sleep/nightly/batch`.
 - Survives device wipes / sign-in on a new device — was previously AsyncStorage-only.
 - 14+ night baseline for personalized score reads from `GET /sleep/history?days=30`.
 - `night_date` keys on the **waking** date so today's row is updated each refresh.

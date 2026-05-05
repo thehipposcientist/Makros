@@ -4477,7 +4477,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       exercises: sourceExercises.map(e => ({
         name: e.name,
         equipment: (e as any).equipment ?? null,
-	        sets: e.sets.map(s => ({ reps: Number(s.reps) || 0 })),
+        sets: e.sets.map(s => ({
+          reps: Number(s.reps) || 0,
+          weight_lbs: Number(s.weightLbs) || 0,
+          duration_seconds: s.durationSeconds ?? null,
+          actual_distance: s.actualDistance ?? null,
+          actual_pace: s.actualPace ?? null,
+          heart_rate_avg: s.heartRateAvg ?? null,
+          cardio_metrics: s.cardioMetrics ?? null,
+        })),
       })),
       total_sets: summarySetCount,
       total_reps: summaryRepCount,
@@ -6601,7 +6609,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   <View style={styles.summaryPrivacyNote}>
                     <Ionicons name="lock-closed-outline" size={12} color={themeColors.textMuted} />
                     <Text style={styles.summaryPrivacyNoteText}>
-                      Friends posts only include workout stats. Calories, macros, and body weight stay private.
+                      Friends posts include workout stats like load, reps, time, and distance. Calories, macros, and body weight stay private.
                     </Text>
                   </View>
                 ) : null}

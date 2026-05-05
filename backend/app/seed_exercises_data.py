@@ -1965,7 +1965,7 @@ CORE = [
         "cardio_intensity": "intervals",
         "default_tracking_mode": "time",
         "substitution_group": "bodyweight_cardio_drill",
-        "description": "Dynamic core and cardiovascular conditioning drill",
+        "description": "High-plank alternating knee-drive cardio drill",
         "equipment": [],
     },
     {
@@ -2490,7 +2490,7 @@ POWER = [
         "power_type": "conditioning",    # MetCon, not pure plyo
         "default_tracking_mode": "reps",
         "substitution_group": "metcon_bodyweight",
-        "description": "High-intensity full body conditioning movement",
+        "description": "Squat-to-plank-to-stand full-body conditioning reps",
         "equipment": [],
     },
     {
@@ -5926,12 +5926,13 @@ _NEW_2026_04_27 = [
         "power_type": "conditioning",
         "cardio_intensity": "intervals",
         "default_tracking_mode": "time",
-        "description": "Footwork and combination drilling with no equipment",
+        "substitution_group": "bodyweight_cardio_drill",
+        "description": "No-equipment boxing rounds: light footwork, jab-cross combinations, and guard resets",
         "equipment": [],
     },
     {
         "slug": "low_impact_cardio_circuit",
-        "name": "Low-Impact Cardio Circuit",
+        "name": "No-Jump March + Step-Touch Cardio",
         "primary_muscle": "cardio",
         "secondary_muscles": [],
         "equipment_bucket": "bodyweight",
@@ -5942,7 +5943,8 @@ _NEW_2026_04_27 = [
         "power_type": "conditioning",
         "cardio_intensity": "easy",
         "default_tracking_mode": "time",
-        "description": "Chained low-impact moves (march, step-touch, side-tap) — joint-friendly",
+        "substitution_group": "low_impact_cardio_drill",
+        "description": "Low-impact sequence: march in place, step-touch, side taps, and light shadow-boxing punches; no jumping jacks",
         "equipment": [],
     },
 

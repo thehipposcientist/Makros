@@ -10,9 +10,10 @@
 //
 // Backed by `/social/feed` (kept the endpoint name; same payload).
 // Each item is a workout share with optional caption, photo, and a
-// structured `workout_summary` (focus, duration, exercises, sets/reps).
+// structured `workout_summary` (focus, duration, exercises, sets/reps,
+// workout loads, and cardio timing/distance metrics).
 //
-// Privacy rule: never reads or displays kcal/macros/weight. Items
+// Privacy rule: never reads or displays kcal/macros/body weight. Items
 // from soft-deleted users render as "unknown" (backend filter).
 //
 // De-duplication: one card per (user_id, workout_date). A single
@@ -20,9 +21,9 @@
 // `workout_post` share. The feed groups them so workout_post beats
 // workout_completed for the headline card.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, Image, RefreshControl,
+  ActivityIndicator, Animated, FlatList, Image, RefreshControl,
   StyleSheet, Text, TouchableOpacity, View,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -35,6 +36,13 @@ import {
   getSocialFeed,
   toggleFeedLike,
 } from '../services/api';
+import { configureExpandAnimation } from '../utils/layoutAnim';
+import {
+  compactSocialSetSummaries,
+  formatSocialDistance,
+  formatSocialDuration,
+  type SocialWorkoutSet,
+} from '../utils/socialWorkoutDetails';
 
 interface Props {
   authToken: string;
@@ -68,7 +76,7 @@ type GroupedItem = { workout: FeedItem; prs: FeedItem[] };
 type FeedWorkoutExercise = {
   name?: string;
   equipment?: string | null;
-  sets?: Array<{ reps?: number | null }>;
+  sets?: SocialWorkoutSet[];
 };
 type FeedWorkoutSummary = {
   focus?: string | null;
@@ -78,6 +86,11 @@ type FeedWorkoutSummary = {
   total_sets?: number | null;
   total_reps?: number | null;
   training_rating?: string | null;
+  activity_category?: string | null;
+  activity_subtype?: string | null;
+  cardio_style?: string | null;
+  distance_miles?: number | null;
+  hr_summary?: { avgBpm?: number | null; maxBpm?: number | null } | null;
 };
 
 function formatRelative(iso: string): string {
@@ -92,17 +105,7 @@ function formatRelative(iso: string): string {
   return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function formatDuration(sec: number | undefined | null): string {
-  const s = Math.max(0, Math.round(sec ?? 0));
-  if (!s) return '';
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  const rm = m % 60;
-  return rm ? `${h}h ${rm}m` : `${h}h`;
-}
-
-function setReps(set: { reps?: number | null } | undefined): number | null {
+function setReps(set: SocialWorkoutSet | undefined): number | null {
   const reps = Number(set?.reps);
   return Number.isFinite(reps) && reps > 0 ? Math.round(reps) : null;
 }
@@ -127,33 +130,56 @@ function normalizeWorkoutSummary(item: FeedItem): FeedWorkoutSummary | null {
       exercises,
       total_sets: summary.total_sets ?? exerciseSetCount(exercises),
       total_reps: summary.total_reps ?? exerciseRepCount(exercises),
+      activity_category: summary.activity_category ?? null,
+      activity_subtype: summary.activity_subtype ?? null,
+      cardio_style: summary.cardio_style ?? null,
+      distance_miles: summary.distance_miles ?? null,
+      hr_summary: summary.hr_summary ?? null,
     };
   }
   if (item.event_type !== 'workout_completed') return null;
   const exercises = (item.payload.exercises ?? []).map((ex) => ({
     name: ex.name,
+    equipment: ex.equipment ?? null,
     sets: ex.sets ?? [],
   }));
   return {
     focus: item.payload.focus ?? 'Workout',
     duration_seconds: item.payload.duration_seconds ?? 0,
     date: item.payload.date ?? '',
+    activity_category: item.payload.activity_category ?? null,
+    activity_subtype: item.payload.activity_subtype ?? null,
+    cardio_style: item.payload.cardio_style ?? null,
+    distance_miles: item.payload.distance_miles ?? null,
+    hr_summary: item.payload.hr_summary ?? null,
     exercises,
     total_sets: exerciseSetCount(exercises),
     total_reps: exerciseRepCount(exercises),
   };
 }
 
-function formatExerciseSets(ex: FeedWorkoutExercise): string {
-  const sets = ex.sets ?? [];
-  const reps = sets.map(setReps).filter((value): value is number => value != null);
-  if (!reps.length) {
-    const count = sets.length;
-    return `${count} set${count === 1 ? '' : 's'}`;
-  }
-  return reps
-    .map((value, index) => `Set ${index + 1}: ${value} rep${value === 1 ? '' : 's'}`)
-    .join('  ·  ');
+function socialLabel(value?: string | null): string {
+  return String(value ?? '')
+    .replace(/_/g, ' ')
+    .trim()
+    .replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
+function RotatingChevron({ expanded, color }: { expanded: boolean; color: string }) {
+  const rotation = useRef(new Animated.Value(expanded ? 1 : 0)).current;
+  useEffect(() => {
+    Animated.timing(rotation, {
+      toValue: expanded ? 1 : 0,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+  }, [expanded, rotation]);
+  const rotate = rotation.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '180deg'] });
+  return (
+    <Animated.View style={{ transform: [{ rotate }] }}>
+      <Ionicons name="chevron-down" size={16} color={color} />
+    </Animated.View>
+  );
 }
 
 export default function SocialFeedView({
@@ -242,7 +268,13 @@ export default function SocialFeedView({
       : it));
     setPendingLikes(p => ({ ...p, [item.id]: true }));
     try {
-      await toggleFeedLike(authToken, item.id);
+      const result = await toggleFeedLike(authToken, item.id);
+      setItems(curr => curr.map(it => it.id === item.id
+        ? { ...it,
+            liked_by_me: result.liked,
+            like_count: Math.max(0, Number(result.like_count) || 0),
+          }
+        : it));
     } catch {
       // Roll back — server is the source of truth.
       setItems(curr => curr.map(it => it.id === item.id
@@ -263,6 +295,17 @@ export default function SocialFeedView({
     const exercises = summary?.exercises ?? [];
     const hasExerciseDetails = exercises.length > 0;
     const isExpanded = !!expandedWorkoutIds[item.id];
+    const summaryMetrics = summary ? [
+      { key: 'time', icon: 'time-outline', value: formatSocialDuration(summary.duration_seconds), label: 'Time' },
+      { key: 'exercises', icon: 'barbell-outline', value: String(summary.exercises?.length ?? 0), label: 'Exercises' },
+      { key: 'sets', icon: 'layers-outline', value: String(summary.total_sets ?? 0), label: 'Sets' },
+      ...(summary.total_reps ? [{ key: 'reps', icon: 'repeat-outline', value: String(summary.total_reps), label: 'Reps' }] : []),
+      ...(summary.distance_miles ? [{ key: 'distance', icon: 'map-outline', value: formatSocialDistance(summary.distance_miles), label: 'Distance' }] : []),
+      ...(summary.hr_summary?.avgBpm ? [{ key: 'hr', icon: 'heart-outline', value: `${Math.round(Number(summary.hr_summary.avgBpm))}`, label: 'Avg bpm' }] : []),
+    ].filter(metric => !!metric.value) : [];
+    const summarySubtitle = summary
+      ? [summary.activity_subtype, summary.cardio_style].map(socialLabel).filter(Boolean).join(' · ')
+      : '';
 
     const caption = item.payload.caption;
     const photo = item.payload.photo_base64;
@@ -311,71 +354,90 @@ export default function SocialFeedView({
         {summary ? (
           <View style={styles.summaryBlock}>
             <View style={styles.summaryHeader}>
-              <Ionicons name="barbell-outline" size={14} color={colors.textSecondary} />
-              <Text style={styles.summaryFocus}>{summary.focus || 'Workout'}</Text>
-              {summary.duration_seconds ? (
-                <Text style={styles.summaryDuration}>
-                  {formatDuration(summary.duration_seconds)}
-                </Text>
+              <View style={styles.summaryIconBadge}>
+                <Ionicons name="barbell-outline" size={15} color={colors.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.summaryFocus}>{summary.focus || 'Workout'}</Text>
+                {summarySubtitle ? (
+                  <Text style={styles.summarySubtitle} numberOfLines={1}>{summarySubtitle}</Text>
+                ) : null}
+              </View>
+              {summary.training_rating ? (
+                <View style={styles.ratingBadge}>
+                  <Text style={styles.ratingBadgeText}>{summary.training_rating}</Text>
+                </View>
               ) : null}
             </View>
-            <View style={styles.summaryStatsRow}>
-              <Text style={styles.summaryStat}>
-                <Text style={styles.summaryStatNum}>{summary.exercises?.length ?? 0}</Text>
-                {' exercises'}
-              </Text>
-              <Text style={styles.summaryStatDot}>·</Text>
-              <Text style={styles.summaryStat}>
-                <Text style={styles.summaryStatNum}>{summary.total_sets ?? 0}</Text>
-                {' sets'}
-              </Text>
-              <Text style={styles.summaryStatDot}>·</Text>
-              <Text style={styles.summaryStat}>
-                <Text style={styles.summaryStatNum}>{summary.total_reps ?? 0}</Text>
-                {' reps'}
-              </Text>
-              {summary.training_rating ? (
-                <>
-                  <Text style={styles.summaryStatDot}>·</Text>
-                  <Text style={styles.summaryStat}>{summary.training_rating}</Text>
-                </>
-              ) : null}
+            <View style={styles.summaryMetricGrid}>
+              {summaryMetrics.map(metric => (
+                <View key={metric.key} style={styles.summaryMetricTile}>
+                  <Ionicons name={metric.icon as any} size={13} color={colors.textMuted} />
+                  <Text style={styles.summaryMetricValue}>{metric.value}</Text>
+                  <Text style={styles.summaryMetricLabel}>{metric.label}</Text>
+                </View>
+              ))}
             </View>
             {hasExerciseDetails ? (
               <TouchableOpacity
                 testID={`social-feed-workout-details-${index}`}
                 accessibilityLabel={`social-feed-workout-details-${index}`}
                 accessibilityRole="button"
+                accessibilityState={{ expanded: isExpanded }}
                 onPress={() => {
+                  configureExpandAnimation(320);
+                  import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
                   setExpandedWorkoutIds(prev => ({ ...prev, [item.id]: !prev[item.id] }));
                 }}
-                style={styles.detailsToggle}
+                style={[styles.detailsToggle, isExpanded && styles.detailsToggleActive]}
                 activeOpacity={0.75}
               >
-                <Text style={styles.detailsToggleText}>
-                  {isExpanded ? 'Hide workout details' : 'Show workout details'}
-                </Text>
-                <Ionicons
-                  name={isExpanded ? 'chevron-up' : 'chevron-down'}
-                  size={15}
-                  color={colors.textMuted}
-                />
+                <View style={styles.detailsToggleCopy}>
+                  <Text style={styles.detailsToggleText}>Workout details</Text>
+                  <Text style={styles.detailsToggleSubtext}>
+                    {isExpanded ? 'Hide recorded sets' : 'Show load, time, and cardio metrics'}
+                  </Text>
+                </View>
+                <RotatingChevron expanded={isExpanded} color={colors.textMuted} />
               </TouchableOpacity>
             ) : null}
             {isExpanded ? (
               <View style={styles.exerciseList}>
-                {exercises.map((ex, exerciseIndex) => (
-                  <View key={`${item.id}-${exerciseIndex}-${ex.name ?? 'exercise'}`} style={styles.exerciseRow}>
-                    <View style={styles.exerciseBullet} />
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.exerciseName}>
-                        {ex.name || 'Exercise'}
-                        {ex.equipment ? <Text style={styles.exerciseEquipment}>  ·  {ex.equipment}</Text> : null}
-                      </Text>
-                      <Text style={styles.exerciseSets}>{formatExerciseSets(ex)}</Text>
+                {exercises.map((ex, exerciseIndex) => {
+                  const setSummaries = compactSocialSetSummaries(ex.sets);
+                  return (
+                    <FadeInView
+                      key={`${item.id}-${exerciseIndex}-${ex.name ?? 'exercise'}`}
+                      delay={Math.min(exerciseIndex * 35, 160)}
+                      duration={220}
+                      slideDistance={6}
+                      style={styles.exerciseDetailCard}
+                    >
+                    <View style={styles.exerciseRow}>
+                      <View style={styles.exerciseIndexPill}>
+                        <Text style={styles.exerciseIndexText}>{exerciseIndex + 1}</Text>
+                      </View>
+                      <View style={{ flex: 1, gap: 7 }}>
+                        <View style={styles.exerciseTitleRow}>
+                          <Text style={styles.exerciseName}>{ex.name || 'Exercise'}</Text>
+                          {ex.equipment ? (
+                            <View style={styles.exerciseEquipmentPill}>
+                              <Text style={styles.exerciseEquipment}>{ex.equipment}</Text>
+                            </View>
+                          ) : null}
+                        </View>
+                        <View style={styles.setChipWrap}>
+                          {(setSummaries.length ? setSummaries : [`${ex.sets?.length ?? 0} sets`]).map((label, setIndex) => (
+                            <View key={`${exerciseIndex}-${setIndex}-${label}`} style={styles.setChip}>
+                              <Text style={styles.setChipText}>{label}</Text>
+                            </View>
+                          ))}
+                        </View>
+                      </View>
                     </View>
-                  </View>
-                ))}
+                    </FadeInView>
+                  );
+                })}
               </View>
             ) : null}
           </View>
@@ -521,7 +583,7 @@ export default function SocialFeedView({
       {privacyExpanded ? (
         <View style={styles.privacyBubble}>
           <Text style={styles.privacyText}>
-            Friends only see workouts, streaks, and optional shares. Calories, macros, meals, body weight, and measurements stay private.
+            Friends see workout activity, including recorded load, time, and distance. Calories, macros, meals, body weight, and measurements stay private.
           </Text>
         </View>
       ) : null}
@@ -626,12 +688,46 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
     summaryBlock: {
       backgroundColor: c.surface,
       borderRadius: radius.md,
-      padding: 10,
-      gap: 6,
+      padding: 12,
+      gap: 10,
     },
-    summaryHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-    summaryFocus: { flex: 1, fontSize: 13, fontWeight: '700', color: c.textPrimary, textTransform: 'capitalize' },
-    summaryDuration: { fontSize: 12, color: c.textSecondary, fontWeight: '600' },
+    summaryHeader: { flexDirection: 'row', alignItems: 'center', gap: 9 },
+    summaryIconBadge: {
+      width: 30,
+      height: 30,
+      borderRadius: 9,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.primary + '14',
+      borderColor: c.primary + '28',
+      borderWidth: 1,
+    },
+    summaryFocus: { fontSize: 14, fontWeight: '800', color: c.textPrimary, textTransform: 'capitalize' },
+    summarySubtitle: { fontSize: 11, color: c.textMuted, marginTop: 1, fontWeight: '600' },
+    ratingBadge: {
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      borderRadius: radius.full,
+      backgroundColor: c.primary + '16',
+      borderColor: c.primary + '26',
+      borderWidth: 1,
+    },
+    ratingBadgeText: { fontSize: 10, fontWeight: '800', color: c.primary },
+    summaryMetricGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
+    summaryMetricTile: {
+      minWidth: 72,
+      flexGrow: 1,
+      flexBasis: '30%',
+      borderRadius: radius.sm,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surfaceRaised,
+      paddingHorizontal: 8,
+      paddingVertical: 8,
+      gap: 3,
+    },
+    summaryMetricValue: { fontSize: 14, color: c.textPrimary, fontWeight: '800', fontVariant: ['tabular-nums'] as any },
+    summaryMetricLabel: { fontSize: 10, color: c.textMuted, fontWeight: '700', textTransform: 'uppercase' },
     summaryStatsRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
     summaryStat: { fontSize: 12, color: c.textSecondary },
     summaryStatNum: { fontWeight: '700', color: c.textPrimary },
@@ -646,14 +742,24 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
       justifyContent: 'space-between',
       gap: 8,
     },
-    detailsToggleText: { fontSize: 12, fontWeight: '700', color: c.textPrimary },
+    detailsToggleActive: { borderTopColor: c.primary + '35' },
+    detailsToggleCopy: { flex: 1 },
+    detailsToggleText: { fontSize: 12, fontWeight: '800', color: c.textPrimary },
+    detailsToggleSubtext: { fontSize: 10, fontWeight: '600', color: c.textMuted, marginTop: 1 },
     exerciseList: {
-      gap: 10,
+      gap: 8,
       paddingTop: 8,
       borderTopWidth: StyleSheet.hairlineWidth,
       borderTopColor: c.border,
     },
-    exerciseRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 9 },
+    exerciseDetailCard: {
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.surfaceRaised,
+      padding: 10,
+    },
+    exerciseRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
     exerciseBullet: {
       width: 5,
       height: 5,
@@ -661,8 +767,39 @@ function createStyles(c: ReturnType<typeof getTheme>['colors']) {
       backgroundColor: c.primary,
       marginTop: 6,
     },
-    exerciseName: { fontSize: 13, fontWeight: '700', color: c.textPrimary, lineHeight: 18 },
-    exerciseEquipment: { fontSize: 11, fontWeight: '600', color: c.textMuted },
+    exerciseIndexPill: {
+      width: 22,
+      height: 22,
+      borderRadius: 7,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: c.primary + '12',
+      borderWidth: 1,
+      borderColor: c.primary + '25',
+    },
+    exerciseIndexText: { fontSize: 10, fontWeight: '800', color: c.primary },
+    exerciseTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+    exerciseName: { fontSize: 13, fontWeight: '800', color: c.textPrimary, lineHeight: 18, flexShrink: 1 },
+    exerciseEquipmentPill: {
+      paddingHorizontal: 7,
+      paddingVertical: 2,
+      borderRadius: radius.full,
+      backgroundColor: c.surface,
+      borderColor: c.border,
+      borderWidth: 1,
+    },
+    exerciseEquipment: { fontSize: 10, fontWeight: '700', color: c.textMuted },
+    setChipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+    setChip: {
+      paddingHorizontal: 8,
+      paddingVertical: 5,
+      borderRadius: radius.sm,
+      backgroundColor: c.primary + '10',
+      borderWidth: 1,
+      borderColor: c.primary + '22',
+      maxWidth: '100%',
+    },
+    setChipText: { fontSize: 11, color: c.textSecondary, fontWeight: '700', lineHeight: 14 },
     exerciseSets: { fontSize: 11, color: c.textSecondary, lineHeight: 16, marginTop: 2 },
     prRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
     prBadge: {

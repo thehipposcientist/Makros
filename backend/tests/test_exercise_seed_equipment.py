@@ -287,10 +287,13 @@ def test_bodyweight_conditioning_replaces_generic_hiit_placeholder() -> None:
 
     by_slug = {e["slug"]: e for e in SEED_EXERCISES}
     required = {
+        "burpees",
+        "mountain_climbers",
         "jumping_jacks",
         "high_knees",
         "butt_kicks",
         "fast_feet",
+        "shadow_boxing",
         "plank_jacks",
         "squat_thrusts",
         "skater_hops",
@@ -320,6 +323,23 @@ def test_bodyweight_conditioning_replaces_generic_hiit_placeholder() -> None:
     _ok(f"circuit cardio pick is concrete: {pick['name']}")
 
 
+def test_active_exercise_names_avoid_generic_circuit_placeholders() -> None:
+    print("\n[test] active exercise names avoid generic circuit placeholders")
+    from app.seed_exercises_data import RETIRED_EXERCISE_SLUGS, SEED_EXERCISES
+
+    generic_tokens = ("circuit", "routine", "workout", "conditioning")
+    offenders = []
+    for exercise in SEED_EXERCISES:
+        if exercise.get("deprecated") or exercise.get("slug") in RETIRED_EXERCISE_SLUGS:
+            continue
+        name = str(exercise.get("name") or "").strip().lower()
+        if any(token in name for token in generic_tokens):
+            offenders.append((exercise.get("slug"), exercise.get("name")))
+
+    assert not offenders, f"active exercises need concrete movement names: {offenders[:20]}"
+    _ok("no active seed exercise uses a generic circuit/routine/workout label")
+
+
 cases = [
     test_seed_exercise_equipment_references_are_canonical,
     test_wger_import_equipment_map_uses_seed_slugs,
@@ -334,6 +354,7 @@ cases = [
     test_strength_load_settings_snap_to_available_weights,
     test_scan_equipment_list_covers_new_equipment_names,
     test_bodyweight_conditioning_replaces_generic_hiit_placeholder,
+    test_active_exercise_names_avoid_generic_circuit_placeholders,
 ]
 
 

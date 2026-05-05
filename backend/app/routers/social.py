@@ -272,6 +272,13 @@ def _notification_unread_count(db: Session, user_id: int) -> int:
     return int(value or 0)
 
 
+def _feed_like_count(db: Session, item_id: int) -> int:
+    value = db.exec(
+        select(sa_func.count(FeedLike.id)).where(FeedLike.feed_item_id == item_id)
+    ).first()
+    return int(value or 0)
+
+
 def _hydrate_notifications(db: Session, rows: list[SocialNotification]) -> list[SocialNotificationRead]:
     if not rows:
         return []
@@ -834,6 +841,91 @@ class FeedItemRead(BaseModel):
     created_at: str
 
 
+def _coerce_positive_number(value) -> float | None:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return round(n, 2)
+
+
+def _coerce_positive_int(value) -> int | None:
+    n = _coerce_positive_number(value)
+    return int(round(n)) if n is not None else None
+
+
+_SENSITIVE_SOCIAL_METRIC_KEYS = {
+    "calorie", "calories", "kcal", "calories_burned", "body_weight",
+    "body_weight_lbs", "weight_entry", "body_fat", "bodyfat", "macros",
+    "protein", "carbs", "fat",
+}
+_ALLOWED_CARDIO_METRIC_KEYS = {
+    "speed", "incline", "pace", "split", "spm", "stroke_rate", "distance",
+    "watts", "cadence", "output", "laps", "floors", "level", "elevation",
+    "resistance", "weight", "load",
+}
+
+
+def _sanitize_cardio_metrics(raw) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    clean: dict = {}
+    for key, value in raw.items():
+        normalized = str(key or "").strip().lower()
+        if not normalized:
+            continue
+        if normalized in _SENSITIVE_SOCIAL_METRIC_KEYS or "calorie" in normalized or "body_" in normalized:
+            continue
+        if normalized not in _ALLOWED_CARDIO_METRIC_KEYS:
+            continue
+        text = str(value).strip()
+        if not text or text.lower() in {"none", "null", "undefined", "nan"}:
+            continue
+        clean[normalized[:32]] = text[:60]
+    return clean or None
+
+
+def _sanitize_workout_set(raw: dict) -> dict:
+    clean: dict = {}
+    reps = _coerce_positive_int(raw.get("reps") or raw.get("actual_reps"))
+    if reps is not None:
+        clean["reps"] = reps
+    weight = _coerce_positive_number(raw.get("weight_lbs") or raw.get("actual_weight_lbs"))
+    if weight is not None:
+        clean["weight_lbs"] = weight
+    duration = _coerce_positive_int(raw.get("duration_seconds"))
+    if duration is not None:
+        clean["duration_seconds"] = duration
+    distance = _coerce_positive_number(raw.get("actual_distance"))
+    if distance is not None:
+        clean["actual_distance"] = distance
+    pace = raw.get("actual_pace")
+    if isinstance(pace, str) and pace.strip():
+        clean["actual_pace"] = pace.strip()[:40]
+    heart_rate = _coerce_positive_int(raw.get("heart_rate_avg"))
+    if heart_rate is not None:
+        clean["heart_rate_avg"] = heart_rate
+    cardio_metrics = _sanitize_cardio_metrics(raw.get("cardio_metrics"))
+    if cardio_metrics:
+        clean["cardio_metrics"] = cardio_metrics
+    return clean
+
+
+def _sanitize_hr_summary(raw) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    clean: dict = {}
+    avg = _coerce_positive_int(raw.get("avgBpm") or raw.get("avg_bpm"))
+    max_bpm = _coerce_positive_int(raw.get("maxBpm") or raw.get("max_bpm"))
+    if avg is not None:
+        clean["avgBpm"] = avg
+    if max_bpm is not None:
+        clean["maxBpm"] = max_bpm
+    return clean or None
+
+
 def _sanitize_feed_payload_for_read(event_type: str, payload: dict | None) -> dict:
     raw = payload if isinstance(payload, dict) else {}
     if event_type == "workout_post":
@@ -858,18 +950,30 @@ def _sanitize_feed_payload_for_read(event_type: str, payload: dict | None) -> di
             for s in list(ex.get("sets") or [])[:20]:
                 if not isinstance(s, dict):
                     continue
-                sets.append({"reps": int(s.get("reps") or 0)})
+                sets.append(_sanitize_workout_set(s))
             exercises.append({
                 "name": str(ex.get("name") or "Exercise")[:80],
+                "equipment": str(ex.get("equipment"))[:60] if ex.get("equipment") else None,
                 "sets": sets,
             })
-        return {
+        clean = {
             "focus": str(raw.get("focus") or "Workout")[:80],
             "duration_seconds": int(raw.get("duration_seconds") or 0),
             "date": str(raw.get("date") or "")[:10],
             "exercise_count": int(raw.get("exercise_count") or len(exercises)),
             "exercises": exercises,
         }
+        for key in ("activity_category", "activity_subtype", "cardio_style"):
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip():
+                clean[key] = value.strip()[:40]
+        distance_miles = _coerce_positive_number(raw.get("distance_miles"))
+        if distance_miles is not None:
+            clean["distance_miles"] = distance_miles
+        hr_summary = _sanitize_hr_summary(raw.get("hr_summary"))
+        if hr_summary:
+            clean["hr_summary"] = hr_summary
+        return clean
 
     if event_type == "pr_achieved":
         return {
@@ -1104,7 +1208,7 @@ def _sanitize_workout_summary(raw: dict) -> dict:
         for s in list(ex.get("sets") or [])[:20]:
             if not isinstance(s, dict):
                 continue
-            sets.append({"reps": int(s.get("reps") or 0)})
+            sets.append(_sanitize_workout_set(s))
         exercises.append({
             "name": str(ex.get("name") or "Exercise")[:80],
             "equipment": str(ex.get("equipment"))[:60] if ex.get("equipment") else None,
@@ -1193,7 +1297,7 @@ def toggle_like(
     if existing:
         db.delete(existing)
         db.commit()
-        return {"liked": False}
+        return {"liked": False, "like_count": _feed_like_count(db, item_id)}
     db.add(FeedLike(user_id=current_user.id, feed_item_id=item_id))
     _create_social_notification(
         db,
@@ -1205,4 +1309,4 @@ def toggle_like(
         payload=_feed_notification_payload(item),
     )
     db.commit()
-    return {"liked": True}
+    return {"liked": True, "like_count": _feed_like_count(db, item_id)}

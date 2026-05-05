@@ -248,8 +248,9 @@ def test_digest_includes_avatar_url_without_sensitive_data():
     _ok("avatar URL appears without leaking sensitive fields")
 
 
-def test_feed_sanitizer_removes_sensitive_workout_fields():
-    """Activity feed payloads must never expose lift/body/nutrition data."""
+def test_feed_sanitizer_keeps_workout_metrics_and_removes_sensitive_fields():
+    """Activity feed payloads can expose workout load/cardio metrics, but
+    must never expose body/nutrition data."""
     print("\n[test] feed: sanitizer removes sensitive workout fields")
     clean = _sanitize_feed_payload_for_read("workout_completed", {
         "focus": "Push",
@@ -264,17 +265,34 @@ def test_feed_sanitizer_removes_sensitive_workout_fields():
                 "weight": 225,
                 "weight_lbs": 225,
                 "calories": 80,
+                "duration_seconds": 90,
+                "actual_distance": 0.25,
+                "actual_pace": "8:00 /mi",
+                "heart_rate_avg": 142,
+                "cardio_metrics": {
+                    "speed": "7.5 mph",
+                    "calories": "80",
+                    "body_weight_lbs": "185",
+                },
             }],
         }],
     })
     dumped = json.dumps(clean).lower()
-    assert clean["exercises"][0]["sets"] == [{"reps": 5}]
-    assert "weight" not in dumped
+    assert clean["exercises"][0]["sets"] == [{
+        "reps": 5,
+        "weight_lbs": 225.0,
+        "duration_seconds": 90,
+        "actual_distance": 0.25,
+        "actual_pace": "8:00 /mi",
+        "heart_rate_avg": 142,
+        "cardio_metrics": {"speed": "7.5 mph"},
+    }]
+    assert "body_weight" not in dumped
     assert "calorie" not in dumped
-    _ok("auto workout feed payload keeps only structure and reps")
+    _ok("auto workout feed payload keeps training metrics without body/nutrition data")
 
 
-def test_feed_sanitizer_removes_sensitive_post_fields():
+def test_feed_sanitizer_keeps_post_metrics_and_removes_sensitive_fields():
     """Manual workout posts get the same privacy boundary as auto rows."""
     print("\n[test] feed: sanitizer removes sensitive post fields")
     clean = _sanitize_feed_payload_for_read("workout_post", {
@@ -288,7 +306,7 @@ def test_feed_sanitizer_removes_sensitive_post_fields():
             "exercises": [{
                 "name": "Back Squat",
                 "equipment": "barbell",
-                "sets": [{"reps": 3, "weight_lbs": 315}],
+                "sets": [{"reps": 3, "weight_lbs": 315, "cardio_metrics": {"calories": "25"}}],
             }],
             "total_sets": 1,
             "total_reps": 3,
@@ -296,10 +314,10 @@ def test_feed_sanitizer_removes_sensitive_post_fields():
     })
     dumped = json.dumps(clean).lower()
     assert clean["caption"] == "Solid session"
-    assert clean["workout_summary"]["exercises"][0]["sets"] == [{"reps": 3}]
-    assert "weight" not in dumped
+    assert clean["workout_summary"]["exercises"][0]["sets"] == [{"reps": 3, "weight_lbs": 315.0}]
+    assert "body_weight" not in dumped
     assert "calorie" not in dumped
-    _ok("manual post payload keeps caption/photo plus sanitized workout structure")
+    _ok("manual post payload keeps caption/photo plus sanitized workout metrics")
 
 
 cases = [
@@ -308,8 +326,8 @@ cases = [
     test_digest_with_zero_friends_doesnt_crash,
     test_digest_respects_share_toggle,
     test_digest_includes_avatar_url_without_sensitive_data,
-    test_feed_sanitizer_removes_sensitive_workout_fields,
-    test_feed_sanitizer_removes_sensitive_post_fields,
+    test_feed_sanitizer_keeps_workout_metrics_and_removes_sensitive_fields,
+    test_feed_sanitizer_keeps_post_metrics_and_removes_sensitive_fields,
 ]
 
 

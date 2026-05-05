@@ -430,7 +430,7 @@ def test_cardio_classification_is_single_source_of_truth() -> None:
         "cardio_intensity": "steady",
     }) == "steady"
     assert classify_cardio({
-        "name": "Low-Impact Cardio Circuit",
+        "name": "No-Jump March + Step-Touch Cardio",
         "exercise_type": "cardio",
         "movement_pattern": "cardio",
         "is_compound": True,

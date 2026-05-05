@@ -12,6 +12,9 @@ export interface ExerciseLibraryItem {
   secondary_muscles?: string[];
   equipment?: string;
   is_compound?: boolean;
+  exercise_type?: string | null;
+  movement_pattern?: string | null;
+  cardio_intensity?: string | null;
 }
 
 export interface ExerciseGuide {
@@ -24,6 +27,9 @@ export interface ExerciseGuide {
   mistake: string;
   concentric: string;
   eccentric: string;
+  phaseTitle: string;
+  primaryPhaseLabel: string;
+  secondaryPhaseLabel: string;
 }
 
 /** Turn an identifier string into a human-readable label.
@@ -93,7 +99,326 @@ function detectMovementPattern(name: string, _primary: string): MovementPattern 
   return 'generic';
 }
 
+function isCardioExercise(ex: ExerciseLibraryItem): boolean {
+  const name = ex.name.toLowerCase();
+  return (
+    String(ex.exercise_type ?? '').toLowerCase() === 'cardio'
+    || String(ex.movement_pattern ?? '').toLowerCase() === 'cardio'
+    || String(ex.primary_muscle ?? '').toLowerCase() === 'cardio'
+    || /sprint|interval|zone ?2|treadmill|bike|cycling|rowing|rower|skierg|elliptical|stair climber|walk|jog|run|jump rope|boxing|burpee|mountain climber|jumping jack|high knees|butt kick|fast feet|plank jack|squat thrust|skater|line hop|battle rope|shuffle|shadow boxing|cardio/.test(name)
+  );
+}
+
+function buildCardioExerciseGuide(ex: ExerciseLibraryItem): ExerciseGuide {
+  const name = ex.name.toLowerCase();
+  const secondary = (ex.secondary_muscles ?? []).map(humanizeToken).filter(Boolean);
+  const supportText = secondary.length ? ` Secondary demand: ${joinParts(secondary).toLowerCase()}.` : '';
+  const has = (pattern: RegExp) => pattern.test(name);
+  const isIntervals = has(/interval|sprint|hiit|tabata|burpee|jump rope|jumping jack|high knees|butt kicks|fast feet|plank jack|squat thrust|skater|line hop|shadow boxing|boxing|battle rope|shuttle|shuffle/);
+  const phaseTitle = isIntervals ? 'Interval Breakdown' : 'Cardio Execution';
+
+  if (has(/sprint|hill sprint|shuttle/)) {
+    return {
+      howTo: 'Use this as a sprint repeat, not a lifting exercise. Mark roughly 30-40 yards of clear space, sprint hard, then walk back or rest until the next repeat.',
+      hits: `Primarily trains acceleration, top-speed mechanics, and high-output conditioning.${supportText}`,
+      why: 'Short sprints build power, speed, and anaerobic capacity without turning the session into a long endurance run. Full recovery keeps each rep fast and crisp.',
+      setup: 'Use a track, turf lane, quiet field, or hill with room to slow down. Warm up first, mark a start and finish, and leave extra space past the finish for deceleration.',
+      movement: 'Start tall with a slight forward lean. Drive arms cheek-to-hip, push the ground back, accelerate smoothly, and stay relaxed through the face, hands, and shoulders.',
+      feel: 'Each sprint should feel fast and powerful, with breathing high by the end but mechanics still clean. Stop a rep early if you are stumbling or tightening up.',
+      mistake: 'Starting cold or sprinting in a cramped space. Sprint intervals need a warm-up, clear runway, and enough recovery to keep speed high.',
+      concentric: 'Sprint the marked distance hard. Build speed over the first few steps, drive the knees and arms, and run through the finish instead of easing up before it.',
+      eccentric: 'Walk back slowly or rest in place until breathing comes down enough for another quality sprint. Recovery is part of the prescription, not wasted time.',
+      phaseTitle,
+      primaryPhaseLabel: 'SPRINT',
+      secondaryPhaseLabel: 'RECOVER',
+    };
+  }
+
+  if (has(/bike|cycling|assault bike/)) {
+    return {
+      howTo: isIntervals
+        ? 'Set the bike so you can pedal fast without bouncing. Alternate hard efforts with easy pedaling exactly as prescribed.'
+        : 'Ride at a steady conversational pace. Keep cadence smooth and adjust resistance so effort stays aerobic instead of turning into leg strength work.',
+      hits: `Primarily trains the cardiovascular system with leg support from quads and calves.${supportText}`,
+      why: isIntervals
+        ? 'Bike intervals let you push heart rate high with low joint impact and very controlled pacing.'
+        : 'Steady cycling builds aerobic capacity with low impact, making it useful for conditioning, recovery support, and weekly Zone 2 volume.',
+      setup: 'Set saddle height so the knee stays slightly bent at the bottom of the pedal stroke. Keep the torso quiet and hands light on the bars.',
+      movement: 'Pedal in smooth circles. For hard intervals, increase cadence and resistance together; for easy work, back off enough that breathing settles.',
+      feel: isIntervals
+        ? 'Hard rounds should burn in the legs and lungs, then noticeably settle during the easy spin.'
+        : 'You should be able to speak in short sentences. If you are gasping, lower resistance or cadence.',
+      mistake: 'Cranking resistance so high that cadence crawls. This changes cardio into a grindy leg-strength effort.',
+      concentric: isIntervals
+        ? 'During the hard interval, ramp cadence quickly and hold a strong but repeatable pace until the timer ends.'
+        : 'Find a smooth cadence you can hold. Keep breathing rhythmic and effort steady rather than surging.',
+      eccentric: isIntervals
+        ? 'During recovery, keep the pedals moving very easy. Let breathing drop before the next push.'
+        : 'Use small resistance or cadence adjustments to stay in the intended zone as fatigue builds.',
+      phaseTitle,
+      primaryPhaseLabel: isIntervals ? 'HARD' : 'PACE',
+      secondaryPhaseLabel: isIntervals ? 'EASY' : 'CONTROL',
+    };
+  }
+
+  if (has(/row|rowing|skierg/)) {
+    const ski = has(/skierg|ski erg/);
+    return {
+      howTo: isIntervals
+        ? `Use ${ski ? 'the SkiErg' : 'the rower'} for timed hard repeats with easy recovery between rounds.`
+        : `Use ${ski ? 'the SkiErg' : 'the rower'} at a steady pace you can repeat without form falling apart.`,
+      hits: `Primarily trains cardio with ${ski ? 'lats, shoulders, and core' : 'legs, back, and core'} contributing each stroke.${supportText}`,
+      why: `${ski ? 'SkiErg' : 'Rowing'} work gives a measurable cardio stimulus while involving more total body mass than most machines.`,
+      setup: ski
+        ? 'Stand tall with handles above eye level, ribs down, and feet planted. Start each pull from the lats, not by yanking with the arms.'
+        : 'Strap feet in, sit tall, and start with shins near vertical. Sequence each stroke as legs, hips, arms, then arms, hips, legs on the return.',
+      movement: ski
+        ? 'Snap the handles down by crunching the ribs toward the hips, then let the arms recover smoothly overhead.'
+        : 'Drive with the legs first, swing the torso slightly open, then finish with the arms. Recover in the reverse order and keep strokes smooth.',
+      feel: isIntervals ? 'Hard rounds should spike breathing without your stroke getting sloppy.' : 'Breathing should be steady and stroke rhythm repeatable.',
+      mistake: ski ? 'Turning it into an arm-only pull. Use torso and lats.' : 'Yanking with the arms before the legs drive. That wastes power and irritates the low back.',
+      concentric: isIntervals ? 'Push the hard stroke rate or pace for the work interval while keeping technique sharp.' : 'Settle into a repeatable stroke rhythm and keep the monitor pace steady.',
+      eccentric: isIntervals ? 'Use the easy interval to slow the stroke rate, breathe, and reset technique.' : 'Relax the recovery phase of each stroke so the next drive starts controlled.',
+      phaseTitle,
+      primaryPhaseLabel: isIntervals ? 'WORK' : 'PACE',
+      secondaryPhaseLabel: isIntervals ? 'RESET' : 'RHYTHM',
+    };
+  }
+
+  if (has(/walk|jog|run|treadmill|incline|outdoor/)) {
+    return {
+      howTo: isIntervals ? 'Alternate fast running efforts with easy walking or jogging recovery.' : 'Move continuously at the prescribed easy or Zone 2 pace.',
+      hits: `Primarily trains aerobic conditioning through the legs and cardiovascular system.${supportText}`,
+      why: isIntervals
+        ? 'Run intervals build speed and conditioning with clear work and recovery blocks.'
+        : 'Walking, jogging, and steady running build aerobic base without needing complex setup.',
+      setup: 'Choose a safe route or treadmill setting. For outdoor work, pick a surface where you can keep rhythm without dodging traffic or obstacles.',
+      movement: 'Keep posture tall, arms relaxed, and stride quiet. Let pace come from rhythm, not overstriding.',
+      feel: isIntervals ? 'Fast portions should feel challenging but controlled; easy portions should clearly lower breathing.' : 'For Zone 2, you should be able to hold a broken conversation.',
+      mistake: isIntervals ? 'Turning every recovery into another hard rep. Go easy enough to make the next interval good.' : 'Letting easy cardio drift into a tempo run. If conversation disappears, slow down.',
+      concentric: isIntervals ? 'Run the hard segment at the prescribed pace or effort while keeping stride mechanics smooth.' : 'Hold the target pace, incline, or heart-rate zone steadily.',
+      eccentric: isIntervals ? 'Walk or jog easy until the next rep. Use the recovery to bring breathing and posture back under control.' : 'Adjust pace or incline down when breathing climbs above the target zone.',
+      phaseTitle,
+      primaryPhaseLabel: isIntervals ? 'FAST' : 'PACE',
+      secondaryPhaseLabel: isIntervals ? 'EASY' : 'ADJUST',
+    };
+  }
+
+  if (has(/burpee/)) {
+    return {
+      howTo: 'Perform full-body conditioning reps: stand tall, squat down, place hands on the floor, jump or step your feet back to a strong plank, return feet under you, then stand or jump.',
+      hits: `Primarily trains cardio, legs, chest, shoulders, and trunk stiffness.${supportText}`,
+      why: 'Burpees combine a squat, plank transition, and standing finish, making them a simple high-output drill when space and equipment are limited.',
+      setup: 'Clear enough floor space for a plank and stand with feet about hip width. Use the step-back version if jumping back makes your low back sag or your landings get loud.',
+      movement: 'Move as one clean rep at a time. Hands land under shoulders, ribs stay braced in the plank, feet return flat under the hips, and the finish is tall before the next rep.',
+      feel: 'Breathing should climb fast and the whole body should work. You should not feel sharp wrist, shoulder, or low-back strain.',
+      mistake: 'Flopping into the plank or rushing sloppy landings. Keep the plank organized and choose a step-back rep before form breaks.',
+      concentric: 'Complete the rep with a crisp floor-to-stand transition. Drive the feet back, snap them forward under control, then stand tall or jump if prescribed.',
+      eccentric: 'Reset briefly between reps or during the rest interval. Shake out the arms, breathe, and restart with a stable plank position.',
+      phaseTitle,
+      primaryPhaseLabel: 'REP',
+      secondaryPhaseLabel: 'RESET',
+    };
+  }
+
+  if (has(/mountain climber/)) {
+    return {
+      howTo: 'Hold a high plank and drive one knee at a time toward the chest for the prescribed interval. Move quickly only while the hips and shoulders stay stable.',
+      hits: `Primarily trains cardio, abs, hip flexors, shoulders, and trunk anti-rotation.${supportText}`,
+      why: 'Mountain climbers turn a plank into a conditioning drill by adding fast knee drives without needing jumping or equipment.',
+      setup: 'Start in a push-up plank with hands under shoulders, feet behind you, and ribs tucked down. Widen the feet slightly if your hips rock side to side.',
+      movement: 'Alternate knee drives while pressing the floor away. Keep the back long, hips near shoulder height, and foot strikes light.',
+      feel: 'Abs, shoulders, and lungs should work together. If the low back takes over, slow down and shorten the knee drive.',
+      mistake: 'Letting the hips bounce high or sag low. The drill should look like a plank with fast legs, not a loose crawl.',
+      concentric: 'Drive the knee forward sharply while keeping the supporting leg and shoulders braced.',
+      eccentric: 'Return the foot to the plank under control and immediately switch sides without losing trunk position.',
+      phaseTitle,
+      primaryPhaseLabel: 'DRIVE',
+      secondaryPhaseLabel: 'RESET',
+    };
+  }
+
+  if (has(/plank jack|squat thrust/)) {
+    const isPlankJack = has(/plank jack/);
+    return {
+      howTo: isPlankJack
+        ? 'Hold a high plank and jump or step both feet out and in like a jumping jack for the prescribed time.'
+        : 'Perform burpee-style reps without the push-up or jump: hands to floor, feet jump or step back to plank, feet return under you, then stand.',
+      hits: `Primarily trains cardio, shoulders, abs, and hip control.${supportText}`,
+      why: isPlankJack
+        ? 'Plank jacks add fast footwork to a plank, raising heart rate while challenging trunk stiffness.'
+        : 'Squat thrusts deliver the conditioning piece of a burpee with less impact and less upper-body fatigue.',
+      setup: 'Use a clear floor space and start with hands under shoulders. Choose step-out reps if jumping causes loud landings or hip sway.',
+      movement: isPlankJack
+        ? 'Keep shoulders stacked over hands, brace the ribs down, and move the feet out-in without letting the hips bounce.'
+        : 'Place hands down, brace the plank, move feet back and forward, then stand tall before starting the next rep.',
+      feel: 'Shoulders, abs, and lungs should work. The low back should stay quiet.',
+      mistake: 'Moving the feet faster than the plank can handle. Slow down or step the feet when hips start swinging.',
+      concentric: isPlankJack
+        ? 'Move the feet out and back in while maintaining a strong plank line.'
+        : 'Kick or step the feet back to plank, then bring them forward under control and stand.',
+      eccentric: 'Use the reset or rest period to bring breathing down and rebuild the plank before the next rep.',
+      phaseTitle,
+      primaryPhaseLabel: isPlankJack ? 'JACK' : 'REP',
+      secondaryPhaseLabel: 'RESET',
+    };
+  }
+
+  if (has(/jumping jack|high knees|butt kick|fast feet/)) {
+    const isJumpingJack = has(/jumping jack/);
+    const isHighKnees = has(/high knees/);
+    const isButtKicks = has(/butt kick/);
+    const drill = isJumpingJack ? 'jumping jacks' : isHighKnees ? 'high knees' : isButtKicks ? 'butt kicks' : 'fast feet';
+    return {
+      howTo: isJumpingJack
+        ? 'Perform classic jumping jacks: feet jump out as arms reach overhead, then feet jump in as arms return to your sides.'
+        : isHighKnees
+          ? 'Run in place with quick arm action and drive alternating knees toward hip height for the prescribed interval.'
+          : isButtKicks
+            ? 'Jog in place and pull alternating heels toward your glutes while keeping knees under the hips.'
+            : 'Stay in an athletic stance and tap the feet rapidly in place with short, quiet contacts.',
+      hits: `Primarily trains cardio, foot rhythm, calves, and hip coordination.${supportText}`,
+      why: `${humanizeToken(drill)} are simple upright conditioning drills that raise heart rate quickly without setup time.`,
+      setup: 'Clear a small patch of floor, stay tall, and keep knees soft. Use march-in-place if impact needs to be lower.',
+      movement: isJumpingJack
+        ? 'Land softly on each out-in jump and keep the arms moving in rhythm without shrugging.'
+        : isHighKnees
+          ? 'Drive knees up from the hips, pump the arms, and keep foot contacts quick under your body.'
+          : isButtKicks
+            ? 'Keep posture tall, cycle the heels back quickly, and avoid leaning forward to chase the movement.'
+            : 'Keep the hips low, chest proud, and feet moving fast without drifting around the room.',
+      feel: 'Breathing should rise and lower legs may burn, but contacts should stay light and controlled.',
+      mistake: isJumpingJack
+        ? 'Landing stiff-legged or letting the arms lag behind the feet.'
+        : 'Letting posture collapse as speed increases. Keep the torso tall and shorten the range before form gets messy.',
+      concentric: 'Move through the fast part of each rep with crisp rhythm and quiet foot contacts.',
+      eccentric: 'Use the reset or easy interval to march, breathe, and bring posture back before the next push.',
+      phaseTitle,
+      primaryPhaseLabel: isJumpingJack ? 'JUMP' : isHighKnees ? 'DRIVE' : 'QUICK',
+      secondaryPhaseLabel: 'RESET',
+    };
+  }
+
+  if (has(/skater|line hop|shuffle/)) {
+    const isSkater = has(/skater/);
+    const isLineHop = has(/line hop/);
+    return {
+      howTo: isSkater
+        ? 'Bound side to side like a speed skater, landing on one foot with the opposite leg sweeping behind you.'
+        : isLineHop
+          ? 'Hop quickly over an imaginary line, side to side or front to back, for the prescribed interval.'
+          : 'Shuffle laterally in short, quick steps, staying low and reversing direction under control.',
+      hits: `Primarily trains cardio, lateral footwork, calves, glutes, and balance.${supportText}`,
+      why: 'Lateral conditioning drills train side-to-side movement that straight-ahead cardio misses.',
+      setup: 'Use a flat surface with enough room to move side to side. Keep landings quiet and scale the distance before chasing speed.',
+      movement: isSkater
+        ? 'Push off one foot, travel sideways, land softly, and absorb through the hip before bounding back.'
+        : isLineHop
+          ? 'Keep hops small and quick, knees soft, and torso quiet as the feet clear the line.'
+          : 'Stay in an athletic stance, push the floor sideways, and keep the feet from crossing.',
+      feel: 'You should feel lungs, calves, and outer hips working while balance stays under control.',
+      mistake: 'Letting knees cave inward or landing loudly. Shorten the hop or shuffle distance until landings are clean.',
+      concentric: isSkater ? 'Push laterally and bound to the other side.' : 'Move quickly across the line or shuffle lane with springy foot contacts.',
+      eccentric: 'Absorb the landing softly, regain balance, and immediately prepare for the next direction change.',
+      phaseTitle,
+      primaryPhaseLabel: isSkater ? 'BOUND' : 'HOP',
+      secondaryPhaseLabel: 'LAND',
+    };
+  }
+
+  if (has(/battle rope/)) {
+    return {
+      howTo: 'Use anchored battle ropes for timed waves, slams, or alternating arms. Work hard for the interval, then rest before the next round.',
+      hits: `Primarily trains cardio, shoulders, lats, grip, and trunk bracing.${supportText}`,
+      why: 'Battle ropes create a high heart-rate conditioning effect with very little lower-body impact.',
+      setup: 'Stand in an athletic stance with knees soft, ribs down, and one rope end in each hand. Step closer to make waves easier or back up to add tension.',
+      movement: 'Create strong rope waves by moving from the shoulders and trunk while keeping the neck relaxed. For slams, lift and drive the ropes down hard.',
+      feel: 'Shoulders, grip, and lungs should fatigue quickly while the low back stays stable.',
+      mistake: 'Standing upright and yanking only with the arms. Stay braced, use the trunk, and keep waves consistent.',
+      concentric: 'Drive the ropes into fast waves or powerful slams for the work interval.',
+      eccentric: 'Rest fully enough to restore shoulder rhythm and breathing before the next round.',
+      phaseTitle,
+      primaryPhaseLabel: 'WAVES',
+      secondaryPhaseLabel: 'RESET',
+    };
+  }
+
+  if (has(/jump rope/)) {
+    return {
+      howTo: 'Use small, quick hops while turning the rope from the wrists. Work for the prescribed time, then rest before the next round.',
+      hits: `Primarily trains cardio, calves, rhythm, and foot stiffness.${supportText}`,
+      why: 'Jump rope delivers high conditioning density with simple equipment and easy interval structure.',
+      setup: 'Use a rope length that reaches roughly armpit height when stood on. Pick a flat surface and keep elbows close to the ribs.',
+      movement: 'Stay tall, bounce lightly off the balls of the feet, and keep jumps low. The rope turns from the wrists, not big shoulder circles.',
+      feel: 'Calves and lungs should work quickly, but contacts should stay light and springy.',
+      mistake: 'Jumping too high or whipping the rope with the shoulders. Both waste energy and make the drill fall apart.',
+      concentric: 'During the work round, keep quick low hops and steady wrist turns until the timer ends.',
+      eccentric: 'During rest, shake out the calves, reset the rope, and restart only when rhythm is ready.',
+      phaseTitle,
+      primaryPhaseLabel: 'JUMP',
+      secondaryPhaseLabel: 'RESET',
+    };
+  }
+
+  if (has(/boxing|shadow boxing|heavy bag/)) {
+    return {
+      howTo: 'Work in boxing rounds: move your feet, keep your guard up, and throw crisp combinations for the prescribed interval.',
+      hits: `Primarily trains cardio, shoulders, trunk rotation, coordination, and footwork.${supportText}`,
+      why: 'Boxing-style conditioning raises heart rate while training rhythm, coordination, and upper-body endurance without needing a machine.',
+      setup: has(/heavy bag/) ? 'Wrap hands, use gloves, set a timer, and stand close enough to reach the bag without locking the elbows.' : 'Clear a small space, set a timer, keep hands by the face, and imagine a target in front of you.',
+      movement: 'Stay light on the feet. Throw jab-cross combinations, add slips or pivots, then reset guard before the next combo.',
+      feel: 'Breathing should climb, shoulders should fatigue, and footwork should stay controlled.',
+      mistake: 'Dropping the hands and arm-punching while standing still. Keep guard, rotate the trunk, and keep moving.',
+      concentric: 'During the round, flow through footwork and combinations without holding your breath.',
+      eccentric: 'Between rounds, lower intensity, shake out the shoulders, and reset stance and guard.',
+      phaseTitle,
+      primaryPhaseLabel: 'ROUND',
+      secondaryPhaseLabel: 'RESET',
+    };
+  }
+
+  if (has(/no-jump|step-touch|low-impact|march/)) {
+    return {
+      howTo: 'Cycle through march-in-place, step-touch, side taps, and light punches for the prescribed time. Keep it low impact: no jumping jacks required.',
+      hits: `Primarily trains easy cardio and coordination with minimal joint impact.${supportText}`,
+      why: 'Low-impact cardio keeps the heart rate moving without repeated jumping or hard landings.',
+      setup: 'Clear enough floor space to step side to side. Wear shoes with traction and keep the pace conversational.',
+      movement: 'March tall, step side-to-side, tap lightly, and add relaxed punches if desired. Keep knees soft and land quietly.',
+      feel: 'You should feel warm and lightly out of breath, not hammered.',
+      mistake: 'Making it too intense too soon. The point is steady joint-friendly movement, not max-effort HIIT.',
+      concentric: 'Move continuously through the low-impact pattern and keep steps light.',
+      eccentric: 'Use slower marching or smaller steps whenever breathing climbs above the intended easy effort.',
+      phaseTitle: 'Cardio Execution',
+      primaryPhaseLabel: 'MOVE',
+      secondaryPhaseLabel: 'MODIFY',
+    };
+  }
+
+  return {
+    howTo: isIntervals
+      ? 'Perform the prescribed work interval with crisp movement, then use the recovery interval to reset before the next round.'
+      : 'Perform continuous cardio at the prescribed pace, time, or heart-rate zone.',
+    hits: `Primarily trains the cardiovascular system${supportText}.`,
+    why: isIntervals
+      ? 'Intervals alternate high effort with recovery so you can accumulate quality hard work without turning every minute into a grind.'
+      : 'Steady cardio builds aerobic capacity and weekly conditioning volume.',
+    setup: 'Set a timer and choose equipment or space that matches the exercise name. Start easy for the first minute before settling into the target effort.',
+    movement: isIntervals ? 'Push during the work block, then deliberately back off during recovery.' : 'Keep rhythm smooth and effort consistent.',
+    feel: isIntervals ? 'Hard blocks should challenge breathing; recovery blocks should bring it down.' : 'Effort should feel repeatable and controlled.',
+    mistake: isIntervals ? 'Going so hard early that later rounds collapse.' : 'Letting pace drift too high and turning easy cardio into a hard workout.',
+    concentric: isIntervals ? 'Use the work interval for the prescribed hard effort.' : 'Hold the target pace or zone with smooth breathing.',
+    eccentric: isIntervals ? 'Use the recovery interval to slow down, breathe, and prepare for the next repeat.' : 'Adjust pace, resistance, or incline to stay in the target effort.',
+    phaseTitle,
+    primaryPhaseLabel: isIntervals ? 'WORK' : 'PACE',
+    secondaryPhaseLabel: isIntervals ? 'RECOVER' : 'CONTROL',
+  };
+}
+
 export function buildExerciseGuide(ex: ExerciseLibraryItem): ExerciseGuide {
+  if (isCardioExercise(ex)) {
+    return buildCardioExerciseGuide(ex);
+  }
+
   const primary = humanizeToken(ex.primary_muscle) || 'the target muscle';
   const secondary = (ex.secondary_muscles ?? []).map(humanizeToken).filter(Boolean);
   const equipment = humanizeToken(ex.equipment) || 'the equipment';
@@ -265,6 +590,9 @@ export function buildExerciseGuide(ex: ExerciseLibraryItem): ExerciseGuide {
     mistake: pd.mistake,
     concentric: pd.concentric,
     eccentric: pd.eccentric,
+    phaseTitle: 'Muscle Phase Breakdown',
+    primaryPhaseLabel: '↑ LIFTING',
+    secondaryPhaseLabel: '↓ LOWERING',
   };
 }
 

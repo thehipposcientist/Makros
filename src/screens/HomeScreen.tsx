@@ -83,6 +83,7 @@ import { exerciseEquipmentLabel } from '../utils/swapScoring';
 import ExerciseVideoCard from '../components/ExerciseVideoCard';
 import { exerciseThumbSmall, primeThumbnailIndex } from '../utils/exerciseThumb';
 import { configureExpandAnimation } from '../utils/layoutAnim';
+import { compactSocialSetSummaries, formatSocialDistance, formatSocialDuration } from '../utils/socialWorkoutDetails';
 import AnimatedCollapsible from '../components/AnimatedCollapsible';
 import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
@@ -9104,21 +9105,28 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   )}
                   {!friendFeedLoading && friendFeedItems.map((item, index) => {
                     const p = item.payload;
+                    const summary = p.workout_summary ?? p;
                     const isExpanded = expandedFeedItemId === item.id;
-                    const mins = p.duration_seconds ? Math.round(p.duration_seconds / 60) : null;
-                    const dateLabel = p.date ? new Date(p.date + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) : '';
+                    const durationLabel = formatSocialDuration(summary.duration_seconds ?? p.duration_seconds);
+                    const distanceLabel = formatSocialDistance(summary.distance_miles ?? p.distance_miles);
+                    const exerciseCount = p.exercise_count ?? summary.exercises?.length ?? 0;
+                    const date = summary.date ?? p.date;
+                    const dateLabel = date ? new Date(date + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) : '';
+                    const metaParts = [dateLabel, durationLabel, distanceLabel, exerciseCount ? `${exerciseCount} exercises` : ''].filter(Boolean);
                     return (
                       <TouchableOpacity
                         key={item.id}
                         testID={`social-friend-feed-row-${index}`}
                         accessibilityLabel={`social-friend-feed-row-${index}`}
+                        accessibilityState={{ expanded: isExpanded }}
                         activeOpacity={0.85}
                         onPress={() => {
-                          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                          configureExpandAnimation(320);
+                          import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
                           setExpandedFeedItemId(isExpanded ? null : item.id);
                         }}
                         style={{
-                          backgroundColor: themeColors.surface, borderColor: themeColors.border, borderWidth: 1,
+                          backgroundColor: themeColors.surface, borderColor: isExpanded ? themeColors.primary + '45' : themeColors.border, borderWidth: 1,
                           borderRadius: 14, marginBottom: 10, overflow: 'hidden',
                         }}
                       >
@@ -9130,9 +9138,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             <Ionicons name="barbell-outline" size={18} color={themeColors.primary} />
                           </View>
                           <View style={{ flex: 1 }}>
-                            <Text style={{ fontSize: 14, fontWeight: '700', color: themeColors.textPrimary }}>{p.focus ?? 'Workout'}</Text>
+                            <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.textPrimary }}>{summary.focus ?? p.focus ?? 'Workout'}</Text>
                             <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 1 }}>
-                              {dateLabel}{mins ? `  ·  ${mins} min` : ''}{p.exercise_count ? `  ·  ${p.exercise_count} exercises` : ''}
+                              {metaParts.join('  ·  ')}
                             </Text>
                           </View>
                           <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={themeColors.textMuted} />
@@ -9152,32 +9160,43 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           return (
                             <View style={{ borderTopWidth: 1, borderTopColor: themeColors.border, paddingHorizontal: 14, paddingVertical: 10, gap: 10 }}>
                               {exercises.map((ex, ei) => {
-                                const usableSets = (ex.sets ?? []).filter(
-                                  s => s.reps != null && Number(s.reps) > 0,
-                                );
-                                const groups: Array<{ count: number; reps: number }> = [];
-                                for (const s of usableSets) {
-                                  const r = Math.round(Number(s.reps));
-                                  const last = groups[groups.length - 1];
-                                  if (last && last.reps === r) {
-                                    last.count++;
-                                  } else {
-                                    groups.push({ count: 1, reps: r });
-                                  }
-                                }
-                                const setStr = groups.length
-                                  ? groups.map(g =>
-                                      `${g.count > 1 ? `${g.count}×` : ''}${g.reps} reps`,
-                                    ).join('  ·  ')
-                                  : `${ex.sets?.length ?? 0} sets`;
+                                const setSummaries = compactSocialSetSummaries(ex.sets as any);
                                 return (
-                                  <View key={ei} style={{ flexDirection: 'row', gap: 10, alignItems: 'flex-start' }}>
-                                    <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: themeColors.primary, marginTop: 5 }} />
-                                    <View style={{ flex: 1 }}>
-                                      <Text style={{ fontSize: 13, fontWeight: '600', color: themeColors.textPrimary }}>{ex.name}</Text>
-                                      <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 2 }}>{setStr}</Text>
+                                  <FadeInView key={ei} delay={Math.min(ei * 35, 160)} duration={220} slideDistance={6}>
+                                  <View style={{
+                                    flexDirection: 'row', gap: 10, alignItems: 'flex-start',
+                                    backgroundColor: themeColors.surfaceRaised,
+                                    borderWidth: 1, borderColor: themeColors.border,
+                                    borderRadius: 12, padding: 10,
+                                  }}>
+                                    <View style={{
+                                      width: 22, height: 22, borderRadius: 7,
+                                      alignItems: 'center', justifyContent: 'center',
+                                      backgroundColor: themeColors.primary + '12',
+                                      borderWidth: 1, borderColor: themeColors.primary + '25',
+                                    }}>
+                                      <Text style={{ fontSize: 10, fontWeight: '800', color: themeColors.primary }}>{ei + 1}</Text>
+                                    </View>
+                                    <View style={{ flex: 1, gap: 7 }}>
+                                      <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.textPrimary }}>{ex.name}</Text>
+                                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                                        {(setSummaries.length ? setSummaries : [`${ex.sets?.length ?? 0} sets`]).map((label, si) => (
+                                          <View key={`${ei}-${si}-${label}`} style={{
+                                            paddingHorizontal: 8, paddingVertical: 5,
+                                            borderRadius: 8,
+                                            backgroundColor: themeColors.primary + '10',
+                                            borderWidth: 1,
+                                            borderColor: themeColors.primary + '22',
+                                          }}>
+                                            <Text style={{ fontSize: 11, color: themeColors.textSecondary, fontWeight: '700', lineHeight: 14 }}>
+                                              {label}
+                                            </Text>
+                                          </View>
+                                        ))}
+                                      </View>
                                     </View>
                                   </View>
+                                  </FadeInView>
                                 );
                               })}
                             </View>
@@ -10215,22 +10234,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         </Text>
                       </CollapsibleSection>
 
-                      {/* Muscle phase breakdown — left as a prominent
-                          block (not collapsible) because the
-                          LIFTING / LOWERING split is the highest-leverage
-                          coaching content on the page. */}
+                      {/* Phase breakdown stays prominent: strength uses
+                          lifting/lowering, cardio uses work/recovery or
+                          pace/control. */}
                       <View style={[styles.detailPhaseBlock, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
-                        <Text style={[styles.detailPhaseTitle, { color: themeColors.textPrimary }]}>Muscle Phase Breakdown</Text>
+                        <Text style={[styles.detailPhaseTitle, { color: themeColors.textPrimary }]}>{guide.phaseTitle}</Text>
                         <View style={styles.detailPhaseRow}>
                           <View style={[styles.detailPhaseBadge, { backgroundColor: workoutPalette.strong + '22' }]}>
-                            <Text style={[styles.detailPhaseBadgeLabel, { color: workoutPalette.strong }]}>↑ LIFTING</Text>
+                            <Text style={[styles.detailPhaseBadgeLabel, { color: workoutPalette.strong }]}>{guide.primaryPhaseLabel}</Text>
                           </View>
                           <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{guide.concentric}</Text>
                         </View>
                         <View style={[styles.detailPhaseDivider, { backgroundColor: themeColors.border }]} />
                         <View style={styles.detailPhaseRow}>
                           <View style={[styles.detailPhaseBadge, { backgroundColor: mealPalette.strong + '22' }]}>
-                            <Text style={[styles.detailPhaseBadgeLabel, { color: mealPalette.strong }]}>↓ LOWERING</Text>
+                            <Text style={[styles.detailPhaseBadgeLabel, { color: mealPalette.strong }]}>{guide.secondaryPhaseLabel}</Text>
                           </View>
                           <Text style={[styles.detailPhaseText, { color: themeColors.textSecondary }]}>{guide.eccentric}</Text>
                         </View>

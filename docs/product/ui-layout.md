@@ -1,6 +1,6 @@
 # UI Layout
 
-Last updated: 2026-05-01
+Last updated: 2026-05-05
 
 ## Tab Structure
 
@@ -27,10 +27,11 @@ Last updated: 2026-05-01
 - **Supps** — supplements.
 
 ### Progress Screen Tabs
-- **Health** — Apple Health vitals + Nutrition & Gut Facts (adaptive window up to 14 days) + Muscle Balance.
-- **Body** — per-muscle recovery (`RecoveryCard`) + weight trend.
-- **PRs** — personal records.
-- **Charts** — strength + consistency charts.
+- **Today** — goal-aware on-track check using the user's active goal, current week pace, strength trend, cardio trend, weight/body trend, and nutrition signal; cards link into the relevant detail tab.
+- **Trends** — goal trajectory, strength / cardio charts, and the top estimated 1RM.
+- **History** — workout calendar + chronological logged workout/session history only; trend summaries stay out of this tab.
+- **Body** — recovery, muscle balance, weight history, measurements, and body-scan history.
+- **Health** — Apple Health vitals, stored Health/Sleep history, and Nutrition & Gut Facts (adaptive window up to 14 days).
 - Tab transitions: `FadeInView` keyed on tab + haptic selection.
 
 ## UI Helpers + Conventions
@@ -84,4 +85,4 @@ Last updated: 2026-05-01
 - Activity log includes: Yard Work, Chopping Wood, Moving/Lifting, Gardening, House Cleaning, Construction, Shoveling, Playing w/ Kids, Dancing.
 - Sports: Pickleball, Surfing, Skiing, Spin Class.
 - Smart weekly check-in modal leads with a date-stamped "TRAINER'S READ" block + inline Apply pills.
-- Friends modal: Activity feed tab + Friends tab with THIS WEEK digest, REQUESTS/FRIENDS/SENT sections, and ADD FRIENDS search.
+- Friends modal: Activity feed tab + Friends tab with THIS WEEK digest, REQUESTS/FRIENDS/SENT sections, and ADD FRIENDS search. Expanded workout cards use spring animation and show recorded workout-only load/time/distance details.

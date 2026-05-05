@@ -1151,6 +1151,49 @@ def save_weight_entry(
     return {"status": "ok"}
 
 
+@router.delete("/weight-entries/{entry_date}", status_code=200)
+def delete_weight_entry(
+    entry_date: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    from datetime import date as _d
+    try:
+        d = _d.fromisoformat(entry_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+    existing = db.exec(
+        select(WeightEntry).where(
+            WeightEntry.user_id == current_user.id,
+            WeightEntry.entry_date == d,
+        )
+    ).first()
+    if not existing:
+        return {"deleted": 0, "date": d.isoformat()}
+
+    db.delete(existing)
+    db.flush()
+    _promote_latest_weight_entry_to_profile(db, current_user.id)
+    db.commit()
+    return {"deleted": 1, "date": d.isoformat()}
+
+
+@router.delete("/weight-entries", status_code=200)
+def clear_weight_entries(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_session),
+):
+    rows = db.exec(
+        select(WeightEntry).where(WeightEntry.user_id == current_user.id)
+    ).all()
+    deleted = len(rows)
+    for row in rows:
+        db.delete(row)
+    db.commit()
+    return {"deleted": deleted}
+
+
 @router.post("/weight-entries/sync", status_code=200)
 def sync_weight_entries(
     entries: list[WeightEntryBody],

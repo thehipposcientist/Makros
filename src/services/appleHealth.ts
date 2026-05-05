@@ -962,6 +962,44 @@ export async function loadSleepHistory(): Promise<NightRecord[]> {
   } catch { return []; }
 }
 
+function sleepHistoryPayloadFromNight(night: NightRecord): import('./api').SleepNightlyPayload | null {
+  if (!night?.night) return null;
+  const totalHours = typeof night.sleepHours === 'number' && night.sleepHours > 0 ? night.sleepHours : null;
+  const hasAnyValue = totalHours != null
+    || night.hrv != null
+    || night.restingHr != null
+    || night.respiratoryRate != null
+    || night.spo2Percent != null
+    || night.bedtimeMinutes != null;
+  if (!hasAnyValue) return null;
+  return {
+    night_date: night.night,
+    total_hours: totalHours,
+    hrv_ms: night.hrv ?? null,
+    resting_hr: night.restingHr ?? null,
+    respiratory_rate: night.respiratoryRate ?? null,
+    spo2_percent: night.spo2Percent ?? null,
+    bedtime_minutes_from_midnight: night.bedtimeMinutes ?? null,
+    source: 'apple_health',
+  };
+}
+
+async function pushSleepHistoryToBackend(nights: NightRecord[]): Promise<void> {
+  try {
+    const token = await loadAuthToken();
+    if (!token) return;
+    const payloads = nights
+      .slice(-90)
+      .map(sleepHistoryPayloadFromNight)
+      .filter((row): row is import('./api').SleepNightlyPayload => row != null);
+    if (payloads.length === 0) return;
+    const { upsertNightlySleepBatch } = await import('./api');
+    await upsertNightlySleepBatch(token, payloads);
+  } catch {
+    // Network / not-signed-in — silent. Local cache still has the data.
+  }
+}
+
 /** Mirror last night's sleep snapshot to the backend (fire-and-forget).
  *  Keyed on the waking date so today's score uses today's row. Auth
  *  token is read fresh from AsyncStorage so callers don't need to pass it. */
@@ -1022,6 +1060,7 @@ async function persistSleepHistory(nights: NightRecord[]): Promise<void> {
     for (const n of nights) byNight.set(n.night, n); // fresh data wins
     const merged = [...byNight.values()].sort((a, b) => a.night.localeCompare(b.night)).slice(-MAX_HISTORY_NIGHTS);
     await AsyncStorage.setItem(SLEEP_HISTORY_KEY, JSON.stringify(merged));
+    pushSleepHistoryToBackend(merged).catch(() => {});
   } catch {}
 }
 

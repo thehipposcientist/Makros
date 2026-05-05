@@ -16,7 +16,6 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
 import { Ionicons } from '@expo/vector-icons';
 import { LayoutAnimation, UIManager, Platform } from 'react-native';
 import FadeInView from '../components/FadeInView';
-import StreakCounter from '../components/StreakCounter';
 import AnimatedNumber from '../components/AnimatedNumber';
 import { WorkoutDaySkeleton } from '../components/SkeletonLoader';
 import { configureExpandAnimation } from '../utils/layoutAnim';
@@ -50,7 +49,7 @@ import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { computeFitnessAge } from '../utils/fitnessAge';
 import { estimate1RM } from '../utils/oneRepMax';
-import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord, listWorkoutSessions, WorkoutSessionRecord, getWeightEntries } from '../services/api';
+import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord, listWorkoutSessions, WorkoutSessionRecord, getWeightEntries, saveWeightEntryAPI, deleteWeightEntryAPI, clearWeightEntriesAPI } from '../services/api';
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
@@ -352,6 +351,83 @@ function formatLoggedTime(loggedAt?: string): string {
   return ` · ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
 }
 
+function formatHealthDateLabel(dateISO: string): string {
+  const d = new Date(`${String(dateISO).slice(0, 10)}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return String(dateISO).slice(5, 10);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function averageFinite(values: Array<number | null | undefined>): number | null {
+  const finite = values.map(Number).filter(Number.isFinite);
+  if (finite.length === 0) return null;
+  return finite.reduce((sum, value) => sum + value, 0) / finite.length;
+}
+
+function latestFiniteValue(rows: Array<{ date: string; value: number | null | undefined }>): number | null {
+  const sorted = rows
+    .filter(row => row.date && Number.isFinite(Number(row.value)))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const latest = sorted.length > 0 ? sorted[sorted.length - 1] : null;
+  return latest ? Number(latest.value) : null;
+}
+
+function formatSleepHours(hours: number | null | undefined): string {
+  const value = Number(hours);
+  if (!Number.isFinite(value) || value <= 0) return '—';
+  const totalMin = Math.round(value * 60);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${m}m`;
+}
+
+function normalizeRemoteWeightEntry(row: import('../services/api').WeightEntryAPI): import('../types').WeightEntry | null {
+  const date = String(row.date ?? '').slice(0, 10);
+  const weightLbs = Math.round(Number(row.weight_lbs) * 10) / 10;
+  if (!date || !Number.isFinite(weightLbs) || weightLbs <= 0) return null;
+  return {
+    date,
+    weightLbs,
+    source: row.source as any,
+    loggedAt: row.logged_at,
+  };
+}
+
+function normalizeBodyScanEntry(raw: any): BodyScanEntry | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const date = String(raw.date ?? raw.created_at ?? raw.scan_date ?? '').trim();
+  const bodyFatPct = Number(raw.bodyFatPct ?? raw.body_fat_pct);
+  if (!date || !Number.isFinite(bodyFatPct) || bodyFatPct <= 0) return null;
+  const id = String(raw.id ?? `${date}-${bodyFatPct}`);
+  const bodyFatRange = String(raw.bodyFatRange ?? raw.body_fat_range ?? '');
+  const muscleMass = String(raw.muscleMass ?? raw.muscle_mass ?? '');
+  return {
+    id,
+    date,
+    photoUri: raw.photoUri,
+    bodyFatPct: Math.round(bodyFatPct * 10) / 10,
+    bodyFatRange,
+    muscleMass,
+    category: String(raw.category ?? 'Body check'),
+    strengths: Array.isArray(raw.strengths) ? raw.strengths.map(String) : [],
+    improvements: Array.isArray(raw.improvements) ? raw.improvements.map(String) : [],
+    assessment: String(raw.assessment ?? ''),
+    weightLbs: raw.weightLbs ?? raw.weight_lbs,
+  };
+}
+
+function bodyScanSortValue(entry: BodyScanEntry): number {
+  const ms = new Date(entry.date).getTime();
+  if (Number.isFinite(ms)) return ms;
+  const scanMs = new Date(`${entry.date.slice(0, 10)}T12:00:00`).getTime();
+  return Number.isFinite(scanMs) ? scanMs : 0;
+}
+
+function bodyScanMergeKey(entry: BodyScanEntry): string {
+  return entry.id ? `id:${entry.id}` : `date:${entry.date}`;
+}
+
 function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
@@ -468,6 +544,36 @@ type ProgressOverviewItem = {
   targetTab: ProgressTab;
 };
 
+type ProgressGoalBucket = 'fat_loss' | 'muscle_gain' | 'body_recomp' | 'strength' | 'endurance' | 'athletic' | 'general';
+type TodaySignalStatus = 'good' | 'watch' | 'off' | 'needs_data';
+
+type TodayTrackSignal = {
+  key: string;
+  label: string;
+  value: string;
+  detail: string;
+  action: string;
+  icon: any;
+  color: string;
+  targetTab: ProgressTab;
+  status: TodaySignalStatus;
+  score: number;
+  pct?: number;
+};
+
+type TodayTrackSummary = {
+  bucket: ProgressGoalBucket;
+  goalLabel: string;
+  title: string;
+  subtitle: string;
+  action: string;
+  color: string;
+  icon: any;
+  progressPct: number;
+  confidence: string;
+  signals: TodayTrackSignal[];
+};
+
 type ProgressPlanWeekWindow = { startDate: string; endDate: string };
 
 type ProgressDateWindow = {
@@ -489,6 +595,22 @@ const LEGACY_PROGRESS_OVERVIEW_TEST_IDS: Record<string, string> = {
   'week-weight': 'progress-overview-week-weight',
   'week-prs': 'progress-overview-week-prs',
 };
+
+const GOAL_LABELS: Record<ProgressGoalBucket, string> = {
+  fat_loss: 'Fat loss',
+  muscle_gain: 'Muscle gain',
+  body_recomp: 'Body recomp',
+  strength: 'Strength',
+  endurance: 'Cardio',
+  athletic: 'Athletic',
+  general: 'General fitness',
+};
+
+const FAT_LOSS_GOALS = new Set(['lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting', 'tone', 'get_toned']);
+const MUSCLE_GOALS = new Set(['build_muscle', 'lean_bulk', 'gain_weight', 'improve_aesthetics', 'build_glutes', 'build_upper_body', 'build_lower_body', 'build_arms', 'build_shoulders']);
+const STRENGTH_GOALS = new Set(['build_strength', 'increase_overall', 'improve_1rm', 'powerlifting', 'improve_squat', 'improve_bench', 'improve_deadlift', 'improve_ohp', 'improve_pullups', 'improve_grip', 'functional_strength', 'explosive_strength', 'relative_strength']);
+const ENDURANCE_GOALS = new Set(['improve_cardio', 'improve_conditioning', 'aerobic_base', 'improve_vo2', 'increase_stamina', 'running_fitness', 'train_5k', 'train_10k', 'train_half', 'train_marathon', 'sprint_speed', 'interval_perf', 'hiking_endurance', 'cycling_endurance', 'rowing_endurance', 'swimming_endurance', 'work_capacity']);
+const ATHLETIC_GOALS = new Set(['improve_athleticism', 'improve_speed', 'improve_agility', 'improve_power', 'improve_vertical', 'improve_acceleration', 'improve_cod', 'improve_coordination', 'improve_balance', 'sport_performance', 'offseason_training', 'inseason_maintenance', 'return_to_sport', 'hyrox']);
 
 function isActiveWorkoutSummary(summary: StoredWorkoutSummary): boolean {
   const hasSets = (summary.totalSets ?? 0) > 0
@@ -1039,7 +1161,7 @@ function buildThisWeekOverview(
       detail: trendText(recentWorkoutDays, previousWorkoutDays, 'active days'),
       icon: 'calendar-outline',
       color: '#22C55E',
-	      targetTab: 'today',
+      targetTab: 'history',
     });
   }
   if (recentSets > 0) {
@@ -1079,7 +1201,7 @@ function buildThisWeekOverview(
       detail: top ? `${top.exerciseName}: ${formatWeight(top.weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} x ${top.reps}` : `records ${currentWindowText}`,
       icon: 'trophy-outline',
       color: '#F59E0B',
-      targetTab: 'history',
+      targetTab: 'trends',
     });
   }
 
@@ -1132,6 +1254,443 @@ function buildThisWeekOverview(
   }
 
   return items.slice(0, 4);
+}
+
+function clampPct(value: number): number {
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function todaySignalStatusLabel(status: TodaySignalStatus): string {
+  if (status === 'good') return 'on track';
+  if (status === 'watch') return 'watch';
+  if (status === 'off') return 'behind';
+  return 'need data';
+}
+
+function resolveProgressGoalBucket(profile: UserProfile): ProgressGoalBucket {
+  const goal = String(profile.goal ?? '');
+  if (goal === 'body_recomp') return 'body_recomp';
+  if (FAT_LOSS_GOALS.has(goal)) return 'fat_loss';
+  if (MUSCLE_GOALS.has(goal)) return 'muscle_gain';
+  if (STRENGTH_GOALS.has(goal)) return 'strength';
+  if (ENDURANCE_GOALS.has(goal)) return 'endurance';
+  if (ATHLETIC_GOALS.has(goal)) return 'athletic';
+
+  const category = String(profile.goalSelection?.category ?? '');
+  if (category === 'fat_loss') return 'fat_loss';
+  if (category === 'muscle_physique') return 'muscle_gain';
+  if (category === 'strength') return 'strength';
+  if (category === 'cardio_endurance') return 'endurance';
+  if (category === 'athletic_performance') return 'athletic';
+  return 'general';
+}
+
+function signalColor(status: TodaySignalStatus, tc: ReturnType<typeof getTheme>['colors']): string {
+  if (status === 'good') return tc.success;
+  if (status === 'watch') return tc.warning;
+  if (status === 'off') return tc.error;
+  return tc.textMuted;
+}
+
+function loggedWorkoutDayKeys(
+  history: WorkoutSession[],
+  summaries: StoredWorkoutSummary[],
+  startDate: string,
+  endDate: string,
+  capDate?: string,
+): Set<string> {
+  const capMs = capDate ? parseDateKeyMs(capDate) : Number.POSITIVE_INFINITY;
+  const keys = new Set<string>();
+  for (const summary of summaries.filter(isActiveWorkoutSummary)) {
+    const day = summary.date.slice(0, 10);
+    const ms = parseDateKeyMs(day);
+    if (dateInWindow(day, startDate, endDate) && ms <= capMs) keys.add(day);
+  }
+  for (const session of history) {
+    if (!session.completed || session.skipped) continue;
+    const day = session.date.slice(0, 10);
+    const ms = parseDateKeyMs(day);
+    const hasLoggedWork = (session.durationSeconds ?? 0) > 30
+      || (session.exercises ?? []).some(ex => (ex.sets?.length ?? 0) > 0);
+    if (hasLoggedWork && dateInWindow(day, startDate, endDate) && ms <= capMs) keys.add(day);
+  }
+  return keys;
+}
+
+function buildTrainingPaceSignal(
+  history: WorkoutSession[],
+  summaries: StoredWorkoutSummary[],
+  profile: UserProfile,
+  window: ProgressDateWindow,
+  tc: ReturnType<typeof getTheme>['colors'],
+): TodayTrackSignal {
+  const today = dateKey(new Date());
+  const startMs = parseDateKeyMs(window.startDate);
+  const endMs = parseDateKeyMs(window.endDate);
+  const todayMs = parseDateKeyMs(today);
+  const elapsedDays = todayMs < startMs
+    ? 0
+    : todayMs > endMs
+      ? window.days
+      : Math.max(1, Math.round((todayMs - startMs) / 86400000) + 1);
+  const targetWeek = Math.max(1, Math.min(window.days, Math.round(Number(profile.daysPerWeek) || 3)));
+  const expectedByToday = elapsedDays <= 0
+    ? 0
+    : Math.min(targetWeek, Math.max(1, Math.ceil((targetWeek / window.days) * elapsedDays)));
+  const completedByToday = loggedWorkoutDayKeys(history, summaries, window.startDate, window.endDate, today).size;
+  const completedThisWeek = loggedWorkoutDayKeys(history, summaries, window.startDate, window.endDate).size;
+  const pct = expectedByToday > 0 ? clampPct((completedByToday / expectedByToday) * 100) : 0;
+  const status: TodaySignalStatus = expectedByToday === 0
+    ? 'needs_data'
+    : completedByToday >= expectedByToday
+      ? 'good'
+      : completedByToday >= Math.max(0, expectedByToday - 1)
+        ? 'watch'
+        : 'off';
+  const color = signalColor(status, tc);
+  return {
+    key: 'week-workouts',
+    label: 'Training pace',
+    value: expectedByToday > 0 ? `${completedByToday}/${expectedByToday}` : `${completedThisWeek}/${targetWeek}`,
+    detail: expectedByToday > 0
+      ? `${targetWeek}/week goal · ${completedThisWeek} logged in this ${window.source === 'plan_week' ? 'PlanWeek' : 'week'}`
+      : `${targetWeek}/week goal starts ${formatShortDateKey(window.startDate)}`,
+    action: status === 'good'
+      ? 'Stay with the next scheduled session.'
+      : 'Complete the next scheduled workout to get back on pace.',
+    icon: 'calendar-outline',
+    color,
+    targetTab: 'history',
+    status,
+    score: status === 'good' ? 1 : status === 'watch' ? 0.55 : status === 'off' ? 0.15 : 0.35,
+    pct,
+  };
+}
+
+function buildStrengthGoalSignal(
+  history: WorkoutSession[],
+  tc: ReturnType<typeof getTheme>['colors'],
+): TodayTrackSignal {
+  const strength = strengthIndexDelta(history);
+  if (!strength) {
+    return {
+      key: 'week-strength',
+      label: 'Strength trend',
+      value: 'Need sets',
+      detail: 'Log loaded working sets in two sessions to compare strength.',
+      action: 'Log weight and reps on your main lifts today.',
+      icon: 'barbell-outline',
+      color: tc.textMuted,
+      targetTab: 'trends',
+      status: 'needs_data',
+      score: 0.35,
+      pct: 20,
+    };
+  }
+
+  const deltaPct = Number(String(strength.value).replace(/[^0-9.-]/g, ''));
+  const status: TodaySignalStatus = strength.value === 'New'
+    ? 'watch'
+    : !Number.isFinite(deltaPct)
+      ? 'needs_data'
+      : deltaPct >= 0
+        ? 'good'
+        : deltaPct >= -5
+          ? 'watch'
+          : 'off';
+  return {
+    key: 'week-prs',
+    label: 'Strength trend',
+    value: strength.value,
+    detail: strength.detail,
+    action: status === 'good'
+      ? 'Keep progressing the lift that is moving best.'
+      : 'Hold form quality and log hard sets before adding load.',
+    icon: 'barbell-outline',
+    color: signalColor(status, tc),
+    targetTab: 'trends',
+    status,
+    score: status === 'good' ? 1 : status === 'watch' ? 0.6 : status === 'off' ? 0.2 : 0.35,
+    pct: status === 'good' ? 85 : status === 'watch' ? 55 : status === 'off' ? 25 : 20,
+  };
+}
+
+function buildCardioGoalSignal(
+  paceHistory: PaceHistoryPoint[],
+  summaries: StoredWorkoutSummary[],
+  distanceUnit: DistanceUnit,
+  window: ProgressDateWindow,
+  tc: ReturnType<typeof getTheme>['colors'],
+): TodayTrackSignal {
+  const today = dateKey(new Date());
+  const currentStart = shiftDateKey(today, -13);
+  const previousStart = shiftDateKey(today, -27);
+  const previousEnd = shiftDateKey(today, -14);
+  const currentDistance = paceHistory
+    .filter(point => dateInWindow(point.date, currentStart, today))
+    .reduce((sum, point) => sum + Math.max(0, Number(point.distance) || 0), 0);
+  const previousDistance = paceHistory
+    .filter(point => dateInWindow(point.date, previousStart, previousEnd))
+    .reduce((sum, point) => sum + Math.max(0, Number(point.distance) || 0), 0);
+  const currentZone2 = summaries
+    .filter(row => dateInWindow(row.date, window.startDate, window.endDate))
+    .reduce((sum, row) => sum + Math.round(Number(row.hrZoneMinutes?.[1] ?? 0)), 0);
+
+  if (currentDistance > 0 || previousDistance > 0) {
+    const deltaPct = previousDistance > 0 ? Math.round(((currentDistance - previousDistance) / previousDistance) * 100) : null;
+    const status: TodaySignalStatus = deltaPct == null
+      ? 'watch'
+      : deltaPct >= 0
+        ? 'good'
+        : deltaPct >= -15
+          ? 'watch'
+          : 'off';
+    return {
+      key: 'week-cardio',
+      label: 'Cardio trend',
+      value: formatDistance(currentDistance, distanceUnit),
+      detail: deltaPct == null
+        ? 'distance logged in the last 14 days'
+        : `${deltaPct >= 0 ? '+' : ''}${deltaPct}% distance vs prior 14 days`,
+      action: status === 'good'
+        ? 'Keep the aerobic work steady.'
+        : 'Add one easy cardio session or Zone 2 block this week.',
+      icon: 'pulse-outline',
+      color: signalColor(status, tc),
+      targetTab: 'trends',
+      status,
+      score: status === 'good' ? 1 : status === 'watch' ? 0.6 : 0.2,
+      pct: deltaPct == null ? 50 : clampPct(60 + deltaPct),
+    };
+  }
+
+  if (currentZone2 > 0) {
+    return {
+      key: 'week-zone2',
+      label: 'Cardio trend',
+      value: `${currentZone2}m`,
+      detail: `Zone 2 minutes in this ${window.source === 'plan_week' ? 'PlanWeek' : 'week'}`,
+      action: 'Keep easy cardio easy so it supports recovery.',
+      icon: 'walk-outline',
+      color: tc.success,
+      targetTab: 'health',
+      status: 'good',
+      score: 0.8,
+      pct: clampPct(currentZone2),
+    };
+  }
+
+  return {
+    key: 'week-cardio',
+    label: 'Cardio trend',
+    value: 'Need logs',
+    detail: 'Log distance, pace, or wear Apple Watch for Zone 2.',
+    action: 'Log a short easy cardio session to start the trend.',
+    icon: 'pulse-outline',
+    color: tc.textMuted,
+    targetTab: 'trends',
+    status: 'needs_data',
+    score: 0.35,
+    pct: 20,
+  };
+}
+
+function buildWeightGoalSignal(
+  profile: UserProfile,
+  bucket: ProgressGoalBucket,
+  weightEntries: Array<{ date: string; weightLbs: number }>,
+  weightUnit: WeightUnit,
+  tc: ReturnType<typeof getTheme>['colors'],
+): TodayTrackSignal {
+  const sorted = [...weightEntries]
+    .filter(entry => Number.isFinite(entry.weightLbs) && entry.weightLbs > 0 && parseDateKeyMs(entry.date) > 0)
+    .sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date));
+  const latest = sorted[sorted.length - 1] ?? null;
+  if (sorted.length < 2 || !latest) {
+    return {
+      key: 'week-weight',
+      label: 'Weight trend',
+      value: latest ? formatWeight(latest.weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }) : 'Need logs',
+      detail: 'Two weigh-ins at least a week apart make this goal-aware.',
+      action: 'Add a weigh-in today or tomorrow morning.',
+      icon: 'scale-outline',
+      color: tc.textMuted,
+      targetTab: 'body',
+      status: 'needs_data',
+      score: 0.35,
+      pct: 20,
+    };
+  }
+
+  const recentCutoff = shiftDateKey(dateKey(new Date()), -41);
+  const recent = sorted.filter(entry => parseDateKeyMs(entry.date) >= parseDateKeyMs(recentCutoff));
+  const sample = recent.length >= 2 ? recent : sorted;
+  const first = sample[0];
+  const spanDays = Math.max(1, Math.round((parseDateKeyMs(latest.date) - parseDateKeyMs(first.date)) / 86400000));
+  const slope = ((latest.weightLbs - first.weightLbs) / spanDays) * 7;
+  const desired = bucket === 'fat_loss' ? -1 : bucket === 'muscle_gain' ? 1 : bucket === 'body_recomp' ? 0 : null;
+  let status: TodaySignalStatus = 'watch';
+  if (desired === -1) status = slope < -0.1 ? 'good' : slope <= 0.25 ? 'watch' : 'off';
+  else if (desired === 1) status = slope > 0.1 ? 'good' : slope >= -0.1 ? 'watch' : 'off';
+  else if (desired === 0) status = Math.abs(slope) <= 0.35 ? 'good' : Math.abs(slope) <= 0.8 ? 'watch' : 'off';
+  else status = 'watch';
+
+  const target = profile.goalDetails?.targetWeightLbs;
+  const targetDetail = target && (bucket === 'fat_loss' || bucket === 'muscle_gain')
+    ? ` · target ${formatWeight(target, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })}`
+    : '';
+  return {
+    key: 'week-weight',
+    label: bucket === 'body_recomp' ? 'Scale control' : 'Weight trend',
+    value: `${formatSignedWeightDelta(slope, weightUnit)}/wk`,
+    detail: `${sample.length} weigh-ins over ${spanDays} days${targetDetail}`,
+    action: status === 'good'
+      ? 'Keep calories and weigh-in timing consistent.'
+      : bucket === 'fat_loss'
+        ? 'Tighten meal logging before changing the plan.'
+        : bucket === 'muscle_gain'
+          ? 'Make sure meals support the surplus before adding training stress.'
+          : 'Use weight plus photos or measurements before judging recomp.',
+    icon: slope < -0.05 ? 'trending-down-outline' : slope > 0.05 ? 'trending-up-outline' : 'remove-outline',
+    color: signalColor(status, tc),
+    targetTab: 'body',
+    status,
+    score: status === 'good' ? 1 : status === 'watch' ? 0.6 : 0.2,
+    pct: status === 'good' ? 85 : status === 'watch' ? 55 : 25,
+  };
+}
+
+function buildMealGoalSignal(
+  mealHistory: Array<{ meal_date: string }> | null,
+  mealAverages: { window_days: number; days_with_data: number; avg_protein_g?: number | null; avg_protein_g_when_logged?: number | null } | null,
+  window: ProgressDateWindow,
+  tc: ReturnType<typeof getTheme>['colors'],
+): TodayTrackSignal {
+  const today = dateKey(new Date());
+  const todayMs = parseDateKeyMs(today);
+  const startMs = parseDateKeyMs(window.startDate);
+  const elapsedDays = todayMs < startMs
+    ? 0
+    : Math.min(window.days, Math.max(1, Math.round((todayMs - startMs) / 86400000) + 1));
+  const mealDays = new Set((mealHistory ?? [])
+    .filter(row => dateInWindow(row.meal_date, window.startDate, window.endDate) && parseDateKeyMs(row.meal_date) <= todayMs)
+    .map(row => row.meal_date.slice(0, 10)));
+  const fallbackDays = Math.round(Number(mealAverages?.days_with_data) || 0);
+  const days = Math.max(mealDays.size, Math.min(fallbackDays, elapsedDays || fallbackDays));
+  const denominator = Math.max(1, elapsedDays || Math.round(Number(mealAverages?.window_days) || 7));
+  const pct = clampPct((days / denominator) * 100);
+  const status: TodaySignalStatus = days <= 0
+    ? 'needs_data'
+    : pct >= 70
+      ? 'good'
+      : pct >= 40
+        ? 'watch'
+        : 'off';
+  const protein = Number(mealAverages?.avg_protein_g_when_logged ?? mealAverages?.avg_protein_g);
+  return {
+    key: 'week-meals',
+    label: 'Nutrition signal',
+    value: days > 0 ? `${days}/${denominator}` : 'Need logs',
+    detail: Number.isFinite(protein) && protein > 0
+      ? `${Math.round(protein)}g protein on logged days`
+      : 'logged meal days by today',
+    action: status === 'good'
+      ? 'Keep logging the meals that drive the goal.'
+      : "Log today's meals so weight and performance trends have context.",
+    icon: 'nutrition-outline',
+    color: signalColor(status, tc),
+    targetTab: 'health',
+    status,
+    score: status === 'good' ? 1 : status === 'watch' ? 0.6 : status === 'off' ? 0.2 : 0.35,
+    pct,
+  };
+}
+
+function uniqueTodaySignals(signals: TodayTrackSignal[]): TodayTrackSignal[] {
+  const seen = new Set<string>();
+  return signals.filter(signal => {
+    if (seen.has(signal.key)) return false;
+    seen.add(signal.key);
+    return true;
+  }).slice(0, 4);
+}
+
+function buildTodayTrackSummary(input: {
+  profile: UserProfile;
+  history: WorkoutSession[];
+  summaries: StoredWorkoutSummary[];
+  weightEntries: Array<{ date: string; weightLbs: number }>;
+  paceHistory: PaceHistoryPoint[];
+  mealHistory: Array<{ meal_date: string }> | null;
+  mealAverages: { window_days: number; days_with_data: number; avg_protein_g?: number | null; avg_protein_g_when_logged?: number | null } | null;
+  weightUnit: WeightUnit;
+  distanceUnit: DistanceUnit;
+  window: ProgressDateWindow;
+  tc: ReturnType<typeof getTheme>['colors'];
+}): TodayTrackSummary {
+  const bucket = resolveProgressGoalBucket(input.profile);
+  const training = buildTrainingPaceSignal(input.history, input.summaries, input.profile, input.window, input.tc);
+  const strength = buildStrengthGoalSignal(input.history, input.tc);
+  const cardio = buildCardioGoalSignal(input.paceHistory, input.summaries, input.distanceUnit, input.window, input.tc);
+  const weight = buildWeightGoalSignal(input.profile, bucket, input.weightEntries, input.weightUnit, input.tc);
+  const nutrition = buildMealGoalSignal(input.mealHistory, input.mealAverages, input.window, input.tc);
+
+  const ordered = bucket === 'fat_loss'
+    ? [weight, training, nutrition, strength]
+    : bucket === 'muscle_gain'
+      ? [strength, training, nutrition, weight]
+      : bucket === 'body_recomp'
+        ? [strength, weight, training, nutrition]
+        : bucket === 'strength'
+          ? [strength, training, nutrition, cardio]
+          : bucket === 'endurance'
+            ? [cardio, training, nutrition, strength]
+            : bucket === 'athletic'
+              ? [training, cardio, strength, nutrition]
+              : [training, strength, cardio, nutrition];
+  const signals = uniqueTodaySignals(ordered);
+  const dataSignals = signals.filter(signal => signal.status !== 'needs_data');
+  const totalWeight = signals.reduce((sum, signal, index) => sum + (index === 0 ? 1.3 : 1), 0);
+  const score = signals.reduce((sum, signal, index) => sum + signal.score * (index === 0 ? 1.3 : 1), 0);
+  const progressPct = clampPct((score / Math.max(1, totalWeight)) * 100);
+  const primary = signals[0] ?? training;
+  const hasPrimaryProblem = primary.status === 'off';
+  const state = dataSignals.length < 2
+    ? 'needs_data'
+    : progressPct >= 75 && !hasPrimaryProblem
+      ? 'on_track'
+      : progressPct >= 55
+        ? 'close'
+        : 'off_track';
+  const color = state === 'on_track'
+    ? input.tc.success
+    : state === 'close'
+      ? input.tc.warning
+      : state === 'off_track'
+        ? input.tc.error
+        : input.tc.primary;
+  const title = state === 'on_track'
+    ? 'On track today'
+    : state === 'close'
+      ? 'Close to on track'
+      : state === 'off_track'
+        ? 'Needs attention today'
+        : "Build today's baseline";
+  const supporting = signals.find(signal => signal.key !== primary.key && signal.status !== 'needs_data') ?? signals.find(signal => signal.key !== primary.key) ?? training;
+  const subtitle = `${GOAL_LABELS[bucket]} goal: ${primary.detail}. ${supporting.label}: ${supporting.value}.`;
+  const worst = [...signals].sort((a, b) => a.score - b.score)[0] ?? primary;
+  return {
+    bucket,
+    goalLabel: GOAL_LABELS[bucket],
+    title,
+    subtitle,
+    action: worst.action,
+    color,
+    icon: state === 'on_track' ? 'checkmark-circle-outline' : state === 'off_track' ? 'alert-circle-outline' : 'speedometer-outline',
+    progressPct,
+    confidence: dataSignals.length >= 3 ? 'strong signal' : dataSignals.length >= 2 ? 'directional' : 'needs logs',
+    signals,
+  };
 }
 
 function workoutCompletionKey(dateISO?: string | null, focus?: string | null): string | null {
@@ -1666,6 +2225,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
   const healthLiveLoadedRef = useRef(false);
   const [sleepHistoryCount, setSleepHistoryCount] = useState<number>(0);
+  const [healthHistoryRows, setHealthHistoryRows] = useState<import('../services/api').DailyHealthHistoryItem[]>([]);
+  const [sleepHistoryRows, setSleepHistoryRows] = useState<import('../services/api').SleepHistoryItem[]>([]);
+  const [healthHistoryLoading, setHealthHistoryLoading] = useState(false);
   const [healthEnabled, setHealthEnabled] = useState<boolean>(false);
   const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
@@ -1694,7 +2256,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [nutritionGutExpanded, setNutritionGutExpanded] = useState(false);
   const [mealInsightPatterns, setMealInsightPatterns] = useState<Record<string, any> | null>(null);
   const [nutritionScoreWeekly, setNutritionScoreWeekly] = useState<import('../services/api').NutritionScoreWeekly | null>(null);
-  const [weekSummaryExpanded, setWeekSummaryExpanded] = useState(false);
   const [proteinBreakdown, setProteinBreakdown] = useState<import('../services/api').ProteinBreakdown | null>(null);
   const [proteinBreakdownExpanded, setProteinBreakdownExpanded] = useState(false);
   const [proteinBreakdownLoading, setProteinBreakdownLoading] = useState(false);
@@ -1836,6 +2397,22 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     }),
     [displayedOneRepMaxLifts, distanceUnit, history, mealAverages, mealHistory, paceHistory, summaries, userProfile, weightEntries, weightUnit],
   );
+  const todayTrack = useMemo(
+    () => buildTodayTrackSummary({
+      profile: userProfile,
+      history,
+      summaries,
+      weightEntries,
+      paceHistory,
+      mealHistory,
+      mealAverages,
+      weightUnit,
+      distanceUnit,
+      window: progressWeekWindow,
+      tc,
+    }),
+    [distanceUnit, history, mealAverages, mealHistory, paceHistory, progressWeekWindow, summaries, tc, userProfile, weightEntries, weightUnit],
+  );
   const goalTrajectoryColor = goalTrajectory.tone === 'success'
     ? tc.success
     : goalTrajectory.tone === 'warning'
@@ -1944,19 +2521,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           loadWeightHistory(),
           authToken ? getWeightEntries(authToken).catch(() => null) : Promise.resolve(null),
         ]).then(([local, server]) => {
-          const byDate = new Map(local.map(entry => [entry.date, entry] as const));
-          for (const row of server ?? []) {
-            byDate.set(row.date, {
-              date: row.date,
-              weightLbs: Math.round(Number(row.weight_lbs) * 10) / 10,
-              source: row.source as any,
-            });
+          if (server != null) {
+            const remote = server
+              .map(normalizeRemoteWeightEntry)
+              .filter((entry): entry is import('../types').WeightEntry => entry != null)
+              .sort((a, b) => a.date.localeCompare(b.date));
+            setWeightEntries(remote);
+            AsyncStorage.setItem('weightHistory', JSON.stringify(remote)).catch(() => {});
+            return;
           }
-          const merged = Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
-          setWeightEntries(merged);
-          if (server?.length) {
-            AsyncStorage.setItem('weightHistory', JSON.stringify(merged)).catch(() => {});
-          }
+          setWeightEntries(local);
         }).catch(() => null)
       );
       if (authToken && isProTier) {
@@ -2119,22 +2693,25 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     bodyScanHistoryLoadedRef.current = true;
     let cancelled = false;
     AsyncStorage.getItem('bodyScanHistory').then(async raw => {
-      const local: BodyScanEntry[] = raw ? (JSON.parse(raw) ?? []) : [];
       const RECENT_CAP = 20;
-      const localSorted = [...local].sort((a, b) => b.date.localeCompare(a.date));
+      const parsed = raw ? JSON.parse(raw) : [];
+      const localRows = Array.isArray(parsed) ? parsed : [];
+      const local: BodyScanEntry[] = localRows
+        .map(normalizeBodyScanEntry)
+        .filter((entry: BodyScanEntry | null): entry is BodyScanEntry => entry != null);
+      const localSorted = [...local].sort((a, b) => bodyScanSortValue(b) - bodyScanSortValue(a));
       if (!cancelled && localSorted.length > 0) setBodyScanHistory(localSorted.slice(0, RECENT_CAP));
       if (authToken) {
         try {
           const { getBodyScanHistory } = await import('../services/api');
-          const remote = await getBodyScanHistory(authToken);
-          if (cancelled || remote.length === 0) return;
+          const remote = (await getBodyScanHistory(authToken))
+            .map(normalizeBodyScanEntry)
+            .filter((entry: BodyScanEntry | null): entry is BodyScanEntry => entry != null);
+          if (cancelled) return;
           const merged = new Map<string, BodyScanEntry>();
-          for (const e of local) merged.set(e.date, e);
-          for (const e of remote) {
-            const key = (e as any).scan_date ?? (e as any).date ?? '';
-            if (!merged.has(key)) merged.set(key, { date: key, ...(e as any) });
-          }
-          const sorted = Array.from(merged.values()).sort((a, b) => b.date.localeCompare(a.date));
+          for (const e of local) merged.set(bodyScanMergeKey(e), e);
+          for (const e of remote) merged.set(bodyScanMergeKey(e), e);
+          const sorted = Array.from(merged.values()).sort((a, b) => bodyScanSortValue(b) - bodyScanSortValue(a));
           setBodyScanHistory(sorted.slice(0, RECENT_CAP));
           await AsyncStorage.setItem('bodyScanHistory', JSON.stringify(sorted));
         } catch { /* non-fatal */ }
@@ -2171,6 +2748,35 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     })();
     return () => { cancelled = true; };
   }, [isActive, isProTier, tab, userProfile.physicalStats?.age]);
+
+  useEffect(() => {
+    if (!isActive || tab !== 'health' || !isProTier || !authToken) {
+      setHealthHistoryRows([]);
+      setSleepHistoryRows([]);
+      setHealthHistoryLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setHealthHistoryLoading(true);
+    import('../services/api').then(({ getDailyHealthHistory, getSleepHistory }) =>
+      Promise.all([
+        getDailyHealthHistory(authToken, 30).catch(() => []),
+        getSleepHistory(authToken, 30).catch(() => []),
+      ])
+    ).then(([healthRows, sleepRows]) => {
+      if (cancelled) return;
+      setHealthHistoryRows(healthRows);
+      setSleepHistoryRows(sleepRows);
+      setSleepHistoryCount(sleepRows.length);
+    }).catch(() => {
+      if (cancelled) return;
+      setHealthHistoryRows([]);
+      setSleepHistoryRows([]);
+    }).finally(() => {
+      if (!cancelled) setHealthHistoryLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [authToken, isActive, isProTier, tab]);
 
   const handleDeletePlanChange = (change: PlanChangeEntry) => {
     if (!change.id) return;
@@ -2338,8 +2944,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
       // Save to history
       const entry: BodyScanEntry = {
-        id: Date.now().toString(),
-        date: new Date().toISOString(),
+        id: String(scanResult.id ?? Date.now()),
+        date: scanResult.date ?? scanResult.scan_date ?? new Date().toISOString(),
         photoUri: asset.uri,
         bodyFatPct: scanResult.bodyFatPct,
         bodyFatRange: scanResult.bodyFatRange,
@@ -2469,54 +3075,95 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       <FadeInView key={tab} duration={260} slideDistance={8} style={{ flex: 1 }}>
       {tab === 'today' ? (
         <ScrollView contentContainerStyle={styles.content}>
-          <View style={styles.todayDashboardCard}>
-            <View style={styles.weekOverviewHeader}>
-              <View>
-                <Text style={styles.weekOverviewEyebrow}>{progressWeekWindow.source === 'plan_week' ? 'PLAN WEEK' : 'CALENDAR WEEK'}</Text>
-                <Text style={styles.weekOverviewTitle}>{progressWeekWindow.label}</Text>
+          <View
+            testID="progress-today-status-card"
+            style={[styles.todayStatusCard, { borderColor: todayTrack.color + '66' }]}
+          >
+            <View style={styles.todayStatusHeader}>
+              <View style={[styles.todayStatusIcon, { backgroundColor: todayTrack.color + '20' }]}>
+                <Ionicons name={todayTrack.icon} size={22} color={todayTrack.color} />
               </View>
-              <Text style={styles.weekOverviewHint}>vs {progressWeekWindow.previousLabel}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.todayStatusEyebrow}>
+                  TODAY · {todayTrack.goalLabel.toUpperCase()}
+                </Text>
+                <Text style={styles.todayStatusDate}>
+                  {progressWeekWindow.source === 'plan_week' ? 'PlanWeek' : 'Week'} {progressWeekWindow.label}
+                </Text>
+              </View>
+              <View style={[styles.todayStatusPill, { borderColor: todayTrack.color + '77', backgroundColor: todayTrack.color + '14' }]}>
+                <Text style={[styles.todayStatusPillText, { color: todayTrack.color }]}>{todayTrack.confidence}</Text>
+              </View>
             </View>
-            {thisWeekOverview.length > 0 ? (
-              <View style={styles.weekOverviewGrid}>
-                {thisWeekOverview.map((item, index) => (
-                  <FadeInView
-                    key={item.key}
-                    delay={staggerDelay(index, 45)}
-                    duration={TIMING_STANDARD.duration}
-                    slideDistance={6}
-                    style={{ flexGrow: 1, flexBasis: '47%' }}
-                  >
-                  <AnimatedPressable
-                    key={item.key}
-                    testID={LEGACY_PROGRESS_OVERVIEW_TEST_IDS[item.key] ?? `progress-today-${item.key}`}
-                    accessibilityRole="button"
-                    accessibilityLabel={item.key === 'week-prs' ? 'PRs' : `${item.label}: ${item.value}. ${item.detail}`}
-                    style={styles.weekOverviewTile}
-                    onPress={() => {
-                      import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-                      setTab(item.targetTab);
-                    }}>
-                    <View style={[styles.weekOverviewIcon, { backgroundColor: item.color + '20' }]}>
+            <Text style={styles.todayStatusTitle} numberOfLines={2}>{todayTrack.title}</Text>
+            <Text style={styles.todayStatusSubtitle} numberOfLines={3}>{todayTrack.subtitle}</Text>
+            <View style={styles.goalProgressTrack}>
+              <AnimatedProgressFill
+                pct={todayTrack.progressPct}
+                minPct={6}
+                color={todayTrack.color}
+                delay={100}
+                style={styles.goalProgressFill}
+              />
+            </View>
+            <View style={styles.todayStatusMetaRow}>
+              <Text style={styles.todayStatusMetaText}>{todayTrack.progressPct}% goal signal</Text>
+              <Text style={styles.todayStatusMetaText}>vs {progressWeekWindow.previousLabel}</Text>
+            </View>
+            <View style={styles.todayActionRow}>
+              <Ionicons name="arrow-forward-circle-outline" size={17} color={todayTrack.color} />
+              <Text style={styles.todayActionText} numberOfLines={2}>{todayTrack.action}</Text>
+            </View>
+          </View>
+
+          <Text style={styles.sectionLabel}>What matters today</Text>
+          <View style={styles.todaySignalGrid}>
+            {todayTrack.signals.map((item, index) => (
+              <FadeInView
+                key={item.key}
+                delay={staggerDelay(index, 45)}
+                duration={TIMING_STANDARD.duration}
+                slideDistance={6}
+                style={{ flexGrow: 1, flexBasis: '47%' }}
+              >
+                <AnimatedPressable
+                  testID={LEGACY_PROGRESS_OVERVIEW_TEST_IDS[item.key] ?? `progress-today-${item.key}`}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${item.label}: ${item.value}. ${item.detail}`}
+                  style={styles.todaySignalTile}
+                  onPress={() => {
+                    import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                    setTab(item.targetTab);
+                  }}>
+                  <View style={styles.todaySignalTileHeader}>
+                    <View style={[styles.todaySignalIcon, { backgroundColor: item.color + '20' }]}>
                       <Ionicons name={item.icon} size={15} color={item.color} />
                     </View>
-                    <Text
-                      style={[styles.weekOverviewLabel, item.key === 'week-prs' && { textTransform: 'none' }]}
-                      numberOfLines={1}
-                    >
-                      {item.label}
-                    </Text>
-                    <PulseOnChange trigger={`${item.key}-${item.value}`}>
-                      <Text style={styles.weekOverviewValue} numberOfLines={1}>{item.value}</Text>
-                    </PulseOnChange>
-                    <Text style={styles.weekOverviewDetail} numberOfLines={2}>{item.detail}</Text>
-                  </AnimatedPressable>
-                  </FadeInView>
-                ))}
-              </View>
-            ) : (
-              <Text style={styles.emptyBody}>Complete workouts, log meals, or add body data to populate today's dashboard.</Text>
-            )}
+                    <View style={[styles.todaySignalPill, { backgroundColor: item.color + '16' }]}>
+                      <Text style={[styles.todaySignalPillText, { color: item.color }]}>
+                        {todaySignalStatusLabel(item.status)}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text style={styles.todaySignalLabel} numberOfLines={1}>{item.label}</Text>
+                  <PulseOnChange trigger={`${item.key}-${item.value}`}>
+                    <Text style={[styles.todaySignalValue, { color: item.color }]} numberOfLines={1}>{item.value}</Text>
+                  </PulseOnChange>
+                  {item.pct != null && (
+                    <View style={styles.todaySignalTrack}>
+                      <AnimatedProgressFill
+                        pct={item.pct}
+                        minPct={5}
+                        color={item.color}
+                        delay={140 + index * 35}
+                        style={styles.todaySignalFill}
+                      />
+                    </View>
+                  )}
+                  <Text style={styles.todaySignalDetail} numberOfLines={2}>{item.detail}</Text>
+                </AnimatedPressable>
+              </FadeInView>
+            ))}
           </View>
         </ScrollView>
       ) : tab === 'trends' ? (
@@ -3011,7 +3658,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </>
           )}
         </ScrollView>
-      ) : tab === 'history' ? (
+      ) : (tab as string) === 'insights' ? (
         <ScrollView contentContainerStyle={styles.content} style={!noHeader ? { backgroundColor: tc.background } : undefined}>
           {coachInsightVisuals.length > 0 && (
             <View style={styles.insightsCard}>
@@ -3519,84 +4166,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           ) : (
             <>
-              {/* Weekly summary strip */}
-              {(() => {
-                const thisWeek = history.filter(s => {
-                  if (!s.date || s.skipped) return false;
-                  return dateInWindow(s.date, progressWeekWindow.startDate, progressWeekWindow.endDate);
-                });
-                const totalMin = Math.round(thisWeek.reduce((s, w) => s + (w.durationSeconds || 0), 0) / 60);
-                const avgMin = thisWeek.length > 0 ? Math.round(totalMin / thisWeek.length) : 0;
-                // Compute streak from consecutive days with workouts (history + summaries, matching HomeScreen)
-                const toStreakKey = (d: string) => {
-                  const p = new Date(d);
-                  if (isNaN(p.getTime())) return d.slice(0, 10);
-                  return `${p.getFullYear()}-${String(p.getMonth() + 1).padStart(2, '0')}-${String(p.getDate()).padStart(2, '0')}`;
-                };
-                const allDoneDates = new Set([
-                  ...history.filter(s => s.date && !s.skipped).map(s => toStreakKey(s.date)),
-                  ...summaries.filter(s => s.date).map(s => toStreakKey(s.date)),
-                ]);
-                let streak = 0;
-                const checkDate = new Date();
-                const todayStr = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
-                if (!allDoneDates.has(todayStr)) checkDate.setDate(checkDate.getDate() - 1);
-                for (let j = 0; j < 90; j++) {
-                  const ck = `${checkDate.getFullYear()}-${String(checkDate.getMonth() + 1).padStart(2, '0')}-${String(checkDate.getDate()).padStart(2, '0')}`;
-                  if (allDoneDates.has(ck)) { streak++; checkDate.setDate(checkDate.getDate() - 1); }
-                  else break;
-                }
-
-                const focuses = thisWeek.map(s => s.focus || '').filter(Boolean);
-                const focusCounts: Record<string, number> = {};
-                focuses.forEach(f => { focusCounts[f] = (focusCounts[f] || 0) + 1; });
-                const focusSummary = Object.entries(focusCounts).sort((a, b) => b[1] - a[1]).map(([f, c]) => `${f} ×${c}`).join(', ');
-
-                return (
-                  <FadeInView delay={0}>
-                  <TouchableOpacity
-                    activeOpacity={0.7}
-                    onPress={() => { configureExpandAnimation(300); setWeekSummaryExpanded(prev => !prev); }}
-                  >
-                  <View style={{ backgroundColor: tc.primary + '12', borderRadius: 10, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: tc.primary + '22' }}>
-                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-                      <Text style={{ fontSize: 13, fontWeight: '700', color: tc.primary, flexShrink: 1 }}>
-                        Plan week {progressWeekWindow.label}: {thisWeek.length} workout{thisWeek.length !== 1 ? 's' : ''} · avg {avgMin} min
-                      </Text>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        {streak > 0 && <StreakCounter count={streak} color={tc.primary} />}
-                        <Ionicons name={weekSummaryExpanded ? 'chevron-up' : 'chevron-down'} size={14} color={tc.primary} />
-                      </View>
-                    </View>
-                    {weekSummaryExpanded && (
-                      <View style={{ marginTop: 10, gap: 6 }}>
-                        <View style={{ flexDirection: 'row', gap: 12 }}>
-                          <View style={{ flex: 1 }}>
-                            <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Total time</Text>
-                            <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{totalMin} min</Text>
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Sessions</Text>
-                            <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{thisWeek.length}</Text>
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={{ fontSize: 10, fontWeight: '600', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>Streak</Text>
-                            <Text style={{ fontSize: 15, fontWeight: '700', color: tc.textPrimary }}>{streak} day{streak !== 1 ? 's' : ''}</Text>
-                          </View>
-                        </View>
-                        {focusSummary.length > 0 && (
-                          <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 2 }}>
-                            {focusSummary}
-                          </Text>
-                        )}
-                      </View>
-                    )}
-                  </View>
-                  </TouchableOpacity>
-                  </FadeInView>
-                );
-              })()}
-
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                 <Text style={styles.sectionLabel}>
                   {history.length} workout{history.length !== 1 ? 's' : ''}
@@ -4399,6 +4968,96 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 {hs!.standingHours7d != null && vitalsRow('body-outline', 'Standing hours', hs!.standingHours7d, 'hrs')}
                 {hs!.mindfulMinutes7d != null && vitalsRow('flower-outline', 'Mindful minutes', hs!.mindfulMinutes7d, 'min')}
                 {hs!.basalEnergy7d != null && vitalsRow('flash-outline', 'Basal energy', hs!.basalEnergy7d, 'kcal')}
+              </View>
+            );
+          })()}
+
+          {isProTier && authToken && (() => {
+            const healthRows = healthHistoryRows.filter(row => !!row.snapshot_date);
+            const sleepRows = sleepHistoryRows.filter(row => !!row.night_date);
+            const sleepAvg7 = averageFinite(sleepRows.slice(-7).map(row => row.total_hours));
+            const stepsAvg7 = averageFinite(healthRows.slice(-7).map(row => row.steps));
+            const hrvLatest = latestFiniteValue([
+              ...healthRows.map(row => ({ date: row.snapshot_date, value: row.hrv_ms })),
+              ...sleepRows.map(row => ({ date: row.night_date, value: row.hrv_ms })),
+            ]);
+            const zone2Values = healthRows.map(row => Number(row.zone2_minutes)).filter(Number.isFinite);
+            const zone2Total = zone2Values.reduce((sum, value) => sum + value, 0);
+            const merged = new Map<string, {
+              date: string;
+              health?: import('../services/api').DailyHealthHistoryItem;
+              sleep?: import('../services/api').SleepHistoryItem;
+            }>();
+            for (const row of healthRows) {
+              const date = String(row.snapshot_date).slice(0, 10);
+              merged.set(date, { ...(merged.get(date) ?? { date }), health: row });
+            }
+            for (const row of sleepRows) {
+              const date = String(row.night_date).slice(0, 10);
+              merged.set(date, { ...(merged.get(date) ?? { date }), sleep: row });
+            }
+            const recentRows = Array.from(merged.values())
+              .sort((a, b) => b.date.localeCompare(a.date))
+              .slice(0, 7);
+            const statTiles = [
+              { label: 'Sleep avg', value: formatSleepHours(sleepAvg7), color: '#818CF8' },
+              { label: 'Steps avg', value: stepsAvg7 != null ? Math.round(stepsAvg7).toLocaleString() : '—', color: tc.primary },
+              { label: 'Latest HRV', value: hrvLatest != null ? `${Math.round(hrvLatest)} ms` : '—', color: '#14B8A6' },
+              { label: 'Zone 2', value: zone2Values.length > 0 ? `${Math.round(zone2Total)}m` : '—', color: '#F59E0B' },
+            ];
+
+            return (
+              <View testID="stored-health-history-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
+                <View style={[styles.vitalsHeader, { marginBottom: 12 }]}>
+                  <Ionicons name="server-outline" size={16} color={tc.primary} />
+                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Stored Health History</Text>
+                  <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted }}>
+                    {healthRows.length}d health · {sleepRows.length}n sleep
+                  </Text>
+                </View>
+
+                {healthHistoryLoading ? (
+                  <ActivityIndicator size="small" color={tc.primary} style={{ marginVertical: 12 }} />
+                ) : recentRows.length === 0 ? (
+                  <Text style={{ fontSize: 12, color: tc.textMuted, lineHeight: 17, textAlign: 'center', paddingVertical: 8 }}>
+                    Connect Apple Health or open Thallo after Health syncs to build daily history.
+                  </Text>
+                ) : (
+                  <>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+                      {statTiles.map(tile => (
+                        <View key={tile.label} style={{ flexGrow: 1, flexBasis: '47%', backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingVertical: 9, paddingHorizontal: 10, borderWidth: 1, borderColor: tc.border }}>
+                          <Text style={{ fontSize: 17, fontWeight: '900', color: tile.color }} numberOfLines={1}>{tile.value}</Text>
+                          <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textMuted, textTransform: 'uppercase', marginTop: 2 }}>{tile.label}</Text>
+                        </View>
+                      ))}
+                    </View>
+                    <View style={{ borderTopWidth: 1, borderTopColor: tc.border + '55' }}>
+                      {recentRows.map(row => {
+                        const sleep = row.sleep?.total_hours != null ? formatSleepHours(row.sleep.total_hours) : '—';
+                        const sleepScore = row.sleep?.score != null ? ` · score ${row.sleep.score}` : '';
+                        const steps = row.health?.steps != null ? Math.round(Number(row.health.steps)).toLocaleString() : '—';
+                        const hrv = Number(row.health?.hrv_ms ?? row.sleep?.hrv_ms);
+                        const rhr = Number(row.health?.resting_hr ?? row.sleep?.resting_hr);
+                        return (
+                          <View key={row.date} style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: tc.border + '33' }}>
+                            <Text style={{ width: 50, fontSize: 11, fontWeight: '800', color: tc.textMuted }}>{formatHealthDateLabel(row.date)}</Text>
+                            <View style={{ flex: 1 }}>
+                              <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary }}>
+                                Sleep {sleep}{sleepScore}
+                              </Text>
+                              <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>
+                                Steps {steps}
+                                {Number.isFinite(hrv) ? ` · HRV ${Math.round(hrv)} ms` : ''}
+                                {Number.isFinite(rhr) ? ` · RHR ${Math.round(rhr)}` : ''}
+                              </Text>
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  </>
+                )}
               </View>
             );
           })()}
@@ -5414,9 +6073,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                               text: 'Delete',
                               style: 'destructive',
                               onPress: async () => {
-                                const { deleteWeightEntry } = await import('../utils/weightHistory');
-                                const next = await deleteWeightEntry(e.date);
-                                setWeightEntries(next);
+                                try {
+                                  if (authToken) await deleteWeightEntryAPI(authToken, e.date);
+                                  const { deleteWeightEntry } = await import('../utils/weightHistory');
+                                  const next = await deleteWeightEntry(e.date);
+                                  setWeightEntries(next);
+                                  import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+                                } catch (err: any) {
+                                  Alert.alert('Could not delete', err?.message ?? 'Try again in a moment.');
+                                }
                               },
                             },
                           ],
@@ -5433,8 +6098,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: tc.border }}>
                     <TouchableOpacity
                       onPress={async () => {
-                        // Force a re-read of the persisted history and re-derive
-                        // downstream stats in case another screen mutated it.
+                        const server = authToken ? await getWeightEntries(authToken).catch(() => null) : null;
+                        if (server != null) {
+                          const remote = server
+                            .map(normalizeRemoteWeightEntry)
+                            .filter((entry): entry is import('../types').WeightEntry => entry != null)
+                            .sort((a, b) => a.date.localeCompare(b.date));
+                          setWeightEntries(remote);
+                          await AsyncStorage.setItem('weightHistory', JSON.stringify(remote));
+                          return;
+                        }
                         const { loadWeightHistory } = await import('../utils/weightHistory');
                         setWeightEntries(await loadWeightHistory());
                       }}
@@ -5452,9 +6125,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                               text: 'Reset',
                               style: 'destructive',
                               onPress: async () => {
-                                const { clearWeightHistory } = await import('../utils/weightHistory');
-                                await clearWeightHistory();
-                                setWeightEntries([]);
+                                try {
+                                  if (authToken) await clearWeightEntriesAPI(authToken);
+                                  const { clearWeightHistory } = await import('../utils/weightHistory');
+                                  await clearWeightHistory();
+                                  setWeightEntries([]);
+                                  import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+                                } catch (err: any) {
+                                  Alert.alert('Could not reset', err?.message ?? 'Try again in a moment.');
+                                }
                               },
                             },
                           ],
@@ -6023,6 +6702,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   const { saveWeightEntry } = await import('../utils/weightHistory');
                   const updated = await saveWeightEntry(canonicalLbs, 'manual');
                   setWeightEntries(updated);
+                  const latest = updated[updated.length - 1];
+                  if (authToken && latest) {
+                    await saveWeightEntryAPI(authToken, latest.date, latest.weightLbs, 'manual', latest.loggedAt ?? new Date().toISOString())
+                      .catch((e) => console.warn('[Progress] weight sync failed:', e?.message ?? e));
+                  }
                   setWeightInputVisible(false);
                   if (onUpdateWeight) onUpdateWeight(canonicalLbs);
                   import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
@@ -6240,6 +6924,154 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     borderColor: colors.border,
     padding: 14,
     marginBottom: 16,
+  },
+  todayStatusCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    padding: 14,
+    marginBottom: 16,
+    ...elevations.subtle,
+  },
+  todayStatusHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 13,
+  },
+  todayStatusIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  todayStatusEyebrow: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+    color: colors.textMuted,
+  },
+  todayStatusDate: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    marginTop: 2,
+  },
+  todayStatusPill: {
+    borderWidth: 1,
+    borderRadius: radius.full,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+  },
+  todayStatusPillText: {
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  todayStatusTitle: {
+    fontSize: 24,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    lineHeight: 29,
+  },
+  todayStatusSubtitle: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    lineHeight: 18,
+    marginTop: 6,
+  },
+  todayStatusMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginTop: 7,
+  },
+  todayStatusMetaText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: colors.textMuted,
+  },
+  todayActionRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 7,
+    marginTop: 12,
+  },
+  todayActionText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '800',
+    color: colors.textSecondary,
+    lineHeight: 17,
+  },
+  todaySignalGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 16,
+  },
+  todaySignalTile: {
+    minHeight: 146,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    padding: 11,
+  },
+  todaySignalTileHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginBottom: 9,
+  },
+  todaySignalIcon: {
+    width: 28,
+    height: 28,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  todaySignalPill: {
+    borderRadius: radius.full,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  todaySignalPillText: {
+    fontSize: 9,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  todaySignalLabel: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.4,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  todaySignalValue: {
+    fontSize: 22,
+    fontWeight: '900',
+    marginTop: 2,
+  },
+  todaySignalTrack: {
+    height: 6,
+    borderRadius: radius.full,
+    overflow: 'hidden',
+    backgroundColor: colors.border,
+    marginTop: 7,
+  },
+  todaySignalFill: {
+    height: '100%',
+    borderRadius: radius.full,
+  },
+  todaySignalDetail: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    lineHeight: 15,
+    marginTop: 7,
   },
   goalTrajectoryCard: {
     backgroundColor: colors.surface,

@@ -18,6 +18,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import type { AppThemeName } from '../types';
 import { createSocialPost, type WorkoutPostSummary } from '../services/api';
+import { compactSocialSetSummaries } from '../utils/socialWorkoutDetails';
 
 interface Props {
   visible: boolean;
@@ -62,7 +63,15 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
         exercises: workoutSummary.exercises.map(ex => ({
           name: ex.name,
           equipment: ex.equipment ?? null,
-          sets: ex.sets.map(set => ({ reps: set.reps })),
+          sets: ex.sets.map(set => ({
+            reps: set.reps ?? null,
+            weight_lbs: set.weight_lbs ?? null,
+            duration_seconds: set.duration_seconds ?? null,
+            actual_distance: set.actual_distance ?? null,
+            actual_pace: set.actual_pace ?? null,
+            heart_rate_avg: set.heart_rate_avg ?? null,
+            cardio_metrics: set.cardio_metrics ?? null,
+          })),
         })),
       };
       await createSocialPost(authToken, {
@@ -148,7 +157,7 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
                 <View style={{ flex: 1 }}>
                   <Text style={s.privacyTitle}>Friends see workout activity only</Text>
                   <Text style={s.privacyBody}>
-                    Shared: focus, duration, sets, exercises, optional caption/photo. Never shared: calories, macros, meals, body weight, body photos, or measurements.
+                    Shared: focus, duration, exercises, set load/reps, and cardio time or distance. Never shared: calories, macros, meals, body weight, body photos, or measurements.
                   </Text>
                 </View>
               </View>
@@ -219,10 +228,7 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
                 {exs.length > 0 && (
                   <View style={s.exerciseList}>
                     {exs.map((ex, i) => {
-                      const bestSet = ex.sets.reduce(
-                        (best, set) => ((set.reps ?? 0) > (best.reps ?? 0) ? set : best),
-                        ex.sets[0] ?? { reps: 0 },
-                      );
+                      const setPreview = compactSocialSetSummaries(ex.sets).slice(0, 2).join('  ·  ');
                       return (
                         <View key={i} style={s.exerciseRow}>
                           <View style={{ flex: 1 }}>
@@ -232,7 +238,7 @@ export default function ShareWorkoutModal({ visible, authToken, onClose, themeNa
                             ) : null}
                           </View>
                           <Text style={s.exerciseSets}>
-                            {ex.sets.length}x{bestSet.reps}
+                            {setPreview || `${ex.sets.length} sets`}
                           </Text>
                         </View>
                       );
@@ -315,7 +321,7 @@ const mk = (c: ReturnType<typeof getTheme>['colors']) =>
     },
     exerciseName: { fontSize: 13, fontWeight: '600', color: c.textPrimary },
     exerciseEquip: { fontSize: 11, color: c.textMuted, marginTop: 1 },
-    exerciseSets: { fontSize: 13, fontWeight: '700', color: c.textSecondary },
+    exerciseSets: { fontSize: 12, fontWeight: '700', color: c.textSecondary, maxWidth: '58%', textAlign: 'right', lineHeight: 16 },
     photoContainer: { marginBottom: 16, borderRadius: radius.lg, overflow: 'hidden' },
     photo: { width: '100%', height: 240, borderRadius: radius.lg },
     photoRemove: { position: 'absolute', top: 8, right: 8 },

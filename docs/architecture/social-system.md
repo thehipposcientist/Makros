@@ -17,9 +17,9 @@ Friend list + once-a-week digest + a bounded friends-only activity feed. There i
 
 | Visible to friends | Never visible |
 |---|---|
-| Sessions completed, workout focus/duration/exercises/sets/reps | Calories, macros, body weight |
+| Sessions completed, workout focus/duration/exercises/sets/reps, recorded lift load, cardio time/distance/pace | Calories, macros, body weight |
 | Streak length | Body fat, measurements, body photos |
-| Goal label | Specific lift weights, meal logs, recovery flags |
+| Goal label | Meal logs, recovery flags |
 | Active-in-last-48h dot | Private notes, reports, account data |
 
 `share_activity_enabled` defaults **off**. Friends without it on show `sessions=0 / streak=0 / share_enabled=false`.
@@ -52,7 +52,7 @@ Digest `summary`: `friend_count`, `friends_trained_this_week`, `total_friend_ses
 | `GET /social/feed/{user_id}` | Friend detail feed when the friend has sharing enabled. |
 | `POST /social/posts` | Optional workout share with caption/photo + sanitized workout summary. |
 | `DELETE /social/posts/{id}` | Delete own post. |
-| `POST /social/feed/{id}/like` | Toggle a like on a visible feed item. |
+| `POST /social/feed/{id}/like` | Toggle a persisted like on a visible feed item; returns `{liked, like_count}`. |
 
 ## Client (`src/components/FriendsModal.tsx`, `src/components/SocialFeedView.tsx`)
 
@@ -71,5 +71,5 @@ Profile tab: "Friends · N" row with pending-request badge. Count refreshes on P
 - Canonical pair `(user_a_id < user_b_id)` — exactly one row per pair.
 - Eager cache invalidation — newly-accepted friend appears in digest within seconds.
 - Digest reads `WorkoutCompletion.workout_date` only.
-- Feed write/read paths sanitize payloads so calorie/macro/body-weight/body-composition data and lift weights never cross social surfaces.
-- PR feed rows are accepted so badges can attach to workout cards, but the sanitized payload omits PR values/lift weights.
+- Feed write/read paths sanitize payloads so calorie/macro/body-weight/body-composition data never crosses social surfaces. Workout-only set load and cardio metrics are allowed.
+- PR feed rows are accepted so badges can attach to workout cards, but the sanitized payload omits PR values.

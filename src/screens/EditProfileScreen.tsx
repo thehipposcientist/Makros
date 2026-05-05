@@ -2411,17 +2411,17 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
                       {/* Phase breakdown */}
                       <View style={[styles.phaseBlock, { borderColor: tc.border }]}>
-                        <Text style={styles.phaseBlockTitle}>Muscle Phase Breakdown</Text>
+                        <Text style={styles.phaseBlockTitle}>{guide.phaseTitle}</Text>
                         <View style={styles.phaseRow}>
                           <View style={[styles.phaseBadge, { backgroundColor: tc.primary + '22' }]}>
-                            <Text style={[styles.phaseBadgeLabel, { color: tc.primary }]}>↑ LIFTING</Text>
+                            <Text style={[styles.phaseBadgeLabel, { color: tc.primary }]}>{guide.primaryPhaseLabel}</Text>
                           </View>
                           <Text style={styles.phaseText}>{guide.concentric}</Text>
                         </View>
                         <View style={[styles.phaseDivider, { backgroundColor: tc.border }]} />
                         <View style={styles.phaseRow}>
                           <View style={[styles.phaseBadge, { backgroundColor: (tc.error ?? '#FF4444') + '22' }]}>
-                            <Text style={[styles.phaseBadgeLabel, { color: tc.error ?? '#FF4444' }]}>↓ LOWERING</Text>
+                            <Text style={[styles.phaseBadgeLabel, { color: tc.error ?? '#FF4444' }]}>{guide.secondaryPhaseLabel}</Text>
                           </View>
                           <Text style={styles.phaseText}>{guide.eccentric}</Text>
                         </View>

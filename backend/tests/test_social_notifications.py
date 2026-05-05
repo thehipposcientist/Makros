@@ -2,8 +2,7 @@
 
 Covers the in-app notification stream for friend requests, accepted
 requests, and feed likes. The payload assertions also guard the social
-privacy boundary: no calories/body/lift weights in notification/feed
-payloads.
+privacy boundary: no calories/body metrics in notification payloads.
 """
 from __future__ import annotations
 
@@ -13,10 +12,11 @@ from datetime import datetime, timezone
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine, select
 
-from app.models import ActivityFeedItem, Friendship, SocialNotification, User, UserSocialProfile
+from app.models import ActivityFeedItem, FeedLike, Friendship, SocialNotification, User, UserSocialProfile
 from app.routers.social import (
     FriendRequestBody,
     accept_friend,
+    get_feed,
     list_notifications,
     mark_all_notifications_read,
     mark_notification_read,
@@ -140,9 +140,9 @@ def test_like_notification_is_sanitized_and_deduped():
         s.commit()
         s.refresh(item)
 
-        assert toggle_like(item.id, current_user=alice, db=s) == {"liked": True}
-        assert toggle_like(item.id, current_user=alice, db=s) == {"liked": False}
-        assert toggle_like(item.id, current_user=alice, db=s) == {"liked": True}
+        assert toggle_like(item.id, current_user=alice, db=s) == {"liked": True, "like_count": 1}
+        assert toggle_like(item.id, current_user=alice, db=s) == {"liked": False, "like_count": 0}
+        assert toggle_like(item.id, current_user=alice, db=s) == {"liked": True, "like_count": 1}
 
         rows = s.exec(select(SocialNotification)).all()
         assert len(rows) == 1
@@ -157,6 +157,49 @@ def test_like_notification_is_sanitized_and_deduped():
         assert "calorie" not in dumped
         assert n.payload["focus"] == "Push"
     _ok("like notification avoids duplicate rows and sensitive payloads")
+
+
+def test_feed_like_persists_and_hydrates_on_posts():
+    print("\n[test] feed likes persist and hydrate back onto posts")
+    eng = _make_engine()
+    with Session(eng) as s:
+        alice = _user(s, 1, "alice")
+        _user(s, 2, "bob")
+        _accepted_friendship(s, 1, 2)
+        item = ActivityFeedItem(
+            user_id=2,
+            event_type="workout_post",
+            payload={
+                "caption": "Solid push day.",
+                "workout_summary": {
+                    "focus": "Push",
+                    "duration_seconds": 2700,
+                    "date": "2026-05-05",
+                    "exercises": [],
+                },
+            },
+        )
+        s.add(item)
+        s.commit()
+        s.refresh(item)
+
+        liked = toggle_like(item.id, current_user=alice, db=s)
+        assert liked == {"liked": True, "like_count": 1}
+
+        rows = s.exec(select(FeedLike).where(FeedLike.feed_item_id == item.id)).all()
+        assert len(rows) == 1
+        assert rows[0].user_id == alice.id
+
+        feed = get_feed(current_user=alice, db=s)
+        hydrated = next(i for i in feed["items"] if i["id"] == item.id)
+        assert hydrated["like_count"] == 1
+        assert hydrated["liked_by_me"] is True
+
+        unliked = toggle_like(item.id, current_user=alice, db=s)
+        assert unliked == {"liked": False, "like_count": 0}
+        rows = s.exec(select(FeedLike).where(FeedLike.feed_item_id == item.id)).all()
+        assert rows == []
+    _ok("post like row is stored, read into feed state, and removed on unlike")
 
 
 def test_mark_all_notifications_read():
@@ -210,6 +253,7 @@ cases = [
     test_friend_request_creates_unread_notification,
     test_accept_friend_creates_notification_for_requester_and_marks_read,
     test_like_notification_is_sanitized_and_deduped,
+    test_feed_like_persists_and_hydrates_on_posts,
     test_mark_all_notifications_read,
     test_pr_feed_event_is_written_without_lift_value,
 ]

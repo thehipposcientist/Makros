@@ -25,6 +25,7 @@ const tests = [
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/apiBaseUrl.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/birthday.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/cycleSupport.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/exerciseGuide.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/oneRepMax.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/goalTrajectory.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/liveActivityQuickStart.test.ts'],

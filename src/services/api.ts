@@ -1972,8 +1972,18 @@ export async function upsertNightlySleep(token: string, payload: SleepNightlyPay
   });
 }
 
+export async function upsertNightlySleepBatch(token: string, payloads: SleepNightlyPayload[]) {
+  return request('/sleep/nightly/batch', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payloads),
+  });
+}
+
+export type SleepHistoryItem = SleepNightlyPayload;
+
 export async function getSleepHistory(token: string, days: number = 30) {
-  return request<any[]>(`/sleep/history?days=${days}`, {
+  return request<SleepHistoryItem[]>(`/sleep/history?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -2016,8 +2026,10 @@ export async function upsertDailyHealthSnapshotBatch(token: string, payloads: Da
   });
 }
 
+export type DailyHealthHistoryItem = DailyHealthSnapshotPayload;
+
 export async function getDailyHealthHistory(token: string, days: number = 30) {
-  return request<any[]>(`/health/history?days=${days}`, {
+  return request<DailyHealthHistoryItem[]>(`/health/history?days=${days}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
@@ -2878,6 +2890,9 @@ export async function analyzeWorkoutFormPhoto(
 }
 
 export interface BodyScanResult {
+  id?: string | number;
+  scan_date?: string;
+  date?: string;
   bodyFatPct: number;
   bodyFatRange: string;
   muscleMass: string;
@@ -3454,28 +3469,43 @@ export async function syncWeightEntries(token: string, entries: WeightEntryAPI[]
   });
 }
 
+export async function deleteWeightEntryAPI(token: string, date: string): Promise<{ deleted: number; date: string }> {
+  return request(`/profile/weight-entries/${encodeURIComponent(date)}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+export async function clearWeightEntriesAPI(token: string): Promise<{ deleted: number }> {
+  return request('/profile/weight-entries', {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
 // ─── Body Scan History ──────────────────────────────────────────────────────
 
 export interface BodyScanHistoryItem {
-  id: number;
-  scan_date: string;
-  body_fat_pct: number | null;
-  body_fat_range: string | null;
-  muscle_mass: string | null;
+  id: string;
+  date: string | null;
+  scan_date: string | null;
+  bodyFatPct: number | null;
+  bodyFatRange: string | null;
+  muscleMass: string | null;
   category: string | null;
   strengths: string[];
   improvements: string[];
   assessment: string | null;
   disclaimer: string | null;
-  weight_lbs: number | null;
-  created_at: string;
+  weightLbs: number | null;
 }
 
 export async function getBodyScanHistory(token: string): Promise<BodyScanHistoryItem[]> {
-  return request<BodyScanHistoryItem[]>('/ai/body-scans', {
+  const result = await request<BodyScanHistoryItem[] | { scans?: BodyScanHistoryItem[] }>('/ai/body-scans', {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}` },
   });
+  return Array.isArray(result) ? result : (result.scans ?? []);
 }
 
 // ─── Saved Meals ─────────────────────────────────────────────────────────────
@@ -4642,7 +4672,16 @@ export interface FeedItem {
     duration_seconds?: number;
     date?: string;
     exercise_count?: number;
-    exercises?: Array<{ name: string; sets: Array<{ reps: number }> }>;
+    activity_category?: string;
+    activity_subtype?: string;
+    cardio_style?: string;
+    distance_miles?: number;
+    hr_summary?: { avgBpm?: number; maxBpm?: number };
+    exercises?: Array<{
+      name: string;
+      equipment?: string | null;
+      sets: Array<WorkoutPostSetSummary>;
+    }>;
     streak?: number;
     caption?: string;
     photo_base64?: string;
@@ -4677,15 +4716,30 @@ export interface WorkoutPostSummary {
   focus: string;
   duration_seconds: number;
   date: string;
+  activity_category?: string | null;
+  activity_subtype?: string | null;
+  cardio_style?: string | null;
+  distance_miles?: number | null;
+  hr_summary?: { avgBpm?: number | null; maxBpm?: number | null } | null;
   exercises: Array<{
     name: string;
     equipment?: string | null;
-    sets: Array<{ reps: number }>;
+    sets: Array<WorkoutPostSetSummary>;
   }>;
   total_sets: number;
   total_reps: number;
   training_score?: number | null;
   training_rating?: string | null;
+}
+
+export interface WorkoutPostSetSummary {
+  reps?: number | null;
+  weight_lbs?: number | null;
+  duration_seconds?: number | null;
+  actual_distance?: number | null;
+  actual_pace?: string | null;
+  heart_rate_avg?: number | null;
+  cardio_metrics?: Record<string, string> | null;
 }
 
 export async function createSocialPost(
@@ -4706,8 +4760,8 @@ export async function deleteSocialPost(token: string, postId: number): Promise<{
   });
 }
 
-export async function toggleFeedLike(token: string, itemId: number): Promise<{ liked: boolean }> {
-  return request<{ liked: boolean }>(`/social/feed/${itemId}/like`, {
+export async function toggleFeedLike(token: string, itemId: number): Promise<{ liked: boolean; like_count: number }> {
+  return request<{ liked: boolean; like_count: number }>(`/social/feed/${itemId}/like`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
   });

@@ -1810,11 +1810,25 @@ def mark_workout_complete(
             "duration_seconds": body.duration_seconds,
             "date": str(body.workout_date),
             "exercise_count": len(body.exercises) if body.exercises else 0,
+            "activity_category": body.activity_category,
+            "activity_subtype": body.activity_subtype,
+            "cardio_style": body.cardio_style,
+            "distance_miles": body.distance_miles,
+            "hr_summary": body.hr_summary,
             "exercises": [
                 {
                     "name": ex.name,
+                    "equipment": ex.equipment,
                     "sets": [
-                        {"reps": s.actual_reps}
+                        {
+                            "reps": s.reps,
+                            "weight_lbs": s.weight_lbs,
+                            "duration_seconds": s.duration_seconds,
+                            "actual_distance": s.actual_distance,
+                            "actual_pace": s.actual_pace,
+                            "heart_rate_avg": s.heart_rate_avg,
+                            "cardio_metrics": s.cardio_metrics,
+                        }
                         for s in ex.sets
                     ],
                 }

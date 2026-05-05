@@ -414,6 +414,71 @@ def test_weight_entry_sync_promotes_newest_entry_only():
     _ok("bulk weight sync promotes the newest dated entry")
 
 
+def test_weight_entry_delete_removes_db_row_and_promotes_remaining_latest():
+    """Deleting a weight row must persist server-side so login cannot resurrect it."""
+    print("\n[test] profile/weight-entries delete: removes row and promotes remaining latest")
+    eng = _make_engine()
+    today = date.today()
+    with Session(eng) as session:
+        user = _seed_user_profile(session, user_id=53, weight_lbs=180.0)
+        session.add(WeightEntry(
+            user_id=53,
+            entry_date=today - timedelta(days=1),
+            weight_lbs=178.2,
+            source="manual",
+            logged_at=datetime(2026, 5, 4, 7, 10, tzinfo=timezone.utc),
+        ))
+        session.add(WeightEntry(
+            user_id=53,
+            entry_date=today,
+            weight_lbs=176.8,
+            source="manual",
+            logged_at=datetime(2026, 5, 5, 8, 25, tzinfo=timezone.utc),
+        ))
+        session.commit()
+
+        result = profile_router.delete_weight_entry(today.isoformat(), current_user=user, db=session)
+        rows = session.exec(select(WeightEntry).where(WeightEntry.user_id == 53)).all()
+
+        assert result["deleted"] == 1
+        assert len(rows) == 1
+        assert rows[0].entry_date == today - timedelta(days=1)
+        assert _profile_weight(session, 53) == 178.2
+    _ok("delete removes DB weight entry and profile follows remaining latest")
+
+
+def test_weight_entry_clear_removes_all_rows_without_readding_cache_payloads():
+    """Reset history should clear persisted rows; profile weight remains as a standalone current value."""
+    print("\n[test] profile/weight-entries clear: removes all persisted rows")
+    eng = _make_engine()
+    today = date.today()
+    with Session(eng) as session:
+        user = _seed_user_profile(session, user_id=54, weight_lbs=180.0)
+        session.add(WeightEntry(
+            user_id=54,
+            entry_date=today - timedelta(days=1),
+            weight_lbs=178.2,
+            source="manual",
+            logged_at=datetime(2026, 5, 4, 7, 10, tzinfo=timezone.utc),
+        ))
+        session.add(WeightEntry(
+            user_id=54,
+            entry_date=today,
+            weight_lbs=176.8,
+            source="manual",
+            logged_at=datetime(2026, 5, 5, 8, 25, tzinfo=timezone.utc),
+        ))
+        session.commit()
+
+        result = profile_router.clear_weight_entries(current_user=user, db=session)
+        rows = session.exec(select(WeightEntry).where(WeightEntry.user_id == 54)).all()
+
+        assert result["deleted"] == 2
+        assert rows == []
+        assert _profile_weight(session, 54) == 180.0
+    _ok("clear removes all DB weight entries and leaves profile weight alone")
+
+
 def test_calorie_ranges_use_latest_weight_and_session_duration():
     """Cut/maintain/bulk card should reflect the newest weigh-in and saved duration."""
     print("\n[test] profile/calorie-ranges: latest weight + session duration")
@@ -476,6 +541,8 @@ cases = [
     test_checkin_rejects_non_positive_weight,
     test_weight_entry_promotes_latest_profile_weight_and_profile_payload,
     test_weight_entry_sync_promotes_newest_entry_only,
+    test_weight_entry_delete_removes_db_row_and_promotes_remaining_latest,
+    test_weight_entry_clear_removes_all_rows_without_readding_cache_payloads,
     test_calorie_ranges_use_latest_weight_and_session_duration,
 ]
 

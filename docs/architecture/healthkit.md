@@ -19,6 +19,12 @@ Single source of truth for all Apple Health reads in the client.
 - `null` = unknown / `0` = known-zero.
 - Z2: prefer real HR zone samples when present; fallback treats steady cardio ≥20 min as Z2 when HR-zone data is unavailable.
 
+## Backend Persistence
+
+- Daily HealthKit rollups are stored in `daily_health_snapshots` through `POST /health/snapshot` and `POST /health/snapshot/batch`; `GET /health/history` powers visible history and server-side trend logic.
+- Per-night sleep rows are stored in `sleep_logs` through `POST /sleep/nightly` and `POST /sleep/nightly/batch`; `GET /sleep/history` powers sleep baselines and the Health tab history card.
+- Both upsert paths are patch-style: later partial rows fill gaps without erasing earlier values.
+
 **Migration status:** ProgressScreen migrated to `getHealthDataSummary`. Remaining direct `readHealthSummary` callers (HomeScreen, ActiveWorkoutScreen) can migrate file-by-file — the aggregator wraps the same fn so callers keep working.
 
 ## HK Write (workouts)

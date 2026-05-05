@@ -211,6 +211,9 @@ _TEST_MODULES = (
     # Profile weight source of truth — measurement-only check-ins must
     # not promote cached/history weights into UserProfile.weight_lbs.
     "tests.test_profile_weight_sync",
+    # Health persistence: batch sleep + daily HealthKit snapshots keep
+    # partial-field upsert semantics for login/device restores.
+    "tests.test_health_sleep_persistence",
     # Coach chat: photo attachments + multi-turn conversation history
     # (the active-workout coach can now see a snapped photo and answer
     # follow-up questions without re-stating context).
