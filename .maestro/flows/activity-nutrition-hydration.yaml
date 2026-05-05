@@ -68,12 +68,10 @@ tags:
 - extendedWaitUntil:
     visible: "Plan tab"
     timeout: 30000
-- scrollUntilVisible:
-    element:
+- extendedWaitUntil:
+    visible:
       id: "extra-workout-log"
-    direction: DOWN
-    timeout: 20000
-    visibilityPercentage: 50
+    timeout: 30000
 - tapOn:
     id: "extra-workout-log"
 - extendedWaitUntil:

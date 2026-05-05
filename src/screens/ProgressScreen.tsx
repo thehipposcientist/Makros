@@ -29,7 +29,7 @@ import ViewShot from 'react-native-view-shot';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, derivePersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
-import { APPLE_HEALTH_PERMISSION_COPY, readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory, summarizeWorkoutZone2 } from '../services/appleHealth';
+import { APPLE_HEALTH_PERMISSION_COPY, readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import BodyMeasurementsModal from '../components/BodyMeasurementsModal';
 import Zone2TargetCard from '../components/Zone2TargetCard';
@@ -78,6 +78,7 @@ interface ProgressScreenProps {
   nutritionPlan?: import('../types').DailyNutritionPlan | null;
   nutritionLogRefreshKey?: number;
   isActive?: boolean;
+  planWeekWindow?: ProgressPlanWeekWindow | null;
 }
 
 function sentenceLabel(value: unknown): string {
@@ -368,6 +369,19 @@ type ProgressOverviewItem = {
   targetTab: ProgressTab;
 };
 
+type ProgressPlanWeekWindow = { startDate: string; endDate: string };
+
+type ProgressDateWindow = {
+  startDate: string;
+  endDate: string;
+  previousStartDate: string;
+  previousEndDate: string;
+  label: string;
+  previousLabel: string;
+  days: number;
+  source: 'plan_week' | 'calendar_week';
+};
+
 const PR_MOMENTUM_WINDOW_DAYS = 30;
 const MIN_NUTRITION_DAYS_FOR_HEALTH_SCORE = 4;
 const LEGACY_PROGRESS_OVERVIEW_TEST_IDS: Record<string, string> = {
@@ -381,6 +395,74 @@ function isActiveWorkoutSummary(summary: StoredWorkoutSummary): boolean {
   const hasSets = (summary.totalSets ?? 0) > 0
     || (summary.exercises ?? []).some(ex => (ex.sets?.length ?? 0) > 0);
   return hasSets || (summary.durationSeconds ?? 0) > 30;
+}
+
+function parseDateKeyMs(raw: string | null | undefined): number {
+  const key = String(raw ?? '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return 0;
+  const ms = new Date(`${key}T12:00:00`).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function formatShortDateKey(key: string): string {
+  const ms = parseDateKeyMs(key);
+  if (!ms) return key;
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
+function shiftDateKey(key: string, days: number): string {
+  const ms = parseDateKeyMs(key);
+  const d = ms ? new Date(ms) : new Date();
+  d.setDate(d.getDate() + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function buildProgressDateWindow(planWeekWindow?: ProgressPlanWeekWindow | null): ProgressDateWindow {
+  const start = String(planWeekWindow?.startDate ?? '').slice(0, 10);
+  const end = String(planWeekWindow?.endDate ?? '').slice(0, 10);
+  const startMs = parseDateKeyMs(start);
+  const endMs = parseDateKeyMs(end);
+  if (startMs && endMs && endMs >= startMs) {
+    const days = Math.max(1, Math.round((endMs - startMs) / 86400000) + 1);
+    const previousStartDate = shiftDateKey(start, -days);
+    const previousEndDate = shiftDateKey(end, -days);
+    return {
+      startDate: start,
+      endDate: end,
+      previousStartDate,
+      previousEndDate,
+      label: `${formatShortDateKey(start)}-${formatShortDateKey(end)}`,
+      previousLabel: `${formatShortDateKey(previousStartDate)}-${formatShortDateKey(previousEndDate)}`,
+      days,
+      source: 'plan_week',
+    };
+  }
+
+  const today = new Date();
+  const dow = today.getDay();
+  const mondayOffset = dow === 0 ? -6 : 1 - dow;
+  const monday = new Date(today);
+  monday.setDate(today.getDate() + mondayOffset);
+  const startDate = `${monday.getFullYear()}-${String(monday.getMonth() + 1).padStart(2, '0')}-${String(monday.getDate()).padStart(2, '0')}`;
+  const endDate = shiftDateKey(startDate, 6);
+  const previousStartDate = shiftDateKey(startDate, -7);
+  const previousEndDate = shiftDateKey(endDate, -7);
+  return {
+    startDate,
+    endDate,
+    previousStartDate,
+    previousEndDate,
+    label: `${formatShortDateKey(startDate)}-${formatShortDateKey(endDate)}`,
+    previousLabel: `${formatShortDateKey(previousStartDate)}-${formatShortDateKey(previousEndDate)}`,
+    days: 7,
+    source: 'calendar_week',
+  };
+}
+
+function dateInWindow(raw: string | null | undefined, startKey: string, endKey: string): boolean {
+  const ms = parseDateKeyMs(raw);
+  return ms >= parseDateKeyMs(startKey) && ms <= parseDateKeyMs(endKey);
 }
 
 function exerciseHistoryStats(history: WorkoutSession[]): Map<string, { firstDate: string; sessionCount: number }> {
@@ -782,21 +864,18 @@ function buildThisWeekOverview(
   mealHistory: Array<{ meal_date: string }> | null,
   weightUnit: WeightUnit,
   distanceUnit: DistanceUnit,
+  window: ProgressDateWindow,
 ): ProgressOverviewItem[] {
-  const now = Date.now();
-  const dayMs = 86400000;
-  const sevenAgo = now - 7 * dayMs;
-  const fourteenAgo = now - 14 * dayMs;
-  const timeOf = (raw: string): number => {
-    const key = String(raw ?? '').slice(0, 10);
-    return key ? +new Date(`${key}T12:00:00`) : 0;
-  };
+  const currentWindowText = window.source === 'plan_week' ? 'this plan week' : 'this calendar week';
+  const previousWindowText = window.source === 'plan_week' ? 'previous week' : 'previous calendar week';
   const trendText = (current: number, previous: number, noun: string): string => {
-    if (previous <= 0) return `${noun} in the last 7 days`;
+    if (previous <= 0) return `${noun} ${currentWindowText}`;
     const delta = current - previous;
-    if (delta === 0) return `unchanged vs previous 7 days`;
-    return `${delta > 0 ? '+' : ''}${delta} vs previous 7 days`;
+    if (delta === 0) return `unchanged vs ${previousWindowText}`;
+    return `${delta > 0 ? '+' : ''}${delta} vs ${previousWindowText}`;
   };
+  const inCurrent = (raw: string | null | undefined) => dateInWindow(raw, window.startDate, window.endDate);
+  const inPrevious = (raw: string | null | undefined) => dateInWindow(raw, window.previousStartDate, window.previousEndDate);
 
   const workoutRows = (summaries.length > 0
     ? summaries.map(s => ({
@@ -813,23 +892,23 @@ function buildThisWeekOverview(
         })))
     .filter(row => row.sets > 0 || row.minutes > 0);
 
-  const recentWorkoutDays = new Set(workoutRows.filter(row => timeOf(row.date) >= sevenAgo).map(row => row.date.slice(0, 10))).size;
-  const previousWorkoutDays = new Set(workoutRows.filter(row => {
-    const t = timeOf(row.date);
-    return t >= fourteenAgo && t < sevenAgo;
-  }).map(row => row.date.slice(0, 10))).size;
-  const recentSets = workoutRows.filter(row => timeOf(row.date) >= sevenAgo).reduce((sum, row) => sum + row.sets, 0);
-  const previousSets = workoutRows.filter(row => {
-    const t = timeOf(row.date);
-    return t >= fourteenAgo && t < sevenAgo;
-  }).reduce((sum, row) => sum + row.sets, 0);
+  const recentWorkoutDays = new Set(workoutRows.filter(row => inCurrent(row.date)).map(row => row.date.slice(0, 10))).size;
+  const previousWorkoutDays = new Set(workoutRows.filter(row => inPrevious(row.date)).map(row => row.date.slice(0, 10))).size;
+  const recentSets = workoutRows.filter(row => inCurrent(row.date)).reduce((sum, row) => sum + row.sets, 0);
+  const previousSets = workoutRows.filter(row => inPrevious(row.date)).reduce((sum, row) => sum + row.sets, 0);
+  const recentZone2 = summaries
+    .filter(row => inCurrent(row.date))
+    .reduce((sum, row) => sum + Math.round(Number(row.hrZoneMinutes?.[1] ?? 0)), 0);
+  const previousZone2 = summaries
+    .filter(row => inPrevious(row.date))
+    .reduce((sum, row) => sum + Math.round(Number(row.hrZoneMinutes?.[1] ?? 0)), 0);
 
   const items: ProgressOverviewItem[] = [];
   if (recentWorkoutDays > 0) {
     items.push({
       key: 'week-workouts',
       label: 'Training days',
-      value: `${recentWorkoutDays}`,
+      value: `${recentWorkoutDays}/${window.days}`,
       detail: trendText(recentWorkoutDays, previousWorkoutDays, 'active days'),
       icon: 'calendar-outline',
       color: '#22C55E',
@@ -848,32 +927,47 @@ function buildThisWeekOverview(
     });
   }
 
-  const recentPrs = prs.filter(pr => timeOf(pr.date) >= sevenAgo);
+  if (recentZone2 > 0 || previousZone2 > 0) {
+    const delta = recentZone2 - previousZone2;
+    items.push({
+      key: 'week-zone2',
+      label: 'Zone 2',
+      value: `${recentZone2}m`,
+      detail: previousZone2 > 0
+        ? `${delta >= 0 ? '+' : ''}${delta}m vs ${previousWindowText}`
+        : `aerobic minutes ${currentWindowText}`,
+      icon: 'walk-outline',
+      color: '#EF4444',
+      targetTab: 'health',
+    });
+  }
+
+  const recentPrs = prs.filter(pr => inCurrent(pr.date));
   if (recentPrs.length > 0) {
     const top = recentPrs[0];
     items.push({
       key: 'week-prs',
       label: 'PRs',
       value: `${recentPrs.length}`,
-	      detail: top ? `${top.exerciseName}: ${formatWeight(top.weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} x ${top.reps}` : 'records this week',
+      detail: top ? `${top.exerciseName}: ${formatWeight(top.weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} x ${top.reps}` : `records ${currentWindowText}`,
       icon: 'trophy-outline',
       color: '#F59E0B',
-	      targetTab: 'history',
+      targetTab: 'history',
     });
   }
 
   const weights = [...weightEntries]
     .filter(w => Number.isFinite(w.weightLbs))
-    .sort((a, b) => timeOf(a.date) - timeOf(b.date));
+    .sort((a, b) => parseDateKeyMs(a.date) - parseDateKeyMs(b.date));
   if (weights.length >= 2) {
-    const latest = weights[weights.length - 1];
-    const baseline = [...weights].reverse().find(w => timeOf(w.date) <= sevenAgo) ?? weights[0];
-	    const delta = Math.round((latest.weightLbs - baseline.weightLbs) * 10) / 10;
-	    items.push({
+    const latest = [...weights].reverse().find(w => parseDateKeyMs(w.date) <= parseDateKeyMs(window.endDate)) ?? weights[weights.length - 1];
+    const baseline = [...weights].reverse().find(w => parseDateKeyMs(w.date) <= parseDateKeyMs(window.startDate)) ?? weights[0];
+    const delta = Math.round((latest.weightLbs - baseline.weightLbs) * 10) / 10;
+    items.push({
       key: 'week-weight',
       label: 'Body weight',
-	      value: formatWeight(latest.weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }),
-	      detail: `${delta > 0 ? '+' : ''}${formatWeight(Math.abs(delta), weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} since ${formatDate(baseline.date)}`,
+      value: formatWeight(latest.weightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }),
+      detail: `${delta > 0 ? '+' : ''}${formatWeight(Math.abs(delta), weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} since ${formatDate(baseline.date)}`,
       icon: delta < 0 ? 'trending-down-outline' : delta > 0 ? 'trending-up-outline' : 'remove-outline',
       color: delta < 0 ? '#22C55E' : delta > 0 ? '#F59E0B' : '#0EA5E9',
       targetTab: 'body',
@@ -881,29 +975,29 @@ function buildThisWeekOverview(
   }
 
   const recentCardioMiles = paceHistory
-    .filter(p => timeOf(p.date) >= sevenAgo)
+    .filter(p => inCurrent(p.date))
     .reduce((sum, p) => sum + (p.distance ?? 0), 0);
   if (recentCardioMiles > 0) {
     items.push({
       key: 'week-cardio',
       label: 'Cardio distance',
-	      value: formatDistance(recentCardioMiles, distanceUnit),
-      detail: 'distance logged in the last 7 days',
+      value: formatDistance(recentCardioMiles, distanceUnit),
+      detail: `distance logged ${currentWindowText}`,
       icon: 'pulse-outline',
       color: '#EF4444',
-	      targetTab: 'trends',
+      targetTab: 'trends',
     });
   }
 
   const mealDays = new Set((mealHistory ?? [])
-    .filter(row => timeOf(row.meal_date) >= sevenAgo)
+    .filter(row => inCurrent(row.meal_date))
     .map(row => row.meal_date.slice(0, 10)));
   if (mealDays.size > 0) {
     items.push({
       key: 'week-meals',
       label: 'Meal signal',
-      value: `${mealDays.size}/7`,
-      detail: 'days with meal data this week',
+      value: `${mealDays.size}/${window.days}`,
+      detail: `days with meal data ${currentWindowText}`,
       icon: 'nutrition-outline',
       color: '#14B8A6',
       targetTab: 'health',
@@ -1244,7 +1338,7 @@ function AnimatedChartBar({
   return <Animated.View style={[style, { height }]} />;
 }
 
-export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true }: ProgressScreenProps) {
+export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true, planWeekWindow }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
   const styles = useMemo(() => createStyles(tc), [themeName]);
   const primaryButtonTextColor = getContrastingTextColor(tc.primary);
@@ -1338,8 +1432,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [paceHistory, setPaceHistory] = useState<PaceHistoryPoint[]>([]);
   const paceLoadedRef = useRef(false);
   const nutritionRefreshSeenRef = useRef(nutritionLogRefreshKey);
-  const [appleHealthZone2Minutes, setAppleHealthZone2Minutes] = useState<number | null>(null);
-  const [zone2DetectedWorkouts, setZone2DetectedWorkouts] = useState<Array<{ name: string; durationMin: number; counted: boolean; reason?: string }>>([]);
 
   // ─── Exercise property lookup maps ────────────────────────────────────────
   // Built from workout history — prefers structured fields from the planner
@@ -1416,10 +1508,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     () => buildProgressAnalytics(history, summaries, prs, plateaus),
     [history, plateaus, prs, summaries],
   );
-  const thisWeekOverview = useMemo(
-    () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory, weightUnit, distanceUnit),
-    [distanceUnit, history, mealHistory, paceHistory, prs, summaries, weightEntries, weightUnit],
+  const progressWeekWindow = useMemo(
+    () => buildProgressDateWindow(planWeekWindow),
+    [planWeekWindow?.startDate, planWeekWindow?.endDate],
   );
+  const thisWeekOverview = useMemo(
+    () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory, weightUnit, distanceUnit, progressWeekWindow),
+    [distanceUnit, history, mealHistory, paceHistory, progressWeekWindow, prs, summaries, weightEntries, weightUnit],
+  );
+  const planWeekZone2 = useMemo(() => {
+    const current = summaries
+      .filter(row => dateInWindow(row.date, progressWeekWindow.startDate, progressWeekWindow.endDate))
+      .reduce((sum, row) => sum + Math.round(Number(row.hrZoneMinutes?.[1] ?? 0)), 0);
+    const previous = summaries
+      .filter(row => dateInWindow(row.date, progressWeekWindow.previousStartDate, progressWeekWindow.previousEndDate))
+      .reduce((sum, row) => sum + Math.round(Number(row.hrZoneMinutes?.[1] ?? 0)), 0);
+    return { current, previous };
+  }, [progressWeekWindow, summaries]);
   const mealHistoryDailyRows = useMemo(
     () => (mealHistory == null ? null : aggregateDailyFromHistory(mealHistory as any)),
     [mealHistory],
@@ -1676,8 +1781,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     if (!isProTier) {
       healthLiveLoadedRef.current = false;
       setHealthEnabled(false);
-      setAppleHealthZone2Minutes(null);
-      setZone2DetectedWorkouts([]);
     }
   }, [authToken, isActive, isProTier, nutritionPlan, userProfile.goal, userProfile.mealsPerDay, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
 
@@ -1725,7 +1828,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         const { getHealthDataSummary } = await import('../services/healthDataSummary');
         const agg = await getHealthDataSummary({ age });
         if (cancelled) return;
-        setAppleHealthZone2Minutes(agg?.weekly?.totalZone2Minutes ?? agg?.zone2Minutes ?? null);
         const fresh = agg?.raw ?? await readHealthSummary({ age: userProfile.physicalStats?.age ?? null });
         if (cancelled || !fresh) return;
         setHealthSummary(fresh);
@@ -1734,18 +1836,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           const { pushSleepToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
           await pushSleepToWatch(buildWatchSleepPayloadFromSummary(fresh as any));
         } catch { /* watch may be unavailable */ }
-        const rows = await Promise.all(
-          (fresh.workoutDetails ?? []).map((w) => summarizeWorkoutZone2(w, age).catch(() => null)),
-        );
-        if (cancelled) return;
-        setZone2DetectedWorkouts(rows
-          .filter((w): w is NonNullable<typeof w> => !!w)
-          .map((w) => ({
-            name: w.name,
-            durationMin: w.durationMin,
-            counted: w.counted,
-            reason: w.reason,
-          })));
         try { setSleepHistoryCount((await loadSleepHistory()).length); } catch {}
       } catch {}
     })();
@@ -2025,6 +2115,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         ] as const).map(([key, label]) => (
           <TouchableOpacity
             key={key}
+            testID={`progress-subtab-${key}`}
             activeOpacity={0.7}
             style={[styles.tab, tab === key && styles.tabActive]}
             accessibilityRole="tab"
@@ -2051,10 +2142,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           <View style={styles.todayDashboardCard}>
             <View style={styles.weekOverviewHeader}>
               <View>
-                <Text style={styles.weekOverviewEyebrow}>THIS WEEK</Text>
-                <Text style={styles.weekOverviewTitle}>At a glance</Text>
+                <Text style={styles.weekOverviewEyebrow}>{progressWeekWindow.source === 'plan_week' ? 'PLAN WEEK' : 'CALENDAR WEEK'}</Text>
+                <Text style={styles.weekOverviewTitle}>{progressWeekWindow.label}</Text>
               </View>
-              <Text style={styles.weekOverviewHint}>Tap tiles to drill in</Text>
+              <Text style={styles.weekOverviewHint}>vs {progressWeekWindow.previousLabel}</Text>
             </View>
             {thisWeekOverview.length > 0 ? (
               <View style={styles.weekOverviewGrid}>
@@ -2088,76 +2179,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Text style={styles.emptyBody}>Complete workouts, log meals, or add body data to populate today's dashboard.</Text>
             )}
           </View>
-
-          {progressMilestones.length > 0 && (
-            <View style={{ marginBottom: 16 }}>
-              <Text style={styles.sectionLabel}>Current Highlights</Text>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                {progressMilestones.map(item => (
-                  <TouchableOpacity
-                    key={item.key}
-                    activeOpacity={0.82}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${item.title}: ${item.value}. ${item.detail}`}
-                    style={{
-                      flexGrow: 1,
-                      flexBasis: '47%',
-                      minHeight: 104,
-                      backgroundColor: tc.surfaceRaised,
-                      borderRadius: 12,
-                      borderWidth: 1,
-                      borderColor: tc.border,
-                      padding: 12,
-                    }}
-                    onPress={() => setTab(item.key === 'cardio-base' ? 'trends' : item.key === 'top-lift' ? 'trends' : 'history')}>
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-                      <View style={{ width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '20' }}>
-                        <Ionicons name={item.icon} size={16} color={item.color} />
-                      </View>
-                      <Text style={{ flex: 1, fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.3, textTransform: 'uppercase' }} numberOfLines={2}>
-                        {item.title}
-                      </Text>
-                    </View>
-                    <Text style={{ fontSize: 22, fontWeight: '900', color: tc.textPrimary }}>{item.value}</Text>
-                    <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 4, lineHeight: 15 }} numberOfLines={2}>
-                      {item.detail}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-          )}
-
-          {trainingSignals.length > 0 && (
-            <View style={{ marginBottom: 16 }}>
-              <Text style={styles.sectionLabel}>Training Signals</Text>
-              <View style={{ backgroundColor: tc.surfaceRaised, borderRadius: 12, borderWidth: 1, borderColor: tc.border, padding: 14, gap: 12 }}>
-                {trainingSignals.slice(0, 4).map(item => (
-                  <View
-                    key={item.key}
-                    style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}
-                    accessible
-                    accessibilityLabel={`${item.label}: ${item.value}. ${item.detail}`}
-                  >
-                    <View style={{ width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: item.color + '1F' }}>
-                      <Ionicons name={item.icon} size={16} color={item.color} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textMuted, textTransform: 'uppercase', letterSpacing: 0.4 }}>
-                        {item.label}
-                      </Text>
-                      <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 2, lineHeight: 16 }}>
-                        {item.detail}
-                      </Text>
-                    </View>
-                    <Text style={{ fontSize: 16, fontWeight: '900', color: item.color, textAlign: 'right', maxWidth: 92 }} numberOfLines={2}>
-                      {item.value}
-                    </Text>
-                  </View>
-                ))}
-              </View>
-            </View>
-          )}
         </ScrollView>
       ) : tab === 'trends' ? (
         <ScrollView contentContainerStyle={styles.content}>
@@ -2506,7 +2527,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Text style={styles.insightsTitle}>Coach Insights</Text>
               {insights?.adherence && (
                 <Text style={styles.insightsLine}>
-                  7-day adherence: workouts {insights.adherence.workout_7d_pct}%
+                  Rolling 7-day adherence: workouts {insights.adherence.workout_7d_pct}%
                   {insights.adherence.meal_7d_pct != null ? ` · meals ${insights.adherence.meal_7d_pct}%` : ''}
                 </Text>
               )}
@@ -2988,16 +3009,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <>
               {/* Weekly summary strip */}
               {(() => {
-                const now = new Date();
-                const dow = now.getDay();
-                const mondayOffset = dow === 0 ? -6 : 1 - dow;
-                const monday = new Date(now);
-                monday.setDate(now.getDate() + mondayOffset);
-                monday.setHours(0, 0, 0, 0);
                 const thisWeek = history.filter(s => {
                   if (!s.date || s.skipped) return false;
-                  const d = new Date(s.date);
-                  return d >= monday;
+                  return dateInWindow(s.date, progressWeekWindow.startDate, progressWeekWindow.endDate);
                 });
                 const totalMin = Math.round(thisWeek.reduce((s, w) => s + (w.durationSeconds || 0), 0) / 60);
                 const avgMin = thisWeek.length > 0 ? Math.round(totalMin / thisWeek.length) : 0;
@@ -3035,7 +3049,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <View style={{ backgroundColor: tc.primary + '12', borderRadius: 10, padding: 12, marginBottom: 12, borderWidth: 1, borderColor: tc.primary + '22' }}>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
                       <Text style={{ fontSize: 13, fontWeight: '700', color: tc.primary, flexShrink: 1 }}>
-                        This week: {thisWeek.length} workout{thisWeek.length !== 1 ? 's' : ''} · avg {avgMin} min
+                        Plan week {progressWeekWindow.label}: {thisWeek.length} workout{thisWeek.length !== 1 ? 's' : ''} · avg {avgMin} min
                       </Text>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                         {streak > 0 && <StreakCounter count={streak} color={tc.primary} />}
@@ -3636,38 +3650,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ) : tab === 'health' ? (
         /* ── Health Tab ─────────────────────────────────────────────── */
         <ScrollView contentContainerStyle={styles.content}>
-          {thisWeekOverview.length > 0 && (
-            <View style={styles.weekOverviewCard}>
-              <View style={styles.weekOverviewHeader}>
-                <View>
-                  <Text style={styles.weekOverviewEyebrow}>THIS WEEK</Text>
-                  <Text style={styles.weekOverviewTitle}>What changed</Text>
-                </View>
-                <Text style={styles.weekOverviewHint}>Tap a tile for detail</Text>
-              </View>
-              <View style={styles.weekOverviewGrid}>
-                {thisWeekOverview.map(item => (
-                  <TouchableOpacity
-                    key={item.key}
-                    testID={`progress-overview-${item.key}`}
-                    accessibilityLabel={`${item.label}: ${item.value}. ${item.detail}`}
-                    activeOpacity={0.82}
-                    style={styles.weekOverviewTile}
-                    onPress={() => {
-                      import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-                      setTab(item.targetTab);
-                    }}>
-                    <View style={[styles.weekOverviewIcon, { backgroundColor: item.color + '20' }]}>
-                      <Ionicons name={item.icon} size={15} color={item.color} />
-                    </View>
-                    <Text style={styles.weekOverviewLabel} numberOfLines={1}>{item.label}</Text>
-                    <Text style={styles.weekOverviewValue} numberOfLines={1}>{item.value}</Text>
-                    <Text style={styles.weekOverviewDetail} numberOfLines={2}>{item.detail}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-            </View>
-          )}
           {!isProTier && (
             <View style={styles.vitalsCard}>
               <View style={{ alignItems: 'center', paddingVertical: 12 }}>
@@ -3690,8 +3672,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Zone2TargetCard
                 authToken={authToken}
                 themeName={userProfile.themePreference}
-                appleHealthZone2={appleHealthZone2Minutes}
-                detectedWorkouts={zone2DetectedWorkouts}
+                currentMinutes={planWeekZone2.current}
+                previousMinutes={planWeekZone2.previous}
+                weekEndDate={progressWeekWindow.endDate}
+                weekLabel={progressWeekWindow.label}
+                previousWeekLabel={progressWeekWindow.previousLabel}
               />
             );
           })()}
@@ -3758,17 +3743,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         if (fresh) {
                           setHealthSummary(fresh);
                           saveHealthSummary(fresh).catch(() => null);
-                          const rows = await Promise.all(
-                            (fresh.workoutDetails ?? []).map((w) => summarizeWorkoutZone2(w, age).catch(() => null)),
-                          );
-                          const cleanRows = rows.filter((w): w is NonNullable<typeof w> => !!w);
-                          setAppleHealthZone2Minutes(cleanRows.reduce((sum, w) => sum + w.zone2Minutes, 0) || null);
-                          setZone2DetectedWorkouts(cleanRows.map((w) => ({
-                            name: w.name,
-                            durationMin: w.durationMin,
-                            counted: w.counted,
-                            reason: w.reason,
-                          })));
                         }
                         if (granted) {
                           import('../services/healthDataSummary')
@@ -3865,7 +3839,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <View style={[styles.vitalsHeader, { marginBottom: 4 }]}>
                   <Ionicons name="heart-outline" size={16} color={tc.primary} />
                   <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Apple Health</Text>
-                  <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>Optional 7-day snapshot</Text>
+                  <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>Rolling 7-day snapshot</Text>
                 </View>
                 {vitalsRow('pulse-outline', 'Resting HR', hs!.restingHeartRate, 'bpm')}
                 {vitalsRow('analytics-outline', 'HRV', hs!.hrvAvg, 'ms')}
@@ -3969,7 +3943,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const STAGE_COLOR = { deep: '#6366F1', core: '#818CF8', rem: '#A78BFA', awake: tc.error };
 
             return (
-              <View testID="nutrition-trend-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
+              <View testID="sleep-score-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
                 {/* Header: icon + title + score (score is the hero metric). */}
                 <View style={[styles.vitalsHeader, { marginBottom: 8 }]}>
                   <Ionicons name="moon-outline" size={16} color="#818CF8" />
@@ -4217,7 +4191,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const calorieAvg = mealMacroHeadline?.calories ?? headlineLoggedCalories(mealAverages as any, trends as any);
             const calorieDelta = Number(trends.calorie_delta_when_logged ?? trends.calorie_delta ?? 0);
             return (
-              <View style={[styles.vitalsCard, { marginTop: 0 }]}>
+              <View testID="nutrition-trend-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
                 <View style={[styles.vitalsHeader, { marginBottom: 12 }]}>
                   <Ionicons name="trending-up-outline" size={16} color={trendColor} />
                   <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Nutrition Trend</Text>
@@ -4257,7 +4231,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
 
-          {/* Nutrition & Gut Facts — 7-day rolling window (facts only, no scores). */}
+          {/* Nutrition & Gut Facts — 14-day logged-food window (facts only, no scores). */}
           {isProTier && (gutHealthWindow || mealAverages) && (
             <View testID="nutrition-gut-facts-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
               <TouchableOpacity

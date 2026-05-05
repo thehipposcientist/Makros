@@ -1088,6 +1088,22 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
           </TouchableOpacity>
         </View>
 
+        {foodSearchActive ? (
+          <View style={s.searchModeBar}>
+            <View style={s.searchModeIcon}>
+              <Ionicons name="search-outline" size={17} color={colors.primary} />
+            </View>
+            <View style={{ flex: 1, minWidth: 0 }}>
+              <Text numberOfLines={1} style={s.searchModeTitle}>
+                Add foods to {mealName.trim() || 'Meal'}
+              </Text>
+              <Text style={s.searchModeMeta}>
+                {items.length} food{items.length === 1 ? '' : 's'} in this meal
+              </Text>
+            </View>
+          </View>
+        ) : (
+          <>
         {/* Meal name + action chips — below the header for breathing room */}
         <View style={{ paddingHorizontal: 16, paddingTop: 10, paddingBottom: 6 }}>
           <TextInput
@@ -1329,6 +1345,8 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             );
           })()}
         </View>
+          </>
+        )}
 
         <KeyboardAvoidingView
           style={{ flex: 1 }}
@@ -1345,151 +1363,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
             keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
             keyboardShouldPersistTaps="handled">
 
-            {/* While the user is actively searching for a food we collapse
-                Current Foods + Saved Meals so the search input + results
-                sit near the top, fully above the keyboard. The "{N} foods
-                already added" hint keeps a hint of context without taking
-                up the screen. */}
-            {foodSearchActive && items.length > 0 && (
-              <Text style={[s.emptyText, { marginBottom: 6 }]}>
-                {items.length} food{items.length === 1 ? '' : 's'} already added — clear search to view & edit
-              </Text>
-            )}
-
-            {/* Current foods — structured editable rows */}
-            {!foodSearchActive && (<>
-            <Text style={s.sectionLabel}>Current Foods</Text>
-            {items.length === 0 && (
-              <Text style={s.emptyText}>No foods — add some below</Text>
-            )}
-            </>)}
-            {!foodSearchActive && items.map((it, idx) => (
-              <View key={`${it.name}-${idx}`} style={s.currentFoodRow}>
-                <View style={s.currentFoodInfo}>
-                  {/* Food name — read-only. Renaming a food breaks its
-                      identity link with the food library, so users
-                      should remove and re-add to swap a food. */}
-                  <Text style={s.foodNameInput} numberOfLines={1}>
-                    {it.name}
-                  </Text>
-                  {/* Quantity + unit row */}
-                  <View style={s.qtyRow}>
-                    <TextInput
-                      style={s.qtyInput}
-                      value={qtyDrafts[idx] ?? String(it.quantity)}
-                      onChangeText={(t) => {
-                        // Keep the raw text locally so intermediate states
-                        // ("0.", ".5", "") render correctly. Only push a
-                        // parsed number to the item when the text is a
-                        // complete, valid number — otherwise the parent
-                        // clobbers the field mid-typing.
-                        setQtyDrafts(d => ({ ...d, [idx]: t }));
-                        if (t === '' || t === '.' || t.endsWith('.')) return;
-                        const parsed = parseFloat(t);
-                        if (Number.isFinite(parsed)) {
-                          updateItem(idx, { quantity: parsed });
-                        }
-                      }}
-                      onBlur={() => {
-                        // Commit on blur: if the draft is empty or invalid,
-                        // fall back to 1 so we never leave the item at NaN.
-                        const draft = qtyDrafts[idx];
-                        if (draft != null) {
-                          const parsed = parseFloat(draft);
-                          updateItem(idx, { quantity: Number.isFinite(parsed) && parsed >= 0 ? parsed : 1 });
-                          setQtyDrafts(d => { const { [idx]: _, ...rest } = d; return rest; });
-                        }
-                      }}
-                      keyboardType="decimal-pad"
-                      placeholder="1"
-                      placeholderTextColor={colors.textMuted}
-                    />
-                    <TouchableOpacity
-                      style={s.unitBtn}
-                      onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setUnitPickerIdx(unitPickerIdx === idx ? null : idx); }}>
-                      <Text style={s.unitBtnText}>{FOOD_UNIT_LABELS[it.unit]} <Ionicons name="chevron-down" size={11} /></Text>
-                    </TouchableOpacity>
-                  </View>
-                  {unitPickerIdx === idx && (() => {
-                    const allowed = new Set(validUnitsForFood(it.name));
-                    if (!allowed.has(it.unit)) allowed.add(it.unit);
-                    const filtered = FOOD_UNIT_GROUPS
-                      .map(g => ({ ...g, units: g.units.filter(u => allowed.has(u)) }))
-                      .filter(g => g.units.length > 0);
-                    return (
-                    <View style={s.unitPicker}>
-                      {filtered.map(group => (
-                        <View key={group.label} style={s.unitGroup}>
-                          <Text style={s.unitGroupLabel}>{group.label}</Text>
-                          <View style={s.unitGroupRow}>
-                            {group.units.map(u => (
-                              <TouchableOpacity
-                                key={u}
-                                style={[s.unitChip, it.unit === u && s.unitChipActive]}
-                                onPress={() => {
-                                  updateItem(idx, { unit: u });
-                                  setUnitPickerIdx(null);
-                                }}>
-                                <Text style={[s.unitChipText, it.unit === u && s.unitChipTextActive]}>
-                                  {FOOD_UNIT_LABELS[u]}
-                                </Text>
-                              </TouchableOpacity>
-                            ))}
-                          </View>
-                        </View>
-                      ))}
-                    </View>
-                    );
-                  })()}
-                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
-                    <Text style={{ fontSize: 11, color: colors.accent, fontWeight: '600' }}>{Math.round(it.calories)} cal</Text>
-                    <Text style={{ fontSize: 11, color: colors.primary, fontWeight: '600' }}>{Math.round(it.protein)}g P</Text>
-                    <Text style={{ fontSize: 11, color: '#F59E0B', fontWeight: '600' }}>{Math.round(it.carbs)}g C</Text>
-                    <Text style={{ fontSize: 11, color: '#A78BFA', fontWeight: '600' }}>{Math.round(it.fat)}g F</Text>
-                  </View>
-                </View>
-                <TouchableOpacity
-                  onPress={() => removeItem(idx)}
-                  style={s.removeBtn}
-                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                  <Ionicons name="remove-circle-outline" size={20} color={colors.error ?? '#EF4444'} />
-                </TouchableOpacity>
-              </View>
-            ))}
-
-            {!foodSearchActive && savedMeals.length > 0 && (
-              <>
-                <Text style={[s.sectionLabel, { marginTop: 24 }]}>Saved Meals</Text>
-                {savedMeals.map((template) => (
-                  <TouchableOpacity
-                    key={template.id}
-                    style={s.savedMealRow}
-                    onPress={() => {
-                      onSave({
-                        ...meal,
-                        meal: template.name,
-                        foods: template.items,
-                        calories: template.calories,
-                        protein: template.protein,
-                        carbs: template.carbs,
-                        fat: template.fat,
-                      });
-                      onClose();
-                    }}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.savedMealName}>{template.name}</Text>
-                      <Text style={s.savedMealMeta}>{template.items.join(', ')}</Text>
-                    </View>
-                    <Text style={s.savedMealApply}>Use</Text>
-                  </TouchableOpacity>
-                ))}
-              </>
-            )}
-
-            {/* Food picker */}
-            {!foodSearchActive && (
-              <Text style={[s.sectionLabel, { marginTop: 24 }]}>Add Foods</Text>
-            )}
+            <Text style={s.sectionLabel}>Add Foods</Text>
 
             {authToken && !foodSearchActive && (
               <>
@@ -1705,6 +1579,142 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               );
             })()}
 
+            {foodSearchActive && items.length > 0 && (
+              <Text style={[s.emptyText, { marginTop: 4 }]}>
+                Clear search to edit the foods already in this meal.
+              </Text>
+            )}
+
+            {/* Current foods — structured editable rows */}
+            {!foodSearchActive && (<>
+            <Text style={[s.sectionLabel, { marginTop: 18 }]}>Current Foods</Text>
+            {items.length === 0 && (
+              <Text style={s.emptyText}>No foods added yet</Text>
+            )}
+            </>)}
+            {!foodSearchActive && items.map((it, idx) => (
+              <View key={`${it.name}-${idx}`} style={s.currentFoodRow}>
+                <View style={s.currentFoodInfo}>
+                  {/* Food name — read-only. Renaming a food breaks its
+                      identity link with the food library, so users
+                      should remove and re-add to swap a food. */}
+                  <Text style={s.foodNameInput} numberOfLines={1}>
+                    {it.name}
+                  </Text>
+                  {/* Quantity + unit row */}
+                  <View style={s.qtyRow}>
+                    <TextInput
+                      style={s.qtyInput}
+                      value={qtyDrafts[idx] ?? String(it.quantity)}
+                      onChangeText={(t) => {
+                        // Keep the raw text locally so intermediate states
+                        // ("0.", ".5", "") render correctly. Only push a
+                        // parsed number to the item when the text is a
+                        // complete, valid number — otherwise the parent
+                        // clobbers the field mid-typing.
+                        setQtyDrafts(d => ({ ...d, [idx]: t }));
+                        if (t === '' || t === '.' || t.endsWith('.')) return;
+                        const parsed = parseFloat(t);
+                        if (Number.isFinite(parsed)) {
+                          updateItem(idx, { quantity: parsed });
+                        }
+                      }}
+                      onBlur={() => {
+                        // Commit on blur: if the draft is empty or invalid,
+                        // fall back to 1 so we never leave the item at NaN.
+                        const draft = qtyDrafts[idx];
+                        if (draft != null) {
+                          const parsed = parseFloat(draft);
+                          updateItem(idx, { quantity: Number.isFinite(parsed) && parsed >= 0 ? parsed : 1 });
+                          setQtyDrafts(d => { const { [idx]: _, ...rest } = d; return rest; });
+                        }
+                      }}
+                      keyboardType="decimal-pad"
+                      placeholder="1"
+                      placeholderTextColor={colors.textMuted}
+                    />
+                    <TouchableOpacity
+                      style={s.unitBtn}
+                      onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setUnitPickerIdx(unitPickerIdx === idx ? null : idx); }}>
+                      <Text style={s.unitBtnText}>{FOOD_UNIT_LABELS[it.unit]} <Ionicons name="chevron-down" size={11} /></Text>
+                    </TouchableOpacity>
+                  </View>
+                  {unitPickerIdx === idx && (() => {
+                    const allowed = new Set(validUnitsForFood(it.name));
+                    if (!allowed.has(it.unit)) allowed.add(it.unit);
+                    const filtered = FOOD_UNIT_GROUPS
+                      .map(g => ({ ...g, units: g.units.filter(u => allowed.has(u)) }))
+                      .filter(g => g.units.length > 0);
+                    return (
+                    <View style={s.unitPicker}>
+                      {filtered.map(group => (
+                        <View key={group.label} style={s.unitGroup}>
+                          <Text style={s.unitGroupLabel}>{group.label}</Text>
+                          <View style={s.unitGroupRow}>
+                            {group.units.map(u => (
+                              <TouchableOpacity
+                                key={u}
+                                style={[s.unitChip, it.unit === u && s.unitChipActive]}
+                                onPress={() => {
+                                  updateItem(idx, { unit: u });
+                                  setUnitPickerIdx(null);
+                                }}>
+                                <Text style={[s.unitChipText, it.unit === u && s.unitChipTextActive]}>
+                                  {FOOD_UNIT_LABELS[u]}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        </View>
+                      ))}
+                    </View>
+                    );
+                  })()}
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 4 }}>
+                    <Text style={{ fontSize: 11, color: colors.accent, fontWeight: '600' }}>{Math.round(it.calories)} cal</Text>
+                    <Text style={{ fontSize: 11, color: colors.primary, fontWeight: '600' }}>{Math.round(it.protein)}g P</Text>
+                    <Text style={{ fontSize: 11, color: '#F59E0B', fontWeight: '600' }}>{Math.round(it.carbs)}g C</Text>
+                    <Text style={{ fontSize: 11, color: '#A78BFA', fontWeight: '600' }}>{Math.round(it.fat)}g F</Text>
+                  </View>
+                </View>
+                <TouchableOpacity
+                  onPress={() => removeItem(idx)}
+                  style={s.removeBtn}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Ionicons name="remove-circle-outline" size={20} color={colors.error ?? '#EF4444'} />
+                </TouchableOpacity>
+              </View>
+            ))}
+
+            {!foodSearchActive && savedMeals.length > 0 && (
+              <>
+                <Text style={[s.sectionLabel, { marginTop: 24 }]}>Saved Meals</Text>
+                {savedMeals.map((template) => (
+                  <TouchableOpacity
+                    key={template.id}
+                    style={s.savedMealRow}
+                    onPress={() => {
+                      onSave({
+                        ...meal,
+                        meal: template.name,
+                        foods: template.items,
+                        calories: template.calories,
+                        protein: template.protein,
+                        carbs: template.carbs,
+                        fat: template.fat,
+                      });
+                      onClose();
+                    }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={s.savedMealName}>{template.name}</Text>
+                      <Text style={s.savedMealMeta}>{template.items.join(', ')}</Text>
+                    </View>
+                    <Text style={s.savedMealApply}>Use</Text>
+                  </TouchableOpacity>
+                ))}
+              </>
+            )}
+
           </ScrollView>
         </KeyboardAvoidingView>
       </View>
@@ -1845,6 +1855,39 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
   routineBadgeTextActive: { color: colors.primary },
   cancelText: { fontSize: 15, color: colors.textSecondary },
   saveText:   { fontSize: 15, fontWeight: '700', color: colors.primary },
+  searchModeBar: {
+    marginHorizontal: 16,
+    marginTop: 10,
+    marginBottom: 6,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surface,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  searchModeIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: colors.primary + '16',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  searchModeTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.textPrimary,
+  },
+  searchModeMeta: {
+    marginTop: 1,
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.textMuted,
+  },
   gapButton: {
     marginHorizontal: 16,
     marginTop: 8,

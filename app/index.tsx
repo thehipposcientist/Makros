@@ -1997,6 +1997,7 @@ export default function Index() {
           themeName={userProfile.themePreference}
           authToken={authToken}
           onClose={() => setShowSettings(false)}
+          onSignOut={handleSignOut}
           onProfileUpdate={async (changes, skipRegen) => {
             // Reuse the existing profile-update path so unit + theme
             // changes follow the same persistence rules as everything

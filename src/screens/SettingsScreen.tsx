@@ -33,6 +33,7 @@ interface Props {
    *  renders correctly for anonymous / not-yet-signed-in callers. */
   authToken?: string | null;
   onClose: () => void;
+  onSignOut?: () => void;
   /** Persist a partial profile update. Same signature the parent uses
    *  for other preference toggles so we don't introduce a new path. */
   onProfileUpdate: (changes: Partial<UserProfile>, skipRegen?: boolean) => void;
@@ -73,7 +74,7 @@ async function openDeviceSettings() {
   }
 }
 
-export default function SettingsScreen({ visible, profile, themeName, authToken, onClose, onProfileUpdate }: Props) {
+export default function SettingsScreen({ visible, profile, themeName, authToken, onClose, onSignOut, onProfileUpdate }: Props) {
   const insets = useSafeAreaInsets();
   const tc = getTheme(themeName).colors;
   const bottomNavClearance = Math.max(insets.bottom, 10) + 78;
@@ -552,6 +553,37 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
           </TouchableOpacity>
         </View>
 
+        {onSignOut && (
+          <>
+            <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>ACCOUNT</Text>
+            <TouchableOpacity
+              testID="settings-sign-out"
+              accessibilityLabel="settings-sign-out"
+              activeOpacity={0.82}
+              onPress={() => {
+                Alert.alert(
+                  'Sign out?',
+                  'You will need to sign back in to see your plan and progress.',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Sign out',
+                      style: 'destructive',
+                      onPress: () => {
+                        onClose();
+                        onSignOut();
+                      },
+                    },
+                  ],
+                );
+              }}
+              style={[styles.signOutButton, { backgroundColor: tc.surface, borderColor: tc.error + '66' }]}>
+              <Ionicons name="log-out-outline" size={18} color={tc.error} />
+              <Text style={[styles.signOutText, { color: tc.error }]}>Sign Out</Text>
+            </TouchableOpacity>
+          </>
+        )}
+
         <Text style={{ fontSize: 10, color: tc.textMuted, textAlign: 'center', marginTop: 28 }}>
           Thallo · v1.0 · {Platform.OS === 'ios' ? 'iOS' : 'Android'}
         </Text>
@@ -580,6 +612,18 @@ const styles = StyleSheet.create({
   },
   rowTitle: { fontSize: 14, fontWeight: '700' },
   rowSub: { fontSize: 11, marginTop: 2, lineHeight: 15 },
+  signOutButton: {
+    minHeight: 52,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  signOutText: { fontSize: 14, fontWeight: '800' },
   timeRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingTop: 10, marginTop: 10, borderTopWidth: 1,

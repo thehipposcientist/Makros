@@ -92,5 +92,5 @@ tags:
     id: "workout-subtab-plan"
 - extendedWaitUntil:
     visible:
-      id: "start-workout-cta-visible"
+      id: "start-workout-cta"
     timeout: 30000

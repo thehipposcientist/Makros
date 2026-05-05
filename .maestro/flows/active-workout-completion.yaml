@@ -60,10 +60,14 @@ tags:
 
 - scrollUntilVisible:
     element:
-      id: "start-workout-cta"
+      text: "Extra workouts"
     direction: DOWN
     timeout: 20000
     visibilityPercentage: 50
+- extendedWaitUntil:
+    visible:
+      id: "start-workout-cta"
+    timeout: 30000
 - tapOn:
     id: "start-workout-cta"
 

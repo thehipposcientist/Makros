@@ -39,7 +39,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
 import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, logHydrationDelta, getMealHistory, updateMeal, deleteLoggedMeal, syncInProgressWorkout } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, logHydrationDelta, getMealHistory, getNutritionScore, updateMeal, deleteLoggedMeal, syncInProgressWorkout } from '../services/api';
 import type { ApplyActionResult, HydrationStatus, MealHistoryEntry } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
@@ -1981,7 +1981,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     nutritionContext?: { protein_avg: number; protein_status: string; message?: string | null; recovery_bonus_applied: boolean } | null;
   } | null>(null);
   const [recoveryExpanded, setRecoveryExpanded] = useState(false);
-  const [nutritionScoreData, setNutritionScoreData] = useState<import('../utils/nutritionScore').NutritionScoreResult | null>(null);
+  const [nutritionScoreData, setNutritionScoreData] = useState<import('../utils/nutritionScore').NutritionScoreResult | import('../services/api').NutritionScoreToday | null>(null);
+  const [nutritionScoreWeekly, setNutritionScoreWeekly] = useState<import('../services/api').NutritionScoreWeekly | null>(null);
   const [plateauedExercises, setPlateauedExercises] = useState<Set<string>>(new Set());
   const [username, setUsername] = useState('');
 
@@ -2033,6 +2034,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     return byDate;
   }, [backendMealHistory]);
+  const loggedNutritionScoreByDate = useMemo(() => {
+    const byDate = new Map<string, import('../services/api').NutritionScoreWeeklyDay>();
+    for (const day of nutritionScoreWeekly?.daily ?? []) {
+      if (day.logged && typeof day.score === 'number') byDate.set(day.date, day);
+    }
+    return byDate;
+  }, [nutritionScoreWeekly]);
 
   // Meal-side day list mirrors the workout PlanWeek: 7 fixed dated days
   // (Mon-Sun anchor). Past days, today, and forward days are rendered
@@ -2096,13 +2104,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   } | null>(null);
   const unloggedPromptCheckedRef = useRef(false);
   // Legacy local check-in state removed; PlanWeekCheckin is server-backed.
-
-  // Recompute nutrition score client-side whenever the plan changes
-  useEffect(() => {
-    const plan = nutritionPlansByDate[todayKey()] ?? null;
-    if (!plan) { setNutritionScoreData(null); return; }
-    setNutritionScoreData(computeNutritionScore(plan, userProfile?.goal ?? 'body_recomp'));
-  }, [nutritionPlansByDate, userProfile?.goal]);
 
   const refreshHydration = useCallback(async (dateISO: string = todayKey()) => {
     if (!authToken) return;
@@ -2258,6 +2259,44 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [todaySupplementMicros, setTodaySupplementMicros] = useState<Array<{ ingredient_slug?: string | null; ingredient_name?: string | null; custom_name?: string | null; dose_amount: number; dose_unit: string; taken_count: number }> | null>(null);
   const [adjustedDailyTarget, setAdjustedDailyTarget] = useState<import('../services/api').AdjustedDailyTarget | null>(null);
   const [activityNutritionRefreshKey, setActivityNutritionRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    const applyPlanPreviewFallback = () => {
+      const plan = nutritionPlansByDate[todayKey()] ?? null;
+      setNutritionScoreWeekly(null);
+      if (!plan) {
+        setNutritionScoreData(null);
+        return;
+      }
+      setNutritionScoreData(computeNutritionScore(plan, userProfile?.goal ?? 'body_recomp'));
+    };
+
+    if (!authToken || !userProfile || tierOf(userProfile) === 'free') {
+      applyPlanPreviewFallback();
+      return;
+    }
+
+    getNutritionScore(authToken, 14)
+      .then((result) => {
+        if (cancelled) return;
+        setNutritionScoreData(result.today ?? null);
+        setNutritionScoreWeekly(result.weekly ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) applyPlanPreviewFallback();
+      });
+
+    return () => { cancelled = true; };
+  }, [
+    authToken,
+    userProfile?.goal,
+    userProfile?.subscriptionTier,
+    nutritionPlansByDate,
+    mealLogRefreshKey,
+    activityNutritionRefreshKey,
+  ]);
+
   useEffect(() => {
     if (!authToken) return;
     let cancelled = false;
@@ -2287,7 +2326,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       } catch { /* network / bridge optional */ }
     })();
     return () => { cancelled = true; };
-  }, [authToken, checkedMealsByDate, nutritionPlansByDate]);
+  }, [authToken, checkedMealsByDate, nutritionPlansByDate, mealLogRefreshKey]);
 
   const refreshAdjustedDailyTarget = useCallback(async (dateISO: string = todayKey()) => {
     if (!authToken) return;
@@ -3813,7 +3852,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         // Show fresh state so the badge always appears
         setReadinessScore({ score: 100, label: 'Fresh', topFatigued: [] });
       }
-      // Nutrition score is computed client-side from plan data (see updateNutritionScore)
+      // Nutrition score is fetched from /meals/score; plan-preview scoring
+      // is only the offline/free fallback.
       import('../services/api').then(({ getPlateaus }) =>
         getPlateaus(authToken, 4)
           .then(r => {
@@ -7715,7 +7755,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       }}
                       onLogActivity={() => setShowLogActivity(true)}
                       onEditPlan={() => setWorkoutSubTab('equipment')}
-                      plannedWorkout={isWorkoutCardExpanded && item.workout && !isCompleted && !isSkipped ? item.workout : null}
+                      plannedWorkout={item.workout && !isCompleted && !isSkipped ? item.workout : null}
                       onStartPlanned={(workout) => {
                         import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {});
                         onStartWorkout(workout);
@@ -8022,27 +8062,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               for (let i = 13; i >= 0; i--) {
                 const dt = new Date(Date.now() - i * 86400000);
                 const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
-                const p = nutritionPlansByDate[key];
-                const backendMeals = backendMealSuggestionsByDate.get(key) ?? [];
-                const scorePlan = backendMeals.length > 0
-                  ? {
-                      ...(p ?? { targets: { calories: 0, protein: 0, carbs: 0, fat: 0 } }),
-                      meals: backendMeals,
-                    } as DailyNutritionPlan
-                  : p;
-                const checks = checkedMealsByDate[key] ?? {};
-                const anyChecked = Object.values(checks).some(Boolean);
-                const isPast = key < todayStr;
-                let sc: number | null = null;
-                // Past days: only show a score when at least one meal was logged.
-                // Today: show the planned score regardless.
-                const hasScoreTargets = (scorePlan?.targets?.calories ?? 0) > 0;
-                if (hasScoreTargets && scorePlan?.meals && scorePlan.meals.length > 0 && (!isPast || anyChecked || backendMeals.length > 0)) {
-                  try {
-                    const ds = computeNutritionScore(scorePlan, userProfile?.goal ?? 'body_recomp');
-                    sc = ds && ds.score > 0 ? ds.score : null;
-                  } catch { sc = null; }
-                }
+                const loggedScore = loggedNutritionScoreByDate.get(key)?.score;
+                const sc = typeof loggedScore === 'number' ? loggedScore : null;
                 calendarDays.push({ date: key, score: sc });
               }
               const scoreColor = (s: number | null): string => {
@@ -8409,6 +8430,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const checkedCount = Object.values(dayChecks).filter(Boolean).length;
               const isPastLogged = isPast && checkedCount > 0;
               const isPastSkipped = isPast && checkedCount === 0;
+              const authoritativeNutritionScore = loggedNutritionScoreByDate.get(d.key);
               const removedSet = new Set(plan.removedMealIds ?? []);
               const meals = (plan.meals ?? []).filter((_, i) => !removedSet.has(`meal_${i}`));
               // Single-pass macro totals — was 4 separate `.reduce` calls
@@ -8582,12 +8604,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     {/* Per-day nutrition score badge */}
                     {(() => {
                       if (isFreeTier) return null;
-                      const ds = computeNutritionScore(planForDisplay, userProfile.goal ?? 'body_recomp');
-                      if (!ds || ds.score <= 0) return null;
-                      const c = ds.score >= 70 ? themeColors.success : ds.score >= 45 ? themeColors.warning : themeColors.error;
+                      const preview = !isPast ? computeNutritionScore(planForDisplay, userProfile.goal ?? 'body_recomp') : null;
+                      const score = authoritativeNutritionScore?.score ?? preview?.score ?? null;
+                      if (!score || score <= 0) return null;
+                      const c = score >= 70 ? themeColors.success : score >= 45 ? themeColors.warning : themeColors.error;
                       return (
                         <View style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: c + '18', alignItems: 'center', justifyContent: 'center', marginRight: 4 }}>
-                          <Text style={{ fontSize: 13, fontWeight: '900', color: c }}>{ds.score}</Text>
+                          <Text style={{ fontSize: 13, fontWeight: '900', color: c }}>{score}</Text>
                         </View>
                       );
                     })()}
@@ -8674,6 +8697,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         dailyProbioticCfuBillions={d.key === todayKey() ? todayProbioticCfu : null}
                         proteinBreakdown={d.key === todayKey() ? proteinBreakdown : null}
                         todaySupplements={d.key === todayKey() ? todaySupplementMicros : null}
+                        authoritativeScore={typeof authoritativeNutritionScore?.score === 'number' ? {
+                          score: authoritativeNutritionScore.score,
+                          adherence: authoritativeNutritionScore.adherence,
+                          quality: authoritativeNutritionScore.quality,
+                          micro: authoritativeNutritionScore.micro,
+                        } : null}
+                        hidePlanScore={isPast}
                       />
                     </View>
                   </AnimatedCollapsible>
@@ -9086,7 +9116,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               noHeader
               isActive={activeTab === 'progress'}
               nutritionPlan={nutritionPlansByDate[todayKey()] ?? null}
-              nutritionLogRefreshKey={mealLogRefreshKey}
+              nutritionLogRefreshKey={mealLogRefreshKey + activityNutritionRefreshKey}
+              planWeekWindow={planWeek ? { startDate: planWeek.start_date, endDate: planWeek.end_date } : null}
               onBack={() => setActiveTab('workout')}
               onCancelScheduledPlanChange={onCancelScheduledPlanChange}
               onUpdateWeight={(weightLbs) => {

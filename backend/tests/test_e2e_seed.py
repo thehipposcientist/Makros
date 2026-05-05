@@ -194,6 +194,11 @@ def test_e2e_seed_creates_full_idempotent_personas() -> None:
         assert digest["nutrition"]["avg_calories"] > 1100
         assert digest["nutrition"]["avg_protein_g"] > 110
 
+        from app.services.workout.performance import build_performance_profile
+        returning_profiles = build_performance_profile(int(returning.id), session)
+        assert "romanian_deadlift" in returning_profiles
+        assert returning_profiles["romanian_deadlift"].estimated_1rm_lbs > 0
+
         assert not session.exec(select(PlanWeek).where(PlanWeek.user_id == free_user.id)).first()
         assert session.exec(select(PlanWeek).where(PlanWeek.user_id == recovery_apply_user.id)).first()
 

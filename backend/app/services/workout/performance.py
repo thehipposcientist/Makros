@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+import re
 from typing import Optional
 
 
@@ -67,6 +68,12 @@ def _epley_1rm(weight_lbs: float, reps: int) -> float:
     return round(weight_lbs * (1 + reps / 30.0), 1)
 
 
+def _exercise_slug_fallback(name: str | None) -> str:
+    if not name:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
+
+
 def build_performance_profile(
     user_id: int,
     db_session,
@@ -97,13 +104,16 @@ def build_performance_profile(
         select(
             Exercise.slug,
             Exercise.name,
+            WorkoutExercise.exercise_slug_snapshot,
+            WorkoutExercise.name,
             WorkoutSession.workout_date,
             ExerciseSet.actual_weight_lbs,
             ExerciseSet.actual_reps,
         )
-        .join(WorkoutExercise, WorkoutExercise.exercise_id == Exercise.id)
+        .select_from(WorkoutExercise)
         .join(WorkoutSession, WorkoutSession.id == WorkoutExercise.session_id)
         .join(ExerciseSet, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
+        .outerjoin(Exercise, WorkoutExercise.exercise_id == Exercise.id)
         .where(WorkoutSession.user_id == user_id)
         .where(WorkoutSession.completed_at.is_not(None))
         .where(WorkoutSession.workout_date >= cutoff)
@@ -112,14 +122,21 @@ def build_performance_profile(
         .where(ExerciseSet.actual_reps.is_not(None))
     )
     if only_slugs:
-        query = query.where(Exercise.slug.in_(only_slugs))
+        from sqlalchemy import or_
+
+        query = query.where(or_(
+            Exercise.slug.in_(only_slugs),
+            WorkoutExercise.exercise_slug_snapshot.in_(only_slugs),
+        ))
 
     rows = db_session.exec(query).all()
 
     # Aggregate per-slug. We track top set (max weight × reps, tie-break
     # by weight), total volume, session date set, and last-performed date.
     by_slug: dict[str, dict] = {}
-    for slug, name, workout_date, weight, reps in rows:
+    for canonical_slug, canonical_name, snapshot_slug, workout_name, workout_date, weight, reps in rows:
+        slug = (canonical_slug or snapshot_slug or _exercise_slug_fallback(workout_name)).strip()
+        name = canonical_name or workout_name or slug
         if not slug or weight is None or reps is None:
             continue
         w = float(weight)

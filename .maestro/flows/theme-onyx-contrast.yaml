@@ -82,6 +82,7 @@ tags:
     id: "bottom-tab-workouts"
 - extendedWaitUntil:
     visible:
-      id: "start-workout-cta-visible"
+      id: "start-workout-cta"
     timeout: 30000
-- assertVisible: "Start Workout"
+- assertVisible:
+    id: "start-workout-cta"

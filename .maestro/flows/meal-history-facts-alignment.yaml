@@ -66,13 +66,13 @@ tags:
       id: "meal-history-screen"
     timeout: 30000
 
-# Yesterday's seeded row is the most recent past history day:
-# Greek yogurt bowl + chicken rice bowl + salmon plate.
+# The seeded history includes alternating complete days. Pick the
+# 1427-cal complete day by its totals instead of assuming it is row 0,
+# because the most recent past day depends on the simulator date.
 - extendedWaitUntil:
     visible: "1427 cal · 139g P · 144g C · 30g F"
     timeout: 15000
-- tapOn:
-    id: "meal-history-row-0"
+- tapOn: "1427 cal · 139g P · 144g C · 30g F"
 - extendedWaitUntil:
     visible: "Greek yogurt protein bowl"
     timeout: 15000
@@ -86,6 +86,8 @@ tags:
     visible:
       id: "progress-tab-screen"
     timeout: 30000
+- tapOn:
+    id: "progress-subtab-health"
 - scrollUntilVisible:
     element:
       id: "nutrition-trend-card"

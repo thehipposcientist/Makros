@@ -22,6 +22,11 @@ interface Props {
   authToken: string;
   themeName?: AppThemeName;
   appleHealthZone2?: number | null;
+  currentMinutes?: number | null;
+  previousMinutes?: number | null;
+  weekEndDate?: string | null;
+  weekLabel?: string | null;
+  previousWeekLabel?: string | null;
 }
 
 // Mirror of backend _CARDIO_TARGETS zone2 column so we can show the
@@ -44,7 +49,17 @@ export interface Z2DetectedWorkout {
   reason?: string;
 }
 
-export default function Zone2TargetCard({ authToken, themeName, appleHealthZone2, detectedWorkouts }: Props & { detectedWorkouts?: Z2DetectedWorkout[] }) {
+export default function Zone2TargetCard({
+  authToken,
+  themeName,
+  appleHealthZone2,
+  currentMinutes,
+  previousMinutes,
+  weekEndDate,
+  weekLabel,
+  previousWeekLabel,
+  detectedWorkouts,
+}: Props & { detectedWorkouts?: Z2DetectedWorkout[] }) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const [backendMinutes, setBackendMinutes] = useState<number>(0);
@@ -57,7 +72,7 @@ export default function Zone2TargetCard({ authToken, themeName, appleHealthZone2
     let cancelled = false;
     (async () => {
       try {
-        const r = await getWeeklyReview(authToken, { days: 7 });
+        const r = await getWeeklyReview(authToken, { days: 7, endDate: weekEndDate ?? undefined });
         if (cancelled) return;
         setBackendMinutes(r.zone2_minutes ?? 0);
         setGoal(r.goal);
@@ -66,12 +81,19 @@ export default function Zone2TargetCard({ authToken, themeName, appleHealthZone2
       finally { if (!cancelled) setLoading(false); }
     })();
     return () => { cancelled = true; };
-  }, [authToken]);
+  }, [authToken, weekEndDate]);
 
   if (loading) return null;
   if (target < 60) return null;
 
-  const minutes = Math.max(backendMinutes, appleHealthZone2 ?? 0);
+  const minutes = currentMinutes != null
+    ? Math.max(0, currentMinutes)
+    : Math.max(backendMinutes, appleHealthZone2 ?? 0);
+  const roundedMinutes = Math.round(minutes);
+  const roundedPrevious = previousMinutes != null ? Math.round(previousMinutes) : null;
+  const comparisonText = roundedPrevious != null
+    ? `${roundedMinutes - roundedPrevious >= 0 ? '+' : ''}${roundedMinutes - roundedPrevious}m vs ${previousWeekLabel ?? 'previous week'}`
+    : null;
   const pct = Math.max(0, Math.min(100, (minutes / target) * 100));
   const onTrack = pct >= 80;
   const color = onTrack ? tc.success : pct >= 40 ? tc.warning : tc.error;
@@ -88,19 +110,24 @@ export default function Zone2TargetCard({ authToken, themeName, appleHealthZone2
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
         <Ionicons name="walk-outline" size={16} color={color} />
         <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textPrimary, flex: 1, letterSpacing: 0.3 }}>
-          Zone 2 this week
+          Zone 2 plan week
         </Text>
         <Text style={{ fontSize: 13, fontWeight: '800', color }}>
-          {Math.round(minutes)} / {target}m
+          {roundedMinutes} / {target}m
         </Text>
       </View>
+      {weekLabel ? (
+        <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: -4, marginBottom: 6 }}>
+          {weekLabel}
+        </Text>
+      ) : null}
       <View style={{ height: 6, borderRadius: 3, backgroundColor: tc.border, overflow: 'hidden' }}>
         <View style={{ height: 6, width: `${pct}%` as any, backgroundColor: color }} />
       </View>
       <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6 }}>
         {onTrack
-          ? "Aerobic base on target for your goal."
-          : `${Math.max(0, target - Math.round(minutes))} min short this week — easy walks or bike rides count.`}
+          ? `Aerobic base on target for this plan week.${comparisonText ? ` ${comparisonText}.` : ''}`
+          : `${Math.max(0, target - roundedMinutes)} min short this plan week${comparisonText ? ` · ${comparisonText}` : ' — easy walks or bike rides count.'}`}
       </Text>
 
       {/* "Why?" expander — surfaces the per-workout breakdown so users
@@ -115,7 +142,7 @@ export default function Zone2TargetCard({ authToken, themeName, appleHealthZone2
           style={{ marginTop: 8, alignSelf: 'flex-start' }}
         >
           <Text style={{ fontSize: 10, color: tc.textSecondary, fontWeight: '700' }}>
-            {showWhy ? '▾ Hide breakdown' : `▸ Why? · ${detectedWorkouts.length} session${detectedWorkouts.length === 1 ? '' : 's'} this week`}
+            {showWhy ? '▾ Hide breakdown' : `▸ Why? · ${detectedWorkouts.length} session${detectedWorkouts.length === 1 ? '' : 's'} in this window`}
           </Text>
         </TouchableOpacity>
       )}

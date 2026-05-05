@@ -61,9 +61,15 @@ tags:
 # Switch to the Progress tab.
 - tapOn:
     id: "bottom-tab-progress"
+- extendedWaitUntil:
+    visible:
+      id: "progress-tab-screen"
+    timeout: 30000
+- tapOn:
+    id: "progress-subtab-trends"
 
-# Find the showcase tile. Seeded user has 4 weeks of compound-lift
-# history, so the showcase must render.
+# Find the showcase tile. Seeded user has enough loaded strength
+# history for at least one estimated 1RM, so the showcase must render.
 - scrollUntilVisible:
     element:
       id: "progress-1rm-showcase"

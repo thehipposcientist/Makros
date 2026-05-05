@@ -88,6 +88,16 @@ interface NutritionCardProps {
     dose_unit: string;
     taken_count: number;
   }> | null;
+  /** Server-authoritative logged-meal score. When present, this
+   *  overrides the plan-preview score so Home, History, and Progress
+   *  all show the same number for logged days. */
+  authoritativeScore?: {
+    score: number;
+    adherence?: number | null;
+    quality?: number | null;
+    micro?: number | null;
+  } | null;
+  hidePlanScore?: boolean;
   /** Removes the outer card shell so parent day cards can reveal the
    *  macro panel + individual meal cards as a clean expanding stack. */
   embedded?: boolean;
@@ -119,12 +129,27 @@ export default function NutritionCard({
   dailyProbioticCfuBillions,
   proteinBreakdown,
   todaySupplements,
+  authoritativeScore,
+  hidePlanScore = false,
   embedded = false,
   testID,
 }: NutritionCardProps) {
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [showProteinModal, setShowProteinModal] = useState(false);
-  const dayScore = useMemo(() => computeNutritionScore(nutritionPlan, goal ?? 'body_recomp'), [nutritionPlan, goal]);
+  const planPreviewScore = useMemo(() => computeNutritionScore(nutritionPlan, goal ?? 'body_recomp'), [nutritionPlan, goal]);
+  const dayScore = useMemo(() => {
+    if (!authoritativeScore || authoritativeScore.score <= 0) return planPreviewScore;
+    return {
+      ...planPreviewScore,
+      score: authoritativeScore.score,
+      adherence: authoritativeScore.adherence ?? planPreviewScore.adherence,
+      quality: authoritativeScore.quality ?? planPreviewScore.quality,
+      micro: authoritativeScore.micro ?? planPreviewScore.micro,
+    };
+  }, [authoritativeScore, planPreviewScore]);
+  const visibleDayScore = hidePlanScore && (!authoritativeScore || authoritativeScore.score <= 0)
+    ? { ...dayScore, score: 0 }
+    : dayScore;
   const [drillNutrient, setDrillNutrient] = useState<string | null>(null);
   const [swipeHintDismissed, setSwipeHintDismissed] = useState(false);
   const sectionFadeAnim = useRef(new Animated.Value(0)).current;
@@ -305,8 +330,8 @@ export default function NutritionCard({
           );
         })()}
         {/* Day score — tap to open combined nutrition modal */}
-        {dayScore.score > 0 && (() => {
-          const sc = dayScore;
+        {visibleDayScore.score > 0 && (() => {
+          const sc = visibleDayScore;
           const scoreColor = sc.score >= 70 ? colors.success : sc.score >= 45 ? colors.warning : colors.error;
           return (
             <TouchableOpacity
@@ -331,8 +356,8 @@ export default function NutritionCard({
                   tight — full breakdown is in the modal. */}
               {(() => {
                 const chips: Array<{ text: string; win: boolean }> = [];
-                for (const w of dayScore.wins.slice(0, 2)) chips.push({ text: w, win: true });
-                for (const g of dayScore.improvements.slice(0, 4 - chips.length)) chips.push({ text: g, win: false });
+                for (const w of visibleDayScore.wins.slice(0, 2)) chips.push({ text: w, win: true });
+                for (const g of visibleDayScore.improvements.slice(0, 4 - chips.length)) chips.push({ text: g, win: false });
                 if (chips.length === 0) return null;
                 return (
                   <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
@@ -370,8 +395,8 @@ export default function NutritionCard({
 
               <ScrollView style={styles.modalScroll} showsVerticalScrollIndicator={false}>
                 {/* ── Section 1: Nutrition Score ── */}
-                {dayScore.score > 0 && (() => {
-                  const sc = dayScore;
+                {visibleDayScore.score > 0 && (() => {
+                  const sc = visibleDayScore;
                   const scoreColor = sc.score >= 70 ? colors.success : sc.score >= 45 ? colors.warning : colors.error;
                   return (
                     <Animated.View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised, opacity: sectionFadeAnim }]}>
@@ -443,16 +468,16 @@ export default function NutritionCard({
                     score breakdowns only. */}
 
                 {/* ── Section 3: Food Quality breakdown (unified with backend) ── */}
-                {dayScore.quality_breakdown && dayScore.quality_breakdown.length > 0 && (
+                {visibleDayScore.quality_breakdown && visibleDayScore.quality_breakdown.length > 0 && (
                   <Animated.View style={[styles.modalCard, { borderColor: colors.border, backgroundColor: colors.surfaceRaised, opacity: sectionFadeAnim }]}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
                       <Ionicons name="nutrition-outline" size={16} color={colors.primary} />
                       <Text style={{ fontSize: 14, fontWeight: '700', color: colors.textPrimary }}>Food Quality</Text>
                       <Text style={{ fontSize: 12, fontWeight: '700', color: colors.textSecondary, marginLeft: 'auto' }}>
-                        {dayScore.quality}
+                        {visibleDayScore.quality}
                       </Text>
                     </View>
-                    {dayScore.quality_breakdown.map(b => {
+                    {visibleDayScore.quality_breakdown.map(b => {
                       const c = b.on_track ? colors.success : b.value_pct >= 50 ? colors.warning : colors.error;
                       return (
                         <View key={b.label} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 5 }}>

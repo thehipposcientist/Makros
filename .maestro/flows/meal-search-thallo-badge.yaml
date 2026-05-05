@@ -84,15 +84,15 @@ tags:
 
 - tapOn:
     id: "meal-edit-food-search"
-- inputText: "egg"
+- inputText: "salmon"
 
-# Trigger the search. The seeded user has eggs in their pantry, so
+# Trigger the search. The seeded user has salmon in their pantry, so
 # results come back from the local kitchen path with source="seed".
 - pressKey: Enter
 
 - extendedWaitUntil:
     visible:
-      id: "meal-edit-search-result-0"
+      id: "meal-edit-local-search-result-0"
     timeout: 30000
 
 # THALLO badge must be present somewhere in the results. The label
