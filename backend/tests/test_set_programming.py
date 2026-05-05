@@ -54,6 +54,16 @@ def _isolation_curl():
     }
 
 
+def _decline_db_press():
+    return {
+        "slug": "decline_dumbbell_press",
+        "equipment_bucket": "dumbbell",
+        "is_compound": True,
+        "movement_pattern": "horizontal_press",
+        "primary_muscle": "chest",
+    }
+
+
 # ── load_increment_for ─────────────────────────────────────────────
 
 def test_load_increment_lower_body_barbell_compound():
@@ -209,6 +219,37 @@ def test_beat_top_with_rir_on_reps_first_holds_load():
     assert rec.action == "hold_load"
     assert rec.next_set_weight_lbs == 170.0
     _ok("reps_first holds load, banks reps")
+
+
+def test_large_overshoot_high_rir_db_press_adds_bigger_jump():
+    print("\n[test] huge DB press overshoot + 4 RIR → bounded bigger jump")
+    planned = PlannedSet(
+        set_number=1, set_type="heavy_top", target_reps="8-12",
+        target_rir=2.0, target_weight_lbs=60.0, progression_mode="load_first",
+    )
+    rec = recommend_next_set(
+        exercise=_decline_db_press(), planned_set=planned,
+        actual_reps=18, actual_weight_lbs=60.0, actual_rir=4.0,
+    )
+    assert rec.action == "increase_load", rec.action
+    assert rec.next_set_weight_lbs == 70.0, rec.next_set_weight_lbs
+    assert "adding 10 lb" in rec.explanation
+    _ok("60 lb DB press → 70 lb after clear underload")
+
+
+def test_large_overshoot_high_rir_reps_first_bumps_live_load():
+    print("\n[test] huge reps_first overshoot + 4 RIR → live calibration bump")
+    planned = PlannedSet(
+        set_number=2, set_type="backoff", target_reps="8-12",
+        target_rir=2.0, target_weight_lbs=60.0, progression_mode="reps_first",
+    )
+    rec = recommend_next_set(
+        exercise=_decline_db_press(), planned_set=planned,
+        actual_reps=18, actual_weight_lbs=60.0, actual_rir=4.0,
+    )
+    assert rec.action == "increase_load", rec.action
+    assert rec.next_set_weight_lbs == 70.0, rec.next_set_weight_lbs
+    _ok("reps-first waits unless the set is obviously underloaded")
 
 
 def test_hit_range_holds_load():
@@ -371,6 +412,8 @@ def _run_all() -> int:
         test_timed_scheme_emits_null_loads,
         test_beat_top_with_rir_on_load_first_adds_increment,
         test_beat_top_with_rir_on_reps_first_holds_load,
+        test_large_overshoot_high_rir_db_press_adds_bigger_jump,
+        test_large_overshoot_high_rir_reps_first_bumps_live_load,
         test_hit_range_holds_load,
         test_missed_range_at_failure_drops_load,
         test_missed_range_without_failure_holds_load,

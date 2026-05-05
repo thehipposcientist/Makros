@@ -33,17 +33,26 @@ tags:
     commands:
       - tapOn: "http://localhost:8081"
 
+- waitForAnimationToEnd:
+    timeout: 3000
+
 - runFlow:
     when:
       visible: "Continue"
     commands:
       - tapOn: "Continue"
 
+- waitForAnimationToEnd:
+    timeout: 1000
+
 - runFlow:
     when:
       visible: "Close"
     commands:
       - tapOn: "Close"
+
+- waitForAnimationToEnd:
+    timeout: 1000
 
 # If AuthScreen is visible, run the login steps. Otherwise assume we're
 # already signed in and skip straight to asserting the home tab.

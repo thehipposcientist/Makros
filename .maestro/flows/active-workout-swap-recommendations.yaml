@@ -1,0 +1,123 @@
+# Active workout swap recommendation and history hydration coverage.
+#
+# Requires:
+#   make seed-e2e
+#   backend + Metro/dev client running
+
+appId: com.thallo.app
+name: active-workout-swap-recommendations
+tags:
+  - e2e
+  - seeded
+  - workouts
+  - active-workout
+  - swap
+
+---
+- launchApp:
+    appId: com.thallo.app
+    clearState: true
+    clearKeychain: true
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+
+- runFlow:
+    file: login.yaml
+    env:
+      TEST_EMAIL: e2e_live_swap@test.thallo
+      TEST_PASSWORD: SeedTest1234
+
+- runFlow:
+    when:
+      visible: "Welcome to Thallo Pro"
+    commands:
+      - tapOn:
+          id: "tutorial-skip"
+
+- extendedWaitUntil:
+    visible: "Plan tab"
+    timeout: 60000
+
+- runFlow:
+    when:
+      visible: "Catch up on yesterday"
+    commands:
+      - tapOn: "Skip for now"
+
+- tapOn:
+    id: "bottom-tab-workouts"
+- extendedWaitUntil:
+    visible:
+      id: "start-workout-cta"
+    timeout: 30000
+- tapOn:
+    id: "start-workout-cta"
+
+- extendedWaitUntil:
+    visible:
+      id: "active-workout-screen"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "exercise-card-0"
+    timeout: 30000
+
+- runFlow:
+    when:
+      visible: "Lock-screen timer unavailable"
+    commands:
+      - tapOn: "Not now"
+
+- assertVisible: "Dumbbell Bench Press"
+- extendedWaitUntil:
+    visible:
+      id: "pre-set-recommended-weight-value-0"
+    timeout: 30000
+- assertVisible: "120 lbs"
+
+- tapOn:
+    id: "swap-exercise-0"
+- extendedWaitUntil:
+    visible: "Swap Dumbbell Bench Press"
+    timeout: 15000
+- tapOn:
+    id: "active-exercise-swap-search"
+- inputText: "Dumbbell Shoulder Press"
+- pressKey: Enter
+- extendedWaitUntil:
+    visible:
+      id: "active-exercise-option-dumbbell-shoulder-press"
+    timeout: 30000
+- tapOn:
+    id: "active-exercise-option-dumbbell-shoulder-press"
+
+- extendedWaitUntil:
+    visible: "Dumbbell Shoulder Press"
+    timeout: 15000
+- extendedWaitUntil:
+    visible:
+      id: "pre-set-recommended-weight-value-0"
+    timeout: 30000
+- extendedWaitUntil:
+    visible: "85 lbs"
+    timeout: 30000
+- extendedWaitUntil:
+    visible: "85.*9"
+    timeout: 30000
+- assertNotVisible: "120 lbs"

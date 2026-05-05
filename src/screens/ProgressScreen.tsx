@@ -411,6 +411,10 @@ function formatShortDateKey(key: string): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
+function exerciseNameSlug(name: string): string {
+  return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
 function shiftDateKey(key: string, days: number): string {
   const ms = parseDateKeyMs(key);
   const d = ms ? new Date(ms) : new Date();
@@ -1500,9 +1504,33 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     });
     return { name, bestDist, lastPace, bestDur, extraBests, sessionCount: points.length };
   }).filter(pr => pr.bestDist != null || pr.lastPace != null || pr.bestDur != null), [paceExerciseGroups]);
+  const localOneRepMaxLifts = useMemo<import('../services/api').OneRepMaxLift[]>(() => {
+    const stats = exerciseHistoryStats(history);
+    return prs
+      .map(pr => {
+        const oneRepMaxLbs = Math.round((Number(pr.weightLbs) * (1 + Number(pr.reps) / 30)) * 10) / 10;
+        if (!Number.isFinite(oneRepMaxLbs) || oneRepMaxLbs <= 0) return null;
+        const stat = stats.get(pr.exerciseName.toLowerCase());
+        const sessionCount = Math.max(1, stat?.sessionCount ?? 1);
+        return {
+          slug: exerciseNameSlug(pr.exerciseName),
+          name: pr.exerciseName,
+          oneRepMaxLbs,
+          topWeightLbs: pr.weightLbs,
+          topReps: pr.reps,
+          sessionCount,
+          confidence: Math.round(Math.min(1, sessionCount / 6) * 100) / 100,
+          lastPerformedOn: pr.date ? pr.date.slice(0, 10) : null,
+        };
+      })
+      .filter((lift): lift is import('../services/api').OneRepMaxLift => lift != null)
+      .sort((a, b) => b.oneRepMaxLbs - a.oneRepMaxLbs)
+      .slice(0, 5);
+  }, [history, prs]);
+  const displayedOneRepMaxLifts = oneRepMaxLifts.length > 0 ? oneRepMaxLifts : localOneRepMaxLifts;
   const progressMilestones = useMemo(
-    () => buildProgressMilestones(history, prs, summaries, paceHistory, mealAverages, oneRepMaxLifts, weightUnit, distanceUnit),
-    [distanceUnit, history, mealAverages, oneRepMaxLifts, paceHistory, prs, summaries, weightUnit],
+    () => buildProgressMilestones(history, prs, summaries, paceHistory, mealAverages, displayedOneRepMaxLifts, weightUnit, distanceUnit),
+    [distanceUnit, displayedOneRepMaxLifts, history, mealAverages, paceHistory, prs, summaries, weightUnit],
   );
   const progressAnalytics = useMemo(
     () => buildProgressAnalytics(history, summaries, prs, plateaus),
@@ -2182,6 +2210,40 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         </ScrollView>
       ) : tab === 'trends' ? (
         <ScrollView contentContainerStyle={styles.content}>
+          {displayedOneRepMaxLifts.length > 0 && (() => {
+            const topLift = displayedOneRepMaxLifts[0];
+            return (
+              <View testID="progress-1rm-showcase" style={{ marginBottom: 16 }}>
+                <Text style={styles.sectionLabel}>Estimated 1 Rep Max</Text>
+                <View style={{
+                  backgroundColor: tc.surfaceRaised,
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: tc.border,
+                  padding: 14,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }} numberOfLines={1}>
+                      {topLift.name}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 4 }}>
+                      Top set: {topLift.topWeightLbs} lb × {topLift.topReps}
+                    </Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={{ fontSize: 28, fontWeight: '900', color: tc.primary, fontVariant: ['tabular-nums'] as any }}>
+                      {Math.round(topLift.oneRepMaxLbs)}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '700' }}>lb 1RM</Text>
+                  </View>
+                </View>
+              </View>
+            );
+          })()}
           {chartExerciseOptions.length === 0 && paceHistory.length < 2 ? (
             <View style={styles.emptyBox}>
               <Ionicons name="analytics-outline" size={40} color={tc.textMuted} style={{ marginBottom: 8 }} />
@@ -2730,11 +2792,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           {/* Estimated 1RM showcase — deterministic Epley estimates
               from recent logged sessions for the main compound lifts.
               Hidden when the user has no recent compound-lift data. */}
-          {oneRepMaxLifts.length > 0 && (
-            <View testID="progress-1rm-showcase" style={{ marginBottom: 16 }}>
+          {displayedOneRepMaxLifts.length > 0 && (
+            <View style={{ marginBottom: 16 }}>
               <Text style={styles.sectionLabel}>Estimated 1 Rep Max</Text>
               {(() => {
-                const maxOneRepMax = Math.max(...oneRepMaxLifts.map(lift => lift.oneRepMaxLbs), 1);
+                const maxOneRepMax = Math.max(...displayedOneRepMaxLifts.map(lift => lift.oneRepMaxLbs), 1);
                 return (
                   <View style={{
                     backgroundColor: tc.surfaceRaised,
@@ -2744,7 +2806,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     padding: 14,
                     gap: 10,
                   }}>
-                    {oneRepMaxLifts.map(lift => {
+                    {displayedOneRepMaxLifts.map(lift => {
                       const fillPct = Math.max(0.18, lift.oneRepMaxLbs / maxOneRepMax);
                       return (
                         <View key={lift.slug} style={{ gap: 6 }}>

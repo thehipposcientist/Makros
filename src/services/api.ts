@@ -445,6 +445,15 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
     const goalTrack = data.goal.goal_track ?? data.goal.goal_type;
     const birthdate = data.profile.birthdate ?? undefined;
     const age = effectiveAge({ birthdate, age: data.profile.age });
+    const weightEntries = Array.isArray(data.weight_entries)
+      ? data.weight_entries
+        .map((entry: any) => ({
+          date: String(entry.date ?? '').slice(0, 10),
+          weight_lbs: Math.round(Number(entry.weight_lbs) * 10) / 10,
+          source: entry.source ?? 'manual',
+        }))
+        .filter((entry: any) => entry.date && Number.isFinite(entry.weight_lbs) && entry.weight_lbs > 0)
+      : undefined;
     // Map backend snake_case → frontend UserProfile shape
     return {
       firstName:  data.first_name ?? undefined,
@@ -472,6 +481,12 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
       foodsAvailable:         data.preferences.foods_available ?? [],
       customFoods:            [],
       savedMeals:             [],
+      weightEntries,
+      weightHistory: weightEntries?.map((entry: any) => ({
+        date: entry.date,
+        weightLbs: entry.weight_lbs,
+        source: entry.source,
+      })),
     };
   } catch {
     return null;

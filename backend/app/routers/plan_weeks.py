@@ -35,6 +35,7 @@ from app.services.workout.week_manager import (
     week_needs_renewal,
     default_training_pattern,
     auto_renew_week,
+    auto_skip_unlogged_past_days,
 )
 from app.services.workout.goals import effective_goal_id
 
@@ -510,7 +511,7 @@ def _auto_skip_and_refresh_week_days(db: Session, user_id: int, pw: PlanWeek | N
     if not pw:
         return []
     days = get_week_days(db, pw.id)
-    if not _is_plan_paused(pw) and _auto_skip_unlogged_past_days(db, user_id, days):
+    if not _is_plan_paused(pw) and auto_skip_unlogged_past_days(db, user_id, days):
         days = get_week_days(db, pw.id)
     return days
 
@@ -531,15 +532,7 @@ def get_active_plan_week(
     pw = get_active_week(db, current_user.id)
     if not pw:
         return None
-    days = get_week_days(db, pw.id)
-    # Auto-skip past planned workouts that never got logged. Cheap sweep —
-    # one IN-clause query for sessions, one UPDATE per stale day. Keeps
-    # the UI honest (calendar dots, streak, weekly review) without
-    # requiring the user to manually mark every missed day.
-    # Suppressed while the plan is paused (travel / illness) — we don't
-    # want the user's streak silently demolished by a known-off window.
-    if not _is_plan_paused(pw) and _auto_skip_unlogged_past_days(db, current_user.id, days):
-        days = get_week_days(db, pw.id)
+    days = _auto_skip_and_refresh_week_days(db, current_user.id, pw)
     return _plan_week_to_response(pw, days)
 
 
@@ -548,66 +541,6 @@ def _is_plan_paused(pw: PlanWeek) -> bool:
     treated as expired automatically (no need to clear the column)."""
     pu = getattr(pw, "paused_until", None)
     return pu is not None and pu >= date.today()
-
-
-def _auto_skip_unlogged_past_days(
-    db: Session, user_id: int, days: list[PlanDay]
-) -> bool:
-    """Mark past planned workout days as skipped when no session was logged.
-
-    Fires on every active-week fetch so users don't accumulate dangling
-    'planned' rows once a day passes. Conservative — only touches days that
-    are unambiguously "the user did nothing":
-
-      - day_date strictly before today (today stays fresh until tomorrow)
-      - status == 'planned' (already-locked / completed / started / edited
-        / manually-skipped days are left alone)
-      - is_rest == False (rest days don't need skipping — they're rest)
-      - No WorkoutSession exists on that date (any session counts as
-        engagement, even a started-but-not-completed one)
-
-    Lock reason is 'auto_skip_unlogged' so we can distinguish from manual
-    skips later (e.g. for an "undo auto-skip" CTA). Returns True if any row
-    was updated, so the caller can re-read the days list.
-    """
-    from app.models import WorkoutSession
-    from sqlmodel import col
-
-    today = date.today()
-    candidates = [
-        d for d in days
-        if d.day_date < today
-        and d.status == "planned"
-        and not d.is_rest
-        and not d.locked
-    ]
-    if not candidates:
-        return False
-
-    candidate_dates = [d.day_date for d in candidates]
-    logged_rows = db.exec(
-        select(WorkoutSession.workout_date).where(
-            WorkoutSession.user_id == user_id,
-            col(WorkoutSession.workout_date).in_(candidate_dates),
-        )
-    ).all()
-    logged_dates = {row for row in logged_rows}
-
-    now = datetime.now(timezone.utc)
-    changed = False
-    for d in candidates:
-        if d.day_date in logged_dates:
-            continue
-        d.status = "skipped"
-        d.locked = True
-        d.locked_at = now
-        d.lock_reason = "auto_skip_unlogged"
-        d.updated_at = now
-        db.add(d)
-        changed = True
-    if changed:
-        db.commit()
-    return changed
 
 
 # ─── Plan pause (travel / illness) ───────────────────────────────────────────
@@ -813,7 +746,7 @@ def auto_renew(
             explanation="Auto-renew is suspended while your plan is paused. Resume from Settings when you're ready.",
         )
     if pw and not week_needs_renewal(pw):
-        days = get_week_days(db, pw.id)
+        days = _auto_skip_and_refresh_week_days(db, current_user.id, pw)
         return AutoRenewResponse(
             plan_week=_plan_week_to_response(pw, days),
             review_headline="Week is still active — no renewal needed.",
@@ -827,6 +760,7 @@ def auto_renew(
     # The snapshot powers the day-8 prompt and the Progress recap. Renewal
     # still proceeds immediately so the user always has a current week.
     if pw:
+        _auto_skip_and_refresh_week_days(db, current_user.id, pw)
         checkin = _ensure_plan_week_checkin_pending(db, current_user.id, pw)
         if not checkin or (not checkin.submitted_at and not checkin.skipped):
             if not _checkin_prompt_active(pw):

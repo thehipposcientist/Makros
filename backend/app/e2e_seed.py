@@ -148,6 +148,46 @@ def e2e_personas() -> tuple[PersonaSpec, ...]:
             social_display_name="Riley E2E",
         ),
         PersonaSpec(
+            key="live_swap",
+            email="e2e_live_swap@test.thallo",
+            username="e2e_live_swap",
+            first_name="Sam",
+            last_name="Swap",
+            subscription_tier="pro",
+            goal_type=GoalType.MUSCLE_GAIN,
+            goal_track="muscle_gain",
+            pace=GoalPace.MODERATE,
+            target_weight_lbs=188,
+            timeline_weeks=20,
+            birthdate=date(1991, 8, 22),
+            gender=Gender.MALE,
+            weight_lbs=180,
+            height_feet=5,
+            height_inches=11,
+            days_per_week=1,
+            session_minutes=45,
+            preferred_split="upper_lower",
+            experience="intermediate",
+            priority_region="upper_body",
+            equipment=(
+                "Dumbbells",
+                "Adjustable bench",
+                "Pull-up bar",
+            ),
+            foods_available=(
+                "Greek yogurt",
+                "Chicken breast",
+                "Brown rice",
+                "Salmon",
+                "Sweet potato",
+                "Blueberries",
+                "Spinach",
+                "Protein Powder (Whey)",
+            ),
+            social_display_name="Sam Swap E2E",
+            share_activity=False,
+        ),
+        PersonaSpec(
             key="long_session",
             email="e2e_long@test.thallo",
             username="e2e_long",
@@ -672,8 +712,13 @@ def _seed_plans(session: Session, user: User, spec: PersonaSpec, today: date) ->
         recent_focus_families=recent_focus_families,
         user_age=_age_on(spec.birthdate, today),
     )
-    workout_plan = generate_workout_plan(inputs, SEED_EXERCISES)
-    workout_days = workout_plan.get("workout_plan", {}).get("days", [])
+    if spec.key == "live_swap":
+        workout_days = _live_swap_workout_days()
+        workout_plan_json = {"days": workout_days}
+    else:
+        workout_plan = generate_workout_plan(inputs, SEED_EXERCISES)
+        workout_plan_json = workout_plan.get("workout_plan", workout_plan)
+        workout_days = workout_plan.get("workout_plan", {}).get("days", [])
     if not workout_days:
         raise RuntimeError(f"Planner produced no days for {spec.email}")
 
@@ -684,7 +729,7 @@ def _seed_plans(session: Session, user: User, spec: PersonaSpec, today: date) ->
         goal=spec.planner_goal,
         days_per_week=spec.days_per_week,
         preferred_split=spec.preferred_split,
-        plan_json=workout_plan.get("workout_plan", workout_plan),
+        plan_json=workout_plan_json,
         is_active=True,
     ))
     session.add(NutritionPlan(
@@ -715,6 +760,58 @@ def _seed_plans(session: Session, user: User, spec: PersonaSpec, today: date) ->
         session_minutes=spec.session_minutes,
     )
     return {"workout_days": workout_days, "plan_week": plan_week}
+
+
+def _live_swap_workout_days() -> list[dict[str, Any]]:
+    return [
+        {
+            "day": "Live Swap Upper",
+            "focus": "Upper",
+            "stimulus": "strength",
+            "_source_context": "e2e_live_swap",
+            "exercises": [
+                {
+                    "name": "Dumbbell Bench Press",
+                    "sets": 3,
+                    "reps": "8-12",
+                    "restSeconds": 90,
+                    "equipment": "dumbbells",
+                    "slug": "dumbbell_bench_press",
+                    "primary_muscle": "chest",
+                    "secondary_muscles": ["triceps", "shoulders"],
+                    "is_compound": True,
+                    "targetWeightLbs": 120,
+                    "weightRecommendationSource": "exact_history",
+                    "setScheme": [
+                        {
+                            "setNumber": 1,
+                            "setType": "working",
+                            "targetReps": "8-12",
+                            "targetRir": 2,
+                            "targetWeightLbs": 120,
+                            "progressionMode": "load_first",
+                        },
+                        {
+                            "setNumber": 2,
+                            "setType": "working",
+                            "targetReps": "8-12",
+                            "targetRir": 2,
+                            "targetWeightLbs": 120,
+                            "progressionMode": "load_first",
+                        },
+                        {
+                            "setNumber": 3,
+                            "setType": "working",
+                            "targetReps": "8-12",
+                            "targetRir": 2,
+                            "targetWeightLbs": 120,
+                            "progressionMode": "load_first",
+                        },
+                    ],
+                },
+            ],
+        },
+    ]
 
 
 def _seed_day_states(session: Session, user_id: int, plan_week: PlanWeek, today: date) -> None:

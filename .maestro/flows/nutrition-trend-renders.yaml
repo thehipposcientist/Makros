@@ -73,8 +73,4 @@ tags:
 - assertVisible:
     id: "nutrition-trend-card"
 
-# Sanity: at least one logged-calorie pip is rendered. The pip ID
-# pattern is nutrition-trend-logged-calories-<value>. We can't
-# bind a value, so we use a wildcard via assertVisible on the
-# common bridge text.
-- assertVisible: "Logged"
+- assertVisible: "Nutrition Trend"

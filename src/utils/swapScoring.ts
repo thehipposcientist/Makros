@@ -191,6 +191,7 @@ export interface SwapCandidate extends ExerciseLibraryItem {
 
 export interface WorkoutAddCandidate extends ExerciseLibraryItem {
   _fitScore: number;
+  _alignment: number; // 0-100 display percentage
 }
 
 /** Rank alternatives for `base` from `library`, filtered by owned
@@ -367,6 +368,13 @@ export function scoreWorkoutAddCandidate(
   return score;
 }
 
+export const MAX_WORKOUT_ADD_SCORE = 53; // Sum of capped add-fit components.
+
+export function workoutAddAlignmentPercent(score: number): number {
+  if (!Number.isFinite(score) || score <= 0) return 0;
+  return Math.min(100, Math.round((score / MAX_WORKOUT_ADD_SCORE) * 100));
+}
+
 export function rankWorkoutAddCandidates(
   currentExercises: ExerciseLibraryItem[],
   library: ExerciseLibraryItem[],
@@ -382,9 +390,11 @@ export function rankWorkoutAddCandidates(
   for (const item of library) {
     if (currentNames.has(normalizedText(item.name))) continue;
     if (!isExerciseUsableWithEquipment(item, ownedEquipment)) continue;
+    const fitScore = scoreWorkoutAddCandidate(item, enrichedCurrent, workoutFocus);
     ranked.push({
       ...item,
-      _fitScore: scoreWorkoutAddCandidate(item, enrichedCurrent, workoutFocus),
+      _fitScore: fitScore,
+      _alignment: workoutAddAlignmentPercent(fitScore),
     });
   }
 

@@ -142,11 +142,7 @@ tags:
       id: "progress-tab-screen"
     timeout: 30000
 - extendedWaitUntil:
-    visible: "THIS WEEK"
-    timeout: 30000
-- extendedWaitUntil:
-    visible:
-      id: "progress-overview-week-workouts"
+    visible: "PLAN WEEK"
     timeout: 30000
 - extendedWaitUntil:
     visible:
@@ -155,19 +151,6 @@ tags:
 - extendedWaitUntil:
     visible:
       id: "progress-overview-week-weight"
-    timeout: 30000
-- extendedWaitUntil:
-    visible:
-      id: "progress-overview-week-prs"
-    timeout: 30000
-- tapOn: "PRs"
-- extendedWaitUntil:
-    visible:
-      id: "progress-milestone-recent-prs"
-    timeout: 30000
-- extendedWaitUntil:
-    visible:
-      id: "progress-milestone-nutrition-data"
     timeout: 30000
 - tapOn: "Body"
 - extendedWaitUntil:

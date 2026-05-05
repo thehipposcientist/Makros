@@ -444,6 +444,36 @@ def reviewed_next_set_recommendation(
     ):
         ai_weight = _drop_load(actual_weight_lbs, inc)
 
+    rng_for_large = parse_rep_range(planned_set.target_reps)
+    large_rir_overshoot = (
+        det.action == "increase_load"
+        and any("big overshoot" in r for r in reasons)
+        and rng_for_large is not None
+        and actual_rir is not None
+        and actual_rir >= max(1.0, planned_set.target_rir)
+        and (
+            (float(actual_reps) + float(actual_rir))
+            - (float(rng_for_large[1]) + float(planned_set.target_rir))
+        ) >= 5.0
+        and _feel_bucket(feel) not in ("hard", "failure", "pain")
+    )
+    if large_rir_overshoot and (
+        action != "increase_load"
+        or ai_weight is None
+        or (
+            det.next_set_weight_lbs is not None
+            and ai_weight < det.next_set_weight_lbs
+        )
+    ):
+        return ReviewedRecommendation(
+            next_set_weight_lbs=det.next_set_weight_lbs,
+            next_set_rep_target=det.next_set_rep_target,
+            action=det.action,
+            explanation=det.explanation,
+            source="deterministic",
+            suspicion_reasons=reasons,
+        )
+
     return ReviewedRecommendation(
         next_set_weight_lbs=ai_weight,
         next_set_rep_target=str(ai.get("next_rep_target") or det.next_set_rep_target),

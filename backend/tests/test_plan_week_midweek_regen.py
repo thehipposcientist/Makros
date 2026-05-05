@@ -64,9 +64,26 @@ class FakePlanDay:
     locked: bool = False
     locked_at: Any = None
     lock_reason: Any = None
+    skip_reason: Any = None
     generation_source: str = "initial"
     created_at: datetime = dc_field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = dc_field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+@dataclass
+class FakeCompletion:
+    workout_date: date
+    focus_label: str = "Push"
+    plan_day_id: int | None = None
+
+
+@dataclass
+class FakeUserDayState:
+    user_id: int
+    day_key: date
+    skipped_focus: str | None = None
+    skip_reason: str | None = None
+    updated_at: Any = None
 
 
 @dataclass
@@ -103,6 +120,24 @@ class FakeSession:
                 return []
             def first(self_inner):
                 return None
+        return _R()
+
+
+class QueueSession(FakeSession):
+    def __init__(self, responses: list[list[Any]]):
+        super().__init__()
+        self.responses = list(responses)
+
+    def exec(self, *_args, **_kwargs):
+        data = self.responses.pop(0) if self.responses else []
+
+        class _R:
+            def all(self_inner):
+                return data
+
+            def first(self_inner):
+                return data[0] if data else None
+
         return _R()
 
 
@@ -1043,6 +1078,100 @@ def test_start_day_locks_with_started_reason():
     assert pd.locked is True
     assert pd.lock_reason == "started"
     assert pd.status == "started"
+
+
+def test_auto_skip_marks_past_unlogged_day_without_moving_workout():
+    yesterday = date.today() - timedelta(days=1)
+    pd = FakePlanDay(
+        day_date=yesterday,
+        status="planned",
+        locked=False,
+        workout_json={"focus": "Push", "exercises": [{"name": "Bench Press"}]},
+    )
+    db = QueueSession([[], []])
+    changed = week_manager.auto_skip_unlogged_past_days(db, 1, [pd])
+    assert changed is True
+    assert pd.status == "skipped"
+    assert pd.locked is True
+    assert pd.lock_reason == "auto_skip_unlogged"
+    assert pd.skip_reason == "No workout logged"
+    assert pd.workout_json["focus"] == "Push"
+    state_rows = [obj for obj in db.added if getattr(obj, "day_key", None) == yesterday]
+    assert state_rows
+    assert state_rows[0].skipped_focus == "Push"
+
+
+def test_auto_skip_leaves_today_fresh_until_tomorrow():
+    pd = FakePlanDay(
+        day_date=date.today(),
+        status="planned",
+        locked=False,
+        workout_json={"focus": "Pull", "exercises": []},
+    )
+    changed = week_manager.auto_skip_unlogged_past_days(FakeSession(), 1, [pd])
+    assert changed is False
+    assert pd.status == "planned"
+    assert pd.locked is False
+
+
+def test_auto_skip_resolves_stale_started_day_without_completion():
+    yesterday = date.today() - timedelta(days=1)
+    pd = FakePlanDay(
+        day_date=yesterday,
+        status="started",
+        locked=True,
+        lock_reason="started",
+        workout_json={"focus": "Legs", "exercises": []},
+    )
+    changed = week_manager.auto_skip_unlogged_past_days(QueueSession([[], []]), 1, [pd])
+    assert changed is True
+    assert pd.status == "skipped"
+    assert pd.lock_reason == "auto_skip_unlogged"
+
+
+def test_auto_skip_marks_matching_past_completion_done():
+    yesterday = date.today() - timedelta(days=1)
+    pd = FakePlanDay(
+        id=42,
+        day_date=yesterday,
+        status="planned",
+        locked=False,
+        workout_json={"focus": "Push", "exercises": []},
+    )
+    completion = FakeCompletion(
+        workout_date=yesterday,
+        focus_label="Different label",
+        plan_day_id=42,
+    )
+    db = QueueSession([[completion], []])
+    changed = week_manager.auto_skip_unlogged_past_days(db, 1, [pd])
+    assert changed is True
+    assert pd.status == "completed"
+    assert pd.locked is True
+    assert pd.lock_reason == "completed"
+    state_rows = [obj for obj in db.added if getattr(obj, "day_key", None) == yesterday]
+    assert state_rows == []
+
+
+def test_auto_skip_preserves_existing_day_state_skip_reason():
+    yesterday = date.today() - timedelta(days=1)
+    pd = FakePlanDay(
+        day_date=yesterday,
+        status="planned",
+        locked=False,
+        workout_json={"focus": "Upper", "exercises": []},
+    )
+    state = FakeUserDayState(
+        user_id=1,
+        day_key=yesterday,
+        skipped_focus="recovery",
+        skip_reason="Coach swapped to recovery",
+    )
+    changed = week_manager.auto_skip_unlogged_past_days(QueueSession([[], [state]]), 1, [pd])
+    assert changed is True
+    assert pd.status == "skipped"
+    assert pd.lock_reason == "skipped"
+    assert pd.skip_reason == "Coach swapped to recovery"
 
 
 def test_lock_day_sets_locked_at():

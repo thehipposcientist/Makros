@@ -21,6 +21,7 @@ from app.models import (
     UserGoal,
     UserPreferences,
     UserProfile,
+    WeightEntry,
 )
 
 
@@ -126,6 +127,30 @@ def test_recent_apple_health_weight_replaces_profile_weight():
     _ok("recent HealthKit weight drives bodyweight-based protein")
 
 
+def test_recent_manual_weight_entry_drives_macro_targets():
+    print("\n[test] nutrition targets use recent manual weight entry")
+    from app.services.nutrition.targets import resolve_targets_for_user
+
+    eng = _make_engine()
+    today = date.today()
+    with Session(eng) as s:
+        _seed_user(s, weight_lbs=180)
+        s.add(WeightEntry(
+            user_id=1,
+            entry_date=today,
+            weight_lbs=172.5,
+            source="manual",
+        ))
+        s.commit()
+        targets = resolve_targets_for_user(s, 1, as_of=today, include_health=False)
+
+    assert targets is not None
+    assert targets.source_weight_lbs == 172.5
+    assert targets.source_weight_kind == "manual"
+    assert targets.protein_g == 172
+    _ok("manual weight entry drives bodyweight-based macro targets")
+
+
 def test_plan_day_targets_shift_with_day_type_without_mutating_template():
     print("\n[test] plan-day nutrition targets follow workout day type")
     from app.services.nutrition.day_targets import adapt_template_targets_for_day
@@ -181,6 +206,7 @@ def test_same_day_activity_adjustment_is_partial_and_capped():
 TESTS = [
     test_coaching_and_apple_health_activity_adjust_targets,
     test_recent_apple_health_weight_replaces_profile_weight,
+    test_recent_manual_weight_entry_drives_macro_targets,
     test_plan_day_targets_shift_with_day_type_without_mutating_template,
     test_same_day_activity_adjustment_is_partial_and_capped,
 ]

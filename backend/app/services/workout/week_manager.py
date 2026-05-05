@@ -10,11 +10,14 @@ from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from sqlmodel import Session, select
+from sqlmodel import Session, select, col
 
 from app.models import PlanWeek, PlanDay, WorkoutPlan, NutritionPlan, WorkoutCompletion, UserProfile, UserPreferences
 from app.services.nutrition.day_targets import adapt_template_targets_for_day
 from app.services.workout.goals import effective_goal_id
+
+AUTO_SKIP_UNLOGGED_REASON = "No workout logged"
+AUTO_SKIP_UNRESOLVED_STATUSES = {"planned", "started", "edited"}
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
@@ -256,6 +259,120 @@ def unskip_day(db: Session, plan_day: PlanDay) -> PlanDay:
     db.commit()
     db.refresh(plan_day)
     return plan_day
+
+
+def auto_skip_unlogged_past_days(
+    db: Session, user_id: int, days: list[PlanDay]
+) -> bool:
+    """Resolve past planned workout days once the calendar has moved on.
+
+    Matching completions become completed PlanDays. Unresolved planned /
+    started / edited days become skipped, while keeping the original workout
+    payload in place for the user's history and weekly review.
+    """
+    from app.models import UserDayState
+
+    today = date.today()
+    candidates = [
+        d for d in days
+        if d.day_date < today
+        and d.status in AUTO_SKIP_UNRESOLVED_STATUSES
+        and not d.is_rest
+        and d.lock_reason not in {"completed", "skipped", "auto_skip_unlogged"}
+    ]
+    if not candidates:
+        return False
+
+    candidate_dates = [d.day_date for d in candidates]
+    completions = db.exec(
+        select(WorkoutCompletion).where(
+            WorkoutCompletion.user_id == user_id,
+            col(WorkoutCompletion.workout_date).in_(candidate_dates),
+        )
+    ).all()
+    completions_by_date: dict[date, list[WorkoutCompletion]] = {}
+    for completion in completions:
+        completion_date = getattr(completion, "workout_date", None)
+        if completion_date is not None:
+            completions_by_date.setdefault(completion_date, []).append(completion)
+
+    states = db.exec(
+        select(UserDayState).where(
+            UserDayState.user_id == user_id,
+            col(UserDayState.day_key).in_(candidate_dates),
+        )
+    ).all()
+    states_by_date = {
+        state.day_key: state
+        for state in states
+        if getattr(state, "day_key", None) is not None
+    }
+
+    now = datetime.now(timezone.utc)
+    changed = False
+    for d in candidates:
+        matched_completion = next(
+            (
+                completion for completion in completions_by_date.get(d.day_date, [])
+                if (d.id is not None and getattr(completion, "plan_day_id", None) == d.id)
+                or _completion_matches_plan_day(d, getattr(completion, "focus_label", ""))
+            ),
+            None,
+        )
+        if matched_completion is not None:
+            d.status = "completed"
+            d.locked = True
+            d.locked_at = now
+            d.lock_reason = "completed"
+            d.updated_at = now
+            db.add(d)
+            changed = True
+            continue
+
+        state = states_by_date.get(d.day_date)
+        planned_focus = _plan_day_focus_label(d) or "Workout"
+        explicit_skip = bool(getattr(state, "skipped_focus", None))
+        if state is None:
+            state = UserDayState(
+                user_id=user_id,
+                day_key=d.day_date,
+                skipped_focus=planned_focus,
+                skip_reason=AUTO_SKIP_UNLOGGED_REASON,
+                updated_at=now,
+            )
+            states_by_date[d.day_date] = state
+            db.add(state)
+        elif not explicit_skip:
+            state.skipped_focus = planned_focus
+            if not getattr(state, "skip_reason", None):
+                state.skip_reason = AUTO_SKIP_UNLOGGED_REASON
+            state.updated_at = now
+            db.add(state)
+
+        d.status = "skipped"
+        d.locked = True
+        d.locked_at = now
+        d.lock_reason = "skipped" if explicit_skip else "auto_skip_unlogged"
+        d.skip_reason = getattr(state, "skip_reason", None) or AUTO_SKIP_UNLOGGED_REASON
+        d.updated_at = now
+        db.add(d)
+        changed = True
+    if changed:
+        db.commit()
+        try:
+            from app.services.readiness.compute import invalidate_readiness_cache
+            invalidate_readiness_cache(user_id)
+        except Exception:
+            pass
+    return changed
+
+
+def _plan_day_focus_label(plan_day: PlanDay) -> str | None:
+    workout = getattr(plan_day, "workout_json", None)
+    if not isinstance(workout, dict):
+        return None
+    focus = str(workout.get("focus") or "").strip()
+    return focus or None
 
 
 def start_day(db: Session, plan_day: PlanDay) -> PlanDay:

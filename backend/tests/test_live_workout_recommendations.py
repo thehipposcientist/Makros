@@ -97,6 +97,17 @@ def _db_row():
     }
 
 
+def _decline_db_press():
+    return {
+        "slug": "decline_dumbbell_press",
+        "name": "Decline Dumbbell Press",
+        "equipment_bucket": "dumbbell",
+        "is_compound": True,
+        "movement_pattern": "horizontal_press",
+        "primary_muscle": "chest",
+    }
+
+
 def _curl():
     return {
         "slug": "dumbbell_curl",
@@ -402,6 +413,28 @@ def test_next_one_rep_above_top_load_first_increases_by_increment():
     assert rec.action == "increase_load"
     assert rec.next_set_weight_lbs == 190.0
     _ok("9 reps + RIR 2 → 190 lb")
+
+
+def test_next_big_db_press_overshoot_with_4rir_adds_two_increments():
+    print("\n[test] DB press +6 reps over top and 4 RIR → +10 lb")
+    plan = _planned(target_reps="8-12", target_rir=2.0, target_weight_lbs=60.0,
+                    progression_mode="load_first")
+    rec = recommend_next_set(exercise=_decline_db_press(), planned_set=plan,
+                             actual_reps=18, actual_weight_lbs=60.0, actual_rir=4.0)
+    assert rec.action == "increase_load"
+    assert rec.next_set_weight_lbs == 70.0, rec.next_set_weight_lbs
+    _ok("60 lb → 70 lb for clear underload")
+
+
+def test_next_big_reps_first_overshoot_bumps_instead_of_waiting():
+    print("\n[test] reps-first huge overshoot → bump now instead of waiting")
+    plan = _planned(target_reps="8-12", target_rir=2.0, target_weight_lbs=60.0,
+                    progression_mode="reps_first")
+    rec = recommend_next_set(exercise=_decline_db_press(), planned_set=plan,
+                             actual_reps=18, actual_weight_lbs=60.0, actual_rir=4.0)
+    assert rec.action == "increase_load"
+    assert rec.next_set_weight_lbs == 70.0, rec.next_set_weight_lbs
+    _ok("reps-first calibration miss still progresses live")
 
 
 def test_next_beat_top_low_rir_does_not_increase():
@@ -934,6 +967,31 @@ def test_reviewed_ai_failure_falls_back_to_deterministic_with_reasons_attached()
     _ok("AI fail → deterministic fallback, reasons preserved")
 
 
+def test_reviewed_big_rir_overshoot_rejects_too_small_ai_jump():
+    print("\n[test] big RIR overshoot: conservative AI +5 is replaced by deterministic +10")
+    plan = _planned(target_reps="8-12", target_weight_lbs=60.0,
+                    progression_mode="load_first")
+    timid_ai = {
+        "next_weight_lbs": 65.0,
+        "next_rep_target": "8-12",
+        "action": "increase_load",
+        "explanation": "Small bump.",
+        "confirmed": False,
+    }
+    with patch("app.services.workout.in_workout_review._call_ai_reviewer", return_value=timid_ai):
+        out = reviewed_next_set_recommendation(
+            exercise=_decline_db_press(), planned_set=plan, actual_reps=18,
+            actual_weight_lbs=60.0, actual_rir=4.0, feel="good",
+            previous_sets_this_session=[{"reps": 12, "weight_lbs": 60.0, "rir": 2.0}],
+            last_session_sets=[],
+        )
+    assert out is not None
+    assert out.source == "deterministic"
+    assert out.next_set_weight_lbs == 70.0
+    assert any("big overshoot" in r for r in out.suspicion_reasons)
+    _ok("big overshoot has deterministic floor when AI is too timid")
+
+
 def test_reviewed_ai_confirmed_yields_ai_confirmed_source():
     print("\n[test] suspicious + AI confirmed=True → source='ai_confirmed'")
     plan = _planned(target_reps="6-8", target_weight_lbs=185.0,
@@ -1240,8 +1298,40 @@ def test_callsite_live_scheme_preserves_top_set_to_backoff_transition():
         scheme,
         completed_set_number=1,
         next_set_number=2,
+        completed_actual_weight_lbs=185,
     ) == 170.0
     _ok("heavy_top set 1 → backoff set 2 keeps planned 170 lb target")
+
+
+def test_callsite_live_scheme_ignores_stale_swap_backoff_target():
+    print("\n[test] live setScheme ignores stale backoff target after swapped lift")
+    from app.routers.ai.progression import _planned_backoff_transition_weight
+
+    stale_scheme = [
+        {
+            "setNumber": 1,
+            "setType": "heavy_top",
+            "targetReps": "5",
+            "targetRir": 2,
+            "targetWeightLbs": 80,
+            "progressionMode": "load_first",
+        },
+        {
+            "setNumber": 2,
+            "setType": "backoff",
+            "targetReps": "6-8",
+            "targetRir": 2,
+            "targetWeightLbs": 80,
+            "progressionMode": "reps_first",
+        },
+    ]
+    assert _planned_backoff_transition_weight(
+        stale_scheme,
+        completed_set_number=1,
+        next_set_number=2,
+        completed_actual_weight_lbs=115,
+    ) is None
+    _ok("actual 115 lb top set is not overridden by stale 80 lb backoff")
 
 
 def test_callsite_pre_set_endpoint_prefers_planned_target_over_last_session():
@@ -1279,6 +1369,65 @@ def test_callsite_pre_set_endpoint_prefers_planned_target_over_last_session():
     _ok("planned 185 lb target wins over last-session 165 lb")
 
 
+def test_callsite_recommend_weight_big_rir_overshoot_skips_backoff_override():
+    print("\n[test] /recommend-weight big RIR overshoot is not crushed by planned backoff")
+    from app.routers.ai.models import WeightRecommendRequest
+    from app.routers.ai.progression import recommend_weight
+
+    body = WeightRecommendRequest(
+        exerciseName="Decline Dumbbell Press",
+        exerciseSlug="decline_dumbbell_press",
+        goal="muscle_gain",
+        lastSets=[{"setNumber": 1, "reps": 18, "weightLbs": 60, "rir": 4}],
+        nextSetNumber=2,
+        targetSets=3,
+        targetReps="8-12",
+        progressionPace="moderate",
+        experienceLevel="intermediate",
+        recoveryLevel="normal",
+        phase="accumulation",
+        workoutFocus="push",
+        weekNumber=1,
+        incrementLbs=5,
+        equipment="dumbbell",
+        primaryMuscle="chest",
+        setScheme=[
+            {
+                "setNumber": 1,
+                "setType": "heavy_top",
+                "targetReps": "8-12",
+                "targetRir": 2,
+                "targetWeightLbs": 60,
+                "progressionMode": "load_first",
+            },
+            {
+                "setNumber": 2,
+                "setType": "backoff",
+                "targetReps": "8-12",
+                "targetRir": 2,
+                "targetWeightLbs": 55,
+                "progressionMode": "reps_first",
+            },
+            {
+                "setNumber": 3,
+                "setType": "backoff",
+                "targetReps": "8-12",
+                "targetRir": 2,
+                "targetWeightLbs": 55,
+                "progressionMode": "reps_first",
+            },
+        ],
+    )
+    with patch("app.services.workout.in_workout_review._call_ai_reviewer", return_value=None), \
+         patch("app.services.workout.history.get_recent_completions_for_fatigue", return_value=[]):
+        out = recommend_weight(body, current_user=SimpleNamespace(id=1), db=None)
+
+    assert out["action"] == "increase", out
+    assert out["weightLbs"] == 70.0, out
+    assert any("big overshoot" in r for r in out["suspicionReasons"]), out
+    _ok("60 lb + huge overshoot → 70 lb, not stale 55 lb backoff")
+
+
 # ── Runner ──────────────────────────────────────────────────────────
 
 
@@ -1314,6 +1463,8 @@ def _run_all():
         # Group 5: recommend_next_set
         test_next_exact_top_of_range_with_rir_load_first_increases,
         test_next_one_rep_above_top_load_first_increases_by_increment,
+        test_next_big_db_press_overshoot_with_4rir_adds_two_increments,
+        test_next_big_reps_first_overshoot_bumps_instead_of_waiting,
         test_next_beat_top_low_rir_does_not_increase,
         test_next_beat_top_squat_adds_real_10_lb_even_off_grid,
         test_next_reps_first_beat_top_holds_load_explanation_mentions_session_bump,
@@ -1352,6 +1503,7 @@ def _run_all():
         test_reviewed_clean_path_returns_deterministic_source,
         test_reviewed_suspicious_path_calls_ai_and_uses_override_when_unconfirmed,
         test_reviewed_ai_failure_falls_back_to_deterministic_with_reasons_attached,
+        test_reviewed_big_rir_overshoot_rejects_too_small_ai_jump,
         test_reviewed_ai_confirmed_yields_ai_confirmed_source,
         test_reviewed_ai_returns_invalid_action_falls_through_to_det_action,
         # Group 10: rolling_e1rm gaps
@@ -1370,7 +1522,9 @@ def _run_all():
         test_callsite_http_metadata_preserves_barbell_squat_10lb_increment,
         test_callsite_http_metadata_preserves_cable_isolation_2_5lb_increment,
         test_callsite_live_scheme_preserves_top_set_to_backoff_transition,
+        test_callsite_live_scheme_ignores_stale_swap_backoff_target,
         test_callsite_pre_set_endpoint_prefers_planned_target_over_last_session,
+        test_callsite_recommend_weight_big_rir_overshoot_skips_backoff_override,
     ]
     failed = 0
     for t in tests:

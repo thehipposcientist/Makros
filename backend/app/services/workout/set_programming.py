@@ -178,6 +178,72 @@ def _drop_load(current: float, increment: float) -> float:
     return round(math.floor(target / increment) * increment, 1)
 
 
+def _is_lower_body_compound(exercise: dict) -> bool:
+    is_compound = bool(exercise.get("is_compound"))
+    pattern = (exercise.get("movement_pattern") or "").lower()
+    primary = (exercise.get("primary_muscle") or "").lower()
+    return is_compound and (
+        pattern in ("squat", "hinge", "lunge")
+        or primary in ("quads", "hamstrings", "glutes", "adductors", "abductors")
+    )
+
+
+def _max_live_overshoot_delta(exercise: dict, increment: float) -> float:
+    if increment <= 0:
+        return 0.0
+    is_compound = bool(exercise.get("is_compound"))
+    if _is_lower_body_compound(exercise):
+        return max(increment, 15.0)
+    if is_compound:
+        return max(increment, 10.0)
+    return max(increment, 5.0)
+
+
+def _format_rir(rir: float) -> str:
+    return str(int(rir)) if float(rir).is_integer() else f"{rir:.1f}"
+
+
+def _format_lbs(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+
+def _scaled_overshoot_load(
+    *,
+    exercise: dict,
+    weight: float,
+    increment: float,
+    rep_top: int,
+    target_rir: float,
+    actual_reps: int,
+    actual_rir: float,
+) -> tuple[float, float]:
+    if increment <= 0 or weight <= 0:
+        return weight, 0
+
+    target_reps_to_failure = max(1.0, float(rep_top) + max(0.0, target_rir))
+    actual_reps_to_failure = max(0.0, float(actual_reps) + max(0.0, actual_rir))
+    denominator = 1.0 + target_reps_to_failure / 30.0
+    estimated = (
+        weight * ((1.0 + actual_reps_to_failure / 30.0) / denominator)
+        if denominator > 0 and actual_reps_to_failure > target_reps_to_failure
+        else weight + increment
+    )
+
+    max_delta = _max_live_overshoot_delta(exercise, increment)
+    min_delta = increment
+    if actual_reps_to_failure - target_reps_to_failure >= 5.0 and max_delta >= increment * 2:
+        min_delta = increment * 2
+    bounded_delta = min(max(estimated - weight, min_delta), max_delta)
+    new_w = round_to_increment(weight + bounded_delta, increment)
+    if new_w - weight < min_delta:
+        import math
+        new_w = round(math.ceil((weight + min_delta) / increment) * increment, 1)
+    if new_w <= weight:
+        new_w = _bump_load(weight, increment)
+    actual_delta = round(new_w - weight, 1)
+    return new_w, actual_delta
+
+
 # ── Rep-range parsing ───────────────────────────────────────────────
 
 def parse_rep_range(reps: str) -> Optional[tuple[int, int]]:
@@ -447,20 +513,38 @@ def recommend_next_set(
 
     if beat_top and rir >= max(1.0, planned_set.target_rir - 1.0):
         # Over-performed with technique in the tank. For load-first
-        # work, the load goes up right now. For reps-first, hold the
-        # load so the user keeps banking reps at this weight — but the
-        # next-session engine will bump load after a top-of-range hit.
-        if planned_set.progression_mode == "load_first":
-            new_w = _bump_load(weight or 0, inc) if inc > 0 else weight
-            actual_delta = int(round((new_w - (weight or 0)) if new_w and weight else inc))
+        # work, the load goes up right now. Reps-first normally waits,
+        # but a large reps-to-failure gap means the load is calibrated
+        # too low for even this session.
+        reps_to_failure_gap = (float(actual_reps) + float(rir)) - (float(hi) + float(planned_set.target_rir))
+        should_bump_now = planned_set.progression_mode == "load_first" or (
+            planned_set.progression_mode == "reps_first" and reps_to_failure_gap >= 5.0
+        )
+        if should_bump_now:
+            new_w, actual_delta = _scaled_overshoot_load(
+                exercise=exercise,
+                weight=weight or 0,
+                increment=inc,
+                rep_top=hi,
+                target_rir=planned_set.target_rir,
+                actual_reps=actual_reps,
+                actual_rir=float(rir),
+            )
+            if actual_delta > (inc or 0):
+                explanation = (
+                    f"You hit {actual_reps} reps with {_format_rir(float(rir))} RIR, "
+                    f"well beyond {lo}-{hi} — adding {_format_lbs(actual_delta)} lb for the next set."
+                )
+            else:
+                explanation = (
+                    f"You hit {actual_reps} reps (top of {lo}-{hi}) with "
+                    f"{_format_rir(float(rir))} RIR — adding {_format_lbs(actual_delta)} lb for the next set."
+                )
             return NextSetRecommendation(
                 next_set_weight_lbs=new_w if new_w > 0 else None,
                 next_set_rep_target=f"{lo}-{hi}",
                 action="increase_load",
-                explanation=(
-                    f"You hit {actual_reps} reps (top of {lo}-{hi}) with "
-                    f"{int(rir)} RIR — adding {actual_delta} lb for the next set."
-                ),
+                explanation=explanation,
             )
         if planned_set.progression_mode == "reps_first":
             return NextSetRecommendation(

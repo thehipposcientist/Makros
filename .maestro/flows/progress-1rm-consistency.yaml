@@ -70,12 +70,10 @@ tags:
 
 # Find the showcase tile. Seeded user has enough loaded strength
 # history for at least one estimated 1RM, so the showcase must render.
-- scrollUntilVisible:
-    element:
+- extendedWaitUntil:
+    visible:
       id: "progress-1rm-showcase"
-    direction: DOWN
     timeout: 30000
-    visibilityPercentage: 30
 
 - assertVisible: "Estimated 1 Rep Max"
 

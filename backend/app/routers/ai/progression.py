@@ -355,6 +355,7 @@ def _planned_backoff_transition_weight(
     *,
     completed_set_number: int | None,
     next_set_number: int | None,
+    completed_actual_weight_lbs: float | None = None,
 ) -> float | None:
     current = _scheme_row_by_number(raw_scheme, completed_set_number)
     upcoming = _scheme_row_by_number(raw_scheme, next_set_number)
@@ -364,7 +365,19 @@ def _planned_backoff_transition_weight(
     next_type = str(upcoming.get("setType") or upcoming.get("set_type") or "").lower()
     if current_type not in ("heavy_top", "top_set") or next_type not in ("backoff", "volume"):
         return None
-    return _positive_float(upcoming.get("targetWeightLbs") or upcoming.get("target_weight_lbs"))
+    upcoming_weight = _positive_float(upcoming.get("targetWeightLbs") or upcoming.get("target_weight_lbs"))
+    if upcoming_weight is None:
+        return None
+    actual_weight = _positive_float(completed_actual_weight_lbs)
+    if actual_weight is not None:
+        current_target = _positive_float(current.get("targetWeightLbs") or current.get("target_weight_lbs"))
+        if current_target is not None:
+            allowed_drift = max(15.0, current_target * 0.20)
+            if abs(actual_weight - current_target) > allowed_drift:
+                return None
+        if upcoming_weight < actual_weight * 0.75:
+            return None
+    return upcoming_weight
 
 
 @router.post("/recommend-weight")
@@ -708,6 +721,7 @@ def recommend_weight(
 
         reviewed_source = "deterministic"
         reviewed_reasons: list[str] = []
+        reviewed_action_override: str | None = None
         if last_logged is not None:
             try:
                 from app.services.workout.in_workout_review import (
@@ -754,10 +768,19 @@ def recommend_weight(
                 if reviewed is not None:
                     reviewed_source = reviewed.source
                     reviewed_reasons = reviewed.suspicion_reasons
-                    # AI can override weight / rep target / tip.
-                    if reviewed.next_set_weight_lbs is not None and reviewed.source != "deterministic":
+                    deterministic_rir_override = (
+                        reviewed.source == "deterministic"
+                        and reviewed.action == "increase_load"
+                        and any("big overshoot" in r for r in reviewed.suspicion_reasons)
+                        and str(last_logged_feel or "").strip().lower() not in ("pain", "form_breakdown", "form breakdown")
+                    )
+                    use_reviewed_payload = reviewed.source != "deterministic" or deterministic_rir_override
+                    # AI can override weight / rep target / tip. For large RIR-backed
+                    # overshoots, the deterministic reviewer can also override the
+                    # older one-increment progression engine.
+                    if reviewed.next_set_weight_lbs is not None and use_reviewed_payload:
                         rec_weight = float(reviewed.next_set_weight_lbs)
-                    if reviewed.next_set_rep_target and reviewed.source != "deterministic":
+                    if reviewed.next_set_rep_target and use_reviewed_payload:
                         # Best-effort parse of "6-8" → rep_min / rep_max.
                         r = reviewed.next_set_rep_target
                         if "-" in r:
@@ -768,8 +791,9 @@ def recommend_weight(
                                 rec_reps = max(1, round((rep_min + rep_max) / 2))
                             except (ValueError, TypeError):
                                 pass
-                    if reviewed.explanation and reviewed.source != "deterministic":
+                    if reviewed.explanation and use_reviewed_payload:
                         tip = reviewed.explanation
+                        reviewed_action_override = reviewed.action
                     else:
                         tip = rec.coach_message
                 else:
@@ -781,12 +805,25 @@ def recommend_weight(
             tip = rec.coach_message
 
         response_action = rec.action.value
+        if reviewed_action_override:
+            response_action = {
+                "increase_load": "increase",
+                "reduce_load": "decrease",
+                "hold_load": "hold",
+                "keep_reps": "hold",
+                "add_rep": "hold",
+            }.get(reviewed_action_override, response_action)
         planned_backoff_weight = _planned_backoff_transition_weight(
             body.setScheme,
             completed_set_number=last_logged.setNumber if last_logged else None,
             next_set_number=rec.next_set_number,
+            completed_actual_weight_lbs=last_logged.weightLbs if last_logged else None,
         )
-        if planned_backoff_weight is not None and last_logged is not None:
+        skip_planned_backoff = (
+            response_action == "increase"
+            and any("big overshoot" in r for r in reviewed_reasons)
+        )
+        if planned_backoff_weight is not None and last_logged is not None and not skip_planned_backoff:
             rec_weight = float(planned_backoff_weight)
             response_action = (
                 "decrease"

@@ -360,7 +360,7 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
   }
 }
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, getAIRemainingWeekNutritionPlan, repairPlanWeekInjuryConflicts, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, getAIRemainingWeekNutritionPlan, repairPlanWeekInjuryConflicts, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName, saveWeightEntryAPI } from '../src/services/api';
 import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday, clearSavedNutritionPlansForDates, clearPreservedMealsForDates, clearMealChecksForDates } from '../src/utils/mealTracker';
 import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
 import { encodePulledStateValueForStorage, preserveLocalPreferredSplitWhenRemoteMissing } from '../src/utils/profileCache';
@@ -953,6 +953,112 @@ export default function Index() {
     setPlanRefreshKey(k => k + 1);
   };
 
+  const profileWithWeightHistory = async (
+    profile: UserProfile,
+    weightLbs: number,
+    source: 'manual' | 'onboarding' | 'coach' | 'checkin' | 'watch' = 'manual',
+  ): Promise<UserProfile> => {
+    const canonicalWeight = Math.round(Number(weightLbs) * 10) / 10;
+    const { saveWeightEntry } = await import('../src/utils/weightHistory');
+    const history = await saveWeightEntry(canonicalWeight, source);
+    const weightEntries = history.map(entry => ({
+      date: entry.date,
+      weight_lbs: entry.weightLbs,
+      source: entry.source,
+    }));
+    return {
+      ...profile,
+      physicalStats: {
+        ...profile.physicalStats,
+        weightLbs: canonicalWeight,
+      },
+      weightHistory: history,
+      weightEntries,
+    };
+  };
+
+  const pushWeightSnapshotToWatch = async (profile: UserProfile): Promise<void> => {
+    try {
+      const entries = profile.weightEntries ?? [];
+      const latest = entries[entries.length - 1];
+      const latestLbs = Number(latest?.weight_lbs ?? profile.physicalStats.weightLbs);
+      if (!Number.isFinite(latestLbs) || latestLbs <= 0) return;
+      const recent = entries.slice(-7);
+      const ema = recent.length > 0
+        ? recent.reduce((sum, entry) => sum + Number(entry.weight_lbs || 0), 0) / recent.length
+        : latestLbs;
+      const older = entries.slice(-14, -7);
+      const oldEma = older.length > 0
+        ? older.reduce((sum, entry) => sum + Number(entry.weight_lbs || 0), 0) / older.length
+        : null;
+      const { pushWeightToWatch } = await import('../src/utils/watchSync');
+      await pushWeightToWatch({
+        latestLbs,
+        daysSinceLastLog: 0,
+        emaLbs: ema,
+        slopeLbsPerWeek: oldEma != null ? ema - oldEma : null,
+      });
+    } catch {}
+  };
+
+  const syncWeightToBackend = async (
+    profile: UserProfile,
+    weightLbs: number,
+    source: 'manual' | 'onboarding' | 'coach' | 'checkin' | 'watch' = 'manual',
+  ): Promise<void> => {
+    if (!authToken) return;
+    const canonicalWeight = Math.round(Number(weightLbs) * 10) / 10;
+    await Promise.all([
+      saveWeightEntryAPI(authToken, todayKey(), canonicalWeight, source).catch((e) =>
+        console.warn('[weight] entry sync failed (non-fatal)', e?.message ?? e),
+      ),
+      syncOnboarding(authToken, profile).catch((e) =>
+        console.warn('[weight] profile sync failed (non-fatal)', e?.message ?? e),
+      ),
+    ]);
+    await pushUserStateToBackend(authToken).catch(() => null);
+  };
+
+  const refreshRemainingNutritionForWeight = async (
+    profile: UserProfile,
+    weightLbs: number,
+  ): Promise<void> => {
+    if (!authToken || tierOf(profile) === 'free') {
+      setPlanRefreshKey(k => k + 1);
+      return;
+    }
+
+    setIsNutritionUpdating(true);
+    holdPlanGenAwake();
+    await setPlanGenMarker('nutrition_remaining').catch(() => null);
+    try {
+      const raw = await AsyncStorage.getItem('userLog');
+      const userLog = safeParse<UserLogEntry[]>(raw, []);
+      const aiPlans = await getAIRemainingWeekNutritionPlan(authToken, profile, {
+        userLog,
+        extraContext: `User updated current body weight to ${Math.round(weightLbs * 10) / 10} lb. Recalculate nutrition targets from the new weight while preserving current-week workout structure.`,
+      });
+      await applyRemainingWeekNutritionResult(aiPlans);
+      await appendUserLog({
+        type: 'plan_generated',
+        summary: `Remaining meal targets refreshed for ${Math.round(weightLbs * 10) / 10} lb body weight`,
+      });
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (!msg.toLowerCase().includes('cancelled') && !msg.includes('orphaned_on_restart')) {
+        console.error('[weight nutrition refresh] failed:', msg || err);
+        Alert.alert(
+          'Weight saved',
+          msg || 'Your weight was updated, but meal targets could not refresh right now.',
+        );
+      }
+    } finally {
+      setIsNutritionUpdating(false);
+      clearPlanGenMarker().catch(() => null);
+      releasePlanGenAwake();
+    }
+  };
+
   /** Resume polling an in-flight plan job if one was persisted. Called from
    *  `initApp` (cold start) and the AppState 'active' listener. The server
    *  is holding the job so this survives any amount of app kill / network
@@ -1491,7 +1597,16 @@ export default function Index() {
     options?: { updateRemainingWeekNutrition?: boolean; repairInjuryConflicts?: boolean },
   ) => {
     const effectiveMode = modeOverride ?? editMode;
-    const stamped = stampGoalStart(updated, userProfile);
+    let stamped = stampGoalStart(updated, userProfile);
+    const nextWeight = Number(stamped.physicalStats?.weightLbs);
+    const prevWeight = Number(userProfile?.physicalStats?.weightLbs);
+    const bodyWeightChanged = Number.isFinite(nextWeight)
+      && nextWeight > 0
+      && Number.isFinite(prevWeight)
+      && Math.round(nextWeight * 10) !== Math.round(prevWeight * 10);
+    if (bodyWeightChanged) {
+      stamped = await profileWithWeightHistory(stamped, nextWeight, 'manual');
+    }
     // Record goal history only when the user actually used the GOAL
     // edit screen AND the goal/pace changed. We used to compute this
     // off a raw profile diff, which meant any unrelated field drift
@@ -1510,6 +1625,10 @@ export default function Index() {
     }
     await AsyncStorage.setItem('userProfile', JSON.stringify(stamped));
     setUserProfile(stamped);
+    if (bodyWeightChanged) {
+      await appendUserLog({ type: 'weight_updated', summary: `Weight updated to ${stamped.physicalStats.weightLbs} lbs` });
+      pushWeightSnapshotToWatch(stamped).catch(() => null);
+    }
     // Direct watch theme push on save — HomeScreen's useEffect will also
     // fire on the themePreference dep change, but a save can race the
     // re-render. Pushing here guarantees the watch sees the new theme
@@ -1526,8 +1645,12 @@ export default function Index() {
     // Sync to backend so the edit is available on other devices.
     // Await the sync so the backend has the latest profile before plan generation.
     if (authToken) {
-      await pushUserStateToBackend(authToken).catch(() => null);
-      await syncOnboarding(authToken, stamped).catch(() => null);
+      if (bodyWeightChanged) {
+        await syncWeightToBackend(stamped, stamped.physicalStats.weightLbs, 'manual');
+      } else {
+        await pushUserStateToBackend(authToken).catch(() => null);
+        await syncOnboarding(authToken, stamped).catch(() => null);
+      }
 
       // CRITICAL: profile saves do not rebuild the active workout week.
       // Injury changes are the safety exception: they run a deterministic
@@ -1548,7 +1671,17 @@ export default function Index() {
       // explicitly asks to update remaining meals now.
       const regenWorkout = false;
       const repairInjuryConflicts = effectiveMode === 'workout' && options?.repairInjuryConflicts === true;
-      const refreshRemainingNutrition = effectiveMode === 'mealplan' && options?.updateRemainingWeekNutrition === true;
+      const refreshNutritionForWeight =
+        bodyWeightChanged
+        && !goalChanged
+        && effectiveMode !== 'workout'
+        && (
+          effectiveMode !== 'mealplan'
+          || options?.updateRemainingWeekNutrition !== false
+        );
+      const refreshRemainingNutrition =
+        (effectiveMode === 'mealplan' && options?.updateRemainingWeekNutrition === true)
+        || refreshNutritionForWeight;
       const regenNutrition = refreshRemainingNutrition;
 
       if (goalChanged) {
@@ -1705,21 +1838,24 @@ export default function Index() {
     setPlanRefreshKey(k => k + 1);
   };
 
-  const handleUpdateWeight = async (weightLbs: number) => {
+  const handleUpdateWeight = async (
+    weightLbs: number,
+    source: 'manual' | 'onboarding' | 'coach' | 'checkin' | 'watch' = 'manual',
+  ) => {
     if (!userProfile) return;
-    const updated: UserProfile = {
-      ...userProfile,
-      physicalStats: { ...userProfile.physicalStats, weightLbs },
-    };
+    const canonicalWeight = Math.round(Number(weightLbs) * 10) / 10;
+    if (!Number.isFinite(canonicalWeight) || canonicalWeight <= 0) return;
+
+    const updated = await profileWithWeightHistory(userProfile, canonicalWeight, source);
     await AsyncStorage.setItem('userProfile', JSON.stringify(updated));
     setUserProfile(updated);
-    if (authToken) syncOnboarding(authToken, updated).catch(() => null);
-    // Sync to weight history so Body Check trend stays current
-    try {
-      const { saveWeightEntry } = await import('../src/utils/weightHistory');
-      await saveWeightEntry(weightLbs, 'manual');
-    } catch {}
-    await appendUserLog({ type: 'weight_updated', summary: `Weight updated to ${weightLbs} lbs` });
+    setPlanRefreshKey(k => k + 1);
+    await appendUserLog({ type: 'weight_updated', summary: `Weight updated to ${canonicalWeight} lbs` });
+    pushWeightSnapshotToWatch(updated).catch(() => null);
+    if (authToken) {
+      await syncWeightToBackend(updated, canonicalWeight, source);
+      await refreshRemainingNutritionForWeight(updated, canonicalWeight);
+    }
   };
 
   const handleCancelScheduledPlanChange = async (restoredProfile: UserProfile) => {
@@ -1827,6 +1963,7 @@ export default function Index() {
           setShowAccount(false);
           setShowProgress(false);
         }}
+        onUpdateWeight={handleUpdateWeight}
         onSaveProfile={(updated, mode) => handleSaveProfile(updated, mode)}
         onActivePlanWeekEndChange={setActivePlanWeekEnd}
         onCancelScheduledPlanChange={handleCancelScheduledPlanChange}

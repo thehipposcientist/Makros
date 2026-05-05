@@ -1,6 +1,6 @@
 # Apple Watch — Architecture
 
-Last synced from app state: 2026-05-03
+Last synced from app state: 2026-05-05
 
 ## Bidirectional Sync via WCSession
 
@@ -22,7 +22,7 @@ Active workout exercise rows can include `plannedTargetWeightLbs` and up to five
 
 Watch commands carry a `commandId`; the phone bridge de-dupes recent IDs so `sendMessage` fallback to `transferUserInfo` cannot double-apply a set log or end command.
 
-When the native phone bridge receives a mutating watch command before JS listeners are attached, it stores the command in a durable `UserDefaults` queue (bounded + TTL-filtered). Home drains general commands on mount; active-workout commands that arrive during the Home → ActiveWorkout handoff are also stashed in a small AsyncStorage backlog and replayed by `ActiveWorkoutScreen` so queued set logs do not disappear during navigation.
+When the native phone bridge receives a mutating watch command before JS listeners are attached, it stores the command in a durable `UserDefaults` queue (bounded + TTL-filtered). Home drains general commands on mount. During the Home -> ActiveWorkout handoff, `ActiveWorkoutScreen` marks the active command consumer ready only after its listener is attached; until then Home mirrors `log_set` commands into `activeWorkoutSets` and stashes non-log active commands in a small AsyncStorage backlog for replay.
 
 If `log_set` arrives while `ActiveWorkoutScreen` is not mounted, Home mirrors it into `activeWorkoutSets`, updates the resume banner, and calls `/workouts/sync` so watch-only sessions are backed up to `WorkoutSession` rows mid-workout. Home does not push a replacement workout snapshot while a workout is active; progress and active snapshots remain owned by `ActiveWorkoutScreen` or the watch's local state to avoid resetting the watch session.
 
@@ -45,7 +45,7 @@ TabView: **Today** (workout) / **Meals** / **Hydration** / **Supps** / **Sleep**
 
 **Active workout**: Digital Crown + −/+ steppers, recommended-weight quick-use row, rest timer, HR persistent chip, live recommendation text, swipe-right HR zones tab, warm-up card before first set, end + cancel + skip/swap-exercise menu.
 
-**Start behavior**: watch Start is local-first. It immediately presents `ActiveWorkoutView`, clears stale watch set state, and sends `start_workout` to the phone in the background. The phone still owns persistence and echoes an active workout snapshot, but the watch no longer waits on the phone echo or on a HealthKit workout session before tracking sets.
+**Start behavior**: watch Start is local-first. It immediately mints a local `sessionId`, presents `ActiveWorkoutView`, clears stale watch set state, and sends `start_workout` with that `sessionId` to the phone in the background. The phone reuses the watch-provided id for its active echo, so sets logged before the echo lands still belong to the same workout session. The phone still owns persistence, but the watch no longer waits on the phone echo or on a HealthKit workout session before tracking sets.
 
 **HealthKit**: watch tracking does not save a HealthKit workout. Heart-rate/runtime support may start opportunistically, but end/cancel discards the builder so workout history remains Thallo-authoritative.
 

@@ -156,6 +156,7 @@ interface HomeScreenProps {
   onOpenSettings?: () => void;
   onHomeTabNavigate?: () => void;
   onProfileUpdate?: (changes: Partial<UserProfile>, skipRegen?: boolean) => void;
+  onUpdateWeight?: (weightLbs: number, source?: 'manual' | 'watch') => void | Promise<void>;
   /** Optional: push local AsyncStorage state to the backend. Called by
    *  the trainer-chat Apply flow so plan changes persist cross-device
    *  (the old flow only wrote to local storage and silently drifted
@@ -1472,7 +1473,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onOpenSettings, onHomeTabNavigate, onProfileUpdate, onBackendSync, onSaveProfile, onCancelScheduledPlanChange, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onOpenSettings, onHomeTabNavigate, onProfileUpdate, onUpdateWeight, onBackendSync, onSaveProfile, onCancelScheduledPlanChange, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -1503,6 +1504,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 	  const plannerPalette = theme.sections.planner;
 	  const weightUnit = resolveWeightUnit(userProfile);
 	  const distanceUnit = resolveDistanceUnit(userProfile);
+  const onUpdateWeightRef = useRef(onUpdateWeight);
+  useEffect(() => {
+    onUpdateWeightRef.current = onUpdateWeight;
+  }, [onUpdateWeight]);
 
   const [workoutPlan, setWorkoutPlan]     = useState<WorkoutPlan | null>(null);
   // The persisted 7-day plan from /plans/week/active. Source of truth for
@@ -3185,6 +3190,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               try {
                 const lbs = Number(payload?.lbs);
                 if (!isFinite(lbs) || lbs < 50 || lbs > 600) return;
+                if (onUpdateWeightRef.current) {
+                  await onUpdateWeightRef.current(lbs, 'watch');
+                  return;
+                }
                 const { saveWeightEntry } = await import('../utils/weightHistory');
                 await saveWeightEntry(lbs, 'watch');
                 // Re-push to refresh the Weight tab on the watch.
@@ -3357,7 +3366,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               // gets an authoritative active echo before ActiveWorkoutScreen
               // has a chance to mount (which was the race causing the watch
               // to stay idle while the phone started).
-              const sessionId = `${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
+              const incomingSessionId = typeof payload?.sessionId === 'string' && payload.sessionId.trim().length > 0
+                ? payload.sessionId.trim()
+                : null;
+              const sessionId = incomingSessionId ?? `${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
               setActiveWatchSessionId(sessionId);
               AsyncStorage.setItem('activeWatchSessionId', sessionId).catch(() => {});
               AsyncStorage.setItem('activeWorkoutStartTime', String(startedAtMs)).catch(() => {});
@@ -9121,6 +9133,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               onBack={() => setActiveTab('workout')}
               onCancelScheduledPlanChange={onCancelScheduledPlanChange}
               onUpdateWeight={(weightLbs) => {
+                if (onUpdateWeight) {
+                  void onUpdateWeight(weightLbs, 'manual');
+                  return;
+                }
                 onProfileUpdate?.({ physicalStats: { ...userProfile.physicalStats, weightLbs } } as any, true);
                 import('../utils/weightHistory').then(({ saveWeightEntry }) => saveWeightEntry(weightLbs, 'manual')).catch(() => {});
               }}

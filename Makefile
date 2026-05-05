@@ -232,6 +232,7 @@ smoke-mobile-workouts: seed-e2e
 	  exit 1; }
 	@$(MAESTRO) test .maestro/flows/recovery-live-workouts.yaml
 	@$(MAESTRO) test .maestro/flows/workout-templates.yaml
+	@$(MAESTRO) test .maestro/flows/active-workout-swap-recommendations.yaml
 	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
 
 smoke-mobile-plan-adaptation: seed-e2e-recovery-apply
@@ -293,6 +294,8 @@ smoke-mobile-preflight:
 	@$(MAESTRO) test .maestro/flows/recovery-live-workouts.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/workout-templates.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/active-workout-swap-recommendations.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
 	@$(MAKE) seed-e2e

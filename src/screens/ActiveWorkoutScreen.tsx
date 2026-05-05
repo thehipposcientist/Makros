@@ -66,7 +66,7 @@ import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNot
 import { humanizeToken } from '../utils/exerciseGuide';
 import { shouldHideWeight, shouldHideReps, formatDurationTarget, isGuideExercise } from '../utils/exerciseDisplay';
 import { startRestActivity, updateRestActivity, getRestActivityState, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
-import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, rankWorkoutAddCandidates, scoreSwapCandidate } from '../utils/swapScoring';
+import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, rankWorkoutAddCandidates, scoreSwapCandidate, scoreWorkoutAddCandidate, workoutAddAlignmentPercent } from '../utils/swapScoring';
 import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate, tierOf } from '../utils/subscription';
 import { buildWorkoutBestSetHighlights } from '../utils/workoutBestSets';
 import { clearManagedInterval, restartManagedInterval, useManagedInterval } from '../hooks/useManagedInterval';
@@ -207,7 +207,23 @@ interface ExerciseLibraryItem {
   is_custom?: boolean;
 }
 
-type SmartSwapItem = ExerciseLibraryItem & { _overlap?: number; _swapNotes?: string[] };
+function exerciseLibraryItemFromAiResult(ex: AIExerciseResult, id?: number | string): ExerciseLibraryItem {
+  return {
+    ...(id != null ? { id } : {}),
+    name: ex.name,
+    primary_muscle: ex.primary_muscle as any,
+    secondary_muscles: (ex.secondary_muscles ?? []) as any,
+    equipment: ex.equipment as any,
+    description: ex.why,
+    is_custom: true,
+    video_id: ex.video_id ?? undefined,
+    image_url: ex.image_url ?? undefined,
+    is_compound: ex.is_compound ?? undefined,
+    movement_pattern: ex.movement_pattern ?? undefined,
+  } as unknown as ExerciseLibraryItem;
+}
+
+type SmartSwapItem = ExerciseLibraryItem & { _overlap?: number; _alignment?: number; _fitScore?: number; _swapNotes?: string[] };
 type ExerciseHistorySignal = { count: number; lastDate?: string };
 
 const SMART_SWAP_HISTORY_BONUS_MAX = 5;
@@ -224,6 +240,35 @@ function normalizeSwapText(raw: unknown): string {
 
 function exerciseHistoryKey(name: string): string {
   return normalizeSwapText(name);
+}
+
+function exercisePickerTestId(item: ExerciseLibraryItem): string {
+  const raw = item.slug || item.name;
+  const slug = String(raw)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return `active-exercise-option-${slug || 'exercise'}`;
+}
+
+function exerciseAlignmentColor(value: number | null | undefined): string | undefined {
+  if (value == null) return undefined;
+  if (value >= 80) return '#22C55E';
+  if (value >= 60) return '#F59E0B';
+  return '#EF4444';
+}
+
+function ExerciseAlignmentBadge({ value }: { value: number }) {
+  const color = exerciseAlignmentColor(value);
+  if (!color) return null;
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, backgroundColor: color + '22', borderWidth: 1, borderColor: color + '88' }}>
+      <View style={{ width: 28, height: 4, borderRadius: 2, backgroundColor: color + '33', overflow: 'hidden' }}>
+        <View style={{ width: `${value}%`, height: '100%', backgroundColor: color }} />
+      </View>
+      <Text style={{ fontSize: 10, fontWeight: '800', color }}>{value}%</Text>
+    </View>
+  );
 }
 
 type BackendLastSetsContext = {
@@ -419,25 +464,19 @@ const ActiveExercisePickerRow = React.memo(function ActiveExercisePickerRow({
   stylesRef: ReturnType<typeof createStyles>;
   onPress: (item: ExerciseLibraryItem) => void;
 }) {
-  const overlap = item._overlap;
-  const overlapColor = overlap == null ? undefined
-    : overlap >= 80 ? '#22C55E'
-    : overlap >= 60 ? '#F59E0B'
-    : '#EF4444';
-  const noteColor = overlapColor ?? '#22C55E';
+  const fitPercent = swapMode ? item._overlap : item._alignment;
+  const fitLabel = swapMode ? 'overlap' : 'alignment';
+  const noteColor = exerciseAlignmentColor(fitPercent) ?? '#22C55E';
   return (
-    <TouchableOpacity style={stylesRef.addExerciseItem} onPress={() => onPress(item)}>
+    <TouchableOpacity
+      style={stylesRef.addExerciseItem}
+      testID={exercisePickerTestId(item)}
+      accessibilityLabel={`${swapMode ? 'Swap to' : 'Add'} ${item.name}${fitPercent != null ? `, ${fitPercent}% ${fitLabel}` : ''}`}
+      onPress={() => onPress(item)}>
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <Text style={stylesRef.addExerciseName}>{item.name}</Text>
-          {overlap != null && overlapColor && (
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6, backgroundColor: overlapColor + '22', borderWidth: 1, borderColor: overlapColor + '88' }}>
-              <View style={{ width: 28, height: 4, borderRadius: 2, backgroundColor: overlapColor + '33', overflow: 'hidden' }}>
-                <View style={{ width: `${overlap}%`, height: '100%', backgroundColor: overlapColor }} />
-              </View>
-              <Text style={{ fontSize: 10, fontWeight: '800', color: overlapColor }}>{overlap}%</Text>
-            </View>
-          )}
+          {fitPercent != null && <ExerciseAlignmentBadge value={fitPercent} />}
         </View>
         <Text style={stylesRef.addExerciseMeta}>
           {humanizeToken(item.primary_muscle) || 'General'} · {formatEquipmentLabel(item.equipment) || 'Bodyweight'}
@@ -542,7 +581,7 @@ function AnimatedBarFill({ pct, color, delay = 0 }: { pct: number; color: string
 }
 
 const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|\bwalk\b|walking|carry|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/i;
-const TIMED_REPS_RE = /^\d+\s*-?\s*\d*\s*s(ec|econds?)?$/i;
+const TIMED_REPS_RE = /\b\d+(?:\.\d+)?\s*(?:[-–—]\s*\d+(?:\.\d+)?)?\s*(?:s|sec|secs|second|seconds|min|mins|minute|minutes)\b/i;
 // `isBodyweightOnly` name-regex was replaced by the richer
 // `shouldHideWeight(ex)` predicate in `utils/exerciseDisplay.ts`,
 // which also checks equipment / archetype / training_type / reps
@@ -555,7 +594,7 @@ function isTimedExercise(name: string, targetReps?: string | number): boolean {
   // "25 min", "20-30 min". Coerce to string — AI plans occasionally return
   // reps as a number ("reps": 12) which crashed .trim() before this guard.
   const reps = targetReps == null ? '' : String(targetReps).trim();
-  if (reps && (TIMED_REPS_RE.test(reps) || /\d\s*-?\s*\d*\s*m(in(ute)?s?)?$/i.test(reps))) return true;
+  if (reps && TIMED_REPS_RE.test(reps)) return true;
   return false;
 }
 
@@ -957,9 +996,15 @@ function savedExerciseFallback(saved: any): SessionExercise {
 function restoreSavedSessionExercise(saved: any, fallback: SessionExercise): SessionExercise {
   const targetSets = Number(saved?.targetSets ?? fallback.targetSets);
   const targetRestSeconds = Number(saved?.targetRestSeconds ?? fallback.targetRestSeconds);
+  const savedName = typeof saved?.name === 'string' && saved.name.trim() ? saved.name : fallback.name;
+  const exerciseNameChanged = exerciseHistoryKey(savedName) !== exerciseHistoryKey(fallback.name);
+  const savedSlug = saved?.slug ?? null;
+  const restoredSlug = exerciseNameChanged
+    ? (savedSlug && savedSlug !== fallback.slug ? savedSlug : null)
+    : savedSlug ?? fallback.slug ?? null;
   return {
     ...fallback,
-    name: typeof saved?.name === 'string' && saved.name.trim() ? saved.name : fallback.name,
+    name: savedName,
     targetSets: Number.isFinite(targetSets) && targetSets > 0 ? targetSets : fallback.targetSets,
     targetReps: typeof saved?.targetReps === 'string' ? saved.targetReps : fallback.targetReps,
     targetRestSeconds: Number.isFinite(targetRestSeconds) && targetRestSeconds > 0 ? targetRestSeconds : fallback.targetRestSeconds,
@@ -968,9 +1013,9 @@ function restoreSavedSessionExercise(saved: any, fallback: SessionExercise): Ses
     aiRecommendation: typeof saved?.aiRecommendation === 'string' ? saved.aiRecommendation : fallback.aiRecommendation,
     image_url: saved?.image_url ?? fallback.image_url,
     video_id: saved?.video_id ?? fallback.video_id ?? null,
-    targetWeightLbs: saved?.targetWeightLbs ?? fallback.targetWeightLbs ?? null,
-    setScheme: Array.isArray(saved?.setScheme) ? saved.setScheme : Array.isArray(saved?.set_scheme) ? saved.set_scheme : fallback.setScheme ?? null,
-    slug: saved?.slug ?? fallback.slug ?? null,
+    targetWeightLbs: exerciseNameChanged ? null : saved?.targetWeightLbs ?? fallback.targetWeightLbs ?? null,
+    setScheme: exerciseNameChanged ? null : Array.isArray(saved?.setScheme) ? saved.setScheme : Array.isArray(saved?.set_scheme) ? saved.set_scheme : fallback.setScheme ?? null,
+    slug: restoredSlug,
     primaryMuscle: saved?.primaryMuscle ?? saved?.primary_muscle ?? fallback.primaryMuscle ?? null,
     secondaryMuscles: saved?.secondaryMuscles ?? saved?.secondary_muscles ?? fallback.secondaryMuscles ?? [],
     muscles_targeted: saved?.muscles_targeted ?? fallback.muscles_targeted,
@@ -978,7 +1023,7 @@ function restoreSavedSessionExercise(saved: any, fallback: SessionExercise): Ses
     slotRole: saved?.slotRole ?? fallback.slotRole ?? null,
     slotLabel: saved?.slotLabel ?? fallback.slotLabel ?? null,
     prescriptionType: saved?.prescriptionType ?? fallback.prescriptionType ?? null,
-    weightRecommendationSource: saved?.weightRecommendationSource ?? fallback.weightRecommendationSource ?? null,
+    weightRecommendationSource: exerciseNameChanged ? null : saved?.weightRecommendationSource ?? fallback.weightRecommendationSource ?? null,
   };
 }
 
@@ -1141,34 +1186,64 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const buildWatchWorkoutSnapshotRef = useRef<() => any>(() => workout as any);
   // Persist start time so elapsed timer survives app restart
   useEffect(() => {
-    AsyncStorage.getItem('activeWorkoutStartTime').then(saved => {
-      if (saved) {
-        const ts = parseInt(saved, 10);
-        if (!isNaN(ts) && ts > 0) startTime.current = ts;
-        // Rehydrate sessionId from persistence so reopen gets same id.
-        AsyncStorage.getItem('activeWatchSessionId').then(sid => {
-          if (sid) {
-            watchSessionId.current = sid;
-            setActiveWatchSessionId(sid);
-          } else {
-            setActiveWatchSessionId(watchSessionId.current);
-          }
-          setWatchSessionHydrated(true);
-        }).catch(() => {
-          setActiveWatchSessionId(watchSessionId.current);
-          setWatchSessionHydrated(true);
-        });
-      } else {
-        setActiveWatchSessionId(watchSessionId.current);
-        AsyncStorage.setItem('activeWorkoutStartTime', String(startTime.current)).catch(() => {});
-        AsyncStorage.setItem('activeWatchSessionId', watchSessionId.current).catch(() => {});
-        setWatchSessionHydrated(true);
-        // Fresh start — play the countdown.
-        setShowStartCountdown(true);
+    Promise.all([
+      AsyncStorage.getItem('activeWorkoutStartTime'),
+      AsyncStorage.getItem('activeWorkoutSets'),
+      AsyncStorage.getItem('activeWatchSessionId'),
+    ]).then(([savedStart, savedSetsRaw, savedSessionIdRaw]) => {
+      const savedStartMs = savedStart ? parseInt(savedStart, 10) : NaN;
+      const hasValidSavedStart = Number.isFinite(savedStartMs) && savedStartMs > 0;
+      let hasLoggedSets = false;
+      try {
+        const savedSets = savedSetsRaw ? JSON.parse(savedSetsRaw) : [];
+        hasLoggedSets = Array.isArray(savedSets)
+          && savedSets.some((row: any) => Array.isArray(row?.sets) && row.sets.length > 0);
+      } catch {
+        hasLoggedSets = false;
       }
-    }).catch(() => {
+      const savedSessionId = typeof savedSessionIdRaw === 'string' && savedSessionIdRaw.trim().length > 0
+        ? savedSessionIdRaw.trim()
+        : null;
+      const liveSessionId = getActiveWatchSessionId();
+      const isWatchInitiatedEmptyStart = Boolean(
+        hasValidSavedStart
+        && !hasLoggedSets
+        && savedSessionId
+        && liveSessionId
+        && savedSessionId === liveSessionId,
+      );
+      if (hasValidSavedStart && (hasLoggedSets || isWatchInitiatedEmptyStart)) {
+        startTime.current = savedStartMs;
+        if (savedSessionId) {
+          watchSessionId.current = savedSessionId;
+          setActiveWatchSessionId(savedSessionId);
+        } else {
+          setActiveWatchSessionId(watchSessionId.current);
+        }
+        setWatchSessionHydrated(true);
+        return;
+      }
+
+      startTime.current = Date.now();
       setActiveWatchSessionId(watchSessionId.current);
+      if (savedStart && !hasLoggedSets) {
+        AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
+        AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
+      }
+      AsyncStorage.setItem('activeWorkoutStartTime', String(startTime.current)).catch(() => {});
+      AsyncStorage.setItem('activeWatchSessionId', watchSessionId.current).catch(() => {});
       setWatchSessionHydrated(true);
+      // Fresh phone start — play the countdown. A same-process
+      // watch-initiated start keeps its pre-seeded session id above and
+      // skips this so the wrist stays local-first.
+      setShowStartCountdown(true);
+    }).catch(() => {
+      startTime.current = Date.now();
+      setActiveWatchSessionId(watchSessionId.current);
+      AsyncStorage.setItem('activeWorkoutStartTime', String(startTime.current)).catch(() => {});
+      AsyncStorage.setItem('activeWatchSessionId', watchSessionId.current).catch(() => {});
+      setWatchSessionHydrated(true);
+      setShowStartCountdown(true);
     });
     // Pre-load the rest-timer chime so the first set's countdown
     // end fires the audio without a few-hundred-ms decode delay.
@@ -1302,6 +1377,25 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }>({ finish: () => {}, cancel: () => {} });
   const watchSwapExerciseRef = useRef<(exerciseIndex: number, toExerciseName?: string | null) => Promise<void> | void>(() => {});
   const watchLogSetChainRef = useRef<Promise<void>>(Promise.resolve());
+  const processedWatchCommandIdsRef = useRef<Set<string>>(new Set());
+  const processedWatchCommandIdOrderRef = useRef<string[]>([]);
+  const rememberWatchCommandId = useCallback((payload: Record<string, any>): boolean => {
+    const commandId = typeof payload?.commandId === 'string' ? payload.commandId.trim() : '';
+    if (!commandId) return true;
+    const seen = processedWatchCommandIdsRef.current;
+    if (seen.has(commandId)) {
+      console.log(`[watch] ignored duplicate command ${commandId.slice(0, 18)}`);
+      return false;
+    }
+    seen.add(commandId);
+    const order = processedWatchCommandIdOrderRef.current;
+    order.push(commandId);
+    while (order.length > 200) {
+      const dropped = order.shift();
+      if (dropped) seen.delete(dropped);
+    }
+    return true;
+  }, []);
   // handlersRef is updated further down once handleFinish / onCancel
   // are in scope (see the `watchHandlersRef.current = ...` assignment
   // below the handleFinish definition).
@@ -1309,8 +1403,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   useEffect(() => {
     // Ref-token cleanup so a teardown that fires before the async
     // import resolves still removes the listener once it attaches.
-    setActiveWatchCommandConsumerMounted(true);
-    const token = { cancelled: false, unsub: null as (() => void) | null };
+    const token = {
+      cancelled: false,
+      consumerRegistered: false,
+      unsub: null as (() => void) | null,
+    };
     (async () => {
       try {
         const { onWatchCommand } = await import('../utils/watchSync');
@@ -1359,6 +1456,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             return;
           }
           if (!commandMatchesCurrentSession(command, payload)) return;
+          if (activeWorkoutCommands.has(command) && !rememberWatchCommandId(payload)) return;
           if (command === 'log_set') {
             const exIdx = Number(payload?.exerciseIndex ?? -1);
             const weight = payload?.weightLbs;
@@ -1416,20 +1514,31 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           }
         };
         const unsub = onWatchCommand(handleWatchCommand);
+        setActiveWatchCommandConsumerMounted(true);
+        token.consumerRegistered = true;
         const queued = await drainActiveWatchCommands().catch(() => []);
         if (!token.cancelled) {
           queued.forEach(({ command, payload }) => handleWatchCommand(command, payload));
         }
-        if (token.cancelled) { try { unsub(); } catch {} }
+        if (token.cancelled) {
+          try { unsub(); } catch {}
+          if (token.consumerRegistered) {
+            setActiveWatchCommandConsumerMounted(false);
+            token.consumerRegistered = false;
+          }
+        }
         else { token.unsub = unsub; }
       } catch { /* watch bridge optional */ }
     })();
     return () => {
-      setActiveWatchCommandConsumerMounted(false);
       token.cancelled = true;
+      if (token.consumerRegistered) {
+        setActiveWatchCommandConsumerMounted(false);
+        token.consumerRegistered = false;
+      }
       if (token.unsub) { try { token.unsub(); } catch {} }
     };
-  }, [cachedProfileIsPro]);
+  }, [cachedProfileIsPro, rememberWatchCommandId]);
 
   const restNotificationIds = useRef<{ startId?: string; warningId?: string; completeId?: string } | null>(null);
   const restDurationSeconds = useRef<number>(0);
@@ -2148,6 +2257,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   // Last-session data for comparison display
   const [lastExerciseSets, setLastExerciseSets] = useState<Record<string, CompletedSet[]>>({});
+  const lastSessionLookupKeysRef = useRef<Set<string>>(new Set());
 
   // HR zones for cardio exercises
   const [hrZones, setHrZones] = useState<HRZone[]>([]);
@@ -2625,6 +2735,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     let cancelled = false;
     Promise.all(
       exercises.map(async ex => {
+        const key = exerciseHistoryKey(ex.name);
+        if (key) lastSessionLookupKeysRef.current.add(key);
         const sets = await loadLastSetsForExerciseAnySource(ex, loadBackendWorkoutHistory, {
           workoutDate: dateKey(new Date()),
           focus: workout.focus,
@@ -2634,7 +2746,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     ).then(results => {
       if (cancelled) return;
       const map: Record<string, CompletedSet[]> = {};
-      results.forEach(r => { if (r.sets.length > 0) map[r.name] = r.sets; });
+      results.forEach(r => { map[r.name] = r.sets; });
       setLastExerciseSets(map);
 
       // Only pre-fill duration inputs for timed exercises (cardio /
@@ -2652,6 +2764,35 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }
       });
       setSetInputs(inputs);
+    });
+    return () => { cancelled = true; };
+  }, [activeWorkoutStateRestored, exercises, loadBackendWorkoutHistory, workout.focus]);
+
+  useEffect(() => {
+    if (!activeWorkoutStateRestored) return;
+    const toLoad = exercises.filter(ex => {
+      const key = exerciseHistoryKey(ex.name);
+      if (!key || lastSessionLookupKeysRef.current.has(key)) return false;
+      lastSessionLookupKeysRef.current.add(key);
+      return true;
+    });
+    if (toLoad.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      toLoad.map(async ex => {
+        const sets = await loadLastSetsForExerciseAnySource(ex, loadBackendWorkoutHistory, {
+          workoutDate: dateKey(new Date()),
+          focus: workout.focus,
+        });
+        return { name: ex.name, sets };
+      })
+    ).then(results => {
+      if (cancelled) return;
+      setLastExerciseSets(prev => {
+        const next = { ...prev };
+        results.forEach(r => { next[r.name] = r.sets; });
+        return next;
+      });
     });
     return () => { cancelled = true; };
   }, [activeWorkoutStateRestored, exercises, loadBackendWorkoutHistory, workout.focus]);
@@ -3013,6 +3154,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       // hero thumbnail as a planner-generated one.
       video_id: (item as any).video_id ?? null,
       image_url: (item as any).image_url ?? null,
+      slug: item.slug ?? null,
     };
     setExercises(prev => {
       // Swap mode: replace the exercise at swapTargetIdx instead of appending.
@@ -3029,6 +3171,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           targetSets: previous.targetSets,
           targetReps: previous.targetReps,
           targetRestSeconds: previous.targetRestSeconds,
+          targetWeightLbs: null,
+          setScheme: null,
+          weightRecommendationSource: null,
         };
         setActiveExIdx(swapTargetIdx);
         return updated;
@@ -3087,23 +3232,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
    *  AI shape into the same `ExerciseLibraryItem` shape `handleAddExercise`
    *  expects so the workout code doesn't need to know about AI origin. */
   const handleAddAiExercise = useCallback((ex: AIExerciseResult) => {
-    handleAddExercise({
-      id: `ai_${Date.now()}` as any,
-      name: ex.name,
-      primary_muscle: ex.primary_muscle as any,
-      secondary_muscles: (ex.secondary_muscles ?? []) as any,
-      equipment: ex.equipment as any,
-      description: ex.why,
-      is_custom: true,
-      // Carry the enrichment fields the backend just normalized so the
-      // active session sees the same metadata the seed catalog ships
-      // with: form-video card via video_id, swap-scoring via
-      // is_compound, hero thumbnail via image_url.
-      video_id: ex.video_id ?? undefined,
-      image_url: ex.image_url ?? undefined,
-      is_compound: ex.is_compound ?? undefined,
-      movement_pattern: ex.movement_pattern ?? undefined,
-    } as unknown as ExerciseLibraryItem);
+    handleAddExercise(exerciseLibraryItemFromAiResult(ex, `ai_${Date.now()}`));
   }, [handleAddExercise]);
 
   /** Persist an AI search result to the user's custom exercise library so
@@ -4557,6 +4686,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, [activeExIdx, authToken, coachInput, exercises]);
 
   const swapTargetExerciseName = swapTargetIdx != null ? exercises[swapTargetIdx]?.name : null;
+  const currentWorkoutAddContext = useMemo<ExerciseLibraryItem[]>(() => {
+    const libraryByName = new Map(exerciseLibrary.map(item => [item.name.toLowerCase(), item]));
+    return exercises.map(ex => {
+      const libraryItem = libraryByName.get(ex.name.toLowerCase());
+      return {
+        name: ex.name,
+        equipment: ex.equipment ?? libraryItem?.equipment ?? null,
+        gear: libraryItem?.gear ?? null,
+        primary_muscle: ex.primaryMuscle ?? ex.primary_muscle ?? libraryItem?.primary_muscle ?? null,
+        secondary_muscles: ex.secondaryMuscles ?? ex.secondary_muscles ?? libraryItem?.secondary_muscles ?? [],
+        is_compound: ex.isCompound ?? libraryItem?.is_compound ?? null,
+        movement_pattern: libraryItem?.movement_pattern ?? null,
+      };
+    });
+  }, [exerciseLibrary, exercises]);
   const filteredExerciseLibrary: SmartSwapItem[] = useMemo(() => {
     const q = deferredExerciseSearch.trim().toLowerCase();
     if (swapTargetIdx != null) {
@@ -4607,18 +4751,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         _swapNotes: buildSwapNotes(s.item, base, s.historySignal, activeInjuryTokens),
       }));
     }
-    const currentWorkoutContext = exercises.map(ex => {
-      const libraryItem = exerciseLibrary.find(item => item.name.toLowerCase() === ex.name.toLowerCase());
-      return {
-        name: ex.name,
-        equipment: ex.equipment ?? libraryItem?.equipment ?? null,
-        gear: libraryItem?.gear ?? null,
-        primary_muscle: ex.primaryMuscle ?? ex.primary_muscle ?? libraryItem?.primary_muscle ?? null,
-        secondary_muscles: ex.secondaryMuscles ?? ex.secondary_muscles ?? libraryItem?.secondary_muscles ?? [],
-        is_compound: ex.isCompound ?? libraryItem?.is_compound ?? null,
-        movement_pattern: libraryItem?.movement_pattern ?? null,
-      };
-    });
     const searchableLibrary = exerciseLibrary
       .filter(item => !candidateConflictsWithActiveInjuries(item, activeInjuryTokens))
       .filter(item => {
@@ -4629,13 +4761,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           .includes(q);
       });
     return rankWorkoutAddCandidates(
-      currentWorkoutContext,
+      currentWorkoutAddContext,
       searchableLibrary,
       ownedEquipment,
       workout.focus,
       10,
     );
-  }, [activeInjuryTokens, deferredExerciseSearch, exerciseHistorySignals, exerciseLibrary, exercises, ownedEquipment, swapTargetExerciseName, swapTargetIdx, workout.focus]);
+  }, [activeInjuryTokens, currentWorkoutAddContext, deferredExerciseSearch, exerciseHistorySignals, exerciseLibrary, ownedEquipment, swapTargetExerciseName, swapTargetIdx, workout.focus]);
   const renderExercisePickerItem = useCallback(({ item }: { item: SmartSwapItem }) => (
     <ActiveExercisePickerRow
       item={item}
@@ -5081,6 +5213,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   {!isDone && (
                     <TouchableOpacity
                       style={styles.exerciseToolbarBtn}
+                      testID={`swap-exercise-${i}`}
                       onPress={() => {
                         setSwapTargetIdx(i);
                         setExerciseSearch('');
@@ -5176,7 +5309,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                        anything is logged). Clean label + weight; no
                        rationale text so it can't truncate. */}
                   {!guide && ex.sets.length === 0 && preSetHints[i] && preSetHints[i].recommendedWeight != null && (
-                    <View style={{
+                    <View
+                      testID={`pre-set-recommended-weight-card-${i}`}
+                      accessibilityLabel={`pre-set-recommended-weight-card-${i}`}
+                      style={{
                       borderLeftWidth: 3,
                       borderLeftColor: workoutPalette.strong,
                       backgroundColor: workoutPalette.strong + '14',
@@ -5186,7 +5322,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                         Recommended weight
                       </Text>
-                      <Text style={{ fontSize: 18, fontWeight: '800', color: themeColors.textPrimary, marginTop: 2 }}>
+                      <Text
+                        testID={`pre-set-recommended-weight-value-${i}`}
+                        accessibilityLabel={`Recommended weight ${displayWeight(preSetHints[i].recommendedWeight!)}${preSetHints[i].recommendedReps ? ` x ${preSetHints[i].recommendedReps}` : ''}`}
+                        style={{ fontSize: 18, fontWeight: '800', color: themeColors.textPrimary, marginTop: 2 }}>
 	                        {displayWeight(preSetHints[i].recommendedWeight!)}
                         {preSetHints[i].recommendedReps ? (
                           <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textSecondary }}>
@@ -5672,7 +5811,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   selectTextOnFocus
                                 />
                               )}
-                              <Text style={styles.inlineLastResult} numberOfLines={1}>{lastTimeLabel}</Text>
+                              <Text
+                                testID={`set-last-time-${i}-${slot}`}
+                                accessibilityLabel={`Last time set ${slot + 1}: ${lastTimeLabel}`}
+                                style={styles.inlineLastResult}
+                                numberOfLines={1}>
+                                {lastTimeLabel}
+                              </Text>
                               {(() => {
                                 const badgeKey = `${i}-${slot}`;
                                 const badgeScale = getSetBadgeScale(badgeKey);
@@ -6647,6 +6792,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
               <SearchInput
                 containerStyle={{ flex: 1 }}
+                testID={swapTargetIdx != null ? 'active-exercise-swap-search' : 'active-exercise-add-search'}
                 value={exerciseSearch}
                 onChangeText={(t) => {
                   setExerciseSearch(t);
@@ -6688,41 +6834,50 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         <Text style={{ fontSize: 11, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
                           {exerciseSearch.trim() ? 'Results' : `Fits Your ${workout.focus} Workout`}
                         </Text>
-                        {aiExerciseResults.map((ex, i) => (
-                          <View key={`ai-${ex.name}-${i}`} style={[styles.addExerciseItem, { flexDirection: 'column', alignItems: 'stretch', borderColor: workoutPalette.strong + '66', borderWidth: 1.5 }]}>
-                            <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
-                              <View style={{ flex: 1 }}>
-                                <Text style={styles.addExerciseName}>{ex.name}</Text>
-                                <Text style={styles.addExerciseMeta}>
-                                  {humanizeToken(ex.primary_muscle)} · {formatEquipmentLabel(ex.equipment)} · {ex.sets}x{ex.reps}
-                                </Text>
-                              </View>
-                              {ex.source === 'wger' && (
-                                <View style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
-                                  <Text style={{ fontSize: 9, fontWeight: '600', color: themeColors.textMuted }}>DB</Text>
+                        {aiExerciseResults.map((ex, i) => {
+                          const aiItem = exerciseLibraryItemFromAiResult(ex);
+                          const alignment = workoutAddAlignmentPercent(
+                            scoreWorkoutAddCandidate(aiItem, currentWorkoutAddContext, workout.focus),
+                          );
+                          return (
+                            <View key={`ai-${ex.name}-${i}`} style={[styles.addExerciseItem, { flexDirection: 'column', alignItems: 'stretch', borderColor: workoutPalette.strong + '66', borderWidth: 1.5 }]}>
+                              <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+                                <View style={{ flex: 1 }}>
+                                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                    <Text style={styles.addExerciseName}>{ex.name}</Text>
+                                    <ExerciseAlignmentBadge value={alignment} />
+                                  </View>
+                                  <Text style={styles.addExerciseMeta}>
+                                    {humanizeToken(ex.primary_muscle)} · {formatEquipmentLabel(ex.equipment)} · {ex.sets}x{ex.reps}
+                                  </Text>
                                 </View>
+                                {ex.source === 'wger' && (
+                                  <View style={{ backgroundColor: themeColors.surfaceRaised, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
+                                    <Text style={{ fontSize: 9, fontWeight: '600', color: themeColors.textMuted }}>DB</Text>
+                                  </View>
+                                )}
+                              </View>
+                              <Text style={[styles.addExerciseMeta, { marginTop: 4 }]}>{ex.why}</Text>
+                              {ex.form_cues?.length > 0 && (
+                                <Text style={[styles.addExerciseMeta, { marginTop: 4, fontSize: 11, opacity: 0.7 }]}>
+                                  Cues: {ex.form_cues.join(' · ')}
+                                </Text>
                               )}
+                              <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
+                                <TouchableOpacity
+                                  style={{ flex: 1, backgroundColor: workoutPalette.strong, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
+                                  onPress={() => handleAddAiExercise(ex)}>
+                                  <Text style={{ color: getContrastingTextColor(workoutPalette.strong), fontWeight: '700', fontSize: 13 }}>Add</Text>
+                                </TouchableOpacity>
+                                <TouchableOpacity
+                                  style={{ flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
+                                  onPress={() => handleSaveAiExerciseToLibrary(ex)}>
+                                  <Text style={{ color: themeColors.textPrimary, fontWeight: '700', fontSize: 13 }}>Save to library</Text>
+                                </TouchableOpacity>
+                              </View>
                             </View>
-                            <Text style={[styles.addExerciseMeta, { marginTop: 4 }]}>{ex.why}</Text>
-                            {ex.form_cues?.length > 0 && (
-                              <Text style={[styles.addExerciseMeta, { marginTop: 4, fontSize: 11, opacity: 0.7 }]}>
-                                Cues: {ex.form_cues.join(' · ')}
-                              </Text>
-                            )}
-                            <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
-                              <TouchableOpacity
-                                style={{ flex: 1, backgroundColor: workoutPalette.strong, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
-                                onPress={() => handleAddAiExercise(ex)}>
-                                <Text style={{ color: getContrastingTextColor(workoutPalette.strong), fontWeight: '700', fontSize: 13 }}>Add</Text>
-                              </TouchableOpacity>
-                              <TouchableOpacity
-                                style={{ flex: 1, backgroundColor: themeColors.surfaceRaised, borderWidth: 1, borderColor: themeColors.border, paddingVertical: 10, borderRadius: 8, alignItems: 'center' }}
-                                onPress={() => handleSaveAiExerciseToLibrary(ex)}>
-                                <Text style={{ color: themeColors.textPrimary, fontWeight: '700', fontSize: 13 }}>Save to library</Text>
-                              </TouchableOpacity>
-                            </View>
-                          </View>
-                        ))}
+                          );
+                        })}
                       </View>
                     )}
                   </>

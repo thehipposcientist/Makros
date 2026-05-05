@@ -1,6 +1,7 @@
 import {
   rankWorkoutAddCandidates,
   scoreWorkoutAddCandidate,
+  workoutAddAlignmentPercent,
 } from '../swapScoring.ts';
 
 const pushWorkout = [
@@ -132,6 +133,8 @@ describe('workout add-exercise ranking', () => {
     expect(firstFour).toContain('Dumbbell Lateral Raise');
     expect(firstFour).toContain('Cable Chest Fly');
     expect(firstFour).toContain('Triceps Pushdown');
+    expect(ranked[0]._alignment).toBeGreaterThan(0);
+    expect(101).toBeGreaterThan(ranked[0]._alignment);
   });
 
   it('keeps equipment filtering before ranking', () => {
@@ -149,5 +152,11 @@ describe('workout add-exercise ranking', () => {
     const legScore = scoreWorkoutAddCandidate(library[6], [], 'Legs');
     const chestScore = scoreWorkoutAddCandidate(library[3], [], 'Legs');
     expect(legScore).toBeGreaterThan(chestScore);
+  });
+
+  it('normalizes add fit score for display as workout alignment', () => {
+    const score = scoreWorkoutAddCandidate(library[2], pushWorkout, 'Push');
+    expect(workoutAddAlignmentPercent(score)).toBe(79);
+    expect(workoutAddAlignmentPercent(-1)).toBe(0);
   });
 });

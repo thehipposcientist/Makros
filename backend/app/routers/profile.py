@@ -220,6 +220,51 @@ def _write_memory(session: Session, user_id: int, event_type: str, summary: str,
     session.add(CoachMemory(user_id=user_id, event_type=event_type, summary=summary, details=details))
 
 
+def _weight_entry_payload(row: WeightEntry) -> dict:
+    return {
+        "date": row.entry_date.isoformat(),
+        "weight_lbs": row.weight_lbs,
+        "source": row.source,
+    }
+
+
+def _recent_weight_entries(session: Session, user_id: int, limit: int = 365) -> list[dict]:
+    rows = session.exec(
+        select(WeightEntry)
+        .where(WeightEntry.user_id == user_id)
+        .order_by(WeightEntry.entry_date.desc(), WeightEntry.created_at.desc())
+        .limit(limit)
+    ).all()
+    return [_weight_entry_payload(row) for row in reversed(rows)]
+
+
+def _promote_latest_weight_entry_to_profile(
+    session: Session,
+    user_id: int,
+    *,
+    as_of: date | None = None,
+) -> None:
+    latest = session.exec(
+        select(WeightEntry)
+        .where(WeightEntry.user_id == user_id)
+        .where(WeightEntry.entry_date <= (as_of or date.today()))
+        .order_by(WeightEntry.entry_date.desc(), WeightEntry.created_at.desc())
+    ).first()
+    if not latest or latest.weight_lbs <= 0:
+        return
+
+    profile = session.exec(
+        select(UserProfile).where(UserProfile.user_id == user_id)
+    ).first()
+    if not profile:
+        return
+
+    if profile.weight_lbs != latest.weight_lbs:
+        profile.weight_lbs = latest.weight_lbs
+        profile.updated_at = datetime.now(timezone.utc)
+        session.add(profile)
+
+
 @router.post("/onboarding")
 def sync_onboarding(
     body: OnboardingSync,
@@ -398,6 +443,7 @@ def get_my_profile(
         "first_name": current_user.first_name,
         "last_name": current_user.last_name,
         "subscription_tier": current_user.subscription_tier or "free",
+        "weight_entries": _recent_weight_entries(session, current_user.id),
     }
     session.commit()
     return payload
@@ -1046,7 +1092,7 @@ def list_weight_entries(
         .where(WeightEntry.user_id == current_user.id)
         .order_by(WeightEntry.entry_date)
     ).all()
-    return [{"date": r.entry_date.isoformat(), "weight_lbs": r.weight_lbs, "source": r.source} for r in rows]
+    return [_weight_entry_payload(r) for r in rows]
 
 
 @router.post("/weight-entries", status_code=201)
@@ -1056,6 +1102,8 @@ def save_weight_entry(
     db: Session = Depends(get_session),
 ):
     from datetime import date as _d
+    if body.weight_lbs <= 0:
+        raise HTTPException(status_code=400, detail="weight_lbs must be positive")
     d = _d.fromisoformat(body.date)
     existing = db.exec(
         select(WeightEntry).where(
@@ -1074,6 +1122,8 @@ def save_weight_entry(
             weight_lbs=body.weight_lbs,
             source=body.source,
         ))
+    db.flush()
+    _promote_latest_weight_entry_to_profile(db, current_user.id)
     db.commit()
     return {"status": "ok"}
 
@@ -1087,6 +1137,8 @@ def sync_weight_entries(
     """Bulk upsert from client's local weight history."""
     from datetime import date as _d
     for e in entries:
+        if e.weight_lbs <= 0:
+            raise HTTPException(status_code=400, detail="weight_lbs must be positive")
         d = _d.fromisoformat(e.date)
         existing = db.exec(
             select(WeightEntry).where(
@@ -1105,6 +1157,8 @@ def sync_weight_entries(
                 weight_lbs=e.weight_lbs,
                 source=e.source,
             ))
+    db.flush()
+    _promote_latest_weight_entry_to_profile(db, current_user.id)
     db.commit()
     return {"synced": len(entries)}
 

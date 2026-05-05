@@ -26,6 +26,7 @@ struct ContentView: View {
     // Set to true when the user explicitly taps Start so onReceive can
     // accept the phone's first active echo without the age check.
     @State private var watchStartPending: Bool = false
+    @State private var pendingLocalSessionId: String? = nil
     @State private var selectedPage: Int = 0
     // Show a brief "← swipe →" hint on the first launch the user
     // sees, then never again (persisted in UserDefaults). Covers the
@@ -45,6 +46,27 @@ struct ContentView: View {
             warmupSteps: nil,
             syncedAtMs: Date().timeIntervalSince1970 * 1000,
             userId: nil
+        )
+    }
+
+    private var activeDisplayedWorkout: WatchWorkout {
+        let w = displayedWorkout
+        guard let sid = pendingLocalSessionId, !sid.isEmpty else { return w }
+        if w.status == .completed || w.status == .skipped || w.status == .rest {
+            return w
+        }
+        return WatchWorkout(
+            focus: w.focus,
+            durationMinutes: w.durationMinutes,
+            dateISO: w.dateISO,
+            status: .active,
+            sessionId: w.status == .active ? (w.sessionId ?? sid) : sid,
+            readiness: w.readiness,
+            readinessLabel: w.readinessLabel,
+            exercises: w.exercises,
+            warmupSteps: w.warmupSteps,
+            syncedAtMs: max(w.syncedAtMs, Date().timeIntervalSince1970 * 1000),
+            userId: w.userId
         )
     }
 
@@ -109,17 +131,24 @@ struct ContentView: View {
         }
     }
 
+    private func makeLocalSessionId() -> String {
+        "watch-\(Int(Date().timeIntervalSince1970 * 1000))-\(String(UUID().uuidString.prefix(8)))"
+    }
+
     private func startOrRejoinWorkout() {
         selectedPage = 0
         if let w = todayWorkout, w.status == .active {
             HeartRateStore.saveDiag("Start shortcut → rejoin active")
+            pendingLocalSessionId = nil
             openActiveWorkout()
         } else {
             HeartRateStore.saveDiag("Start shortcut → active + phone command")
             ActiveWorkoutState.clearPersistedStore()
+            let sessionId = makeLocalSessionId()
+            pendingLocalSessionId = sessionId
             watchStartPending = true
             openActiveWorkout()
-            conn.sendCommand("start_workout")
+            conn.sendCommand("start_workout", payload: ["sessionId": sessionId])
         }
     }
 
@@ -197,26 +226,28 @@ struct ContentView: View {
             }
             .navigationDestination(isPresented: $active) {
                 ActiveWorkoutView(
-                    workout: displayedWorkout,
+                    workout: activeDisplayedWorkout,
                     hr: heartRate,
                     onEndWorkout: {
                         active = false
                         heartRate.discard()
-                        let sid = conn.workout?.sessionId ?? ""
+                        let sid = activeDisplayedWorkout.sessionId ?? conn.workout?.sessionId ?? ""
                         conn.sendCommand("end_workout", payload: ["sessionId": sid])
                         if !sid.isEmpty {
                             UserDefaults.standard.set(sid, forKey: "thallo.lastEndedSessionId")
                         }
+                        pendingLocalSessionId = nil
                         UserDefaults.standard.set(false, forKey: "thallo.pendingWorkoutLaunch")
                     },
                     onCancelWorkout: {
                         active = false
                         heartRate.discard()
-                        let sid = conn.workout?.sessionId ?? ""
+                        let sid = activeDisplayedWorkout.sessionId ?? conn.workout?.sessionId ?? ""
                         conn.sendCommand("cancel_workout", payload: ["sessionId": sid])
                         if !sid.isEmpty {
                             UserDefaults.standard.set(sid, forKey: "thallo.lastEndedSessionId")
                         }
+                        pendingLocalSessionId = nil
                         UserDefaults.standard.set(false, forKey: "thallo.pendingWorkoutLaunch")
                     }
                 )
@@ -247,6 +278,9 @@ struct ContentView: View {
             HeartRateStore.saveDiag("rcv workout sync status=\(w.status) sid=\(w.sessionId?.prefix(8) ?? "nil")")
             switch w.status {
             case .active:
+                if let sid = w.sessionId, sid == pendingLocalSessionId {
+                    pendingLocalSessionId = nil
+                }
                 if !active {
                     let pending = watchStartPending
                     if pending || shouldResumeWorkout(w) {
@@ -257,6 +291,7 @@ struct ContentView: View {
                 }
             case .completed, .skipped:
                 watchStartPending = false
+                pendingLocalSessionId = nil
                 ActiveWorkoutState.clearPersistedStore()
                 if active {
                     active = false
@@ -264,6 +299,7 @@ struct ContentView: View {
                 }
             case .rest, .scheduled:
                 watchStartPending = false
+                pendingLocalSessionId = nil
             }
         }
     }

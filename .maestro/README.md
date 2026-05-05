@@ -76,6 +76,7 @@ Additional seeded E2E coverage:
 make seed-e2e
 maestro test .maestro/flows/recovery-live-workouts.yaml
 maestro test .maestro/flows/workout-templates.yaml
+maestro test .maestro/flows/active-workout-swap-recommendations.yaml
 maestro test .maestro/flows/active-workout-completion.yaml
 ```
 
@@ -157,6 +158,8 @@ Seeded credentials:
 
 - `e2e_returning@test.thallo` / `SeedTest1234` — pro returning user with active
   PlanWeek, meals, progress, social, gear, and supplement data.
+- `e2e_live_swap@test.thallo` / `SeedTest1234` — pro live-workout swap fixture
+  with a seeded bench target and shoulder-press history.
 - `e2e_long@test.thallo` / `SeedTest1234` — pro 90-minute workout persona.
 - `e2e_social_a@test.thallo` / `SeedTest1234` and
   `e2e_social_b@test.thallo` / `SeedTest1234` — friend graph fixtures.

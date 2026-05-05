@@ -89,6 +89,7 @@ def test_e2e_seed_creates_full_idempotent_personas() -> None:
         user_ids = [int(user.id) for user in users]
 
         returning = users_by_email["e2e_returning@test.thallo"]
+        live_swap_user = users_by_email["e2e_live_swap@test.thallo"]
         long_user = users_by_email["e2e_long@test.thallo"]
         ppl_open_user = users_by_email["e2e_ppl_open@test.thallo"]
         recovery_apply_user = users_by_email["e2e_recovery_apply@test.thallo"]
@@ -146,6 +147,21 @@ def test_e2e_seed_creates_full_idempotent_personas() -> None:
                 assert day.workout_json.get("exercises"), f"training day {idx} is missing exercises"
             else:
                 assert day.workout_json is None
+
+        live_swap_week = session.exec(
+            select(PlanWeek).where(PlanWeek.user_id == live_swap_user.id)
+        ).first()
+        assert live_swap_week is not None
+        live_swap_today = session.exec(
+            select(PlanDay)
+            .where(PlanDay.plan_week_id == live_swap_week.id)
+            .where(PlanDay.day_index == 0)
+        ).first()
+        assert live_swap_today is not None
+        assert live_swap_today.workout_json is not None
+        live_swap_exercises = live_swap_today.workout_json.get("exercises") or []
+        assert live_swap_exercises[0]["name"] == "Dumbbell Bench Press"
+        assert live_swap_exercises[0]["targetWeightLbs"] == 120
 
         long_week = session.exec(
             select(PlanWeek).where(PlanWeek.user_id == long_user.id)

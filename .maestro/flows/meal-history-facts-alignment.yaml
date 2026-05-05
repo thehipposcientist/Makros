@@ -66,13 +66,15 @@ tags:
       id: "meal-history-screen"
     timeout: 30000
 
-# The seeded history includes alternating complete days. Pick the
-# 1427-cal complete day by its totals instead of assuming it is row 0,
-# because the most recent past day depends on the simulator date.
+# The seeded history opens with a complete meal-history day. Use the
+# row testID instead of exact macro text because Maestro can split the
+# rendered totals string across accessibility nodes.
 - extendedWaitUntil:
-    visible: "1427 cal · 139g P · 144g C · 30g F"
+    visible:
+      id: "meal-history-row-0"
     timeout: 15000
-- tapOn: "1427 cal · 139g P · 144g C · 30g F"
+- tapOn:
+    id: "meal-history-row-0"
 - extendedWaitUntil:
     visible: "Greek yogurt protein bowl"
     timeout: 15000

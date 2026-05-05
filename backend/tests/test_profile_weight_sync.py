@@ -6,7 +6,7 @@ weight unless the caller explicitly opts into promotion.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi import HTTPException
 from sqlalchemy.pool import StaticPool
@@ -23,6 +23,7 @@ from app.models import (
     UserPreferences,
     UserProfile,
     UserState,
+    WeightEntry,
     WeeklyCheckIn,
     WeeklyCheckInCreate,
 )
@@ -326,6 +327,62 @@ def test_checkin_rejects_non_positive_weight():
     _ok("weight_lbs <= 0 is rejected without touching profile/check-ins")
 
 
+def test_weight_entry_promotes_latest_profile_weight_and_profile_payload():
+    """Explicit weight logs update the profile and hydrate /profile/me trend data."""
+    print("\n[test] profile/weight-entries: latest log promotes profile + profile/me")
+    eng = _make_engine()
+    with Session(eng) as session:
+        user = _seed_user_profile(session, user_id=50, weight_lbs=180.0)
+
+        result = profile_router.save_weight_entry(
+            profile_router.WeightEntryBody(
+                date=date.today().isoformat(),
+                weight_lbs=177.4,
+                source="manual",
+            ),
+            current_user=user,
+            db=session,
+        )
+        payload = profile_router.get_my_profile(current_user=user, session=session)
+
+        assert result["status"] == "ok"
+        assert _profile_weight(session, 50) == 177.4
+        assert payload["profile"]["weight_lbs"] == 177.4
+        assert payload["weight_entries"][-1]["weight_lbs"] == 177.4
+    _ok("manual weight log updates profile and profile payload")
+
+
+def test_weight_entry_sync_promotes_newest_entry_only():
+    """Bulk sync should not let an older history row replace a newer profile weight."""
+    print("\n[test] profile/weight-entries/sync: newest entry wins profile weight")
+    eng = _make_engine()
+    today = date.today()
+    with Session(eng) as session:
+        user = _seed_user_profile(session, user_id=51, weight_lbs=180.0)
+
+        profile_router.sync_weight_entries(
+            [
+                profile_router.WeightEntryBody(
+                    date=(today - timedelta(days=1)).isoformat(),
+                    weight_lbs=178.0,
+                    source="manual",
+                ),
+                profile_router.WeightEntryBody(
+                    date=today.isoformat(),
+                    weight_lbs=176.8,
+                    source="watch",
+                ),
+            ],
+            current_user=user,
+            db=session,
+        )
+        rows = session.exec(select(WeightEntry).where(WeightEntry.user_id == 51)).all()
+
+        assert len(rows) == 2
+        assert _profile_weight(session, 51) == 176.8
+    _ok("bulk weight sync promotes the newest dated entry")
+
+
 cases = [
     test_profile_me_returns_dumped_profile_payload,
     test_onboarding_sync_keeps_unchanged_goal_idempotent,
@@ -335,6 +392,8 @@ cases = [
     test_measurement_checkin_does_not_update_profile_weight_when_flag_false,
     test_checkin_defaults_to_updating_profile_weight,
     test_checkin_rejects_non_positive_weight,
+    test_weight_entry_promotes_latest_profile_weight_and_profile_payload,
+    test_weight_entry_sync_promotes_newest_entry_only,
 ]
 
 
