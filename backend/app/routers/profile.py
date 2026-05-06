@@ -347,6 +347,9 @@ def sync_onboarding(
         prefs.preferred_split  = body.preferences.preferred_split
         prefs.equipment        = body.preferences.equipment
         prefs.equipment_settings = body.preferences.equipment_settings
+        prefs.experience_level = body.preferences.experience_level
+        prefs.strength_baselines = body.preferences.strength_baselines
+        prefs.cardio_baseline = body.preferences.cardio_baseline
         prefs.foods_available  = body.preferences.foods_available
         prefs.injuries         = body.preferences.injuries
         prefs.updated_at       = now

@@ -131,7 +131,7 @@ def test_density_none_session_minutes_no_trim():
 
 # ─── prescribe_for_slot ────────────────────────────────────────────────────
 
-def _make_inputs(goal="muscle_gain", session_minutes=60):
+def _make_inputs(goal="muscle_gain", session_minutes=60, cardio_baseline=None):
     """Minimal PlannerInputs-shaped object for prescription tests."""
     from types import SimpleNamespace
     return SimpleNamespace(
@@ -139,6 +139,7 @@ def _make_inputs(goal="muscle_gain", session_minutes=60):
         session_minutes=session_minutes,
         experience="intermediate",
         days_per_week=5,
+        cardio_baseline=cardio_baseline,
     )
 
 
@@ -214,6 +215,27 @@ def test_prescribe_conditioning_zone2_scales_to_session():
     assert re.search(r"\d{2,3}\s*min", pres.reps), \
         f"Zone2 prescription must contain a NN min duration: '{pres.reps}'"
     _ok(f"zone2 60min → {pres.reps}")
+
+
+def test_prescribe_conditioning_cardio_baseline_caps_zone2():
+    """Signup cardio baseline should tune duration/cues deterministically."""
+    print("\n[test] prescriptions: cardio baseline caps early zone2")
+    slot = Slot("Main Cardio", "cardio", None, "primary")
+    ex = {"name": "Treadmill", "movement_pattern": "cardio", "exercise_type": "cardio"}
+    inputs = _make_inputs(
+        session_minutes=60,
+        cardio_baseline={
+            "canJog10Min": False,
+            "comfortableDurationMin": 12,
+        },
+    )
+    pres = _prescribe_conditioning(DayArchetype.COND_ZONE2, slot, ex, inputs)
+    assert pres.cardio_guidance is not None
+    duration = pres.cardio_guidance["duration_min"]
+    assert duration <= 20, pres.cardio_guidance
+    assert pres.cardio_guidance["intensity_cue"] == "walk/jog intervals"
+    assert f"{duration} min" in pres.reps, pres.reps
+    _ok(f"cardio baseline → {pres.reps}")
 
 
 def test_prescribe_conditioning_short_intervals_count_scales():
@@ -657,6 +679,7 @@ cases = [
     test_prescribe_stimulus_hypertrophy_isolation,
     test_prescribe_stimulus_volume_primary,
     test_prescribe_conditioning_zone2_scales_to_session,
+    test_prescribe_conditioning_cardio_baseline_caps_zone2,
     test_prescribe_conditioning_short_intervals_count_scales,
     test_prescribe_power_cardio_gets_sprints,
     test_prescribe_power_plyometric,

@@ -47,13 +47,12 @@ import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
 import { buildGoalTrajectory } from '../utils/goalTrajectory';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
-import { computeFitnessAge } from '../utils/fitnessAge';
 import { estimate1RM } from '../utils/oneRepMax';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord, listWorkoutSessions, WorkoutSessionRecord, getWeightEntries, saveWeightEntryAPI, deleteWeightEntryAPI, clearWeightEntriesAPI } from '../services/api';
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
-import { aggregateDailyFromHistory, dailyBarDenominator, headlineLoggedCalories, macrosHeadlineFromAverages, macrosHeadlineFromDailyRows, selectDailyRows } from './progressData';
+import { aggregateDailyFromHistory, headlineLoggedCalories, macrosHeadlineFromAverages, macrosHeadlineFromDailyRows, selectDailyRows } from './progressData';
 import { tierOf } from '../utils/subscription';
 import { manualActivityFromCompletion, mergeCompletionIntoWorkoutSession } from '../utils/workoutCompletion';
 import { formatDistance, formatWeight, lbsToUnit, resolveDistanceUnit, resolveWeightUnit, unitToLbs, type DistanceUnit, type WeightUnit } from '../utils/units';
@@ -64,7 +63,7 @@ import {
   type E1RMTrendPoint,
 } from '../utils/workoutProgressFilters';
 
-type ProgressTab = 'today' | 'trends' | 'history' | 'body' | 'health';
+type ProgressTab = 'today' | 'trends' | 'body' | 'health';
 
 interface ProgressScreenProps {
   onBack: () => void;
@@ -1161,7 +1160,7 @@ function buildThisWeekOverview(
       detail: trendText(recentWorkoutDays, previousWorkoutDays, 'active days'),
       icon: 'calendar-outline',
       color: '#22C55E',
-      targetTab: 'history',
+      targetTab: 'trends',
     });
   }
   if (recentSets > 0) {
@@ -1360,7 +1359,7 @@ function buildTrainingPaceSignal(
       : 'Complete the next scheduled workout to get back on pace.',
     icon: 'calendar-outline',
     color,
-    targetTab: 'history',
+    targetTab: 'trends',
     status,
     score: status === 'good' ? 1 : status === 'watch' ? 0.55 : status === 'off' ? 0.15 : 0.35,
     pct,
@@ -2228,6 +2227,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [healthHistoryRows, setHealthHistoryRows] = useState<import('../services/api').DailyHealthHistoryItem[]>([]);
   const [sleepHistoryRows, setSleepHistoryRows] = useState<import('../services/api').SleepHistoryItem[]>([]);
   const [healthHistoryLoading, setHealthHistoryLoading] = useState(false);
+  const [healthTimelineExpanded, setHealthTimelineExpanded] = useState(false);
   const [healthEnabled, setHealthEnabled] = useState<boolean>(false);
   const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
@@ -2481,7 +2481,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
   useEffect(() => {
     if (!isActive) return;
-    if ((tab === 'trends' || tab === 'history') && authToken && !paceLoadedRef.current) {
+    if (tab === 'trends' && authToken && !paceLoadedRef.current) {
       paceLoadedRef.current = true;
       getPaceHistory(authToken).then(r => setPaceHistory(r.points)).catch(() => {});
     }
@@ -3045,7 +3045,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         {([
           ['today', 'Today'],
           ['trends', 'Trends'],
-          ['history', 'History'],
           ['body', 'Body'],
           ['health', 'Health'],
         ] as const).map(([key, label]) => (
@@ -4062,7 +4061,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
         </ScrollView>
-      ) : (tab as string) === 'history' ? (
+      ) : false ? (
+        /* History tab removed — duplicates the Workout → History tab on
+           Home. Kept disabled instead of deleted to preserve git blame
+           on the legacy month-calendar / streak / share / session-card
+           code; that view still lives on the Home Workout tab. */
         <ScrollView contentContainerStyle={styles.content}>
           {/* Month calendar — standard Sun-Sat grid for current month */}
           {(() => {
@@ -4973,8 +4976,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {isProTier && authToken && (() => {
-            const healthRows = healthHistoryRows.filter(row => !!row.snapshot_date);
-            const sleepRows = sleepHistoryRows.filter(row => !!row.night_date);
+            const healthRows = healthHistoryRows
+              .filter(row => !!row.snapshot_date)
+              .sort((a, b) => String(a.snapshot_date).localeCompare(String(b.snapshot_date)));
+            const sleepRows = sleepHistoryRows
+              .filter(row => !!row.night_date)
+              .sort((a, b) => String(a.night_date).localeCompare(String(b.night_date)));
             const sleepAvg7 = averageFinite(sleepRows.slice(-7).map(row => row.total_hours));
             const stepsAvg7 = averageFinite(healthRows.slice(-7).map(row => row.steps));
             const hrvLatest = latestFiniteValue([
@@ -4996,25 +5003,48 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               const date = String(row.night_date).slice(0, 10);
               merged.set(date, { ...(merged.get(date) ?? { date }), sleep: row });
             }
-            const recentRows = Array.from(merged.values())
-              .sort((a, b) => b.date.localeCompare(a.date))
-              .slice(0, 7);
+            const timelineRows = Array.from(merged.values())
+              .sort((a, b) => a.date.localeCompare(b.date));
+            const recentRows = [...timelineRows].reverse().slice(0, 7);
+            const calendarRows = timelineRows.slice(-14);
+            const sleepChartRows = timelineRows
+              .filter(row => row.sleep?.total_hours != null)
+              .slice(-7);
             const statTiles = [
-              { label: 'Sleep avg', value: formatSleepHours(sleepAvg7), color: '#818CF8' },
-              { label: 'Steps avg', value: stepsAvg7 != null ? Math.round(stepsAvg7).toLocaleString() : '—', color: tc.primary },
+              { label: 'Sleep/day', value: formatSleepHours(sleepAvg7), color: '#818CF8' },
+              { label: 'Steps/day', value: stepsAvg7 != null ? Math.round(stepsAvg7).toLocaleString() : '—', color: tc.primary },
               { label: 'Latest HRV', value: hrvLatest != null ? `${Math.round(hrvLatest)} ms` : '—', color: '#14B8A6' },
-              { label: 'Zone 2', value: zone2Values.length > 0 ? `${Math.round(zone2Total)}m` : '—', color: '#F59E0B' },
+              { label: 'Zone 2 total', value: zone2Values.length > 0 ? `${Math.round(zone2Total)}m` : '—', color: '#F59E0B' },
             ];
+            const scoreColor = (score: number | null | undefined) => {
+              const v = Number(score);
+              if (!Number.isFinite(v)) return tc.border;
+              if (v >= 80) return '#22C55E';
+              if (v >= 60) return '#F59E0B';
+              return '#EF4444';
+            };
+            const metricScore = (row: typeof timelineRows[number]) => {
+              const sleepScore = Number(row.sleep?.score);
+              if (Number.isFinite(sleepScore)) return sleepScore;
+              const readiness = Number(row.health?.readiness_score);
+              return Number.isFinite(readiness) ? readiness : null;
+            };
 
             return (
               <View testID="stored-health-history-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
-                <View style={[styles.vitalsHeader, { marginBottom: 12 }]}>
-                  <Ionicons name="server-outline" size={16} color={tc.primary} />
-                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Stored Health History</Text>
-                  <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted }}>
-                    {healthRows.length}d health · {sleepRows.length}n sleep
-                  </Text>
-                </View>
+                <TouchableOpacity
+                  activeOpacity={0.7}
+                  onPress={() => { configureExpandAnimation(300); setHealthTimelineExpanded(prev => !prev); }}
+                >
+                  <View style={[styles.vitalsHeader, { marginBottom: healthHistoryLoading || recentRows.length > 0 ? 12 : 0 }]}>
+                    <Ionicons name="calendar-clear-outline" size={16} color={tc.primary} />
+                    <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Health Timeline</Text>
+                    <Text style={{ fontSize: 10, fontWeight: '800', color: tc.textMuted, marginRight: 6 }}>
+                      {healthRows.length}d health · {sleepRows.length}n sleep
+                    </Text>
+                    <Ionicons name={healthTimelineExpanded ? 'chevron-up' : 'chevron-down'} size={16} color={tc.textMuted} />
+                  </View>
+                </TouchableOpacity>
 
                 {healthHistoryLoading ? (
                   <ActivityIndicator size="small" color={tc.primary} style={{ marginVertical: 12 }} />
@@ -5024,79 +5054,83 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </Text>
                 ) : (
                   <>
-                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
-                      {statTiles.map(tile => (
-                        <View key={tile.label} style={{ flexGrow: 1, flexBasis: '47%', backgroundColor: tc.surfaceRaised, borderRadius: 10, paddingVertical: 9, paddingHorizontal: 10, borderWidth: 1, borderColor: tc.border }}>
-                          <Text style={{ fontSize: 17, fontWeight: '900', color: tile.color }} numberOfLines={1}>{tile.value}</Text>
-                          <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textMuted, textTransform: 'uppercase', marginTop: 2 }}>{tile.label}</Text>
-                        </View>
-                      ))}
-                    </View>
-                    <View style={{ borderTopWidth: 1, borderTopColor: tc.border + '55' }}>
-                      {recentRows.map(row => {
-                        const sleep = row.sleep?.total_hours != null ? formatSleepHours(row.sleep.total_hours) : '—';
-                        const sleepScore = row.sleep?.score != null ? ` · score ${row.sleep.score}` : '';
-                        const steps = row.health?.steps != null ? Math.round(Number(row.health.steps)).toLocaleString() : '—';
-                        const hrv = Number(row.health?.hrv_ms ?? row.sleep?.hrv_ms);
-                        const rhr = Number(row.health?.resting_hr ?? row.sleep?.resting_hr);
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 4, marginBottom: healthTimelineExpanded ? 12 : 0 }}>
+                      {calendarRows.map(row => {
+                        const score = metricScore(row);
+                        const color = scoreColor(score);
+                        const d = new Date(`${row.date}T12:00:00`);
+                        const dayLabel = Number.isNaN(d.getTime()) ? row.date.slice(8, 10) : String(d.getDate());
                         return (
-                          <View key={row.date} style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: tc.border + '33' }}>
-                            <Text style={{ width: 50, fontSize: 11, fontWeight: '800', color: tc.textMuted }}>{formatHealthDateLabel(row.date)}</Text>
-                            <View style={{ flex: 1 }}>
-                              <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary }}>
-                                Sleep {sleep}{sleepScore}
-                              </Text>
-                              <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>
-                                Steps {steps}
-                                {Number.isFinite(hrv) ? ` · HRV ${Math.round(hrv)} ms` : ''}
-                                {Number.isFinite(rhr) ? ` · RHR ${Math.round(rhr)}` : ''}
+                          <View key={row.date} style={{ alignItems: 'center', flex: 1, minWidth: 20 }}>
+                            <View style={{
+                              width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center',
+                              backgroundColor: score != null ? color + '22' : tc.surfaceRaised,
+                              borderWidth: 1, borderColor: score != null ? color : tc.border,
+                            }}>
+                              <Text style={{ fontSize: 9, fontWeight: '900', color: score != null ? color : tc.textMuted }}>
+                                {score != null ? Math.round(score) : '·'}
                               </Text>
                             </View>
+                            <Text style={{ fontSize: 9, color: tc.textMuted, marginTop: 3 }}>{dayLabel}</Text>
                           </View>
                         );
                       })}
                     </View>
+
+                    {healthTimelineExpanded && (
+                      <>
+                        {sleepChartRows.length > 0 && (
+                          <View style={{ marginBottom: 12, paddingTop: 10, borderTopWidth: 1, borderTopColor: tc.border + '55' }}>
+                            <View style={{ height: 70, flexDirection: 'row', alignItems: 'flex-end', gap: 6 }}>
+                              {sleepChartRows.map((row, index) => {
+                                const hours = Number(row.sleep?.total_hours ?? 0);
+                                const pct = Math.min(100, Math.max(10, (hours / 9) * 100));
+                                return (
+                                  <View key={row.date} style={{ flex: 1, alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
+                                    <View style={{ width: '70%', height: `${pct}%` as any, borderRadius: 5, backgroundColor: '#818CF8', opacity: 0.55 + index * 0.05 }} />
+                                    <Text style={{ fontSize: 9, fontWeight: '700', color: tc.textMuted, marginTop: 4 }}>{formatHealthDateLabel(row.date).replace(' ', '')}</Text>
+                                  </View>
+                                );
+                              })}
+                            </View>
+                          </View>
+                        )}
+                        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+                          {statTiles.map(tile => (
+                            <View key={tile.label} style={{ flexGrow: 1, flexBasis: '47%', backgroundColor: tc.surfaceRaised, borderRadius: 8, paddingVertical: 9, paddingHorizontal: 10, borderWidth: 1, borderColor: tc.border }}>
+                              <Text style={{ fontSize: 17, fontWeight: '900', color: tile.color }} numberOfLines={1}>{tile.value}</Text>
+                              <Text style={{ fontSize: 9, fontWeight: '800', color: tc.textMuted, textTransform: 'uppercase', marginTop: 2 }}>{tile.label}</Text>
+                            </View>
+                          ))}
+                        </View>
+                        <View style={{ borderTopWidth: 1, borderTopColor: tc.border + '55' }}>
+                          {recentRows.map(row => {
+                            const sleep = row.sleep?.total_hours != null ? formatSleepHours(row.sleep.total_hours) : '—';
+                            const sleepScore = row.sleep?.score != null ? ` · score ${row.sleep.score}` : '';
+                            const steps = row.health?.steps != null ? Math.round(Number(row.health.steps)).toLocaleString() : '—';
+                            const hrv = Number(row.health?.hrv_ms ?? row.sleep?.hrv_ms);
+                            const rhr = Number(row.health?.resting_hr ?? row.sleep?.resting_hr);
+                            return (
+                              <View key={row.date} style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: tc.border + '33' }}>
+                                <Text style={{ width: 50, fontSize: 11, fontWeight: '800', color: tc.textMuted }}>{formatHealthDateLabel(row.date)}</Text>
+                                <View style={{ flex: 1 }}>
+                                  <Text style={{ fontSize: 12, fontWeight: '700', color: tc.textPrimary }}>
+                                    Sleep {sleep}{sleepScore}
+                                  </Text>
+                                  <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 2 }}>
+                                    Steps {steps}
+                                    {Number.isFinite(hrv) ? ` · HRV ${Math.round(hrv)} ms` : ''}
+                                    {Number.isFinite(rhr) ? ` · RHR ${Math.round(rhr)}` : ''}
+                                  </Text>
+                                </View>
+                              </View>
+                            );
+                          })}
+                        </View>
+                      </>
+                    )}
                   </>
                 )}
-              </View>
-            );
-          })()}
-
-          {/* Fitness Age */}
-          {isProTier && (() => {
-            const vo2 = healthSummary?.vo2Max;
-            const age = userProfile.physicalStats?.age;
-            const fa = vo2 != null && age != null ? computeFitnessAge(vo2, age) : null;
-            if (!fa) return null;
-            const deltaColor =
-              fa.delta >= 8 ? '#22C55E' :
-              fa.delta >= 2 ? tc.primary :
-              fa.delta >= -5 ? tc.textSecondary : '#EF4444';
-            return (
-              <View style={[styles.vitalsCard, { marginTop: 0 }]}>
-                <View style={[styles.vitalsHeader, { marginBottom: 10 }]}>
-                  <Ionicons name="fitness" size={16} color={tc.primary} />
-                  <Text style={[styles.vitalsTitle, { color: tc.textPrimary }]}>Fitness Age</Text>
-                  <Text style={[styles.vitalsSubtitle, { color: tc.textMuted }]}>{fa.label}</Text>
-                </View>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                  <View style={{ alignItems: 'center', paddingVertical: 4, paddingHorizontal: 10, borderRadius: radius.md, backgroundColor: deltaColor + '22' }}>
-                    <Text style={{ fontSize: 30, fontWeight: '900', color: deltaColor, lineHeight: 34 }}>{fa.fitnessAge}</Text>
-                    <Text style={{ fontSize: 9, fontWeight: '700', color: deltaColor, letterSpacing: 1 }}>YRS</Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 13, fontWeight: '600', color: tc.textPrimary, lineHeight: 18 }}>
-                      {fa.delta === 0
-                        ? `Cardio fitness matches your age (${age}).`
-                        : fa.delta > 0
-                          ? `Cardio fitness of a ${fa.fitnessAge}-year-old — ${fa.delta} yr${fa.delta !== 1 ? 's' : ''} younger than your actual age.`
-                          : `Cardio fitness of a ${fa.fitnessAge}-year-old — ${-fa.delta} yr${-fa.delta !== 1 ? 's' : ''} older than your actual age.`}
-                    </Text>
-                    <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4 }}>
-                      Based on VO₂ Max {Math.round(vo2! * 10) / 10} ml/kg/min
-                    </Text>
-                  </View>
-                </View>
               </View>
             );
           })()}
@@ -5505,7 +5539,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 const loggedProtein = macrosHead.protein;
                 const loggedCarbs = macrosHead.carbs;
                 const loggedFat = macrosHead.fat;
-                const dailyRows = allDailyRows.slice(0, 5);
                 const totalMealsLogged = allDailyRows.length > 0
                   ? allDailyRows.reduce((sum, row) => sum + Number(row.meal_count ?? 0), 0)
                   : mealAverages.total_meals_logged;
@@ -5538,41 +5571,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                       ? ` · calendar avg ${Math.round(mealAverages.avg_calories)} cal`
                       : ''}
                   </Text>
-                  {dailyRows.length > 0 && (() => {
-                    // Use the max of the visible rows (or the avg, whichever
-                    // is larger) as the bar denominator. The previous version
-                    // used `loggedCal` (the avg), which clamped every
-                    // above-average day to 100% — making them all look
-                    // identical even when one day was far higher than another.
-                    const barMax = dailyBarDenominator(loggedCal, dailyRows);
-                    return (
-                    <View style={{ marginTop: 8, gap: 4 }}>
-                      <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 2 }}>
-                        RECENT LOGGED DAYS
-                      </Text>
-                      {dailyRows.map((row, rowIndex) => {
-                        const d = new Date(`${row.date}T12:00:00`);
-                        const label = `${d.getMonth() + 1}/${d.getDate()}`;
-                        return (
-                          <View key={row.date} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                            <Text style={{ width: 36, fontSize: 10, fontWeight: '700', color: tc.textMuted }}>{label}</Text>
-                            <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border }}>
-                              <AnimatedProgressFill
-                                pct={Math.min(100, (row.calories / barMax) * 100)}
-                                color={tc.primary}
-                                delay={staggerDelay(rowIndex, 35)}
-                                style={{ height: 5, borderRadius: 3 }}
-                              />
-                            </View>
-                            <Text style={{ width: 92, fontSize: 10, color: tc.textSecondary, textAlign: 'right' }}>
-                              {Math.round(row.calories)} cal · {Math.round(row.protein_g)}g P
-                            </Text>
-                          </View>
-                        );
-                      })}
-                    </View>
-                    );
-                  })()}
                 </View>
                 );
               })()}
@@ -5635,14 +5633,22 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   })()}
 
                   {/* Metric rows */}
-                  {[
-                    { icon: 'flask-outline', label: 'Fermented foods', value: `${gutHealthWindow.fermented_servings} servings`, detail: 'Kimchi, yogurt, sauerkraut support gut flora' },
-                    { icon: 'medkit-outline', label: 'Probiotic servings', value: `${gutHealthWindow.probiotic_servings ?? 0}`, detail: 'Live cultures for microbiome balance' },
-                    { icon: 'fish-outline', label: 'Omega-3 foods', value: `${gutHealthWindow.omega3_servings} servings`, detail: 'Anti-inflammatory, heart & brain health' },
-                    // Collagen — AI-estimated from every logged food, not
-                    // a keyword match. Shows daily average for readability.
-                    { icon: 'pulse-outline', label: 'Collagen', value: `${Math.round((gutHealthWindow as any).avg_collagen_g ?? 0)}g / day avg`, detail: 'AI-estimated from bone broth, skin-on cuts, gelatin, supplements' },
-                  ].map(row => (
+                  {(() => {
+                    const days = Math.max(1, gutHealthWindow.days_with_data || 1);
+                    const avgFermented = Number((gutHealthWindow as any).avg_fermented_servings ?? (gutHealthWindow.fermented_servings / days));
+                    const avgProbiotic = Number((gutHealthWindow as any).avg_probiotic_servings ?? ((gutHealthWindow.probiotic_servings ?? 0) / days));
+                    const avgOmega3 = Number((gutHealthWindow as any).avg_omega3_servings ?? (gutHealthWindow.omega3_servings / days));
+                    const omega3Supp = Number((gutHealthWindow as any).omega3_supplement_servings ?? 0);
+                    const fmtAvg = (value: number) => `${Number.isFinite(value) ? Math.round(value * 10) / 10 : 0} / day avg`;
+                    return [
+                      { icon: 'flask-outline', label: 'Fermented foods', value: fmtAvg(avgFermented), detail: `${Math.round(gutHealthWindow.fermented_servings * 10) / 10} total servings logged` },
+                      { icon: 'medkit-outline', label: 'Probiotic servings', value: fmtAvg(avgProbiotic), detail: `${Math.round((gutHealthWindow.probiotic_servings ?? 0) * 10) / 10} total live-culture servings logged` },
+                      { icon: 'fish-outline', label: 'Omega-3', value: fmtAvg(avgOmega3), detail: omega3Supp > 0 ? `Food + ${Math.round(omega3Supp * 10) / 10} logged supplement serving${omega3Supp === 1 ? '' : 's'}` : 'Food sources logged in meals' },
+                      // Collagen — AI-estimated from every logged food, not
+                      // a keyword match. Shows daily average for readability.
+                      { icon: 'pulse-outline', label: 'Collagen', value: `${Math.round((gutHealthWindow as any).avg_collagen_g ?? 0)}g / day avg`, detail: 'AI-estimated from bone broth, skin-on cuts, gelatin, supplements' },
+                    ];
+                  })().map(row => (
                     <View key={row.label} style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
                       <Ionicons name={row.icon as any} size={16} color={tc.primary} style={{ marginTop: 1 }} />
                       <View style={{ flex: 1 }}>

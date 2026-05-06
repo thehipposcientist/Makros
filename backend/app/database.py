@@ -380,6 +380,33 @@ def _ensure_user_preferences_equipment_settings_column() -> None:
         print(f"[migration] user_preferences equipment_settings add failed (non-fatal): {e}")
 
 
+def _ensure_user_preferences_baseline_columns() -> None:
+    """Add optional signup performance baselines to user_preferences.
+
+    These are user-entered anchors, not workout history. They help the
+    deterministic planner choose first-week loads without polluting streaks,
+    compliance, social digest, or progress charts.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE user_preferences "
+                "ADD COLUMN IF NOT EXISTS experience_level VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE user_preferences "
+                "ADD COLUMN IF NOT EXISTS strength_baselines JSONB"
+            ))
+            conn.execute(text(
+                "ALTER TABLE user_preferences "
+                "ADD COLUMN IF NOT EXISTS cardio_baseline JSONB"
+            ))
+    except Exception as e:
+        print(f"[migration] user_preferences baseline columns add failed (non-fatal): {e}")
+
+
 def _ensure_user_supplement_stack_group_column() -> None:
     """Add user-defined group label to user_supplement_stack.
 
@@ -1771,6 +1798,7 @@ def create_db_and_tables():
     _ensure_workout_completion_health_columns()
     _ensure_workout_history_source_columns()
     _ensure_user_preferences_equipment_settings_column()
+    _ensure_user_preferences_baseline_columns()
     _ensure_user_supplement_stack_group_column()
     _ensure_coach_apply_state_columns()
     _backfill_user_preferences_preferred_split()

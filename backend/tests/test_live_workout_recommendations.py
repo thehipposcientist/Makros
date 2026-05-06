@@ -8,8 +8,7 @@ test_rolling_e1rm by exercising:
   - Realistic week-over-week e1RM trends (linear progression, plateau,
     deload, "good day" outlier)
   - Suspicion gate every branch + clean-history happy paths
-  - reviewed_next_set_recommendation with mocked AI (success / failure /
-    malformed) so the source tag and fallback path are both exercised
+  - reviewed_next_set_recommendation deterministic suspicion handling
   - Realistic call-site shapes from /routers/ai/progression.py
 
 Run: docker exec thallo-backend python -m tests.test_live_workout_recommendations
@@ -926,117 +925,85 @@ def test_reviewed_clean_path_returns_deterministic_source():
     _ok("clean → deterministic source")
 
 
-def test_reviewed_suspicious_path_calls_ai_and_uses_override_when_unconfirmed():
-    print("\n[test] suspicious → AI fires; unconfirmed AI response yields source='ai_override'")
+def test_reviewed_suspicious_path_stays_deterministic():
+    print("\n[test] suspicious → deterministic result with suspicion reasons")
     plan = _planned(target_reps="6-8", target_weight_lbs=185.0,
                     progression_mode="load_first")
-    fake_ai = {
-        "next_weight_lbs": 195.0,
-        "next_rep_target": "6-8",
-        "action": "increase_load",
-        "explanation": "Felt easy + beat top — bigger jump warranted.",
-        "confirmed": False,
-    }
-    with patch("app.services.workout.in_workout_review._call_ai_reviewer", return_value=fake_ai):
-        out = reviewed_next_set_recommendation(
-            exercise=_bench(), planned_set=plan, actual_reps=10,
-            actual_weight_lbs=185.0, actual_rir=3.0, feel="easy",
-            previous_sets_this_session=[{"reps": 8, "weight_lbs": 185.0, "rir": 2.0}],
-            last_session_sets=[],
-        )
+    out = reviewed_next_set_recommendation(
+        exercise=_bench(), planned_set=plan, actual_reps=10,
+        actual_weight_lbs=185.0, actual_rir=3.0, feel="easy",
+        previous_sets_this_session=[{"reps": 8, "weight_lbs": 185.0, "rir": 2.0}],
+        last_session_sets=[],
+    )
     assert out is not None
-    assert out.source == "ai_override"
+    assert out.source == "deterministic"
     assert out.next_set_weight_lbs == 195.0
     assert out.suspicion_reasons  # at least one reason
-    _ok("ai_override propagates AI weight + override tag")
+    _ok("suspicious set remains deterministic")
 
 
-def test_reviewed_ai_failure_falls_back_to_deterministic_with_reasons_attached():
-    print("\n[test] suspicious + AI returns None → fallback to det + suspicion_reasons preserved")
+def test_reviewed_suspicious_deterministic_reasons_attached():
+    print("\n[test] suspicious set preserves suspicion_reasons")
     plan = _planned(target_reps="6-8", target_weight_lbs=185.0)
-    with patch("app.services.workout.in_workout_review._call_ai_reviewer", return_value=None):
-        out = reviewed_next_set_recommendation(
-            exercise=_bench(), planned_set=plan, actual_reps=11,
-            actual_weight_lbs=185.0, actual_rir=2.0, feel="easy",
-            previous_sets_this_session=[{"reps": 8, "weight_lbs": 185.0, "rir": 1.0}],
-            last_session_sets=[],
-        )
+    out = reviewed_next_set_recommendation(
+        exercise=_bench(), planned_set=plan, actual_reps=11,
+        actual_weight_lbs=185.0, actual_rir=2.0, feel="easy",
+        previous_sets_this_session=[{"reps": 8, "weight_lbs": 185.0, "rir": 1.0}],
+        last_session_sets=[],
+    )
     assert out is not None
     assert out.source == "deterministic"
     assert out.suspicion_reasons  # reasons surface even on fallback
-    _ok("AI fail → deterministic fallback, reasons preserved")
+    _ok("deterministic fallback, reasons preserved")
 
 
-def test_reviewed_big_rir_overshoot_rejects_too_small_ai_jump():
-    print("\n[test] big RIR overshoot: conservative AI +5 is replaced by deterministic +10")
+def test_reviewed_big_rir_overshoot_uses_deterministic_large_jump():
+    print("\n[test] big RIR overshoot uses deterministic +10")
     plan = _planned(target_reps="8-12", target_weight_lbs=60.0,
                     progression_mode="load_first")
-    timid_ai = {
-        "next_weight_lbs": 65.0,
-        "next_rep_target": "8-12",
-        "action": "increase_load",
-        "explanation": "Small bump.",
-        "confirmed": False,
-    }
-    with patch("app.services.workout.in_workout_review._call_ai_reviewer", return_value=timid_ai):
-        out = reviewed_next_set_recommendation(
-            exercise=_decline_db_press(), planned_set=plan, actual_reps=18,
-            actual_weight_lbs=60.0, actual_rir=4.0, feel="good",
-            previous_sets_this_session=[{"reps": 12, "weight_lbs": 60.0, "rir": 2.0}],
-            last_session_sets=[],
-        )
+    out = reviewed_next_set_recommendation(
+        exercise=_decline_db_press(), planned_set=plan, actual_reps=18,
+        actual_weight_lbs=60.0, actual_rir=4.0, feel="good",
+        previous_sets_this_session=[{"reps": 12, "weight_lbs": 60.0, "rir": 2.0}],
+        last_session_sets=[],
+    )
     assert out is not None
     assert out.source == "deterministic"
     assert out.next_set_weight_lbs == 70.0
     assert any("big overshoot" in r for r in out.suspicion_reasons)
-    _ok("big overshoot has deterministic floor when AI is too timid")
+    _ok("big overshoot has deterministic +10")
 
 
-def test_reviewed_ai_confirmed_yields_ai_confirmed_source():
-    print("\n[test] suspicious + AI confirmed=True → source='ai_confirmed'")
+def test_reviewed_suspicious_agreement_is_still_deterministic_source():
+    print("\n[test] suspicious agreement path → source='deterministic'")
     plan = _planned(target_reps="6-8", target_weight_lbs=185.0,
                     progression_mode="load_first")
-    fake_ai = {
-        "next_weight_lbs": 190.0,
-        "next_rep_target": "6-8",
-        "action": "increase_load",
-        "explanation": "Det was right — moving on.",
-        "confirmed": True,
-    }
-    with patch("app.services.workout.in_workout_review._call_ai_reviewer", return_value=fake_ai):
-        out = reviewed_next_set_recommendation(
-            exercise=_bench(), planned_set=plan, actual_reps=11,
-            actual_weight_lbs=185.0, actual_rir=2.0, feel="good",
-            previous_sets_this_session=[{"reps": 8, "weight_lbs": 185.0, "rir": 1.0}],
-            last_session_sets=[],
-        )
+    out = reviewed_next_set_recommendation(
+        exercise=_bench(), planned_set=plan, actual_reps=11,
+        actual_weight_lbs=185.0, actual_rir=2.0, feel="good",
+        previous_sets_this_session=[{"reps": 8, "weight_lbs": 185.0, "rir": 1.0}],
+        last_session_sets=[],
+    )
     assert out is not None
-    assert out.source == "ai_confirmed"
-    assert out.next_set_weight_lbs == 190.0
-    _ok("ai_confirmed source on agreement")
+    assert out.source == "deterministic"
+    assert out.next_set_weight_lbs == 195.0
+    _ok("suspicious agreement remains deterministic")
 
 
-def test_reviewed_ai_returns_invalid_action_falls_through_to_det_action():
-    print("\n[test] AI returns junk action → falls back to deterministic action")
+def test_reviewed_suspicious_action_is_valid_deterministic_action():
+    print("\n[test] suspicious path returns a valid deterministic action")
     plan = _planned(target_reps="6-8", target_weight_lbs=185.0,
                     progression_mode="load_first")
-    bad_ai = {
-        "next_weight_lbs": 190.0,
-        "next_rep_target": "6-8",
-        "action": "do_a_backflip",  # not in enum
-        "explanation": "...",
-        "confirmed": False,
-    }
-    with patch("app.services.workout.in_workout_review._call_ai_reviewer", return_value=bad_ai):
-        out = reviewed_next_set_recommendation(
-            exercise=_bench(), planned_set=plan, actual_reps=11,
-            actual_weight_lbs=185.0, actual_rir=2.0, feel="easy",
-            previous_sets_this_session=[],
-            last_session_sets=[],
-        )
+    out = reviewed_next_set_recommendation(
+        exercise=_bench(), planned_set=plan, actual_reps=11,
+        actual_weight_lbs=185.0, actual_rir=2.0, feel="easy",
+        previous_sets_this_session=[],
+        last_session_sets=[],
+    )
     assert out is not None
+    assert out.source == "deterministic"
     assert out.action in ("increase_load", "hold_load", "reduce_load", "keep_reps", "add_rep")
-    _ok("invalid AI action sanitized")
+    _ok("deterministic action valid")
 
 
 # ── Group 10: rolling_e1rm — gaps + realistic week sequences (8) ────
@@ -1210,7 +1177,7 @@ def test_callsite_full_review_pipeline_with_realistic_inputs():
         require_feel=True,
     )
     assert out is not None
-    assert out.source in ("deterministic", "ai_confirmed", "ai_override")
+    assert out.source == "deterministic"
     assert out.next_set_weight_lbs == 170.0  # reps_first → hold
     assert out.action == "hold_load"
     _ok(f"full pipeline: source={out.source}, action={out.action}")
@@ -1418,8 +1385,7 @@ def test_callsite_recommend_weight_big_rir_overshoot_skips_backoff_override():
             },
         ],
     )
-    with patch("app.services.workout.in_workout_review._call_ai_reviewer", return_value=None), \
-         patch("app.services.workout.history.get_recent_completions_for_fatigue", return_value=[]):
+    with patch("app.services.workout.history.get_recent_completions_for_fatigue", return_value=[]):
         out = recommend_weight(body, current_user=SimpleNamespace(id=1), db=None)
 
     assert out["action"] == "increase", out
@@ -1501,11 +1467,11 @@ def _run_all():
         # Group 9: reviewed_next_set_recommendation full path
         test_reviewed_blocks_when_feel_missing_and_required,
         test_reviewed_clean_path_returns_deterministic_source,
-        test_reviewed_suspicious_path_calls_ai_and_uses_override_when_unconfirmed,
-        test_reviewed_ai_failure_falls_back_to_deterministic_with_reasons_attached,
-        test_reviewed_big_rir_overshoot_rejects_too_small_ai_jump,
-        test_reviewed_ai_confirmed_yields_ai_confirmed_source,
-        test_reviewed_ai_returns_invalid_action_falls_through_to_det_action,
+        test_reviewed_suspicious_path_stays_deterministic,
+        test_reviewed_suspicious_deterministic_reasons_attached,
+        test_reviewed_big_rir_overshoot_uses_deterministic_large_jump,
+        test_reviewed_suspicious_agreement_is_still_deterministic_source,
+        test_reviewed_suspicious_action_is_valid_deterministic_action,
         # Group 10: rolling_e1rm gaps
         test_e1rm_rep_band_compound_lower_bound_3_excludes_2,
         test_e1rm_rep_band_compound_upper_bound_10_excludes_15_rep_finisher,

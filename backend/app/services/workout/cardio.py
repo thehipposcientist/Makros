@@ -255,6 +255,84 @@ def detect_cardio_modality(exercise_name: str) -> str | None:
     return None
 
 
+def _baseline_value(raw: dict, *keys: str):
+    for key in keys:
+        if key in raw:
+            return raw.get(key)
+    return None
+
+
+def _positive_float(value) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def _clamp_float(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def apply_signup_cardio_baseline(
+    guidance: dict,
+    *,
+    baseline: dict | None,
+    modality: str | None,
+    intensity: CardioIntensity,
+) -> None:
+    """Tune cardio guidance from optional signup baseline data.
+
+    The weekly recipe remains deterministic and goal-driven. This only scales
+    the first prescription's duration/cues so early cardio is plausible for a
+    user who said they cannot jog yet or who supplied a recent mile/5K pace.
+    """
+    if not isinstance(baseline, dict):
+        return
+    is_intervals = bool(guidance.get("is_intervals")) or intensity == "intervals"
+    can_jog = _baseline_value(baseline, "canJog10Min", "can_jog_10_min")
+    comfortable = _positive_float(_baseline_value(
+        baseline, "comfortableDurationMin", "comfortable_duration_min",
+    ))
+    if comfortable and not is_intervals:
+        current = _positive_float(guidance.get("duration_min"))
+        if current:
+            cap = max(15.0, comfortable + 5.0)
+            guidance["duration_min"] = int(round(min(current, cap)))
+    elif comfortable and is_intervals:
+        current = _positive_float(guidance.get("duration_min"))
+        if current:
+            cap = max(10.0, comfortable)
+            guidance["duration_min"] = int(round(min(current, cap)))
+
+    run_like = modality in {MODALITY_TREADMILL, MODALITY_OUTDOOR_RUN} or modality is None
+    if can_jog is False and run_like:
+        guidance["speed_range"] = "2.8-4.5 mph"
+        guidance["incline_range"] = guidance.get("incline_range") or "0-2%"
+        guidance["intensity_cue"] = "walk/jog intervals"
+        guidance["rpe_range"] = "4-6/10"
+        if not is_intervals:
+            current = _positive_float(guidance.get("duration_min"))
+            if current:
+                guidance["duration_min"] = int(round(min(current, 20.0)))
+        return
+
+    if run_like and not is_intervals:
+        mile_time = _positive_float(_baseline_value(
+            baseline, "recentMileTimeMin", "recent_mile_time_min",
+        ))
+        five_k_time = _positive_float(_baseline_value(
+            baseline, "recent5kTimeMin", "recent5KTimeMin", "recent_5k_time_min",
+        ))
+        pace_min_per_mile = mile_time or (five_k_time / 3.10686 if five_k_time else None)
+        if pace_min_per_mile:
+            signup_speed = 60.0 / pace_min_per_mile
+            low = _clamp_float(signup_speed * 0.72, 3.0, 7.5)
+            high = _clamp_float(signup_speed * 0.88, low + 0.2, 8.5)
+            guidance["speed_range"] = f"{low:.1f}-{high:.1f} mph"
+            guidance["intensity_cue"] = "easy pace from signup baseline"
+
+
 def build_cardio_guidance(
     exercise: dict,
     *,
@@ -263,6 +341,7 @@ def build_cardio_guidance(
     capabilities: list[str] | None = None,
     user_age: int | None = None,
     resting_hr: int | None = None,
+    cardio_baseline: dict | None = None,
 ) -> dict:
     """Build a modality-specific cardio prescription guidance dict.
 
@@ -377,6 +456,12 @@ def build_cardio_guidance(
             "near-maximal effort during work" if is_intervals else "conversational pace"
         )
 
+    apply_signup_cardio_baseline(
+        guidance,
+        baseline=cardio_baseline,
+        modality=modality,
+        intensity=intensity,
+    )
     guidance["modality"] = modality or "generic"
     return guidance
 

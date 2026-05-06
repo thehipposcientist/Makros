@@ -486,6 +486,9 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
       preferredSplit:         data.preferences.preferred_split ?? undefined,
       equipment:              data.preferences.equipment ?? [],
       equipmentSettings:      data.preferences.equipment_settings ?? undefined,
+      experienceLevel:        data.preferences.experience_level ?? undefined,
+      strengthBaselines:      data.preferences.strength_baselines ?? undefined,
+      cardioBaseline:         data.preferences.cardio_baseline ?? undefined,
       foodsAvailable:         data.preferences.foods_available ?? [],
       customFoods:            [],
       savedMeals:             [],
@@ -900,6 +903,8 @@ export async function getAIPlans(
     workoutDurationMinutes: profile.workoutDurationMinutes,
     equipment:              profile.equipment,
     equipmentSettings:      profile.equipmentSettings ?? undefined,
+    strengthBaselines:      profile.strengthBaselines ?? undefined,
+    cardioBaseline:         profile.cardioBaseline ?? undefined,
     foodsAvailable:         profile.foodsAvailable,
     customFoodNames:        (profile.customFoods ?? []).map(f => f.name).filter(Boolean),
     supplementsAvailable:   profile.supplementsAvailable ?? [],
@@ -964,6 +969,8 @@ export async function getAIWorkoutPlan(
     workoutDurationMinutes: profile.workoutDurationMinutes,
     equipment:              profile.equipment,
     equipmentSettings:      profile.equipmentSettings ?? undefined,
+    strengthBaselines:      profile.strengthBaselines ?? undefined,
+    cardioBaseline:         profile.cardioBaseline ?? undefined,
     foodsAvailable:         [],
     experienceLevel:        profile.experienceLevel,
     preferredSplit:         profile.preferredSplit || undefined,
@@ -1308,6 +1315,9 @@ export async function syncOnboarding(token: string, profile: import('../types').
         preferred_split: profile.preferredSplit ?? null,
         equipment:       profile.equipment,
         equipment_settings: profile.equipmentSettings ?? null,
+        experience_level: profile.experienceLevel ?? null,
+        strength_baselines: profile.strengthBaselines ?? null,
+        cardio_baseline: profile.cardioBaseline ?? null,
         foods_available: profile.foodsAvailable,
         injuries:        buildInjuries(profile),
       },
@@ -3060,8 +3070,13 @@ export interface GutHealthWindow {
   pct_days_fiber_target: number;
   distinct_plant_foods_week: number;
   fermented_servings: number;
+  avg_fermented_servings?: number;
   probiotic_servings: number;
+  avg_probiotic_servings?: number;
   omega3_servings: number;
+  avg_omega3_servings?: number;
+  omega3_food_servings?: number;
+  omega3_supplement_servings?: number;
   /** AI-estimated collagen grams across the full window. */
   collagen_g: number;
   /** AI-estimated average collagen grams per logged day. */

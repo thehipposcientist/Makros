@@ -20,7 +20,7 @@ METRICS_VERSION or CLASSIFIER_VERSION.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +37,8 @@ METRICS_VERSION = 3   # bumped at unified-score rewrite (v3 adds tag servings + 
 # ── Targets / defaults ───────────────────────────────────────────────────────
 FIBER_TARGET_G = 28.0
 FIBER_TARGET_PER_1000 = 14.0
+OMEGA3_SUPPLEMENT_SLUGS = {"omega_3", "fish_oil", "epa_dha", "algae_oil"}
+OMEGA3_SUPPLEMENT_TERMS = ("omega", "fish oil", "krill oil", "cod liver", "algae oil", "epa", "dha")
 
 
 @dataclass
@@ -149,6 +151,74 @@ def _apply_daily_metrics(row: DailyNutritionMetrics, raw: DailyRawSignals, now: 
     row.updated_at = now
 
 
+def _is_omega3_supplement(stack: Any, ingredient: Any | None) -> bool:
+    slug = str(getattr(ingredient, "slug", "") or "").lower()
+    if slug in OMEGA3_SUPPLEMENT_SLUGS:
+        return True
+    category = str(getattr(ingredient, "category", "") or getattr(stack, "category", "") or "").lower()
+    name_parts = [
+        slug,
+        getattr(ingredient, "name", "") if ingredient is not None else "",
+        getattr(stack, "custom_name", ""),
+        getattr(stack, "goal", ""),
+        getattr(stack, "notes", ""),
+    ]
+    haystack = " ".join(str(part or "").lower() for part in name_parts)
+    if not any(term in haystack for term in OMEGA3_SUPPLEMENT_TERMS):
+        return False
+    return category in {"", "fatty_acid", "supplement", "nutrition"}
+
+
+def _omega3_supplement_servings_by_date(
+    db: Any, user_id: int, start: date, end_date: date,
+) -> dict[date, float]:
+    """Return logged omega-3 supplement serving-equivalents by date."""
+    try:
+        from app.models import SupplementIngredient, SupplementLog, UserSupplementStack
+        start_dt = datetime.combine(start, time.min, tzinfo=timezone.utc)
+        end_dt = datetime.combine(end_date, time.max, tzinfo=timezone.utc)
+        logs = db.exec(
+            select(SupplementLog).where(
+                SupplementLog.user_id == user_id,
+                SupplementLog.taken_at >= start_dt,
+                SupplementLog.taken_at <= end_dt,
+                SupplementLog.skipped == False,  # noqa: E712
+            )
+        ).all()
+        if not logs:
+            return {}
+
+        stack_ids = list({log.stack_item_id for log in logs})
+        stacks = (
+            db.exec(select(UserSupplementStack).where(UserSupplementStack.id.in_(stack_ids))).all()
+            if stack_ids else []
+        )
+        stack_by_id = {s.id: s for s in stacks}
+        ingredient_ids = [s.supplement_ingredient_id for s in stacks if s.supplement_ingredient_id]
+        ingredients = (
+            db.exec(select(SupplementIngredient).where(SupplementIngredient.id.in_(ingredient_ids))).all()
+            if ingredient_ids else []
+        )
+        ingredient_by_id = {i.id: i for i in ingredients}
+
+        by_date: dict[date, float] = {}
+        for log in logs:
+            stack = stack_by_id.get(log.stack_item_id)
+            if not stack:
+                continue
+            ingredient = ingredient_by_id.get(stack.supplement_ingredient_id) if stack.supplement_ingredient_id else None
+            if not _is_omega3_supplement(stack, ingredient):
+                continue
+            taken = getattr(log, "taken_at", None)
+            taken_date = taken.date() if hasattr(taken, "date") else None
+            if taken_date is None:
+                continue
+            by_date[taken_date] = by_date.get(taken_date, 0.0) + 1.0
+        return by_date
+    except Exception:
+        return {}
+
+
 def compute_weekly_rollup(
     db: Any,
     user_id: int,
@@ -235,6 +305,13 @@ def compute_weekly_rollup(
     total_p = plant_p_sum + animal_p_sum
     plant_protein_pct = round(100 * plant_p_sum / total_p) if total_p > 0 else 0
 
+    fermented_total = sum((r.fermented_servings or 0) for r in data_rows)
+    probiotic_total = sum((getattr(r, "probiotic_servings", 0) or 0) for r in data_rows)
+    omega3_food_total = sum((r.omega3_servings or 0) for r in data_rows)
+    omega3_supp_by_date = _omega3_supplement_servings_by_date(db, user_id, start, end_date)
+    omega3_supp_total = sum(omega3_supp_by_date.values())
+    omega3_total = omega3_food_total + omega3_supp_total
+
     # Calorie stability: coefficient of variation over logged days (0-1).
     # Low CV = steady eating; high CV = big swings. Feeds the LEA flag.
     cals = [float(r.calories_total or 0) for r in data_rows if (r.calories_total or 0) > 0]
@@ -257,9 +334,14 @@ def compute_weekly_rollup(
         "avg_saturated_fat_g": _avg("saturated_fat_g"),
         "pct_days_fiber_target": round(100 * days_hitting_fiber / n, 0),
         "distinct_plant_foods_week": len(weekly_slugs),
-        "fermented_servings": round(sum((r.fermented_servings or 0) for r in data_rows), 1),
-        "probiotic_servings": round(sum((getattr(r, "probiotic_servings", 0) or 0) for r in data_rows), 1),
-        "omega3_servings": round(sum((r.omega3_servings or 0) for r in data_rows), 1),
+        "fermented_servings": round(fermented_total, 1),
+        "avg_fermented_servings": round(fermented_total / n, 1),
+        "probiotic_servings": round(probiotic_total, 1),
+        "avg_probiotic_servings": round(probiotic_total / n, 1),
+        "omega3_servings": round(omega3_total, 1),
+        "avg_omega3_servings": round(omega3_total / n, 1),
+        "omega3_food_servings": round(omega3_food_total, 1),
+        "omega3_supplement_servings": round(omega3_supp_total, 1),
         # AI-estimated nutrients USDA doesn't carry. Summed from
         # per-food per-serving × servings consumed.
         "collagen_g": round(sum((getattr(r, "collagen_g", 0) or 0) for r in data_rows), 1),
@@ -293,6 +375,8 @@ def _empty_rollup(days: int) -> dict:
         "pct_days_fiber_target": 0.0,
         "distinct_plant_foods_week": 0,
         "fermented_servings": 0.0, "probiotic_servings": 0.0, "omega3_servings": 0.0,
+        "avg_fermented_servings": 0.0, "avg_probiotic_servings": 0.0, "avg_omega3_servings": 0.0,
+        "omega3_food_servings": 0.0, "omega3_supplement_servings": 0.0,
         "collagen_g": 0.0, "avg_collagen_g": 0.0,
         "probiotic_cfu_billions": 0.0, "avg_probiotic_cfu_billions": 0.0,
         "seafood_servings": 0.0, "fruit_servings": 0.0, "vegetable_servings": 0.0,

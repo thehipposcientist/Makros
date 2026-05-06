@@ -121,6 +121,9 @@ class UserPreferences(SQLModel, table=True):
     preferred_split: str | None = Field(default=None)
     equipment: list = Field(default_factory=list, sa_column=Column(JSON))
     equipment_settings: dict | None = Field(default=None, sa_column=Column(JSON))
+    experience_level: str | None = Field(default=None)
+    strength_baselines: dict | None = Field(default=None, sa_column=Column(JSON))
+    cardio_baseline: dict | None = Field(default=None, sa_column=Column(JSON))
     foods_available: list = Field(default_factory=list, sa_column=Column(JSON))
     injuries: list = Field(default_factory=list, sa_column=Column(JSON))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -1583,6 +1586,9 @@ class PreferencesUpsert(SQLModel):
     preferred_split: str | None = None
     equipment: list[str]       # item names e.g. "Dumbbells", "Pull-up bar"
     equipment_settings: dict | None = None
+    experience_level: str | None = None
+    strength_baselines: dict | None = None
+    cardio_baseline: dict | None = None
     foods_available: list[str]
     injuries: list[str] = Field(default_factory=list)
 

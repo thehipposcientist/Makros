@@ -102,6 +102,9 @@ def _onboarding_body(
     weight_lbs: float = 180.0,
     injuries: list[str] | None = None,
     preferred_split: str | None = None,
+    experience_level: str | None = None,
+    strength_baselines: dict | None = None,
+    cardio_baseline: dict | None = None,
 ) -> OnboardingSync:
     return OnboardingSync(
         profile=ProfileUpsert(
@@ -125,6 +128,9 @@ def _onboarding_body(
             equipment=["Dumbbells"],
             foods_available=["chicken breast"],
             injuries=injuries or [],
+            experience_level=experience_level,
+            strength_baselines=strength_baselines,
+            cardio_baseline=cardio_baseline,
         ),
     )
 
@@ -225,11 +231,31 @@ def test_onboarding_sync_updates_planner_preferences():
     eng = _make_engine()
     with Session(eng) as session:
         user = _seed_user_profile(session, user_id=17, weight_lbs=180.0)
+        strength_baselines = {
+            "version": 1,
+            "lifts": [
+                {
+                    "key": "bench_press",
+                    "exerciseSlug": "barbell_bench_press",
+                    "name": "Barbell Bench Press",
+                    "weightLbs": 185,
+                    "reps": 8,
+                }
+            ],
+        }
+        cardio_baseline = {
+            "canJog10Min": True,
+            "comfortableDurationMin": 25,
+            "preferredModes": ["Run", "Bike"],
+        }
 
         profile_router.sync_onboarding(
             _onboarding_body(
                 injuries=["knee pain", "shoulder impingement"],
                 preferred_split="ppl",
+                experience_level="intermediate",
+                strength_baselines=strength_baselines,
+                cardio_baseline=cardio_baseline,
             ),
             current_user=user,
             session=session,
@@ -239,7 +265,10 @@ def test_onboarding_sync_updates_planner_preferences():
         assert prefs is not None
         assert prefs.injuries == ["knee pain", "shoulder impingement"]
         assert prefs.preferred_split == "ppl"
-    _ok("onboarding sync persists planner-visible split + injuries")
+        assert prefs.experience_level == "intermediate"
+        assert prefs.strength_baselines == strength_baselines
+        assert prefs.cardio_baseline == cardio_baseline
+    _ok("onboarding sync persists planner-visible split, injuries, and baselines")
 
 
 def test_user_state_backfills_missing_preferred_split():

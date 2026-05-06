@@ -258,11 +258,10 @@ def build_indicators(
     profile, goal = _get_profile_and_goal(db, user_id)
     cal_target, pro_target, goal_id, sex = _compute_targets(db, user_id, profile, goal)
 
-    # Ensure today's metrics row is fresh — cheap if already computed.
-    # allow_ai=True so collagen_g + probiotic_cfu_billions populate on
-    # first compute of a newly-logged day. Cached per food forever.
+    # Ensure today's metrics row is fresh. Keep score reads deterministic:
+    # collagen/probiotic facts come from rule-based metadata, not OpenAI.
     try:
-        metrics = compute_daily_metrics(db, user_id=user_id, metric_date=target_date, allow_ai=True)
+        metrics = compute_daily_metrics(db, user_id=user_id, metric_date=target_date, allow_ai=False)
     except Exception:
         metrics = None
 

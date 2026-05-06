@@ -426,6 +426,8 @@ function planChangeProfileSnapshot(
       workoutDurationMinutes: profile.workoutDurationMinutes,
       equipment: profile.equipment,
       equipmentSettings: profile.equipmentSettings,
+      strengthBaselines: profile.strengthBaselines,
+      cardioBaseline: profile.cardioBaseline,
       injuries: profile.injuries,
       injuryEntries: profile.injuryEntries,
       experienceLevel: profile.experienceLevel,
@@ -1360,7 +1362,7 @@ export default function Index() {
       if (uname) await AsyncStorage.setItem('user_username', uname);
       if (uid != null) await AsyncStorage.setItem(LAST_USER_ID_KEY, String(uid));
     } catch {}
-    syncOnboarding(authToken, stampedWithTier).catch(() => null);
+    const onboardingSync = syncOnboarding(authToken, stampedWithTier).catch(() => null);
 
     if (serverTierOf(stampedWithTier) === 'free') {
       await clearAllPlanCache().catch(() => null);
@@ -1375,6 +1377,7 @@ export default function Index() {
       setIsNutritionUpdating(false);
       return;
     }
+    await onboardingSync;
 
     // Show loading screen while generating the initial plan.
     // DON'T set userProfile yet — that would mount HomeScreen which

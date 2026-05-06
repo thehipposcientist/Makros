@@ -4997,26 +4997,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }
           summaryParts.push('Meal targets changed');
         }
-        // Goal changes: prefer the structured `updated_goal` field from the AI response.
-        // Fall back to string matching for backwards compatibility with older backend versions.
+        // Goal changes: ONLY honor the structured `updated_goal` field from
+        // the AI response. The previous loose-text-match fallback (scanning
+        // the question + AI answer for any goal label like "fat loss" or
+        // "muscle gain") was firing on incidental mentions — e.g. asking
+        // "should I add cardio for fat loss?" would auto-stage a goal
+        // change to lose_fat, then a stray Apply tap would silently flip
+        // the user's goal. Strict structured field only.
         const structuredGoalRaw = typeof (resp as any).updated_goal === 'string' ? (resp as any).updated_goal.trim() : '';
         const structuredGoal = structuredGoalRaw || null;
-        let matchedGoal: typeof PRIMARY_GOALS[number] | null = null;
-        if (structuredGoal) {
-          matchedGoal = PRIMARY_GOALS.find(g => g.id === structuredGoal) ?? null;
-        }
-        if (!matchedGoal) {
-          const combinedText = `${q} ${resp.answer ?? ''}`.toLowerCase();
-          const sortedGoals = [...PRIMARY_GOALS].sort((a, b) => b.label.length - a.label.length);
-          for (const g of sortedGoals) {
-            const labelLower = g.label.toLowerCase();
-            const idAsWords = g.id.replace(/_/g, ' ');
-            if (combinedText.includes(labelLower) || combinedText.includes(idAsWords)) {
-              matchedGoal = g;
-              break;
-            }
-          }
-        }
+        const matchedGoal = structuredGoal ? (PRIMARY_GOALS.find(g => g.id === structuredGoal) ?? null) : null;
         if (matchedGoal && matchedGoal.id !== userProfile?.goal) {
           profileChanges.goal = matchedGoal.id as any;
           summaryParts.push(`Goal: ${userProfile?.goal?.replace(/_/g, ' ') ?? '?'} → ${matchedGoal.label}`);
@@ -9322,7 +9312,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         };
 	        const stats = ps as any;
         const details = (userProfile.goalDetails ?? {}) as any;
-        const weightLbs = numberValue(stats?.weightLbs ?? stats?.weight_lbs);
+        // Latest weight from the weight log wins over physicalStats so the
+        // hero card stays in sync after the user logs a new weight. Sort
+        // by logged_at then date so a same-day re-log promotes correctly.
+        const latestWeightFromLog = (() => {
+          const entries = userProfile.weightEntries ?? [];
+          if (!Array.isArray(entries) || entries.length === 0) return null;
+          const sorted = [...entries].sort((a, b) =>
+            String(b.logged_at ?? b.date ?? '').localeCompare(String(a.logged_at ?? a.date ?? '')),
+          );
+          const latest = numberValue(sorted[0]?.weight_lbs);
+          return latest != null && latest > 0 ? latest : null;
+        })();
+        const weightLbs = latestWeightFromLog ?? numberValue(stats?.weightLbs ?? stats?.weight_lbs);
         const heightFeet = numberValue(stats?.heightFeet ?? stats?.height_feet);
         const heightInches = numberValue(stats?.heightInches ?? stats?.height_inches);
         const birthdate = cleanText(stats?.birthdate ?? stats?.birth_date);
@@ -9442,21 +9444,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               </View>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
             </TouchableOpacity>
-            {/* Body & Stats */}
-            <TouchableOpacity
-              style={styles.profileMenuItem}
-              onPress={onEditBody}
-              testID="profile-body-open"
-              accessibilityLabel="profile-body-open">
-              <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
-                <Ionicons name="person-outline" size={18} color={themeColors.primary} />
-              </View>
-              <View style={{ flex: 1, marginLeft: 10 }}>
-                <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Body & Stats</Text>
-                <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Weight, height, age, biological sex</Text>
-              </View>
-              <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
-            </TouchableOpacity>
+            {/* Body & Stats menu row removed — weight is editable in the
+                weight log; height, birthday, and biological sex are set
+                during onboarding and intentionally not user-editable
+                afterward. The body-editor screen still exists as a
+                recovery path when a profile lands in an incomplete
+                state (the "Complete profile" tap on the hero card). */}
             {/* Settings & reminders */}
             <TouchableOpacity
               style={styles.profileMenuItem}

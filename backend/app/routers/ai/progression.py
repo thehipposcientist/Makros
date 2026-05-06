@@ -29,7 +29,10 @@ from app.workout_progression import (
     ExerciseCategory, ExercisePrescription, PlannedSet, ReadinessInput,
     SetResult, SetType, UserTrainingProfile, WorkoutContext,
 )
-from app.services.workout.performance import build_performance_profile
+from app.services.workout.performance import (
+    build_performance_profile,
+    merge_strength_anchor_profiles,
+)
 from app.services.workout.recommendation import (
     apply_fatigue_override,
     recommend_starting_weight,
@@ -37,141 +40,10 @@ from app.services.workout.recommendation import (
 from app.services.workout.exercise_metadata import (
     set_programming_exercise_metadata,
 )
-from app.services.workout.ai_first_time_weight import (
-    ai_first_time_weight_recommendation,
-)
 from app.seed_exercises_data import SEED_EXERCISES  # noqa: F401  (used inside handler)
 
 
 logger = logging.getLogger(__name__)
-
-
-def _try_ai_first_time_branch(
-    *,
-    user_id: int,
-    db: Session,
-    exercise_name: str,
-    exercise_slug: str | None,
-    target_reps: str,
-    experience: str,
-) -> tuple[float, dict] | None:
-    """Try the AI first-time branch. Returns `(weight_lbs, meta)` on
-    success, None when we should fall through to the deterministic
-    tiers below.
-
-    Pre-conditions enforced:
-      1. The resolved exercise has a `primary_muscle` we can look up.
-      2. User has NO direct history for the target exercise (we're
-         past the exact-history tier by the time this fires).
-      3. User DOES have >= 1 recent session for that same muscle.
-
-    On missing API key, empty muscle sessions, or any AI failure we
-    return None — the existing tiers 5/6/7 handle fallback.
-    """
-    if not exercise_name:
-        return None
-
-    # Resolve canonical seed row so we know which muscle to look up.
-    seed_row: dict | None = None
-    from app.seed_exercises_data import SEED_EXERCISES
-    if exercise_slug:
-        seed_row = next(
-            (ex for ex in SEED_EXERCISES if ex.get("slug") == exercise_slug), None
-        )
-    if seed_row is None:
-        lname = (exercise_name or "").strip().lower()
-        seed_row = next(
-            (ex for ex in SEED_EXERCISES if (ex.get("name") or "").strip().lower() == lname),
-            None,
-        )
-    primary_muscle = (seed_row or {}).get("primary_muscle")
-    if isinstance(primary_muscle, str):
-        primary_muscle_str = primary_muscle
-    elif primary_muscle is not None and hasattr(primary_muscle, "value"):
-        primary_muscle_str = str(primary_muscle.value)
-    else:
-        primary_muscle_str = ""
-    if not primary_muscle_str:
-        return None
-
-    try:
-        from app.services.workout.history import most_recent_sessions_for_muscle
-        muscle_sessions = most_recent_sessions_for_muscle(
-            user_id, primary_muscle_str, db, limit=3,
-        )
-    except Exception:
-        logger.exception(
-            "[recommend-weight] most_recent_sessions_for_muscle failed (non-fatal)"
-        )
-        muscle_sessions = []
-    # NB: we no longer bail on empty sessions — the AI helper has a
-    # no-history mode that uses profile + bodyweight + strength-
-    # standard ratios to pick a starting weight.
-
-    # Fetch bodyweight + age + sex for the prompt. Bodyweight is
-    # mandatory for the no-history path — without it we can't estimate.
-    bw_lbs = 0.0
-    age_val: int | None = None
-    sex_val: str | None = None
-    try:
-        from app.models import UserProfile as _UP
-        row = db.exec(select(_UP).where(_UP.user_id == user_id)).first()
-        if row:
-            if row.weight_lbs:
-                bw_lbs = float(row.weight_lbs)
-            if row.age:
-                age_val = int(row.age)
-            if row.gender:
-                # SQLModel enum → value string ("male" / "female" / etc.)
-                try:
-                    sex_val = str(row.gender.value)
-                except Exception:
-                    sex_val = str(row.gender)
-    except Exception:
-        logger.exception(
-            "[recommend-weight] profile lookup failed (non-fatal)"
-        )
-
-    # Still need SOMETHING to anchor on. If there are no sessions AND
-    # no bodyweight, the AI can't do better than the planner default,
-    # so we fall through.
-    if not muscle_sessions and bw_lbs <= 0:
-        return None
-
-    api_key = get_openai_api_key()
-    if not api_key:
-        return None
-    try:
-        client = OpenAI(api_key=api_key)
-    except Exception:
-        logger.exception(
-            "[recommend-weight] OpenAI client init failed (non-fatal)"
-        )
-        return None
-
-    rec = ai_first_time_weight_recommendation(
-        exercise_name=exercise_name,
-        primary_muscle=primary_muscle_str,
-        target_reps=target_reps,
-        experience=experience,
-        bodyweight_lbs=bw_lbs,
-        muscle_sessions=muscle_sessions,
-        age=age_val,
-        sex=sex_val,
-        openai_client=client,
-        model=model_chat(),
-        chat_kwargs_builder=_build_chat_kwargs,
-        chat_invoker=_chat_create,
-        json_extractor=_extract_json,
-    )
-    if rec is None or rec.weight_lbs <= 0:
-        return None
-    # Weight only. No reason string surfaced — the number IS the answer.
-    return rec.weight_lbs, {
-        "source": "ai_first_time",
-        "confidence": rec.confidence,
-        "reason": "",
-    }
 
 
 def _resolve_exercise_slug(db: Session, exercise_name: str, exercise_slug: str | None) -> str | None:
@@ -558,7 +430,11 @@ def recommend_weight(
                     by_slug = {ex["slug"]: ex for ex in SEED_EXERCISES}
                     target_ex = by_slug.get(slug)
                     try:
-                        profiles = build_performance_profile(current_user.id, db)
+                        profiles = merge_strength_anchor_profiles(
+                            current_user.id,
+                            db,
+                            build_performance_profile(current_user.id, db),
+                        )
                     except Exception as e:
                         print(f"[recommend-weight] profile build failed (non-fatal): {e}")
                         profiles = {}
@@ -582,22 +458,6 @@ def recommend_weight(
                                 "confidence": rec_anchor.confidence,
                                 "reason": rec_anchor.reason,
                             }
-
-            # Tier 4.5 — AI first-time. No direct history AND no
-            # transferable anchor from the seed pipeline, but the user
-            # DOES have recent sessions for the same primary_muscle.
-            # Hand the recent sessions to the AI and ask for a
-            # conservative starting weight. Fail-safe: any failure
-            # falls through to the deterministic tiers below.
-            if last_weight is None:
-                last_weight, recommendation_meta = _try_ai_first_time_branch(
-                    user_id=current_user.id,
-                    db=db,
-                    exercise_name=body.exerciseName,
-                    exercise_slug=body.exerciseSlug,
-                    target_reps=body.targetReps or "8-12",
-                    experience=(body.experienceLevel or "intermediate"),
-                ) or (last_weight, recommendation_meta)
 
             # Tier 5 — client-provided last-session best (oldest code path).
             if last_weight is None and body.lastSessionBestWeightLbs and body.lastSessionBestWeightLbs > 0:
@@ -775,9 +635,8 @@ def recommend_weight(
                         and str(last_logged_feel or "").strip().lower() not in ("pain", "form_breakdown", "form breakdown")
                     )
                     use_reviewed_payload = reviewed.source != "deterministic" or deterministic_rir_override
-                    # AI can override weight / rep target / tip. For large RIR-backed
-                    # overshoots, the deterministic reviewer can also override the
-                    # older one-increment progression engine.
+                    # For large RIR-backed overshoots, the deterministic reviewer
+                    # can override the older one-increment progression engine.
                     if reviewed.next_set_weight_lbs is not None and use_reviewed_payload:
                         rec_weight = float(reviewed.next_set_weight_lbs)
                     if reviewed.next_set_rep_target and use_reviewed_payload:
@@ -858,11 +717,10 @@ def recommend_weight(
             # anchors so the UI can show "Based on your last 3 sessions"
             # or "Estimated from similar horizontal pressing work".
             "recommendation": recommendation_meta,
-            # New fields for the AI-reviewer pipeline:
+            # New fields for the live reviewer pipeline:
             # `awaitingFeel`: frontend hides the rec card while True.
-            # `source`: "deterministic" | "ai_override" | "ai_confirmed"
-            #           — lets the UI tag an "AI" label on overrides.
-            # `suspicionReasons`: debug list of why the reviewer fired.
+            # `source`: currently "deterministic".
+            # `suspicionReasons`: debug list of why the reviewer flagged it.
             "awaitingFeel": False,
             "source": reviewed_source,
             "suspicionReasons": reviewed_reasons,
@@ -1652,12 +1510,10 @@ def generate_warmup(
         return {"steps": _deterministic_warmup(body.focus, first_ex, second_ex, ex_count), "source": "fallback"}
 
 
-# ── Pre-set recommendation (deterministic, no AI by default) ────────
+# ── Pre-set recommendation (deterministic) ──────────────────────────
 # Shown in the active-workout card BEFORE the user logs a set, so the
 # user can see recommended weight + reps + set intent (heavy/backoff/
-# volume/technique) + a one-sentence rationale. Zero AI cost on the
-# normal path — AI only fires when the prior set was suspicious AND the
-# user fed back their feel.
+# volume/technique) + a one-sentence rationale. Zero AI cost.
 @router.post("/pre-set-recommendation")
 def pre_set_recommendation(
     body: PreSetRecommendRequest,
@@ -1701,10 +1557,9 @@ def pre_set_recommendation(
 
     # DB-side fallback: the client's name-based `lastSessionSets` lookup
     # misses when the generated plan exercise name differs from the logged
-    # history name (e.g. "Back Squat" vs "Barbell Back Squat"). Before we
-    # fall through to the AI first-time branch, ask the DB directly via
-    # slug — this is what the /recommend-weight endpoint does and keeps the
-    # two endpoints consistent.
+    # history name (e.g. "Back Squat" vs "Barbell Back Squat"). Ask the DB
+    # directly via slug; this is what the /recommend-weight endpoint does and
+    # keeps the two endpoints consistent.
     if not last_session:
         try:
             from app.services.workout.history import db_history_lookup
@@ -1762,38 +1617,18 @@ def pre_set_recommendation(
             ) if weight > 0 else "Opening at the planned weight.",
         )
     else:
-        # First-ever session on this exercise — try the AI first-time
-        # branch first (uses the user's last 3 same-muscle sessions to
-        # infer a sensible starting weight). Falls through to the
-        # deterministic planner target on any failure (missing muscle
-        # metadata, no prior same-muscle sessions, AI error).
-        ai_rec = _try_ai_first_time_branch(
-            user_id=current_user.id,
-            db=db,
-            exercise_name=body.exerciseName,
-            exercise_slug=body.exerciseSlug,
-            target_reps=str(planned.target_reps or "8-12"),
-            experience="intermediate",
+        # First-ever session on this exercise — use the planner's
+        # deterministic target/default and calibrate from the user's first set.
+        det = NextSetRecommendation(
+            next_set_weight_lbs=planned.target_weight_lbs,
+            next_set_rep_target=planned.target_reps,
+            action="hold_load",
+            explanation=(
+                f"First time on {body.exerciseName} — starting at "
+                f"{int(planned.target_weight_lbs or 0) or '?'} lb to calibrate. "
+                "Tell me how it feels after the set."
+            ),
         )
-        if ai_rec is not None:
-            ai_weight, _ = ai_rec
-            det = NextSetRecommendation(
-                next_set_weight_lbs=float(ai_weight),
-                next_set_rep_target=planned.target_reps,
-                action="hold_load",
-                explanation="",
-            )
-        else:
-            det = NextSetRecommendation(
-                next_set_weight_lbs=planned.target_weight_lbs,
-                next_set_rep_target=planned.target_reps,
-                action="hold_load",
-                explanation=(
-                    f"First time on {body.exerciseName} — starting at "
-                    f"{int(planned.target_weight_lbs or 0) or '?'} lb to calibrate. "
-                    "Tell me how it feels after the set."
-                ),
-            )
 
     rec = enrich_to_set_recommendation(
         det=det,
@@ -1804,7 +1639,7 @@ def pre_set_recommendation(
         is_first_session=is_first_session,
         is_first_set=is_first_set,
         rep_range=parse_rep_range(planned.target_reps),
-        source=("ai_first_time" if is_first_session and not prior and "ai_first_time" in (det.explanation or "").lower() else "deterministic"),
+        source="deterministic",
     )
     return rec.to_dict()
 

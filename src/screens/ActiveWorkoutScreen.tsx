@@ -1713,23 +1713,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }).catch(() => { setActiveWorkoutStateRestored(true); });
   }, []);
 
-  // ── Lazy AI weight refresh on workout start ─────────────────────────
-  // The planner's `recommend_starting_weight` falls through to a fixed
-  // category-default table (tier 5) when the user has no transferable
-  // history. That table ignores bodyweight, age, sex, and recent
-  // same-muscle work entirely — a 220-lb advanced user gets the same
-  // 95-lb bench rec as a 130-lb beginner.
-  //
-  // Fix: scan exercises whose `weightRecommendationSource === 'default'`
-  // and fire `/ai/recommend-weight` for each in parallel. The endpoint
-  // routes through the AI first-time helper which DOES use bodyweight +
-  // age + sex + recent same-muscle sessions. Replace `targetWeightLbs`
-  // before the user logs their first set.
+  // ── Lazy deterministic weight refresh on workout start ──────────────
+  // Scan exercises whose `weightRecommendationSource === 'default'` and
+  // ask the backend's rule engine for a better anchor before the first set.
   //
   // Skipped:
   //  - exercises that already have a real source (exact_history, sub_group, etc)
   //  - exercises with logged sets restored from a prior session (the
-  //    AI rec for "next set" path takes over from there)
+  //    live set-recommendation path takes over from there)
   //  - exercises where the first set is already logged (race-safe)
   //  - workout has no auth token (offline)
   useEffect(() => {
@@ -1773,12 +1764,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         if (Object.keys(updates).length === 0) return;
         setExercises(prev => prev.map((ex, i) =>
           i in updates
-            ? { ...ex, targetWeightLbs: updates[i], weightRecommendationSource: 'ai_first_time' }
+            ? { ...ex, targetWeightLbs: updates[i], weightRecommendationSource: 'default' }
             : ex,
         ));
-        console.log(`[ActiveWorkout] AI weight refresh: ${Object.keys(updates).length}/${targets.length} exercises updated`);
+        console.log(`[ActiveWorkout] deterministic weight refresh: ${Object.keys(updates).length}/${targets.length} exercises updated`);
       } catch (e) {
-        console.log('[ActiveWorkout] AI weight refresh failed (non-fatal):', e);
+        console.log('[ActiveWorkout] deterministic weight refresh failed (non-fatal):', e);
       }
     })();
     return () => { cancelled = true; };

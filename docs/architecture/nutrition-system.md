@@ -63,7 +63,7 @@ Optional 5th: **thyroid_support** (opt-in, gated by profile). Never hormone-name
 | Endpoint | Description |
 |---|---|
 | `GET /meals/score?days=7` | Authoritative Nutrition Score (today + 7-day). |
-| `GET /meals/gut-health?days=14` | Gut & Plants facts. Today includes AI-estimated `collagen_g` + `probiotic_cfu_billions`. |
+| `GET /meals/gut-health?days=14` | Gut & Plants facts. Window includes serving totals plus daily averages for fermented/probiotic/omega-3; omega-3 includes logged EPA/DHA supplements. Today includes AI-estimated `collagen_g` + `probiotic_cfu_billions`. |
 | `GET /meals/recovery-flags?days=7` | Fueling & Recovery flags. |
 | `GET /meals/hydration` / `POST /meals/hydration` | Daily hydration log + target. Target uses body size/sex, planned/actual exercise, logged protein, and alcohol. Sodium/electrolytes/creatine/caffeine are returned as guidance signals; they do not silently raise ounces. |
 | `GET /meals/averages?window=14` | Adaptive rolling averages (divides by days_with_data). |

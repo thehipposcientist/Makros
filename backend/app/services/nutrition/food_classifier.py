@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-CLASSIFIER_VERSION = 5   # v5: conservative alcohol phrase detection + v4 amount estimates
+CLASSIFIER_VERSION = 5   # v5: conservative alcohol phrase detection + deterministic amount estimates
 
 Source = Literal["deterministic", "heuristic", "ai", "unknown"]
 ProcessingBucket = Literal["minimally_processed", "processed", "ultra_processed", "unknown"]
@@ -189,6 +189,72 @@ _PROBIOTIC_FRAGMENTS = [
     "skyr", "kvass", "cultured buttermilk", "cultured cottage cheese",
     "probiotic",
 ]
+
+_AMOUNT_NEGATIVES = [
+    "flavored", "flavour", "frozen yogurt", "yogurt covered", "yogurt-coated",
+    "yogurt coating", "pasteurized", "pasteurised", "shelf stable",
+]
+
+
+def estimate_amounts_deterministic(raw_name: str) -> dict:
+    """Conservative per-serving collagen/probiotic estimate from food name.
+
+    Normal daily nutrition reads use this instead of OpenAI. Unknown foods
+    return explicit zeros so cached metadata is complete and repeat reads stay
+    deterministic.
+    """
+    n = normalize_name(raw_name)
+    collagen = 0.0
+    cfu = 0.0
+    conf = "none"
+
+    if not n:
+        return {
+            "collagen_g_per_serving": 0.0,
+            "probiotic_cfu_billions_per_serving": 0.0,
+            "amount_confidence": "none",
+        }
+
+    if "collagen" in n and any(x in n for x in ("peptide", "powder", "supplement", "protein")):
+        collagen, conf = 15.0, "high"
+    elif "bone broth" in n:
+        collagen, conf = 9.0, "high"
+    elif "gelatin" in n:
+        collagen, conf = 6.0, "high"
+    elif "pork rind" in n or "chicharr" in n:
+        collagen, conf = 4.0, "med"
+    elif any(x in n for x in ("oxtail", "short rib", "beef tendon", "tripe", "trotter", "chicken feet")):
+        collagen, conf = 12.0, "med"
+    elif ("chicken" in n and "skin" in n and "skinless" not in n) or "chicken wing" in n:
+        collagen, conf = 3.0, "med"
+    elif "fish skin" in n or "salmon skin" in n:
+        collagen, conf = 3.0, "med"
+
+    probiotic_blocked = any(x in n for x in _AMOUNT_NEGATIVES)
+    if not probiotic_blocked:
+        if "kefir" in n:
+            cfu, conf = 35.0, "high" if conf == "none" else conf
+        elif "kombucha" in n:
+            cfu, conf = 1.0, "med" if conf == "none" else conf
+        elif "kimchi" in n:
+            cfu, conf = 5.0, "med" if conf == "none" else conf
+        elif "sauerkraut" in n:
+            cfu, conf = 1.5, "low" if conf == "none" else conf
+        elif "natto" in n:
+            cfu, conf = 5.0, "med" if conf == "none" else conf
+        elif "yogurt" in n or "skyr" in n:
+            cfu, conf = 8.0, "med" if conf == "none" else conf
+        elif "probiotic" in n and any(x in n for x in ("capsule", "supplement", "pill", "tablet")):
+            cfu, conf = 20.0, "low" if conf == "none" else conf
+
+    if collagen <= 0 and cfu <= 0:
+        conf = "none"
+
+    return {
+        "collagen_g_per_serving": round(max(0.0, min(30.0, collagen)), 2),
+        "probiotic_cfu_billions_per_serving": round(max(0.0, min(200.0, cfu)), 2),
+        "amount_confidence": conf,
+    }
 
 
 # ── Protein source ───────────────────────────────────────────────────────────

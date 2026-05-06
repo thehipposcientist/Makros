@@ -40,7 +40,10 @@ from app.services.workout.history import (
     build_history_familiarity, db_history_lookup, propagate_session_targets,
     recent_exercise_slugs_by_muscle,
 )
-from app.services.workout.performance import build_performance_profile
+from app.services.workout.performance import (
+    build_performance_profile,
+    merge_strength_anchor_profiles,
+)
 from app.workout_progression import UserTrainingProfile, WorkoutProgressionEngine
 from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
 
@@ -659,6 +662,7 @@ def _build_deterministic_workout(
         muscle_fatigue=fatigue_dict,
         user_age=user_age,
         completed_today_family=completed_today_family,
+        cardio_baseline=getattr(req, "cardioBaseline", None),
         load_equipment_settings=req.equipmentSettings,
     )
 
@@ -685,7 +689,12 @@ def _build_deterministic_workout(
             # history. The downstream `propagate_session_targets`
             # call below refines these using double-progression rules
             # — it is NOT redundant, it runs on different inputs.
-            perf_profiles_for_planner = build_performance_profile(user_id, db)
+            perf_profiles_for_planner = merge_strength_anchor_profiles(
+                user_id,
+                db,
+                build_performance_profile(user_id, db),
+                getattr(req, "strengthBaselines", None),
+            )
         except Exception as e:
             print(f"[plan-gen workout] pre-plan performance profile lookup failed (non-fatal): {e}")
             perf_profiles_for_planner = None
@@ -713,7 +722,12 @@ def _build_deterministic_workout(
                 progression_pace=map_progression_pace(None),
             )
             lookup = db_history_lookup(user_id, db)
-            perf_profiles = build_performance_profile(user_id, db)
+            perf_profiles = merge_strength_anchor_profiles(
+                user_id,
+                db,
+                build_performance_profile(user_id, db),
+                getattr(req, "strengthBaselines", None),
+            )
             all_by_slug = {ex["slug"]: ex for ex in SEED_EXERCISES}
             propagate_session_targets(
                 plan,

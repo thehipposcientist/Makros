@@ -848,7 +848,7 @@ def propagate_session_targets(
       * `progression_reason` — human-readable explanation
       * `recommendation_source` — one of {"exact_history",
         "substitution_group", "movement_pattern", "muscle_bucket",
-        "default"}
+        "strength_anchor", "default"}
       * `recommendation_confidence` — 0–1 confidence score
       * `recommendation_reason` — source-aware explanation that the UI
         can show beside the weight ("Based on your last 3 bench press

@@ -1100,6 +1100,90 @@ def test_gut_rollup_uses_logged_days_not_empty_metric_placeholders() -> None:
     _ok("empty today row no longer dilutes gut averages")
 
 
+def test_gut_rollup_serving_averages_include_omega3_supplements() -> None:
+    """Gut facts keep raw totals for compatibility, expose daily averages
+    for the UI, and count logged omega-3 supplements in the omega signal."""
+    print("\n[test] gut rollup serving averages include omega-3 supplements")
+    from datetime import date, datetime, time, timedelta, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+    from app.models import (
+        DailyNutritionMetrics, SupplementIngredient, SupplementLog,
+        User, UserSupplementStack,
+    )  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.gut_health import compute_weekly_rollup
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    today = date.today()
+    with Session(engine) as s:
+        u = User(email="gut-supp@example.com", username="gutsupp", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        omega = SupplementIngredient(
+            slug="omega_3",
+            name="Omega-3 (EPA/DHA)",
+            category="fatty_acid",
+            default_unit="mg",
+        )
+        s.add(omega); s.flush()
+        stack = UserSupplementStack(
+            user_id=u.id,
+            supplement_ingredient_id=omega.id,
+            custom_name=omega.name,
+            category="fatty_acid",
+            dose_amount=1000,
+            dose_unit="mg",
+        )
+        s.add(stack); s.flush()
+        s.add(DailyNutritionMetrics(
+            user_id=u.id,
+            metric_date=today - timedelta(days=1),
+            calories_total=1900,
+            item_count=4,
+            fermented_servings=2,
+            probiotic_servings=0.5,
+            omega3_servings=0.5,
+            plant_slugs=["oat"],
+            processing_counts={"minimally_processed": 4},
+        ))
+        s.add(DailyNutritionMetrics(
+            user_id=u.id,
+            metric_date=today,
+            calories_total=2100,
+            item_count=4,
+            fermented_servings=1,
+            probiotic_servings=0.5,
+            omega3_servings=0,
+            plant_slugs=["blueberry"],
+            processing_counts={"minimally_processed": 4},
+        ))
+        s.add(SupplementLog(
+            user_id=u.id,
+            stack_item_id=stack.id,
+            taken_at=datetime.combine(today, time(hour=8), tzinfo=timezone.utc),
+            dose_amount=1000,
+            dose_unit="mg",
+            skipped=False,
+        ))
+        s.commit()
+
+        rollup = compute_weekly_rollup(s, user_id=u.id, end_date=today, days=2)
+        assert rollup["fermented_servings"] == 3, rollup
+        assert rollup["avg_fermented_servings"] == 1.5, rollup
+        assert rollup["probiotic_servings"] == 1, rollup
+        assert rollup["avg_probiotic_servings"] == 0.5, rollup
+        assert rollup["omega3_food_servings"] == 0.5, rollup
+        assert rollup["omega3_supplement_servings"] == 1, rollup
+        assert rollup["omega3_servings"] == 1.5, rollup
+        assert rollup["avg_omega3_servings"] == 0.8, rollup
+    _ok("gut serving averages and omega-3 supplement rollup are stable")
+
+
 def test_compute_daily_metrics_recovers_from_duplicate_insert_race() -> None:
     """Two home-screen reads can race to create today's metrics row. The
     loser should rollback, fetch the winner, and return one clean row."""
@@ -1562,6 +1646,7 @@ cases = [
     test_patch_meal_items_refreshes_history_averages_and_gut_metrics,
     test_score_micros_read_unsuffixed_aliases_and_calorie_fallback,
     test_gut_rollup_uses_logged_days_not_empty_metric_placeholders,
+    test_gut_rollup_serving_averages_include_omega3_supplements,
     test_compute_daily_metrics_recovers_from_duplicate_insert_race,
     test_hydration_get_reads_requested_date,
     test_hydration_guidance_flags_low_sodium_long_session,

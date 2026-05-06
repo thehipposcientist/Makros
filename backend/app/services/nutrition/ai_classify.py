@@ -18,7 +18,8 @@ import logging
 from typing import Any
 
 from app.services.nutrition.food_classifier import (
-    FoodClassification, CLASSIFIER_VERSION, normalize_name,
+    FoodClassification, CLASSIFIER_VERSION, estimate_amounts_deterministic,
+    normalize_name,
 )
 
 logger = logging.getLogger("app.nutrition.ai_classify")
@@ -257,8 +258,9 @@ def get_or_create_metadata(
     Lookup order:
       1. FoodMetadata cache for (normalized_name, CLASSIFIER_VERSION)
       2. deterministic + heuristic classifier
-      3. AI fallback (only if allowed and the heuristic pass returned "unknown")
-      4. persist result into FoodMetadata for next time
+      3. deterministic collagen/probiotic amount estimate
+      4. AI fallback (only if explicitly allowed and the heuristic pass returned "unknown")
+      5. persist result into FoodMetadata for next time
 
     Returns the FoodMetadata row. Safe + idempotent.
     """
@@ -286,11 +288,12 @@ def get_or_create_metadata(
     ).first()
     if existing:
         if (
-            allow_ai
-            and getattr(existing, "collagen_g_per_serving", None) is None
+            getattr(existing, "collagen_g_per_serving", None) is None
             and getattr(existing, "probiotic_cfu_billions_per_serving", None) is None
         ):
-            amounts = estimate_amounts(raw_name)
+            amounts = estimate_amounts_deterministic(raw_name)
+            if allow_ai and (amounts.get("amount_confidence") or "none") == "none":
+                amounts = estimate_amounts(raw_name) or amounts
             if amounts is not None:
                 from datetime import datetime, timezone
                 existing.collagen_g_per_serving = amounts.get("collagen_g_per_serving")
@@ -313,15 +316,12 @@ def get_or_create_metadata(
         if ai_cls is not None:
             cls = ai_cls
 
-    # AI amount estimation runs on EVERY food regardless of what the
-    # deterministic classifier found. Keyword matching misses too many
-    # real-world foods — a user's "Grandma's chicken soup" wouldn't
-    # match collagen keywords but still contains meaningful amounts.
-    # One cached AI call per unique food, indexed by normalized name +
-    # classifier_version, so scaling cost is trivial.
-    amounts = None
-    if allow_ai:
-        amounts = estimate_amounts(raw_name)
+    # Normal app paths use deterministic amounts only. Explicit AI-enabled
+    # backfills may still ask the model when the deterministic pass finds no
+    # collagen/probiotic signal.
+    amounts = estimate_amounts_deterministic(raw_name)
+    if allow_ai and (amounts.get("amount_confidence") or "none") == "none":
+        amounts = estimate_amounts(raw_name) or amounts
 
     row = FoodMetadata(
         normalized_name=cls.normalized_name or normalized,

@@ -59,6 +59,8 @@ class PlanRequest(BaseModel):
     recoveryLevel: str | None = None
     workoutFocus: str | None = None
     preferredSplit: str | None = None
+    strengthBaselines: dict | None = None
+    cardioBaseline: dict | None = None
     preferredExercises: list[str] = []
     dislikedExercises: list[str] = []
     injuriesOrLimitations: list[str] = []
@@ -102,6 +104,8 @@ class WorkoutOnlyRequest(BaseModel):
     equipmentSettings: dict | None = None
 
     experienceLevel: str | None = None
+    strengthBaselines: dict | None = None
+    cardioBaseline: dict | None = None
     injuriesOrLimitations: list[str] = []
     userContext: str | None = None
 

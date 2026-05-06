@@ -99,6 +99,34 @@ export interface StrengthEquipmentSettings {
   };
 }
 
+export type StrengthBaselineLiftKey =
+  | 'bench_press'
+  | 'squat'
+  | 'deadlift'
+  | 'overhead_press'
+  | 'pull_up';
+
+export interface StrengthBaselineLift {
+  key: StrengthBaselineLiftKey;
+  exerciseSlug: string;
+  name: string;
+  weightLbs?: number;
+  reps?: number;
+}
+
+export interface StrengthBaselines {
+  version: 1;
+  lifts: StrengthBaselineLift[];
+}
+
+export interface CardioBaseline {
+  canJog10Min?: boolean;
+  comfortableDurationMin?: number;
+  recentMileTimeMin?: number;
+  recent5kTimeMin?: number;
+  preferredModes?: string[];
+}
+
 // Hierarchical goal selection (new model)
 export interface GoalSelection {
   primaryGoal: string;          // id from PRIMARY_GOALS
@@ -221,6 +249,8 @@ export interface UserProfile {
   workoutDurationMinutes: number;
   equipment: string[];           // specific item names e.g. 'Dumbbells', 'Barbell'
   equipmentSettings?: StrengthEquipmentSettings;
+  strengthBaselines?: StrengthBaselines;
+  cardioBaseline?: CardioBaseline;
   foodsAvailable: string[];
   supplementsAvailable?: string[];  // supplements the user has / takes
   customFoods: CustomFoodItem[]; // user-added foods with AI-fetched macros
@@ -280,6 +310,7 @@ export type WeightRecommendationSource =
   | 'substitution_group'
   | 'movement_pattern'
   | 'muscle_bucket'
+  | 'strength_anchor'
   | 'default';
 
 export interface PlannedSet {

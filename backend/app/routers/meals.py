@@ -90,13 +90,9 @@ def _build_meal_response(meal: Meal, db: Session) -> dict:
     return {**meal.model_dump(), "items": [i.model_dump() for i in items]}
 
 
-# Per-meal-log refresh runs the daily metrics with AI enabled so each
-# newly-logged food gets its collagen_g + probiotic_cfu amounts
-# estimated. The estimator is cached per food forever (one call per
-# unique food name + classifier version), so logging a salmon dinner
-# 30 times pays for AI exactly once. Without allow_ai=True we'd
-# silently zero out collagen + CFU for every food the deterministic
-# keyword classifier doesn't recognise — which was the bug.
+# Per-meal-log refresh runs daily metrics deterministically. Collagen and
+# probiotic amounts now come from conservative name rules, not OpenAI, so
+# normal meal writes never create hidden AI spend.
 #
 # Burst-save debounce: a user adding several meals in quick succession
 # (or the watch + phone double-firing) used to trigger N consecutive
@@ -123,7 +119,7 @@ def _refresh_daily_metrics(db: Session, user_id: int, meal_date: date, *, force:
     _last_refresh_at[key] = now
     try:
         from app.services.nutrition.gut_health import compute_daily_metrics
-        compute_daily_metrics(db, user_id=user_id, metric_date=meal_date, allow_ai=True)
+        compute_daily_metrics(db, user_id=user_id, metric_date=meal_date, allow_ai=False)
     except Exception:
         pass
     # Nutrition adherence is one of readiness's pillars — clear the
@@ -472,15 +468,15 @@ def gut_health_signals(
 
     today = date.today()
     try:
-        # The gut-health endpoint also drives the daily NutritionCard,
-        # so it needs amounts populated. Cached per-food, so the first
-        # query of the day is the only AI cost.
-        today_row = compute_daily_metrics(db, user_id=current_user.id, metric_date=today, allow_ai=True)
+        # The gut-health endpoint also drives the daily NutritionCard.
+        # Keep normal reads deterministic; food metadata enrichment should
+        # not spend AI just because the user opened the app.
+        today_row = compute_daily_metrics(db, user_id=current_user.id, metric_date=today, allow_ai=False)
     except Exception:
         db.rollback()
         today_row = None
 
-    rollup = compute_weekly_rollup(db, user_id=current_user.id, end_date=today, days=days, allow_ai=True)
+    rollup = compute_weekly_rollup(db, user_id=current_user.id, end_date=today, days=days, allow_ai=False)
 
     if today_row is None:
         return {"today": None, "window": rollup}

@@ -28,7 +28,8 @@ from dataclasses import dataclass
 
 from .archetypes import DayArchetype, ARCHETYPE_META, TrainingType
 from .cardio import (
-    classify_cardio, build_cardio_guidance, render_cardio_prescription_text,
+    apply_signup_cardio_baseline, classify_cardio, build_cardio_guidance,
+    render_cardio_prescription_text,
 )
 
 
@@ -285,6 +286,7 @@ def _prescribe_conditioning(
         user_caps = getattr(inputs, "user_equipment_capabilities", None) or {}
     user_age = getattr(inputs, "user_age", None) if inputs else None
     resting_hr = getattr(inputs, "resting_hr", None) if inputs else None
+    cardio_baseline = getattr(inputs, "cardio_baseline", None) if inputs else None
 
     def _make_cardio(
         sets: int,
@@ -312,6 +314,7 @@ def _prescribe_conditioning(
             capabilities=caps,
             user_age=user_age,
             resting_hr=resting_hr,
+            cardio_baseline=cardio_baseline,
         )
         # The prescription's base_reps is the authoritative duration —
         # override the session_minutes-derived value from build_cardio_guidance
@@ -324,6 +327,12 @@ def _prescribe_conditioning(
             guidance["duration_min"] = int(_range_match.group(2))
         elif _single_match:
             guidance["duration_min"] = int(_single_match.group(1))
+        apply_signup_cardio_baseline(
+            guidance,
+            baseline=cardio_baseline,
+            modality=modality,
+            intensity=classify_cardio(exercise),
+        )
         rep_text = (
             _interval_work_text(base_reps)
             if p_type == "cardio_intervals" and sets > 1

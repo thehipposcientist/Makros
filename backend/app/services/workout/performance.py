@@ -56,6 +56,7 @@ class ExercisePerformance:
     # 0–1 confidence that this profile is a good anchor. More sessions
     # = higher confidence, with a cap at MAX_SESSIONS_PER_EXERCISE.
     confidence: float
+    source: str = "history"
 
 
 def _epley_1rm(weight_lbs: float, reps: int) -> float:
@@ -180,6 +181,130 @@ def build_performance_profile(
             confidence=confidence,
         )
     return profiles
+
+
+_SIGNUP_BASELINE_SLUGS = {
+    "bench_press": ("barbell_bench_press", "Barbell Bench Press"),
+    "squat": ("barbell_squat", "Barbell Squat"),
+    "deadlift": ("deadlift", "Deadlift"),
+    "overhead_press": ("overhead_press", "Overhead Press"),
+}
+
+
+def _positive_float(value) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def _positive_int(value) -> int | None:
+    try:
+        out = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return out if out > 0 else None
+
+
+def _baseline_lift_rows(raw: object) -> list[dict]:
+    if isinstance(raw, dict):
+        rows = raw.get("lifts") or []
+    elif isinstance(raw, list):
+        rows = raw
+    else:
+        rows = []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def build_strength_anchor_profiles_from_raw(
+    raw: object,
+    *,
+    only_slugs: Optional[list[str]] = None,
+) -> dict[str, ExercisePerformance]:
+    """Return signup strength anchors from a raw preference payload."""
+    rows = _baseline_lift_rows(raw)
+    if not rows:
+        return {}
+
+    allowed = set(only_slugs or [])
+    out: dict[str, ExercisePerformance] = {}
+    for row in rows:
+        key = str(row.get("key") or "").strip()
+        slug = str(row.get("exercise_slug") or row.get("exerciseSlug") or "").strip()
+        if not slug and key in _SIGNUP_BASELINE_SLUGS:
+            slug = _SIGNUP_BASELINE_SLUGS[key][0]
+        if not slug or (allowed and slug not in allowed):
+            continue
+
+        # Pull-ups/reps-only rows are useful profile context, but they do not
+        # create a load anchor for the first-weight pipeline.
+        weight = _positive_float(row.get("weight_lbs") or row.get("weightLbs"))
+        reps = _positive_int(row.get("reps"))
+        if weight is None or reps is None:
+            continue
+
+        default_name = _SIGNUP_BASELINE_SLUGS.get(key, (slug, slug))[1]
+        name = str(row.get("name") or default_name)
+        e1rm = _epley_1rm(weight, reps)
+        if e1rm <= 0:
+            continue
+        out[slug] = ExercisePerformance(
+            slug=slug,
+            name=name,
+            session_count=1,
+            recent_top_weight_lbs=round(weight, 1),
+            recent_top_reps=reps,
+            estimated_1rm_lbs=e1rm,
+            recent_volume_load=round(weight * reps, 1),
+            last_performed_on=None,
+            confidence=0.35,
+            source="strength_anchor",
+        )
+    return out
+
+
+def build_strength_anchor_profiles(
+    user_id: int,
+    db_session,
+    *,
+    only_slugs: Optional[list[str]] = None,
+) -> dict[str, ExercisePerformance]:
+    """Return signup strength anchors as ExercisePerformance objects.
+
+    These are deliberately separate from `build_performance_profile` so
+    progress charts and history-dependent features continue to represent
+    real logged workouts only. Planning/live weight recommendation can merge
+    these anchors when it wants better first-week loads.
+    """
+    from sqlmodel import select
+
+    from app.models import UserPreferences
+
+    prefs = db_session.exec(
+        select(UserPreferences).where(UserPreferences.user_id == user_id)
+    ).first()
+    raw = getattr(prefs, "strength_baselines", None) if prefs else None
+    return build_strength_anchor_profiles_from_raw(raw, only_slugs=only_slugs)
+
+
+def merge_strength_anchor_profiles(
+    user_id: int,
+    db_session,
+    profiles: dict[str, ExercisePerformance] | None,
+    strength_baselines: object | None = None,
+) -> dict[str, ExercisePerformance]:
+    """Return performance profiles with signup anchors filling gaps only."""
+    merged = dict(profiles or {})
+    try:
+        anchors = build_strength_anchor_profiles_from_raw(strength_baselines) if strength_baselines is not None else {}
+        if not anchors:
+            anchors = build_strength_anchor_profiles(user_id, db_session)
+    except Exception:
+        return merged
+    for slug, profile in anchors.items():
+        merged.setdefault(slug, profile)
+    return merged
 
 
 # ─── Plateau detection ──────────────────────────────────────────────────────

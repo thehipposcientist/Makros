@@ -5,6 +5,7 @@ profiles, pick the best-available anchor weight using a deterministic
 priority ladder:
 
     1. exact_history       — user has profile for this exact exercise
+       strength_anchor     — user-entered signup baseline for exact lift
     2. substitution_group  — user has profile for a direct swap
     3. movement_pattern    — user has profile for a same-pattern lift
     4. muscle_bucket       — user has profile for same primary muscle
@@ -37,6 +38,7 @@ RecommendationSource = Literal[
     "substitution_group",
     "movement_pattern",
     "muscle_bucket",
+    "strength_anchor",
     "default",
 ]
 
@@ -215,6 +217,13 @@ def recommend_starting_weight(
         p = profiles[target_slug]
         weight = _estimate_working_weight(p, target_reps, increment=target_inc)
         if weight > 0:
+            if getattr(p, "source", "history") == "strength_anchor":
+                return WeightRecommendation(
+                    weight_lbs=weight,
+                    confidence=0.45,
+                    source="strength_anchor",
+                    reason=f"Based on your signup {p.name} baseline",
+                )
             return WeightRecommendation(
                 weight_lbs=weight,
                 confidence=min(0.95, 0.45 + 0.08 * p.session_count),
@@ -245,6 +254,11 @@ def recommend_starting_weight(
             )
             if weight > 0:
                 name = all_exercises_by_slug[slug].get("name", slug)
+                anchor_label = (
+                    f"your signup {p.name} baseline"
+                    if getattr(p, "source", "history") == "strength_anchor"
+                    else f"your recent {name} work"
+                )
                 # Substitution-group ceiling sits clearly below exact-
                 # history confidence so a single-session direct swap
                 # never outranks a 1-session exact match.
@@ -252,7 +266,7 @@ def recommend_starting_weight(
                     weight_lbs=weight,
                     confidence=min(0.70, 0.40 + 0.04 * p.session_count),
                     source="substitution_group",
-                    reason=f"Transferred from your recent {name} work (direct swap)",
+                    reason=f"Transferred from {anchor_label} (direct swap)",
                 )
 
     # Tier 3: movement pattern (e.g. horizontal_press). Only transfer
@@ -281,6 +295,11 @@ def recommend_starting_weight(
             if weight > 0:
                 name = all_exercises_by_slug[slug].get("name", slug)
                 pretty = pattern.replace("_", " ")
+                anchor_label = (
+                    f"your signup {p.name} baseline"
+                    if getattr(p, "source", "history") == "strength_anchor"
+                    else f"similar {pretty} work ({name})"
+                )
                 # Movement-pattern transfer is a coarser signal than a
                 # direct substitution-group swap, so its flat confidence
                 # sits below the substitution-group ceiling.
@@ -288,7 +307,7 @@ def recommend_starting_weight(
                     weight_lbs=weight,
                     confidence=0.40,
                     source="movement_pattern",
-                    reason=f"Estimated from similar {pretty} work ({name})",
+                    reason=f"Estimated from {anchor_label}",
                 )
 
     # Tier 4: same primary muscle + same equipment bucket. Last
@@ -323,8 +342,8 @@ def recommend_starting_weight(
                     confidence=0.25,
                     source="muscle_bucket",
                     reason=(
-                        f"New exercise estimate based on recent {muscle} "
-                        f"{bucket} work"
+                        f"New exercise estimate based on "
+                        f"{'your signup ' + p.name + ' baseline' if getattr(p, 'source', 'history') == 'strength_anchor' else 'recent ' + muscle + ' ' + bucket + ' work'}"
                     ),
                 )
 

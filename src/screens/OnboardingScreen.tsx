@@ -41,7 +41,9 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
 })();
 import { colors, radius } from '../constants/theme';
 import {
-  Goal, GoalPace, Gender, UserProfile, PhysicalStats, GoalDetails, GoalSelection, StrengthEquipmentSettings,
+  CardioBaseline,
+  Goal, GoalPace, Gender, UserProfile, PhysicalStats, GoalDetails, GoalSelection,
+  StrengthBaselineLiftKey, StrengthBaselines, StrengthEquipmentSettings,
 } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal, getMe, searchFoodNutrition, type FoodSearchResult } from '../services/api';
@@ -71,7 +73,7 @@ const logo = require('../../assets/images/thallo-logo-white-transparent-New.png'
 
 // ─── Step logic ───────────────────────────────────────────────────────────────
 
-type StepKey = 'goal' | 'goalRefine' | 'physicalStats' | 'trainingDays' | 'equipment' | 'foods' | 'supplements' | 'mealRoutine' | 'appleHealth' | 'context';
+type StepKey = 'goal' | 'goalRefine' | 'physicalStats' | 'trainingDays' | 'equipment' | 'baseline' | 'foods' | 'supplements' | 'mealRoutine' | 'appleHealth' | 'context';
 
 function getSteps(): StepKey[] {
   // Meal routine moved out of onboarding — users can pin meals as routines
@@ -79,7 +81,7 @@ function getSteps(): StepKey[] {
   // at signup time.
   // Compressed onboarding: 5 core free steps. Apple Health is Pro-only,
   // so it is offered after upgrade instead of during first-run setup.
-  const base: StepKey[] = ['goal', 'physicalStats', 'trainingDays', 'equipment', 'foods'];
+  const base: StepKey[] = ['goal', 'physicalStats', 'trainingDays', 'equipment', 'baseline', 'foods'];
   return base;
 }
 
@@ -340,6 +342,52 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
   },
 ];
 
+type StrengthBaselineInput = Record<StrengthBaselineLiftKey, { weightLbs: string; reps: string }>;
+
+const STRENGTH_BASELINE_LIFTS: Array<{
+  key: StrengthBaselineLiftKey;
+  label: string;
+  exerciseSlug: string;
+  name: string;
+  weightPlaceholder: string;
+  repsPlaceholder: string;
+}> = [
+  { key: 'bench_press', label: 'Bench', exerciseSlug: 'barbell_bench_press', name: 'Barbell Bench Press', weightPlaceholder: '135', repsPlaceholder: '8' },
+  { key: 'squat', label: 'Squat', exerciseSlug: 'barbell_squat', name: 'Barbell Squat', weightPlaceholder: '185', repsPlaceholder: '5' },
+  { key: 'deadlift', label: 'Deadlift', exerciseSlug: 'deadlift', name: 'Deadlift', weightPlaceholder: '225', repsPlaceholder: '5' },
+  { key: 'overhead_press', label: 'Press', exerciseSlug: 'overhead_press', name: 'Overhead Press', weightPlaceholder: '95', repsPlaceholder: '6' },
+  { key: 'pull_up', label: 'Pull-ups', exerciseSlug: 'pullups', name: 'Pull-ups', weightPlaceholder: '', repsPlaceholder: '8' },
+];
+
+const CARDIO_BASELINE_MODES = ['Run', 'Bike', 'Row', 'Swim', 'Stairs', 'Hike'];
+
+const emptyStrengthBaselineInputs = (): StrengthBaselineInput => ({
+  bench_press: { weightLbs: '', reps: '' },
+  squat: { weightLbs: '', reps: '' },
+  deadlift: { weightLbs: '', reps: '' },
+  overhead_press: { weightLbs: '', reps: '' },
+  pull_up: { weightLbs: '', reps: '' },
+});
+
+const parseOptionalPositiveNumber = (raw: string): number | undefined => {
+  const n = parseFloat(String(raw || '').trim());
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+};
+
+const parseOptionalMinutes = (raw: string): number | undefined => {
+  const s = String(raw || '').trim();
+  if (!s) return undefined;
+  if (s.includes(':')) {
+    const parts = s.split(':').map(p => parseFloat(p));
+    if (parts.length === 2 && parts.every(Number.isFinite)) {
+      const [minutes, seconds] = parts;
+      if (minutes >= 0 && seconds >= 0 && seconds < 60) return Math.round((minutes + seconds / 60) * 10) / 10;
+    }
+    return undefined;
+  }
+  return parseOptionalPositiveNumber(s);
+};
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 interface OnboardingScreenProps {
@@ -448,6 +496,14 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const [scannedEquipment, setScannedEquipment] = useState<string[]>([]);
   const [showEquipScanModal, setShowEquipScanModal] = useState(false);
 
+  // Step 6 — Optional performance baseline
+  const [strengthBaselineInputs, setStrengthBaselineInputs] = useState<StrengthBaselineInput>(emptyStrengthBaselineInputs);
+  const [cardioCanJog10, setCardioCanJog10] = useState<boolean | null>(null);
+  const [cardioComfortableDuration, setCardioComfortableDuration] = useState('');
+  const [cardioMileTime, setCardioMileTime] = useState('');
+  const [cardioFiveKTime, setCardioFiveKTime] = useState('');
+  const [cardioPreferredModes, setCardioPreferredModes] = useState<string[]>([]);
+
   // Search filters & template selection
   const [equipmentSearch, setEquipmentSearch] = useState('');
   const [foodSearch, setFoodSearch] = useState('');
@@ -520,6 +576,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       weightLbs, heightFeet, heightInches, birthdate, gender,
       daysPerWeek, selectedTrainingDays, preferredSplit, workoutDuration,
       selectedEquipment, equipmentSettings,
+      strengthBaselineInputs,
+      cardioCanJog10, cardioComfortableDuration, cardioMileTime, cardioFiveKTime, cardioPreferredModes,
       foodsAvailable, allergies,
       supplementsAvailable, mealRoutine,
       appleHealthEnabled,
@@ -533,6 +591,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     weightLbs, heightFeet, heightInches, birthdate, gender,
     daysPerWeek, selectedTrainingDays, preferredSplit, workoutDuration,
     selectedEquipment, equipmentSettings,
+    strengthBaselineInputs,
+    cardioCanJog10, cardioComfortableDuration, cardioMileTime, cardioFiveKTime, cardioPreferredModes,
     foodsAvailable, allergies,
     supplementsAvailable, mealRoutine,
     appleHealthEnabled,
@@ -599,6 +659,14 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 if (typeof draft.workoutDuration === 'number') setWorkoutDuration(draft.workoutDuration);
                 if (Array.isArray(draft.selectedEquipment)) setSelectedEquipment(draft.selectedEquipment);
                 if (draft.equipmentSettings !== undefined) setEquipmentSettings(draft.equipmentSettings);
+                if (draft.strengthBaselineInputs && typeof draft.strengthBaselineInputs === 'object') {
+                  setStrengthBaselineInputs({ ...emptyStrengthBaselineInputs(), ...draft.strengthBaselineInputs });
+                }
+                if (draft.cardioCanJog10 === true || draft.cardioCanJog10 === false || draft.cardioCanJog10 === null) setCardioCanJog10(draft.cardioCanJog10);
+                if (typeof draft.cardioComfortableDuration === 'string') setCardioComfortableDuration(draft.cardioComfortableDuration);
+                if (typeof draft.cardioMileTime === 'string') setCardioMileTime(draft.cardioMileTime);
+                if (typeof draft.cardioFiveKTime === 'string') setCardioFiveKTime(draft.cardioFiveKTime);
+                if (Array.isArray(draft.cardioPreferredModes)) setCardioPreferredModes(draft.cardioPreferredModes);
                 if (Array.isArray(draft.foodsAvailable)) setFoodsAvailable(draft.foodsAvailable);
                 if (Array.isArray(draft.allergies)) setAllergies(draft.allergies);
                 if (Array.isArray(draft.supplementsAvailable)) setSupplementsAvailable(draft.supplementsAvailable);
@@ -771,6 +839,41 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     }
   };
 
+  const buildStrengthBaselines = (): StrengthBaselines | undefined => {
+    const lifts = STRENGTH_BASELINE_LIFTS
+      .map(lift => {
+        const input = strengthBaselineInputs[lift.key] ?? { weightLbs: '', reps: '' };
+        const reps = parseOptionalPositiveNumber(input.reps);
+        if (!reps) return null;
+        const weightLbs = lift.key === 'pull_up'
+          ? undefined
+          : parseOptionalPositiveNumber(input.weightLbs);
+        if (lift.key !== 'pull_up' && !weightLbs) return null;
+        return {
+          key: lift.key,
+          exerciseSlug: lift.exerciseSlug,
+          name: lift.name,
+          weightLbs,
+          reps: Math.round(reps),
+        };
+      })
+      .filter(Boolean) as StrengthBaselines['lifts'];
+    return lifts.length ? { version: 1, lifts } : undefined;
+  };
+
+  const buildCardioBaseline = (): CardioBaseline | undefined => {
+    const baseline: CardioBaseline = {};
+    if (cardioCanJog10 !== null) baseline.canJog10Min = cardioCanJog10;
+    const comfortableDurationMin = parseOptionalPositiveNumber(cardioComfortableDuration);
+    if (comfortableDurationMin) baseline.comfortableDurationMin = comfortableDurationMin;
+    const recentMileTimeMin = parseOptionalMinutes(cardioMileTime);
+    if (recentMileTimeMin) baseline.recentMileTimeMin = recentMileTimeMin;
+    const recent5kTimeMin = parseOptionalMinutes(cardioFiveKTime);
+    if (recent5kTimeMin) baseline.recent5kTimeMin = recent5kTimeMin;
+    if (cardioPreferredModes.length > 0) baseline.preferredModes = cardioPreferredModes;
+    return Object.keys(baseline).length > 0 ? baseline : undefined;
+  };
+
   const handleComplete = async () => {
     // Clear the resume draft — onboarding has succeeded, future relaunches
     // should NOT prompt "continue setup?" against stale state.
@@ -803,6 +906,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       birthdate:    birthdate ?? undefined,
       gender:       gender as Gender,
     };
+    const strengthBaselines = buildStrengthBaselines();
+    const cardioBaseline = buildCardioBaseline();
 
     onComplete({
       goal:               selectedGoal,
@@ -816,6 +921,8 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       workoutDurationMinutes: workoutDuration,
       equipment:              selectedEquipment,
       equipmentSettings:      normalizeStrengthEquipmentSettings(equipmentSettings, selectedEquipment),
+      strengthBaselines,
+      cardioBaseline,
       foodsAvailable,
       allergies: allergies.length > 0 ? allergies : undefined,
       supplementsAvailable: supplementsAvailable.length > 0 ? supplementsAvailable : undefined,
@@ -1910,6 +2017,185 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     </View>
   );
 
+  const updateStrengthBaseline = (
+    key: StrengthBaselineLiftKey,
+    patch: Partial<{ weightLbs: string; reps: string }>,
+  ) => {
+    setStrengthBaselineInputs(prev => ({
+      ...prev,
+      [key]: { ...(prev[key] ?? { weightLbs: '', reps: '' }), ...patch },
+    }));
+  };
+
+  const toggleCardioMode = (mode: string) => {
+    setCardioPreferredModes(prev =>
+      prev.includes(mode) ? prev.filter(m => m !== mode) : [...prev, mode]
+    );
+  };
+
+  const renderBaselineStep = () => (
+    <View style={styles.stepContainer}>
+      <Text style={styles.stepTitle}>Performance Baseline</Text>
+      <Text style={styles.stepDescription}>
+        Optional recent working sets and cardio markers.
+      </Text>
+      <Text style={styles.optionalBanner}>Skip anything you do not know.</Text>
+
+      <View style={styles.fieldGroup}>
+        <Text style={styles.fieldLabel}>Training experience</Text>
+        <View style={{ gap: 8 }}>
+          {EXPERIENCE_OPTIONS.map(opt => {
+            const active = experienceLevel === opt.value;
+            return (
+              <TouchableOpacity
+                key={opt.value}
+                style={[
+                  styles.paceCard,
+                  active && styles.paceCardActive,
+                  { alignItems: 'flex-start', paddingVertical: 12, paddingHorizontal: 14 },
+                ]}
+                onPress={() => setExperienceLevel(opt.value)}>
+                <Text style={[styles.paceLabel, active && styles.paceLabelActive, { textAlign: 'left', fontSize: 13 }]}>
+                  {opt.label}
+                </Text>
+                <Text style={[styles.paceDesc, active && styles.paceDescActive, { textAlign: 'left', fontSize: 11, lineHeight: 15 }]}>
+                  {opt.desc}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
+      <View style={styles.fieldGroup}>
+        <Text style={styles.sectionHeading}>Strength</Text>
+        <View style={{ gap: 10 }}>
+          {STRENGTH_BASELINE_LIFTS.map(lift => {
+            const input = strengthBaselineInputs[lift.key] ?? { weightLbs: '', reps: '' };
+            const isPullUp = lift.key === 'pull_up';
+            return (
+              <View
+                key={lift.key}
+                style={{
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  backgroundColor: colors.surface,
+                  borderRadius: radius.md,
+                  padding: 12,
+                }}>
+                <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginBottom: 8 }}>
+                  {lift.label}
+                </Text>
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  {!isPullUp && (
+                    <View style={[styles.inlineInput, { flex: 1 }]}>
+                      <TextInput
+                        style={[styles.input, { flex: 1, paddingVertical: 11 }]}
+                        placeholder={lift.weightPlaceholder}
+                        placeholderTextColor={colors.textMuted}
+                        keyboardType="decimal-pad"
+                        value={input.weightLbs}
+                        onChangeText={text => updateStrengthBaseline(lift.key, { weightLbs: text })}
+                        onFocus={scrollToInput}
+                      />
+                      <Text style={[styles.unit, { minWidth: 24 }]}>lb</Text>
+                    </View>
+                  )}
+                  <View style={[styles.inlineInput, { flex: isPullUp ? 1 : 0.72 }]}>
+                    <TextInput
+                      style={[styles.input, { flex: 1, paddingVertical: 11 }]}
+                      placeholder={lift.repsPlaceholder}
+                      placeholderTextColor={colors.textMuted}
+                      keyboardType="number-pad"
+                      value={input.reps}
+                      onChangeText={text => updateStrengthBaseline(lift.key, { reps: text })}
+                      onFocus={scrollToInput}
+                    />
+                    <Text style={[styles.unit, { minWidth: 34 }]}>reps</Text>
+                  </View>
+                </View>
+              </View>
+            );
+          })}
+        </View>
+      </View>
+
+      <View style={styles.fieldGroup}>
+        <Text style={styles.sectionHeading}>Cardio</Text>
+        <Text style={styles.fieldLabel}>Can you jog continuously for 10 minutes?</Text>
+        <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+          {[
+            { value: true, label: 'Yes' },
+            { value: false, label: 'Not yet' },
+          ].map(opt => {
+            const active = cardioCanJog10 === opt.value;
+            return (
+              <TouchableOpacity
+                key={String(opt.value)}
+                style={[styles.paceCard, active && styles.paceCardActive]}
+                onPress={() => setCardioCanJog10(opt.value)}>
+                <Text style={[styles.paceLabel, active && styles.paceLabelActive]}>{opt.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 4 }}>Comfortable min</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="20"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="number-pad"
+              value={cardioComfortableDuration}
+              onChangeText={setCardioComfortableDuration}
+              onFocus={scrollToInput}
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 4 }}>Mile time</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="9:30"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="numbers-and-punctuation"
+              value={cardioMileTime}
+              onChangeText={setCardioMileTime}
+              onFocus={scrollToInput}
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 4 }}>5K time</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="30:00"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="numbers-and-punctuation"
+              value={cardioFiveKTime}
+              onChangeText={setCardioFiveKTime}
+              onFocus={scrollToInput}
+            />
+          </View>
+        </View>
+
+        <View style={[styles.foodChips, { marginTop: 12 }]}>
+          {CARDIO_BASELINE_MODES.map(mode => {
+            const selected = cardioPreferredModes.includes(mode);
+            return (
+              <TouchableOpacity
+                key={mode}
+                style={[styles.foodChip, selected && styles.foodChipActive]}
+                onPress={() => toggleCardioMode(mode)}>
+                <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>{mode}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+    </View>
+  );
+
   const addFoodToKitchen = (food: string) => {
     const name = food.trim();
     if (!name) return;
@@ -2387,35 +2673,6 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       </Text>
 
       <View style={styles.fieldGroup}>
-        <Text style={styles.fieldLabel}>Experience level</Text>
-        {/* Stacked vertically because the three labels + their descriptions
-            were too cramped side-by-side — "Intermediate" wrapped under
-            itself on narrow screens. One per row fits cleanly. */}
-        <View style={{ gap: 8, marginTop: 8 }}>
-          {EXPERIENCE_OPTIONS.map(opt => {
-            const active = experienceLevel === opt.value;
-            return (
-              <TouchableOpacity
-                key={opt.value}
-                style={[
-                  styles.paceCard,
-                  active && styles.paceCardActive,
-                  { alignItems: 'flex-start', paddingVertical: 14, paddingHorizontal: 16 },
-                ]}
-                onPress={() => setExperienceLevel(opt.value)}>
-                <Text style={[styles.paceLabel, active && styles.paceLabelActive, { fontSize: 14, textAlign: 'left', marginBottom: 4 }]}>
-                  {opt.label}
-                </Text>
-                <Text style={[styles.paceDesc, active && styles.paceDescActive, { fontSize: 12, textAlign: 'left', lineHeight: 16 }]}>
-                  {opt.desc}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      </View>
-
-      <View style={styles.fieldGroup}>
         <Text style={styles.fieldLabel}>
           Any injuries or physical limitations? <Text style={styles.optional}>(optional)</Text>
         </Text>
@@ -2587,6 +2844,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       case 'physicalStats': return renderPhysicalStatsStep();
       case 'trainingDays':  return renderTrainingDaysStep();
       case 'equipment':     return renderEquipmentStep();
+      case 'baseline':      return renderBaselineStep();
       case 'foods':         return renderFoodsStep();
       case 'supplements':   return renderSupplementsStep();
       case 'mealRoutine':   return renderMealRoutineStep();
@@ -2633,6 +2891,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               physicalStats: 'About You',
               trainingDays: 'Schedule',
               equipment: 'Equipment',
+              baseline: 'Baseline',
               foods: 'Foods',
               supplements: 'Supplements',
               mealRoutine: 'Meals',

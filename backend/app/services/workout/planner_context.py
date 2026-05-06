@@ -123,6 +123,7 @@ def build_planweek_planner_context(
         resting_hr=_resting_hr_int(avg_resting_hr),
         cycle_phase=cycle_phase,
         day_of_cycle=day_of_cycle,
+        cardio_baseline=getattr(prefs, "cardio_baseline", None),
         load_equipment_settings=getattr(prefs, "equipment_settings", None),
     )
     return PlannerBuildContext(

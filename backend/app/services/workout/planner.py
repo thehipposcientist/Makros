@@ -138,6 +138,9 @@ class PlannerInputs:
     # the conditioning prescriber uses them to build the most specific
     # prescription tier. Absent = RPE/duration fallback.
     user_equipment_capabilities: dict | None = None
+    # Optional signup cardio baseline. Used only to tune deterministic cardio
+    # guidance; it never changes the weekly recipe or injects plan rewrites.
+    cardio_baseline: dict | None = None
     # Strength loading constraints: barbell plate denominations and
     # adjustable dumbbell range/step. Optional; missing preserves the
     # legacy 5 lb / 2.5 lb load progression behavior.

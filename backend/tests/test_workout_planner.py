@@ -1048,6 +1048,45 @@ def test_recommender_confidence_single_session_below_075() -> None:
     _ok(f"1-session exact_history confidence={rec.confidence}")
 
 
+def test_recommender_uses_signup_strength_anchor_for_exact_lift() -> None:
+    """Signup strength baselines should beat generic category defaults while
+    staying labeled separately from real workout history."""
+    from app.services.workout.recommendation import recommend_starting_weight
+    from app.services.workout.performance import ExercisePerformance
+    print("\n[test] signup strength anchor → exact first-weight rec")
+    target = {
+        "slug": "barbell_bench_press",
+        "name": "Barbell Bench Press",
+        "primary_muscle": "chest",
+        "movement_pattern": "horizontal_press",
+        "equipment_bucket": "gym",
+        "is_compound": True,
+        "is_machine": False,
+    }
+    profile = ExercisePerformance(
+        slug="barbell_bench_press",
+        name="Barbell Bench Press",
+        session_count=1,
+        recent_top_weight_lbs=185.0,
+        recent_top_reps=8,
+        estimated_1rm_lbs=234.3,
+        recent_volume_load=1480.0,
+        last_performed_on=None,
+        confidence=0.35,
+        source="strength_anchor",
+    )
+    rec = recommend_starting_weight(
+        target, profiles={"barbell_bench_press": profile},
+        all_exercises_by_slug={"barbell_bench_press": target},
+        target_reps="6-8", experience="intermediate",
+    )
+    assert rec.source == "strength_anchor"
+    assert rec.weight_lbs == 185.0
+    assert rec.confidence == 0.45
+    assert "signup" in rec.reason.lower()
+    _ok(f"signup anchor source={rec.source} weight={rec.weight_lbs}")
+
+
 def test_default_category_differentiates_by_pattern() -> None:
     """Category defaults should distinguish squat, hinge, upper_push,
     upper_pull rather than lump all compounds into one number."""
@@ -1284,6 +1323,7 @@ if __name__ == "__main__":
         test_injury_free_form_phrase_resolves_via_substring,
         test_accessory_host_prefers_secondary_touch_day,
         test_recommender_confidence_single_session_below_075,
+        test_recommender_uses_signup_strength_anchor_for_exact_lift,
         test_default_category_differentiates_by_pattern,
         test_full_body_3_day_rotates_slots,
         test_full_plan_intermediate_muscle_gain,
