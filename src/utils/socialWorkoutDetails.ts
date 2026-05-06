@@ -166,6 +166,24 @@ function workoutSummaryRecord(payload: unknown): Record<string, any> {
   return isRecord(payload.workout_summary) ? payload.workout_summary : payload;
 }
 
+export function socialWorkoutDateKey(item: unknown): string {
+  const record = isRecord(item) ? item : {};
+  const payload = isRecord(record.payload) ? record.payload : record;
+  const summary = workoutSummaryRecord(payload);
+  const candidates = [
+    summary.date,
+    isRecord(payload) ? payload.date : null,
+    record.created_at,
+    record.createdAt,
+  ];
+  for (const value of candidates) {
+    if (typeof value !== 'string') continue;
+    const key = value.trim().slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(key)) return key;
+  }
+  return '';
+}
+
 export function socialWorkoutExercises(payload: unknown): SocialWorkoutExercise[] {
   const summary = workoutSummaryRecord(payload);
   return Array.isArray(summary.exercises) ? summary.exercises : [];

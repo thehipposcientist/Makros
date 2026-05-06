@@ -109,6 +109,7 @@ async function hardResetSession(): Promise<void> {
  *  new user doesn't inherit it; on the same user returning we leave cache
  *  alone so sign-out → sign-in is non-destructive. */
 const LAST_USER_ID_KEY = 'last_user_id';
+const TUTORIAL_COMPLETED_KEY = 'tutorial_v1_completed';
 /** Every AsyncStorage key that holds user-scoped state. When a different
  *  user signs in we remove all of these in one shot. This list also doubles
  *  as the set of keys synced to the backend via `pushUserState` —
@@ -164,7 +165,7 @@ const USER_SCOPED_KEYS = [
   'watch_active_command_backlog_v1',
   'onboardingDraft_v1',
   'manualWorkoutOverrides',
-  'tutorial_v1_completed',
+  TUTORIAL_COMPLETED_KEY,
   'meal_reminder_settings',
   'meal_reminder_notification_id',
   'meal_reminder_ids',
@@ -196,16 +197,17 @@ function isUserScopedStorageKey(key: string): boolean {
   return USER_SCOPED_KEY_PREFIXES.some(prefix => key.startsWith(prefix));
 }
 
-async function clearUserScopedStorage(): Promise<void> {
+async function clearUserScopedStorage(options: { preserveKeys?: string[] } = {}): Promise<void> {
+  const preserveKeys = new Set(options.preserveKeys ?? []);
   try {
     const keys = await AsyncStorage.getAllKeys();
     const scopedKeys = Array.from(new Set([
       ...USER_SCOPED_KEYS,
       ...keys.filter(isUserScopedStorageKey),
-    ]));
+    ])).filter(key => !preserveKeys.has(key));
     await AsyncStorage.multiRemove(scopedKeys);
   } catch {
-    try { await AsyncStorage.multiRemove(USER_SCOPED_KEYS); } catch {}
+    try { await AsyncStorage.multiRemove(USER_SCOPED_KEYS.filter(key => !preserveKeys.has(key))); } catch {}
   }
 }
 
@@ -599,7 +601,7 @@ export default function Index() {
     let cancelled = false;
     (async () => {
       try {
-        const seen = await AsyncStorage.getItem('tutorial_v1_completed');
+        const seen = await AsyncStorage.getItem(TUTORIAL_COMPLETED_KEY);
         if (cancelled || seen) return;
         // Brief delay so the home view paints first.
         setTimeout(() => { if (!cancelled) setShowTutorial(true); }, 600);
@@ -1522,7 +1524,7 @@ export default function Index() {
       // a proper wipe) rather than arriving without a userId key at all.
       WatchBridge.setUserId(null);
     } catch { /* watch bridge optional */ }
-    await clearUserScopedStorage();
+    await clearUserScopedStorage({ preserveKeys: [TUTORIAL_COMPLETED_KEY] });
     try { await AsyncStorage.removeItem('pending_plan_job'); } catch {}
     await clearAuthToken();
     setAuthToken(null);
@@ -2163,10 +2165,6 @@ export default function Index() {
             setShowAccount(false);
             setTimeout(() => setShowTutorial(true), 200);
           }}
-          onOpenSettings={() => {
-            setShowAccount(false);
-            setTimeout(() => setShowSettings(true), 200);
-          }}
         />
       )}
 
@@ -2213,7 +2211,7 @@ export default function Index() {
           onClose={async ({ completed }) => {
             setShowTutorial(false);
             if (completed) {
-              try { await AsyncStorage.setItem('tutorial_v1_completed', String(Date.now())); } catch {}
+              try { await AsyncStorage.setItem(TUTORIAL_COMPLETED_KEY, String(Date.now())); } catch {}
             }
           }}
         />
@@ -2606,7 +2604,7 @@ function SplashLoadingScreen() {
 // ── Account Info Modal ────────────────────────────────────────────────────────
 
 function AccountInfoModal({
-  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut, onShowTutorial, onOpenSettings,
+  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut, onShowTutorial,
 }: {
   token: string;
   profile: UserProfile;
@@ -2619,9 +2617,6 @@ function AccountInfoModal({
    *  to navigate). Owner is the app root, which renders the
    *  TutorialOverlay. */
   onShowTutorial?: () => void;
-  /** Opens the Settings hub (notifications, units, permissions). When
-   *  unset, the Settings row is hidden. */
-  onOpenSettings?: () => void;
 }) {
   const tc = getTheme(profile.themePreference).colors;
   const c = tc; // alias for the new Developer-logs block below
@@ -2852,6 +2847,7 @@ function AccountInfoModal({
       activeOpacity={0.8}
       testID={testID}
       accessibilityLabel={testID}
+      accessibilityRole="button"
     >
       <View style={{ flex: 1 }}>
         <Text style={[am.securityLabel, tone === 'danger' && { color: tc.error }]}>{label}</Text>
@@ -3047,15 +3043,6 @@ function AccountInfoModal({
               visible={showRecoveryModal}
               authToken={token}
               onDone={() => { setShowRecoveryModal(false); setHasRecoveryQuestion(true); }}
-            />
-          )}
-
-          {onOpenSettings && (
-            <ActionRow
-              label="Settings"
-              desc="Notifications, units (lbs/kg, mi/km), and permissions."
-              onPress={onOpenSettings}
-              testID="account-settings-open"
             />
           )}
 

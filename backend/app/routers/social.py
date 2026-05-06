@@ -21,6 +21,7 @@ router = APIRouter(prefix="/social", tags=["social"])
 _SOCIAL_FEED_FLAG = os.getenv("SOCIAL_FEED_ENABLED", "1").strip().lower()
 SOCIAL_FEED_ENABLED = _SOCIAL_FEED_FLAG not in {"0", "false", "no", "off"}
 FEED_EVENT_TYPES = ("workout_completed", "workout_post", "pr_achieved")
+FEED_WORKOUT_EVENT_TYPES = ("workout_completed", "workout_post")
 
 
 # ─── Schemas ─────────────────────────────────────────────────────────────────
@@ -1010,6 +1011,50 @@ def _can_view_feed_author(db: Session, viewer_id: int, author_id: int) -> bool:
     return bool(prof and prof.share_activity_enabled)
 
 
+def _feed_date_key(row: ActivityFeedItem) -> str:
+    raw = row.payload if isinstance(row.payload, dict) else {}
+    value = None
+    if row.event_type == "workout_post":
+        summary = raw.get("workout_summary")
+        if isinstance(summary, dict):
+            value = summary.get("date")
+    else:
+        value = raw.get("date")
+    if isinstance(value, str):
+        key = value.strip()[:10]
+        if key:
+            return key
+    return row.created_at.date().isoformat() if row.created_at else ""
+
+
+def _feed_group_key(row: ActivityFeedItem) -> tuple[int, str]:
+    return (row.user_id, _feed_date_key(row))
+
+
+def _bounded_feed_rows(db: Session, query, limit: int) -> list[ActivityFeedItem]:
+    card_limit = max(1, min(limit, 50))
+    candidate_limit = min(max(card_limit * 8, 80), 300)
+    candidates = db.exec(query.limit(candidate_limit)).all()
+
+    selected_keys: list[tuple[int, str]] = []
+    seen: set[tuple[int, str]] = set()
+    for row in candidates:
+        if row.event_type not in FEED_WORKOUT_EVENT_TYPES:
+            continue
+        key = _feed_group_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected_keys.append(key)
+        if len(selected_keys) >= card_limit:
+            break
+
+    if not selected_keys:
+        return candidates[:card_limit]
+    selected = set(selected_keys)
+    return [row for row in candidates if _feed_group_key(row) in selected]
+
+
 @router.get("/feed")
 def get_feed(
     limit: int = 30,
@@ -1033,12 +1078,11 @@ def get_feed(
         .where(ActivityFeedItem.user_id.in_(visible_ids))  # type: ignore[union-attr]
         .where(ActivityFeedItem.event_type.in_(FEED_EVENT_TYPES))  # type: ignore[union-attr]
         .order_by(ActivityFeedItem.created_at.desc())  # type: ignore[union-attr]
-        .limit(min(limit, 50))
     )
     if before_id is not None:
         q = q.where(ActivityFeedItem.id < before_id)
 
-    rows = db.exec(q).all()
+    rows = _bounded_feed_rows(db, q, limit)
 
     item_ids = [r.id for r in rows]
     like_counts: dict[int, int] = {}
@@ -1129,12 +1173,11 @@ def get_user_feed(
         .where(ActivityFeedItem.user_id == user_id)
         .where(ActivityFeedItem.event_type.in_(FEED_EVENT_TYPES))
         .order_by(ActivityFeedItem.created_at.desc())
-        .limit(min(limit, 50))
     )
     if before_id is not None:
         q = q.where(ActivityFeedItem.id < before_id)
 
-    rows = db.exec(q).all()
+    rows = _bounded_feed_rows(db, q, limit)
 
     item_ids = [r.id for r in rows]
     like_counts: dict[int, int] = {}

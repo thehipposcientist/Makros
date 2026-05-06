@@ -202,6 +202,46 @@ def test_feed_like_persists_and_hydrates_on_posts():
     _ok("post like row is stored, read into feed state, and removed on unlike")
 
 
+def test_feed_limit_counts_workout_days_not_pr_rows():
+    print("\n[test] feed limit counts workout days, not same-day PR rows")
+    eng = _make_engine()
+    with Session(eng) as s:
+        alice = _user(s, 1, "alice")
+        _user(s, 2, "bob")
+        _accepted_friendship(s, 1, 2)
+        today = datetime(2026, 5, 6, 18, 0, tzinfo=timezone.utc)
+        yesterday = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
+        s.add(ActivityFeedItem(
+            user_id=2,
+            event_type="workout_completed",
+            payload={"focus": "Pull", "duration_seconds": 2400, "date": "2026-05-05", "exercises": []},
+            created_at=yesterday,
+        ))
+        s.add(ActivityFeedItem(
+            user_id=2,
+            event_type="workout_completed",
+            payload={"focus": "Push", "duration_seconds": 2700, "date": "2026-05-06", "exercises": []},
+            created_at=today,
+        ))
+        for idx in range(30):
+            s.add(ActivityFeedItem(
+                user_id=2,
+                event_type="pr_achieved",
+                payload={"exercise": f"Lift {idx}", "pr_type": "heaviest_weight", "date": "2026-05-06"},
+                created_at=today.replace(minute=min(59, idx + 1)),
+            ))
+        s.commit()
+
+        feed = get_feed(limit=2, current_user=alice, db=s)
+        workout_dates = [
+            item["payload"]["date"]
+            for item in feed["items"]
+            if item["event_type"] == "workout_completed"
+        ]
+        assert workout_dates == ["2026-05-06", "2026-05-05"]
+    _ok("older workout days survive noisy PR activity from today")
+
+
 def test_mark_all_notifications_read():
     print("\n[test] mark all social notifications read")
     eng = _make_engine()
@@ -254,6 +294,7 @@ cases = [
     test_accept_friend_creates_notification_for_requester_and_marks_read,
     test_like_notification_is_sanitized_and_deduped,
     test_feed_like_persists_and_hydrates_on_posts,
+    test_feed_limit_counts_workout_days_not_pr_rows,
     test_mark_all_notifications_read,
     test_pr_feed_event_is_written_without_lift_value,
 ]

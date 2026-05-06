@@ -22,7 +22,7 @@ from app.services.email_delivery import send_password_reset_email, send_verifica
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = get_logger("app.auth")
-LEGAL_VERSION = "2026-04-29"
+LEGAL_VERSION = "2026-05-06.1"
 TOKEN_TTL_MINUTES = 30
 APPLE_ISSUER = "https://appleid.apple.com"
 APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys"

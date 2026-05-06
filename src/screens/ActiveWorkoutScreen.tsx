@@ -1205,11 +1205,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [showStartCountdown, setShowStartCountdown] = useState(
     () => playStartCountdown,
   );
-  // When the phone starts a workout and the paired watch does not
-  // become reachable after the HealthKit launch request, show a
-  // dismissable prompt telling the user to open Thallo on the watch.
-  // Auto-hides the moment the watch reports reachable.
-  const [showOpenWatchPrompt, setShowOpenWatchPrompt] = useState(false);
+  // Track paired/reachable state for the header. The root start handler
+  // owns the watchOS launch request so this screen's local countdown
+  // cannot be interrupted by a watch-connection prompt.
   const [watchStatus, setWatchStatus] = useState<{ paired: boolean; reachable: boolean } | null>(null);
   const watchSessionId = useRef(getActiveWatchSessionId() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const [watchSessionHydrated, setWatchSessionHydrated] = useState(false);
@@ -1347,36 +1345,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           .catch(() => {});
         // Initial push on mount.
         pushActive();
-        // If this is a phone-originated start, ask watchOS to open the
-        // companion app after the active snapshot is queued. A normal
-        // WCSession push cannot launch a closed watch app; the
-        // HealthKit startWatchApp path can. Fall back to a nudge only
-        // if watchOS declines or the app still isn't reachable shortly
-        // after the request.
+        // Snapshot the current watch status for the active header.
+        // Watch launch itself is fired from the root start handler before
+        // this screen mounts; doing it here caused a second launch attempt
+        // and let the open-watch nudge appear over the 3-2-1 overlay.
         try {
           const paired = WatchBridge.isPaired();
           const reachable = isWatchReachable();
           setWatchStatus({ paired, reachable });
-          if (!paired || reachable || !playStartCountdown) {
-            setShowOpenWatchPrompt(false);
-          } else {
-            WatchBridge.startWatchWorkout()
-              .then((opened) => {
-                if (token.cancelled) return;
-                if (!opened) {
-                  setShowOpenWatchPrompt(true);
-                  return;
-                }
-                setTimeout(() => {
-                  if (!token.cancelled && !isWatchReachable()) {
-                    setShowOpenWatchPrompt(true);
-                  }
-                }, 2500);
-              })
-              .catch(() => {
-                if (!token.cancelled) setShowOpenWatchPrompt(true);
-              });
-          }
         } catch { /* bridge optional */ }
         // Re-push whenever the watch becomes reachable. Idempotent.
         const unsub = onWatchReachabilityChange((info) => {
@@ -1384,8 +1360,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           if (info.reachable) {
             console.log('[watch] reachable — re-pushing active workout');
             pushActive();
-            // Watch is open now — hide the prompt if it was up.
-            setShowOpenWatchPrompt(false);
           }
         });
         if (token.cancelled) { try { unsub(); } catch {} }
@@ -1396,7 +1370,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       token.cancelled = true;
       if (token.unsub) { try { token.unsub(); } catch {} }
     };
-  }, [activeWorkoutStateRestored, playStartCountdown, watchSessionHydrated, workout]);
+  }, [activeWorkoutStateRestored, watchSessionHydrated, workout]);
 
   // Watch→phone command handler. The watch is a remote control for the
   // phone's workout state — log_set commits weight/reps into the same
@@ -7126,54 +7100,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }}
       />
 
-      {/* Open-on-watch nudge. If watchOS declines the phone's HealthKit
-          launch request or reachability does not come up shortly after,
-          tell the user to open Thallo manually. Auto-dismisses the
-          moment the watch reports reachable. */}
-      <Modal
-        visible={showOpenWatchPrompt}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setShowOpenWatchPrompt(false)}>
-        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
-          <View style={{
-            backgroundColor: themeColors.surface,
-            borderRadius: 18,
-            padding: 20,
-            width: '100%',
-            maxWidth: 340,
-            borderWidth: 1, borderColor: themeColors.border,
-            alignItems: 'center',
-          }}>
-            <View style={{
-              width: 54, height: 54, borderRadius: 27,
-              backgroundColor: themeColors.primary + '22',
-              alignItems: 'center', justifyContent: 'center',
-              marginBottom: 12,
-            }}>
-              <Ionicons name="watch-outline" size={28} color={themeColors.primary} />
-            </View>
-            <Text style={{ fontSize: 16, fontWeight: '800', color: themeColors.textPrimary, textAlign: 'center' }}>
-              Open Thallo on your watch
-            </Text>
-            <Text style={{ fontSize: 12, color: themeColors.textSecondary, textAlign: 'center', marginTop: 8, lineHeight: 17 }}>
-              The workout is already queued. Launch Thallo on your Apple Watch and it will rejoin this phone session.
-            </Text>
-            <TouchableOpacity
-              onPress={() => setShowOpenWatchPrompt(false)}
-              style={{
-                marginTop: 16,
-                paddingVertical: 12, paddingHorizontal: 28,
-                borderRadius: 12,
-                backgroundColor: themeColors.primary,
-              }}>
-              <Text style={{ fontSize: 14, fontWeight: '800', color: themeColors.background }}>
-                Got it
-              </Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }

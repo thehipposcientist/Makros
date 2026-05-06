@@ -62,15 +62,40 @@ tags:
 - assertVisible:
     text: ".*goal 168 lb.*"
 
-# Settings should open from the profile menu and expose the mounted settings
-# hub's stable controls for preflight checks.
+# Account opens from the profile menu and exposes identity plus the Settings
+# shortcut.
 - scrollUntilVisible:
     element:
-      id: "profile-settings-row"
+      id: "profile-account-open"
     direction: DOWN
     timeout: 15000
     visibilityPercentage: 50
-- tapOn: "Settings"
+- tapOn:
+    id: "profile-account-open"
+- extendedWaitUntil:
+    visible:
+      id: "account-modal"
+    timeout: 30000
+- assertVisible:
+    id: "account-email-row"
+- assertVisible:
+    id: "account-username-row"
+- assertVisible:
+    id: "account-legal-version-row"
+- assertVisible:
+    id: "account-recovery-question"
+
+# Settings should open from Account and expose stable controls for preflight
+# checks.
+- scrollUntilVisible:
+    element:
+      id: "account-settings-open"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+    centerElement: true
+- tapOn:
+    id: "account-settings-open"
 - extendedWaitUntil:
     visible:
       id: "settings-screen"
@@ -92,6 +117,22 @@ tags:
     visibilityPercentage: 50
 - assertVisible:
     id: "settings-meal-reminder-toggle"
+- scrollUntilVisible:
+    element:
+      text: "UNITS"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- assertVisible:
+    id: "settings-weight-unit-lbs"
+- scrollUntilVisible:
+    element:
+      id: "settings-distance-unit-mi"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
+- assertVisible:
+    id: "settings-distance-unit-mi"
 - tapOn:
     id: "settings-back"
 - extendedWaitUntil:
@@ -99,8 +140,7 @@ tags:
       id: "you-tab-screen"
     timeout: 15000
 
-# Account opens from the profile menu and exposes identity, legal, support,
-# tutorial replay, and destructive-account controls.
+# Reopen Account for legal review and tutorial replay checks.
 - scrollUntilVisible:
     element:
       id: "profile-account-open"
@@ -113,14 +153,6 @@ tags:
     visible:
       id: "account-modal"
     timeout: 30000
-- assertVisible:
-    id: "account-email-row"
-- assertVisible:
-    id: "account-username-row"
-- assertVisible:
-    id: "account-legal-version-row"
-- assertVisible:
-    id: "account-recovery-question"
 
 # Legal review should open and close without dismissing Account.
 - swipe:

@@ -42,6 +42,7 @@ import {
   compactSocialSetSummaries,
   formatSocialDistance,
   formatSocialDuration,
+  socialWorkoutDateKey,
   type SocialWorkoutSet,
 } from '../utils/socialWorkoutDetails';
 
@@ -104,6 +105,13 @@ function formatRelative(iso: string): string {
   if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
   if (diffSec < 86400 * 7) return `${Math.floor(diffSec / 86400)}d ago`;
   return new Date(d).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function formatWorkoutDate(dateKey: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return '';
+  const d = new Date(`${dateKey}T12:00:00`);
+  if (!Number.isFinite(d.getTime())) return '';
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
 function setReps(set: SocialWorkoutSet | undefined): number | null {
@@ -234,7 +242,7 @@ export default function SocialFeedView({
     // Pass 1: build workout cards
     for (const item of items) {
       if (item.event_type !== 'workout_completed' && item.event_type !== 'workout_post') continue;
-      const date = item.payload.date ?? item.created_at.slice(0, 10);
+      const date = socialWorkoutDateKey(item);
       const key = `${item.user_id}:${date}`;
       const existing = groups.get(key);
       if (!existing) {
@@ -247,7 +255,7 @@ export default function SocialFeedView({
     // Pass 2: attach PR badges to their parent workout card
     for (const item of items) {
       if (item.event_type !== 'pr_achieved') continue;
-      const date = item.payload.date ?? item.created_at.slice(0, 10);
+      const date = socialWorkoutDateKey(item);
       const key = `${item.user_id}:${date}`;
       const g = groups.get(key);
       if (g) g.prs.push(item);
@@ -309,6 +317,8 @@ export default function SocialFeedView({
 
     const caption = item.payload.caption;
     const photo = item.payload.photo_base64;
+    const dateLabel = formatWorkoutDate(socialWorkoutDateKey(item));
+    const metaLabel = [`@${item.username}`, dateLabel, formatRelative(item.created_at)].filter(Boolean).join('  ·  ');
 
     return (
       <FadeInView delay={Math.min(index * 45, 260)} duration={280} slideDistance={10}>
@@ -333,7 +343,7 @@ export default function SocialFeedView({
             <View style={{ flex: 1 }}>
               <Text style={styles.authorName} numberOfLines={1}>{author}</Text>
               <Text style={styles.authorMeta} numberOfLines={1}>
-                @{item.username}  ·  {formatRelative(item.created_at)}
+                {metaLabel}
               </Text>
             </View>
           </TouchableOpacity>

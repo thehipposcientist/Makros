@@ -1,6 +1,7 @@
 import {
   chooseSocialWorkoutFeedItem,
   compactSocialSetSummaries,
+  socialWorkoutDateKey,
 } from '../socialWorkoutDetails.ts';
 
 describe('social workout details', () => {
@@ -60,6 +61,24 @@ describe('social workout details', () => {
     expect(chosen.id).toBe(12);
     expect(chosen.payload.caption).toBe('Solid one');
     expect(chosen.payload.workout_summary.exercises[0].sets[0].weight_lbs).toBe(225);
+  });
+
+  it('uses the workout date nested inside manual social posts', () => {
+    const post = {
+      id: 12,
+      event_type: 'workout_post',
+      created_at: '2026-05-08T18:00:00+00:00',
+      payload: {
+        caption: 'Late share',
+        workout_summary: {
+          focus: 'Pull',
+          date: '2026-05-05',
+          exercises: [],
+        },
+      },
+    };
+
+    expect(socialWorkoutDateKey(post)).toBe('2026-05-05');
   });
 
   it('formats load and reps for expanded social set chips', () => {

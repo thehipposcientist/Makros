@@ -309,8 +309,27 @@ struct ActiveWorkoutView: View {
     @EnvironmentObject var theme: ThemeStore
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var state = ActiveWorkoutState()
-    @State private var showCountdown: Bool = true
+    @State private var showCountdown: Bool
     @State private var lastExerciseName: String? = nil
+
+    private static let countdownConsumedSessionKey = "thallo.activeWorkoutCountdownSessionId"
+
+    init(
+        workout: WatchWorkout,
+        hr: HeartRateStore,
+        playStartCountdown: Bool = false,
+        onEndWorkout: @escaping () -> Void,
+        onCancelWorkout: @escaping () -> Void
+    ) {
+        self.workout = workout
+        self.hr = hr
+        self.onEndWorkout = onEndWorkout
+        self.onCancelWorkout = onCancelWorkout
+        let sessionId = workout.sessionId ?? ""
+        let alreadyPlayed = !sessionId.isEmpty &&
+            UserDefaults.standard.string(forKey: Self.countdownConsumedSessionKey) == sessionId
+        _showCountdown = State(initialValue: playStartCountdown && !alreadyPlayed)
+    }
 
     var body: some View {
         ZStack {
@@ -345,6 +364,9 @@ struct ActiveWorkoutView: View {
         }
         .onAppear {
             HeartRateStore.saveDiag("ActiveView.onAppear")
+            if showCountdown, let sessionId = workout.sessionId, !sessionId.isEmpty {
+                UserDefaults.standard.set(sessionId, forKey: Self.countdownConsumedSessionKey)
+            }
             state.attach(to: workout)
             state.startTick()
             seedCurrentExerciseIfNeeded()
@@ -394,10 +416,9 @@ struct ActiveWorkoutView: View {
 // ─── Start countdown overlay ───────────────────────────────────────
 
 /// 3-2-1-go intro shown when the active workout view first mounts.
-/// Mirrors the phone overlay (see `StartCountdownOverlay.tsx`) so the
-/// two surfaces feel synchronised when a workout is started from the
-/// wrist — phone countdown runs locally as soon as the phone flips the
-/// watch to `.active`, watch runs its own.
+/// Only plays for a workout that was started from the watch itself;
+/// phone-originated starts open this view directly without trying to
+/// sync the animation across devices.
 private struct StartCountdownOverlay: View {
     let onComplete: () -> Void
     @EnvironmentObject var theme: ThemeStore

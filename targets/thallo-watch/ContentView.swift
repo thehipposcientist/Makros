@@ -228,6 +228,7 @@ struct ContentView: View {
                 ActiveWorkoutView(
                     workout: activeDisplayedWorkout,
                     hr: heartRate,
+                    playStartCountdown: watchStartPending && (activeDisplayedWorkout.sessionId?.hasPrefix("watch-") ?? false),
                     onEndWorkout: {
                         active = false
                         heartRate.discard()

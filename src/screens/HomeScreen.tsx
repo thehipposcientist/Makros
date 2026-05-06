@@ -83,7 +83,7 @@ import { exerciseEquipmentLabel } from '../utils/swapScoring';
 import ExerciseVideoCard from '../components/ExerciseVideoCard';
 import { exerciseThumbSmall, primeThumbnailIndex } from '../utils/exerciseThumb';
 import { configureExpandAnimation } from '../utils/layoutAnim';
-import { chooseSocialWorkoutFeedItem, compactSocialSetSummaries, formatSocialDistance, formatSocialDuration } from '../utils/socialWorkoutDetails';
+import { chooseSocialWorkoutFeedItem, compactSocialSetSummaries, formatSocialDistance, formatSocialDuration, socialWorkoutDateKey } from '../utils/socialWorkoutDetails';
 import AnimatedCollapsible from '../components/AnimatedCollapsible';
 import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
@@ -9504,7 +9504,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       );
                       const byDate = new Map<string, import('../services/api').FeedItem>();
                       for (const item of raw) {
-                        const date = item.payload.date ?? item.created_at.slice(0, 10);
+                        const date = socialWorkoutDateKey(item);
                         const existing = byDate.get(date);
                         if (!existing) {
                           byDate.set(date, item);
@@ -9603,7 +9603,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           age != null && age > 0 ? `age ${Math.round(age)}` : null,
         ].filter((part): part is string => !!part);
         return (
-        <ScrollView testID="you-tab-screen" style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+        <ScrollView
+          testID="you-tab-screen"
+          style={styles.profileScrollView}
+          contentContainerStyle={styles.scrollContent}>
           {/* User info header */}
           <View style={[styles.profileHero, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             <TouchableOpacity
@@ -9647,15 +9650,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 </TouchableOpacity>
               )}
             </View>
-            <TouchableOpacity
+            <Pressable
               onPress={openSettingsHub}
               testID="profile-settings-open"
               accessibilityLabel="profile-settings-open"
+              accessibilityRole="button"
               hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              style={{ padding: 4 }}
+              style={({ pressed }) => [{ padding: 4 }, pressed && { opacity: 0.7 }]}
             >
               <Ionicons name="settings-outline" size={22} color={themeColors.textMuted} />
-            </TouchableOpacity>
+            </Pressable>
           </View>
 
           {/* Quick data references — fitness score, body scan, weight */}
@@ -9691,12 +9695,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <Text style={[styles.profileSectionLabel, { color: themeColors.textMuted, marginTop: 4 }]}>MY STUFF</Text>
           <View style={[styles.profileMenuList, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
             {/* Goal */}
-            <TouchableOpacity
-              style={styles.profileMenuItem}
+            <Pressable
+              style={({ pressed }) => [styles.profileMenuItem, pressed && { opacity: 0.72 }]}
               onPress={() => setShowGoalEditor(true)}
               testID="profile-goal-open"
               accessibilityLabel="profile-goal-open"
-              activeOpacity={0.85}
+              accessibilityRole="button"
             >
               <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
                 <Ionicons name="flag-outline" size={18} color={themeColors.primary} />
@@ -9706,7 +9710,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <Text style={{ fontSize: 11, color: themeColors.textMuted }}>{goalLabel || 'Set your training goal'}</Text>
               </View>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
-            </TouchableOpacity>
+            </Pressable>
             {/* Body & Stats menu row removed — weight is editable in the
                 weight log; height, birthday, and biological sex are set
                 during onboarding and intentionally not user-editable
@@ -9714,11 +9718,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 recovery path when a profile lands in an incomplete
                 state (the "Complete profile" tap on the hero card). */}
             {/* Settings & reminders */}
-            <TouchableOpacity
-              style={styles.profileMenuItem}
+            <Pressable
+              style={({ pressed }) => [styles.profileMenuItem, pressed && { opacity: 0.72 }]}
               onPress={openSettingsHub}
               testID="profile-settings-row"
-              accessibilityLabel="profile-settings-row">
+              accessibilityLabel="profile-settings-row"
+              accessibilityRole="button">
               <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
                 <Ionicons name="notifications-outline" size={18} color={themeColors.primary} />
               </View>
@@ -9727,13 +9732,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Themes, notifications, units, plan pause, and permissions</Text>
               </View>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
-            </TouchableOpacity>
+            </Pressable>
             {/* Account */}
-            <TouchableOpacity
-              style={styles.profileMenuItem}
-              onPress={onViewAccount}
+            <Pressable
+              style={({ pressed }) => [styles.profileMenuItem, pressed && { opacity: 0.72 }]}
+              onPress={() => {
+                console.warn('[e2e] profile account pressed');
+                onViewAccount();
+              }}
               testID="profile-account-open"
-              accessibilityLabel="profile-account-open">
+              accessibilityLabel="profile-account-open"
+              accessibilityRole="button">
               <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
                 <Ionicons name="id-card-outline" size={18} color={themeColors.primary} />
               </View>
@@ -9742,13 +9751,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Name, email, password recovery, legal, and support</Text>
               </View>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
-            </TouchableOpacity>
+            </Pressable>
             {/* Gear */}
-            <TouchableOpacity
-              style={styles.profileMenuItem}
+            <Pressable
+              style={({ pressed }) => [styles.profileMenuItem, pressed && { opacity: 0.72 }]}
               onPress={() => setShowGearScreen(true)}
               testID="profile-gear-open"
-              accessibilityLabel="profile-gear-open">
+              accessibilityLabel="profile-gear-open"
+              accessibilityRole="button">
               <View style={[styles.profileRowIcon, { backgroundColor: themeColors.primary + '22' }]}>
                 <Ionicons name="walk-outline" size={18} color={themeColors.primary} />
               </View>
@@ -9757,7 +9767,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <Text style={{ fontSize: 11, color: themeColors.textMuted }}>Track mileage on shoes, bikes & equipment</Text>
               </View>
               <Text style={[styles.profileMenuChevron, { color: themeColors.textMuted }]}>›</Text>
-            </TouchableOpacity>
+            </Pressable>
           </View>
         </ScrollView>
         );
@@ -14855,6 +14865,7 @@ const styles = StyleSheet.create({
   tabText:   { fontSize: 14, fontWeight: '700', letterSpacing: 0.2 },
 
   scrollView:    { flex: 1 },
+  profileScrollView: { flex: 1, zIndex: 10 },
   scrollContent: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 166 },
 
   dayCard:         { backgroundColor: colors.surface, borderRadius: 22, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, paddingHorizontal: 16, paddingBottom: 16, paddingTop: 0, marginBottom: 16, overflow: 'hidden', ...elevations.card },
