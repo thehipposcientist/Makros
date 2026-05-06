@@ -1,9 +1,11 @@
 const appJson = require('./app.json');
 
+const GOOGLE_CLIENT_ID_RE = /^\d+-[a-zA-Z0-9_-]+\.apps\.googleusercontent\.com$/;
+
 function configured(...values) {
   for (const value of values) {
     const cleaned = (value ?? '').trim();
-    if (cleaned && !cleaned.startsWith('$') && !cleaned.includes('missing-google-client-id')) {
+    if (GOOGLE_CLIENT_ID_RE.test(cleaned)) {
       return cleaned;
     }
   }

@@ -76,6 +76,8 @@
     "extra": {
       "apiBaseUrl": "https://q4q8mjjhmp.us-east-1.awsapprunner.com",
       "freeBetaFullAccess": true,
+      "googleWebClientId": "592286949926-tt77lik8cldc7dnccdetfgdd0kqntgcr.apps.googleusercontent.com",
+      "googleIosClientId": "592286949926-7h0niho86jnes9bbqrd2gsske9h5ohmc.apps.googleusercontent.com",
       "eas": {
         "projectId": "89ef69c6-db5f-45ac-b7aa-64120d60f1b4"
       }

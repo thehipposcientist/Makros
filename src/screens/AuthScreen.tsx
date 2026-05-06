@@ -19,13 +19,14 @@ const { width: SCREEN_W } = Dimensions.get('window');
 const logo = require('../../assets/images/thallo-logo-white-transparent-New.png');
 
 const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
+const GOOGLE_CLIENT_ID_RE = /^\d+-[a-zA-Z0-9_-]+\.apps\.googleusercontent\.com$/;
 const GOOGLE_CLIENT_ID_PLACEHOLDER = 'missing-google-client-id.apps.googleusercontent.com';
 
 WebBrowser.maybeCompleteAuthSession();
 
 function configured(value?: string | null): string | undefined {
   const cleaned = (value ?? '').trim();
-  if (!cleaned || cleaned.startsWith('$') || cleaned.includes('missing-google-client-id')) return undefined;
+  if (!GOOGLE_CLIENT_ID_RE.test(cleaned)) return undefined;
   return cleaned;
 }
 

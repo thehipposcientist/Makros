@@ -2160,10 +2160,13 @@ export default function Index() {
           onSignOut={handleSignOut}
           onShowTutorial={() => {
             // Close Account first so the tutorial paints over a clean
-            // canvas. 200ms is enough for the modal close animation
-            // to settle without a perceptible delay.
+            // canvas. iOS can drop a second modal presentation while the
+            // Account sheet is still closing, so defer until after the
+            // transition and pending interactions have settled.
             setShowAccount(false);
-            setTimeout(() => setShowTutorial(true), 200);
+            setTimeout(() => {
+              InteractionManager.runAfterInteractions(() => setShowTutorial(true));
+            }, Platform.OS === 'ios' ? 650 : 250);
           }}
           onOpenSettings={() => {
             setShowAccount(false);

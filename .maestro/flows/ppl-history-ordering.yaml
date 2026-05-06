@@ -52,13 +52,35 @@ tags:
 
 - tapOn:
     id: "workout-week-day-chip-1"
+- waitForAnimationToEnd:
+    timeout: 1000
+- runFlow:
+    when:
+      visible:
+        id: "workout-day-card-title-legs"
+    commands:
+      - tapOn:
+          id: "workout-week-day-chip-1"
+      - waitForAnimationToEnd:
+          timeout: 1000
 - extendedWaitUntil:
     visible:
-      id: "workout-day-card-title-pull"
+      id: "workout-day-card-title-pull.*"
     timeout: 30000
 
 - tapOn:
     id: "workout-week-day-chip-2"
+- waitForAnimationToEnd:
+    timeout: 1000
+- runFlow:
+    when:
+      notVisible:
+        id: "workout-day-card-title-push"
+    commands:
+      - tapOn:
+          id: "workout-week-day-chip-2"
+      - waitForAnimationToEnd:
+          timeout: 1000
 - extendedWaitUntil:
     visible:
       id: "workout-day-card-title-push"

@@ -9271,7 +9271,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {/* ── Social tab — Friends + Weekly Digest ──────── */}
       {activeTab === 'friends' && (
         <ErrorBoundary>
-        <FadeInView key={viewingFriend ? `friend-${viewingFriend.user_id}` : 'social-home'} duration={280} slideDistance={10} style={{ flex: 1 }}>
+          <View key={viewingFriend ? `friend-${viewingFriend.user_id}` : 'social-home'} style={{ flex: 1 }}>
           {viewingFriend ? (
             <ScrollView testID="social-friend-detail-screen" style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 166 }}>
               <TouchableOpacity
@@ -9564,7 +9564,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               }}
             />
           )}
-        </FadeInView>
+          </View>
         </ErrorBoundary>
       )}
 
