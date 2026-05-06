@@ -101,7 +101,7 @@ tags:
     id: "social-friend-feed-row-0"
 - extendedWaitUntil:
     visible:
-      id: "social-friend-feed-row-0-exercise-0"
+      id: "social-friend-feed-row-0-exercise-.*"
     timeout: 15000
 
 # Sharing-off friends should show the privacy branch instead of feed rows.
