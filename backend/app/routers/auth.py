@@ -175,6 +175,14 @@ def _google_audiences() -> list[str]:
     return audiences
 
 
+def _claim_matches_audience(claim: Any, audiences: list[str]) -> bool:
+    if isinstance(claim, str):
+        return claim in audiences
+    if isinstance(claim, list):
+        return any(isinstance(item, str) and item in audiences for item in claim)
+    return False
+
+
 def _apple_jwks(force_refresh: bool = False) -> list[dict[str, Any]]:
     global _apple_jwks_cache
     now = time.time()
@@ -263,6 +271,23 @@ def _verify_google_identity_token(identity_token: str) -> dict[str, Any]:
     if not audiences:
         raise HTTPException(status_code=503, detail="Google sign-in is not configured")
     try:
+        unverified_claims = jwt.get_unverified_claims(token)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
+    issuer = str(unverified_claims.get("iss") or "")
+    if issuer not in GOOGLE_ISSUERS:
+        logger.warning(
+            "auth_google_token_failed",
+            extra={
+                "error": "Invalid issuer",
+                "aud": unverified_claims.get("aud"),
+                "azp": unverified_claims.get("azp"),
+                "iss": unverified_claims.get("iss"),
+                "accepted_audiences": audiences,
+            },
+        )
+        raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
+    try:
         header = jwt.get_unverified_header(token)
     except JWTError:
         raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
@@ -277,21 +302,30 @@ def _verify_google_identity_token(identity_token: str) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
 
     last_error: Exception | None = None
-    for issuer in GOOGLE_ISSUERS:
-        for audience in audiences:
-            try:
-                claims = jwt.decode(
-                    token,
-                    key,
-                    algorithms=["RS256"],
-                    audience=audience,
-                    issuer=issuer,
-                )
-                if claims.get("sub"):
-                    return claims
-            except JWTError as e:
-                last_error = e
-    logger.warning("auth_google_token_failed", extra={"error": str(last_error or "missing_sub")})
+    try:
+        claims = jwt.decode(
+            token,
+            key,
+            algorithms=["RS256"],
+            issuer=issuer,
+            options={"verify_aud": False},
+        )
+        if not _claim_matches_audience(claims.get("aud"), audiences):
+            last_error = JWTError("Invalid audience")
+        elif claims.get("sub"):
+            return claims
+    except JWTError as e:
+        last_error = e
+    logger.warning(
+        "auth_google_token_failed",
+        extra={
+            "error": str(last_error or "missing_sub"),
+            "aud": unverified_claims.get("aud"),
+            "azp": unverified_claims.get("azp"),
+            "iss": unverified_claims.get("iss"),
+            "accepted_audiences": audiences,
+        },
+    )
     raise HTTPException(status_code=401, detail="Google sign-in token is invalid")
 
 

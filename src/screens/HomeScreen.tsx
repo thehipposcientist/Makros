@@ -12736,7 +12736,7 @@ function WeekStrip({ items, selectedKey, accent, colors: tc, label, onSelect }: 
               activeOpacity={0.82}
               accessibilityRole="button"
               accessibilityState={{ selected: active }}
-              accessibilityLabel={`${isToday ? 'Today, ' : ''}${DAY_NAMES[item.date.getDay()]} ${item.date.getDate()}, ${item.title}`}
+              accessibilityLabel={`Day ${index + 1}, ${isToday ? 'Today, ' : ''}${DAY_NAMES[item.date.getDay()]} ${item.date.getDate()}, ${item.title}`}
               style={[
                 styles.weekDayChip,
                 {
@@ -13832,6 +13832,13 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
       ? accentColor
       : readinessBadge.label === 'Moderate' ? tc.warning : tc.error
     : accentColor;
+  let startWorkoutRequested = false;
+  const handleStartWorkoutPress = () => {
+    if (startWorkoutRequested) return;
+    startWorkoutRequested = true;
+    import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {});
+    onStartWorkout(item.workout!);
+  };
 
   return (
     <View
@@ -14066,8 +14073,10 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
       {isToday && !isCompleted && !isSkipped && (
         <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingBottom: 14, paddingTop: 10 }}>
           <PulseView active intensity={0.02} duration={2000} style={{ flex: 2 }}>
-            <PressableScale
-              onPress={() => { import('../utils/feedback').then(f => f.hapticHeavy()).catch(() => {}); onStartWorkout(item.workout!); }}
+            <TouchableOpacity
+              onPressIn={handleStartWorkoutPress}
+              onPress={handleStartWorkoutPress}
+              activeOpacity={0.88}
               style={{ width: '100%' }}
               accessibilityRole="button"
               accessibilityLabel="start-workout-cta"
@@ -14082,7 +14091,7 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                   </View>
                 </View>
               </View>
-            </PressableScale>
+            </TouchableOpacity>
           </PulseView>
           <Pressable
             style={[styles.skipSecondaryBtn, { borderColor: quietBorderColor, borderWidth: quietBorderWidth, backgroundColor: isLightMode ? tc.surface : tc.surfaceRaised }]}

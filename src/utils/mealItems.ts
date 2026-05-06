@@ -225,12 +225,9 @@ export function ensureItems(meal: MealSuggestion): MealSuggestion {
 /** Write legacy `foods`/`amounts` arrays from `items`. Used at save time so
  *  old readers (and the backend) still see something.
  *
- *  Macro totals are recomputed from item macros so they stay in sync —
- *  BUT only when the item macros actually have data. If every item has
- *  zero macros (which can happen when the backend AI returns per-item
- *  zeros), we preserve the original meal-level totals rather than
- *  clobbering them with zero. Otherwise an edit to a valid meal would
- *  silently reset its calories to 0 on save. */
+ *  Macro totals are recomputed from item macros so they stay in sync.
+ *  A non-empty all-zero item list is valid: users can log coffee, water,
+ *  or other zero-calorie entries without carrying stale meal totals. */
 export function syncLegacyFieldsFromItems(meal: MealSuggestion): MealSuggestion {
   if (!meal.items || meal.items.length === 0) return meal;
   const foods = meal.items.map(i => i.name);
@@ -244,15 +241,14 @@ export function syncLegacyFieldsFromItems(meal: MealSuggestion): MealSuggestion 
     }),
     { calories: 0, protein: 0, carbs: 0, fat: 0 },
   );
-  const hasItemMacros = totals.calories > 0 || totals.protein > 0 || totals.carbs > 0 || totals.fat > 0;
   return {
     ...meal,
     foods,
     amounts,
-    calories: hasItemMacros ? totals.calories : meal.calories,
-    protein:  hasItemMacros ? totals.protein  : meal.protein,
-    carbs:    hasItemMacros ? totals.carbs    : meal.carbs,
-    fat:      hasItemMacros ? totals.fat      : meal.fat,
+    calories: totals.calories,
+    protein:  totals.protein,
+    carbs:    totals.carbs,
+    fat:      totals.fat,
   };
 }
 

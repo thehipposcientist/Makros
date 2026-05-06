@@ -42,17 +42,15 @@ tags:
     visible:
       id: "workout-week-day-chip-0"
     timeout: 30000
-- tapOn:
-    id: "workout-week-day-chip-0"
-- assertVisible:
-    text: ".*Upper.*"
-- tapOn:
-    id: "workout-week-day-chip-1"
-- assertVisible:
-    text: ".*Lower.*"
-- tapOn:
-    id: "workout-week-day-chip-2"
-- assertVisible: "Rest Day"
+- extendedWaitUntil:
+    visible: "Day 1, .*Upper"
+    timeout: 30000
+- extendedWaitUntil:
+    visible: "Day 2, .*Lower"
+    timeout: 30000
+- extendedWaitUntil:
+    visible: "Day 3, .*Rest day"
+    timeout: 30000
 
 # Saving workout settings should schedule next-week changes only. It must not
 # regenerate or mutate the fixed 7-day active PlanWeek.
@@ -85,14 +83,12 @@ tags:
 
 - tapOn:
     id: "workout-subtab-plan"
-- tapOn:
-    id: "workout-week-day-chip-0"
-- assertVisible:
-    text: ".*Upper.*"
-- tapOn:
-    id: "workout-week-day-chip-1"
-- assertVisible:
-    text: ".*Lower.*"
-- tapOn:
-    id: "workout-week-day-chip-2"
-- assertVisible: "Rest Day"
+- extendedWaitUntil:
+    visible: "Day 1, .*Upper"
+    timeout: 30000
+- extendedWaitUntil:
+    visible: "Day 2, .*Lower"
+    timeout: 30000
+- extendedWaitUntil:
+    visible: "Day 3, .*Rest day"
+    timeout: 30000

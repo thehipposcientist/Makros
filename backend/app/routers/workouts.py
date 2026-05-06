@@ -9,7 +9,7 @@ from app.database import get_session
 from app.entitlements import require_pro_feature
 from app.models import (
     User, WorkoutSession, WorkoutExercise, ExerciseSet,
-    WorkoutSessionCreate, SetLog, WorkoutCompletion,
+    WorkoutSessionCreate, SetLog, WorkoutCompletion, UserProfile,
 )
 from app.auth import get_current_user
 
@@ -158,6 +158,28 @@ def _activity_time_bounds(body: WorkoutCompleteRequest) -> tuple[datetime | None
     if started_at is None and ended_at is not None and duration > 0:
         started_at = ended_at - timedelta(seconds=duration)
     return started_at, ended_at or datetime.now(timezone.utc)
+
+
+def _estimated_activity_calories(
+    body: WorkoutCompleteRequest,
+    *,
+    db: Session,
+    user_id: int,
+) -> int | None:
+    if body.calories_burned is not None or not body.activity_category:
+        return body.calories_burned
+    profile = db.exec(select(UserProfile).where(UserProfile.user_id == user_id)).first()
+    if not profile or not profile.weight_lbs:
+        return None
+    from app.services.workout.activity_energy import estimate_activity_calories
+    return estimate_activity_calories(
+        duration_seconds=body.duration_seconds,
+        weight_lbs=float(profile.weight_lbs),
+        category=body.activity_category,
+        subtype=body.activity_subtype,
+        intensity=body.activity_intensity,
+        cardio_style=body.cardio_style,
+    )
 
 # ─── Response models ──────────────────────────────────────────────────────────
 
@@ -1439,6 +1461,11 @@ def mark_workout_complete(
     source_context = (body.source_context or "").strip().lower()
     external_source_id = (body.external_source_id or "").strip() or None
     activity_started_at, activity_ended_at = _activity_time_bounds(body)
+    calories_burned = _estimated_activity_calories(
+        body,
+        db=db,
+        user_id=current_user.id,
+    )
 
     # Defensive guard: reject completions that have NO sets logged AND
     # no duration AND aren't a manual activity (cardio / sport / etc).
@@ -1496,7 +1523,7 @@ def mark_workout_complete(
         existing.activity_source    = body.activity_source or existing.activity_source
         existing.cardio_style       = body.cardio_style or existing.cardio_style
         existing.distance_miles     = body.distance_miles if body.distance_miles is not None else existing.distance_miles
-        existing.calories_burned    = body.calories_burned if body.calories_burned is not None else existing.calories_burned
+        existing.calories_burned    = calories_burned if calories_burned is not None else existing.calories_burned
         existing.hr_summary         = body.hr_summary if body.hr_summary is not None else existing.hr_summary
         existing.feeling            = body.feeling if body.feeling is not None else existing.feeling
         existing.intensity          = body.intensity if body.intensity is not None else existing.intensity
@@ -1525,7 +1552,7 @@ def mark_workout_complete(
             activity_source=body.activity_source,
             cardio_style=body.cardio_style,
             distance_miles=body.distance_miles,
-            calories_burned=body.calories_burned,
+            calories_burned=calories_burned,
             hr_summary=body.hr_summary,
             started_at=activity_started_at,
             ended_at=activity_ended_at,

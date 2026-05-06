@@ -171,3 +171,16 @@ def test_google_login_returns_existing_link_without_email_claim():
         auth_router._verify_google_identity_token = original
         engine.dispose()
     print("PASS test_google_login_returns_existing_link_without_email_claim")
+
+
+def test_google_audience_claim_matching():
+    audiences = [
+        "web-client.apps.googleusercontent.com",
+        "ios-client.apps.googleusercontent.com",
+    ]
+    assert auth_router._claim_matches_audience("ios-client.apps.googleusercontent.com", audiences)
+    assert auth_router._claim_matches_audience(["other", "web-client.apps.googleusercontent.com"], audiences)
+    assert not auth_router._claim_matches_audience("other", audiences)
+    assert not auth_router._claim_matches_audience(["other"], audiences)
+    assert not auth_router._claim_matches_audience(None, audiences)
+    print("PASS test_google_audience_claim_matching")

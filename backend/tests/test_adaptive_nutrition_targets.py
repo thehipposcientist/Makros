@@ -203,12 +203,97 @@ def test_same_day_activity_adjustment_is_partial_and_capped():
     _ok(f"body_recomp +{moderate.adjustment_kcal} kcal, fat_loss capped +{capped.adjustment_kcal} kcal")
 
 
+def test_manual_activity_calorie_estimator_is_conservative():
+    print("\n[test] manual activity calories estimate when no wearable value exists")
+    from app.services.workout.activity_energy import estimate_activity_calories
+
+    run = estimate_activity_calories(
+        duration_seconds=3600,
+        weight_lbs=180,
+        category="cardio",
+        subtype="run",
+        intensity="moderate",
+        cardio_style="steady",
+    )
+    yoga = estimate_activity_calories(
+        duration_seconds=3600,
+        weight_lbs=180,
+        category="mobility",
+        subtype="yoga",
+        intensity="easy",
+    )
+    sauna = estimate_activity_calories(
+        duration_seconds=1200,
+        weight_lbs=180,
+        category="recovery",
+        subtype="sauna",
+        intensity="easy",
+    )
+
+    assert run is not None and 650 <= run <= 850, run
+    assert yoga is not None and 150 <= yoga <= 250, yoga
+    assert sauna is None, sauna
+    _ok(f"run={run} kcal, yoga={yoga} kcal, sauna ignored")
+
+
+def test_health_activity_window_can_exclude_today_for_live_activity_bump():
+    print("\n[test] live daily target can use prior HealthKit activity baseline")
+    from app.services.nutrition.targets import resolve_targets_for_user
+
+    eng = _make_engine()
+    today = date.today()
+    with Session(eng) as s:
+        _seed_user(s)
+        for i in range(1, 7):
+            d = today - timedelta(days=i)
+            s.add(DailyHealthSnapshot(
+                user_id=1,
+                snapshot_date=d,
+                steps=7000,
+                active_energy_kcal=650,
+                source="apple_health",
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            ))
+        s.add(DailyHealthSnapshot(
+            user_id=1,
+            snapshot_date=today,
+            steps=17000,
+            active_energy_kcal=2200,
+            source="apple_health",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ))
+        s.commit()
+
+        through_today = resolve_targets_for_user(s, 1, as_of=today, include_health=True)
+        through_yesterday = resolve_targets_for_user(
+            s,
+            1,
+            as_of=today,
+            include_health=True,
+            health_activity_as_of=today - timedelta(days=1),
+        )
+
+    assert through_today is not None and through_yesterday is not None
+    assert through_today.health_activity_adjustment_kcal > through_yesterday.health_activity_adjustment_kcal, (
+        through_today.health_signal,
+        through_yesterday.health_signal,
+    )
+    _ok(
+        f"today-inclusive={through_today.health_activity_adjustment_kcal:+d}, "
+        f"prior-baseline={through_yesterday.health_activity_adjustment_kcal:+d}"
+    )
+
+
 TESTS = [
     test_coaching_and_apple_health_activity_adjust_targets,
     test_recent_apple_health_weight_replaces_profile_weight,
     test_recent_manual_weight_entry_drives_macro_targets,
     test_plan_day_targets_shift_with_day_type_without_mutating_template,
     test_same_day_activity_adjustment_is_partial_and_capped,
+    test_manual_activity_calorie_estimator_is_conservative,
+    test_health_activity_window_can_exclude_today_for_live_activity_bump,
 ]
 
 

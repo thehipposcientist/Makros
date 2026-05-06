@@ -273,10 +273,22 @@ describe('syncLegacyFieldsFromItems', () => {
     expect(r.foods).toEqual(['a', 'b']);
   });
 
-  it('preserves meal-level totals when items have no macros (regression: do not zero out the meal)', () => {
-    // The dangerous scenario: items have 0 macros but meal totals are
-    // non-zero. Without the guard, save would write 0 to the user's
-    // history, silently destroying their data.
+  it('sums intentional zero-calorie items to zero instead of keeping stale totals', () => {
+    const meal = {
+      meal: 'Coffee', foods: [], amounts: [],
+      calories: 600, protein: 50, carbs: 60, fat: 20,
+      items: [
+        { name: 'black coffee', quantity: 1, unit: 'cup', calories: 0, protein: 0, carbs: 0, fat: 0 } as any,
+      ],
+    } as any;
+    const r = syncLegacyFieldsFromItems(meal);
+    expect(r.calories).toBe(0);
+    expect(r.protein).toBe(0);
+    expect(r.carbs).toBe(0);
+    expect(r.fat).toBe(0);
+  });
+
+  it('keeps AI meal-level totals when ensureItems normalizes zero-macro items first', () => {
     const meal = {
       meal: 'Dinner', foods: [], amounts: [],
       calories: 600, protein: 50, carbs: 60, fat: 20,
@@ -285,7 +297,7 @@ describe('syncLegacyFieldsFromItems', () => {
         { name: 'broccoli', quantity: 1, unit: 'cup', calories: 0, protein: 0, carbs: 0, fat: 0 } as any,
       ],
     } as any;
-    const r = syncLegacyFieldsFromItems(meal);
+    const r = syncLegacyFieldsFromItems(ensureItems(meal));
     expect(r.calories).toBe(600);
     expect(r.protein).toBe(50);
     expect(r.carbs).toBe(60);

@@ -318,6 +318,7 @@ def _resolve_from_inputs(
     *,
     as_of: date,
     include_health: bool,
+    health_activity_as_of: date | None = None,
 ) -> ResolvedNutritionTargets:
     base = compute_targets(CalorieInputs(
         weight_lbs=inputs.weight_lbs,
@@ -347,7 +348,7 @@ def _resolve_from_inputs(
         health_signal = _health_activity_signal(
             db,
             user_id,
-            as_of=as_of,
+            as_of=health_activity_as_of or as_of,
             bmr=base.bmr,
             tdee=base.tdee,
             planned_training_days=int(inputs.training_days_per_week or 0),
@@ -405,6 +406,7 @@ def resolve_targets_for_user(
     as_of: date | None = None,
     custom_overrides: CustomMacroOverrides | None = None,
     include_health: bool = True,
+    health_activity_as_of: date | None = None,
 ) -> ResolvedNutritionTargets | None:
     as_of = as_of or date.today()
     profile = db.exec(select(UserProfile).where(UserProfile.user_id == user_id)).first()
@@ -446,6 +448,7 @@ def resolve_targets_for_user(
         inputs,
         as_of=as_of,
         include_health=include_health,
+        health_activity_as_of=health_activity_as_of,
     )
     return ResolvedNutritionTargets(
         **{
@@ -463,6 +466,7 @@ def resolve_targets_for_request(
     user_id: int | None = None,
     as_of: date | None = None,
     include_health: bool = True,
+    health_activity_as_of: date | None = None,
 ) -> ResolvedNutritionTargets:
     as_of = as_of or date.today()
     ps = req.physicalStats
@@ -507,6 +511,7 @@ def resolve_targets_for_request(
         inputs,
         as_of=as_of,
         include_health=include_health,
+        health_activity_as_of=health_activity_as_of,
     )
     return ResolvedNutritionTargets(
         **{

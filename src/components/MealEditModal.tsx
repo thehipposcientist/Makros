@@ -165,10 +165,10 @@ function _crossSystemDefault(fromUnit: FoodUnit, toUnit: FoodUnit, fromQty: numb
 /** Sum macros directly from the structured item list. Each item carries its
  *  own snapshotted macros so we don't need to look anything up here.
  *
- *  When `items` is empty OR every item is zero-macro (which can happen
- *  with AI-generated meals where only the meal-level totals are real),
- *  fall back to the meal's top-level macros so the totals panel doesn't
- *  show 0 cal for a meal that obviously has nutrition data. */
+ *  When `items` is empty, fall back to the meal's top-level macros so
+ *  legacy meals still show their totals. A non-empty item list is trusted
+ *  even when all items are zero-calorie, because black coffee / water /
+ *  other zero-calorie entries are valid logs. */
 function calcMacrosFromItems(items: MealItem[], fallback?: MealSuggestion): Macros {
   const totals = items.reduce(
     (acc, it) => ({
@@ -179,8 +179,7 @@ function calcMacrosFromItems(items: MealItem[], fallback?: MealSuggestion): Macr
     }),
     { calories: 0, protein: 0, carbs: 0, fat: 0 },
   );
-  const hasItemMacros = totals.calories > 0 || totals.protein > 0 || totals.carbs > 0 || totals.fat > 0;
-  if (!hasItemMacros && fallback) {
+  if (items.length === 0 && fallback) {
     return {
       calories: Math.round(fallback.calories ?? 0),
       protein:  Math.round(fallback.protein  ?? 0),
@@ -980,16 +979,14 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
   const isRoutineEdit = mode === 'day' && !!_routineId && !!onSaveRoutine;
 
   const handleSave = () => {
-    // Empty-meal guard: if every item has 0 calories, saving would create
-    // a ghost meal that muddies the nutrition totals. Prompt instead.
+    // Empty-meal guard. Zero-calorie foods are still real food rows
+    // (coffee, water, diet soda), so only block meals with no items.
     // Only runs on SAVE — cancel skips this so the user can always bail
     // out of a mistaken add.
-    if (items.length === 0 || items.every(it => Math.round(it.calories ?? 0) === 0)) {
+    if (items.length === 0) {
       Alert.alert(
         'Meal is empty',
-        items.length === 0
-          ? 'Add at least one food before saving, or cancel to discard.'
-          : 'Every food in this meal shows 0 calories. Add macros to at least one food before saving, or cancel to discard.',
+        'Add at least one food before saving, or cancel to discard.',
       );
       return;
     }

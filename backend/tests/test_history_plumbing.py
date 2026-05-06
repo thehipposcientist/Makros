@@ -1722,6 +1722,65 @@ def test_manual_activity_identity_preserves_same_focus_rows_and_time() -> None:
     _ok("same-focus manual rows stay distinct and decay from activity end")
 
 
+def test_manual_activity_completion_estimates_missing_calories() -> None:
+    """A manually logged run without wearable calories should still feed
+    same-day nutrition and recovery through WorkoutCompletion.calories_burned."""
+    print("\n[test] manual activity completion estimates missing calories")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, UserProfile, WorkoutCompletion  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import WorkoutCompleteRequest, mark_workout_complete
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    workout_date = date(2026, 5, 4)
+    start = datetime(2026, 5, 4, 7, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 5, 4, 7, 45, tzinfo=timezone.utc)
+    with Session(engine) as s:
+        u = User(email="manual-estimate@example.com", username="manualestimate", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+        s.add(UserProfile(
+            user_id=u.id,
+            weight_lbs=180,
+            height_feet=5,
+            height_inches=10,
+            age=30,
+            gender="male",
+        ))
+        s.commit()
+
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=workout_date,
+                focus_label="Running",
+                duration_seconds=int((end - start).total_seconds()),
+                source_context="manual_activity",
+                activity_category="cardio",
+                activity_subtype="run",
+                activity_intensity="moderate",
+                activity_source="manual",
+                cardio_style="steady",
+                started_at=start,
+                ended_at=end,
+                external_source_id="manual-run-estimate",
+            ),
+            current_user=u,
+            db=s,
+        )
+
+        row = s.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == u.id)).first()
+        assert row is not None
+        assert row.calories_burned is not None
+        assert 450 <= row.calories_burned <= 650, row.calories_burned
+    _ok(f"manual run stored estimated {row.calories_burned} kcal")
+
+
 def test_delete_completion_by_external_source_id_keeps_same_day_rows() -> None:
     """Deleting one local/HK row should not wipe every completion for the day."""
     print("\n[test] delete completion by external source id keeps same-day rows")
@@ -1810,6 +1869,7 @@ cases = [
     test_planned_completion_keeps_plan_focus_after_partial_exercise_log,
     test_custom_exercise_muscles_feed_completion_fatigue,
     test_manual_activity_identity_preserves_same_focus_rows_and_time,
+    test_manual_activity_completion_estimates_missing_calories,
     test_delete_completion_by_external_source_id_keeps_same_day_rows,
 ]
 

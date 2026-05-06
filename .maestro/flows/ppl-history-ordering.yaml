@@ -41,47 +41,12 @@ tags:
       id: "workout-week-day-chip-0"
     timeout: 30000
 
-# This persona's recent PPL history is Push then Pull, leaving Legs most open.
-# Strict PPL still means the other two families follow, not that Push must lead.
-- tapOn:
-    id: "workout-week-day-chip-0"
 - extendedWaitUntil:
-    visible:
-      id: "workout-day-card-title-legs"
+    visible: "Day 1, .*Legs"
     timeout: 30000
-
-- tapOn:
-    id: "workout-week-day-chip-1"
-- waitForAnimationToEnd:
-    timeout: 1000
-- runFlow:
-    when:
-      visible:
-        id: "workout-day-card-title-legs"
-    commands:
-      - tapOn:
-          id: "workout-week-day-chip-1"
-      - waitForAnimationToEnd:
-          timeout: 1000
 - extendedWaitUntil:
-    visible:
-      id: "workout-day-card-title-pull.*"
+    visible: "Day 2, .*Pull \\+ Cardio"
     timeout: 30000
-
-- tapOn:
-    id: "workout-week-day-chip-2"
-- waitForAnimationToEnd:
-    timeout: 1000
-- runFlow:
-    when:
-      notVisible:
-        id: "workout-day-card-title-push"
-    commands:
-      - tapOn:
-          id: "workout-week-day-chip-2"
-      - waitForAnimationToEnd:
-          timeout: 1000
 - extendedWaitUntil:
-    visible:
-      id: "workout-day-card-title-push"
+    visible: "Day 3, .*Push"
     timeout: 30000

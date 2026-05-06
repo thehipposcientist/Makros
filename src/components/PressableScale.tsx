@@ -62,7 +62,7 @@ export default function PressableScale({
       accessibilityState={accessibilityState}
       testID={testID}
       hitSlop={hitSlop}>
-      <Animated.View testID={testID} style={[style, { transform: [{ scale }, { translateY }] }]}>
+      <Animated.View testID={testID ? `${testID}-inner` : undefined} style={[style, { transform: [{ scale }, { translateY }] }]}>
         {children}
       </Animated.View>
     </TouchableOpacity>

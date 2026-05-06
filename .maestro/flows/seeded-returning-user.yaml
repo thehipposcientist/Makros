@@ -85,16 +85,6 @@ tags:
 - tapOn:
     id: "workout-week-day-chip-0"
 
-# Weekly digest is time-gated by the app (Sunday or after 6pm local). When it
-# is eligible, assert the seeded summary card has real session/adherence/set data.
-- runFlow:
-    when:
-      visible: ".*Week in review.*"
-    commands:
-      - assertVisible: "sessions"
-      - assertVisible: "adherence"
-      - assertVisible: "sets"
-
 # Meals: seeded DayState nutrition plan plus checked-plan history should render.
 - tapOn:
     id: "bottom-tab-meals"

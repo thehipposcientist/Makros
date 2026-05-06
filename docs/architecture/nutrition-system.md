@@ -50,6 +50,8 @@ Flag-based, never scored. Tri-state: green / amber / red / not_enough_data.
 
 Optional 5th: **thyroid_support** (opt-in, gated by profile). Never hormone-named. Iodine not scored.
 
+Exercise kcal source: imported/wearable calories win. If a manual/custom activity arrives without calories, `/workouts/complete` stores a conservative MET-based estimate from activity type, duration, intensity, and bodyweight so same-day targets and energy availability still react. The live `/meals/adjusted-daily-target` uses prior HealthKit activity as the baseline and adds today's completed-workout bump separately to avoid double-counting a same-day HealthKit spike.
+
 ## Client Components
 
 - **`NutritionCard`** — overview (macros + Score + chips + Gut signals). Modal: adherence/quality/micro bars.

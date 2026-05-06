@@ -1200,7 +1200,13 @@ def adjusted_daily_target(
     else:
         calories_this_week = 0.0
 
-    targets = resolve_targets_for_user(db, current_user.id, as_of=today)
+    health_activity_as_of = today - timedelta(days=1) if today >= date_cls.today() else today
+    targets = resolve_targets_for_user(
+        db,
+        current_user.id,
+        as_of=today,
+        health_activity_as_of=health_activity_as_of,
+    )
     if not targets:
         raise HTTPException(status_code=404, detail="User profile not found")
 

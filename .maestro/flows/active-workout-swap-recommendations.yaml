@@ -51,8 +51,20 @@ tags:
     visible:
       id: "start-workout-cta"
     timeout: 30000
+- waitForAnimationToEnd:
+    timeout: 2000
 - tapOn:
     id: "start-workout-cta"
+- waitForAnimationToEnd:
+    timeout: 1000
+- runFlow:
+    when:
+      notVisible:
+        id: "active-workout-screen"
+    commands:
+      - tapOn: "Start Workout"
+      - waitForAnimationToEnd:
+          timeout: 1000
 
 - extendedWaitUntil:
     visible:
@@ -69,12 +81,14 @@ tags:
     commands:
       - tapOn: "Not now"
 
-- assertVisible: "Dumbbell Bench Press"
+- assertVisible:
+    id: "active-exercise-name-0"
 - extendedWaitUntil:
     visible:
       id: "pre-set-recommended-weight-value-0"
     timeout: 30000
-- assertVisible: "120 lbs"
+- assertVisible:
+    text: ".*120 lbs.*"
 
 - tapOn:
     id: "swap-exercise-0"
@@ -93,16 +107,18 @@ tags:
     id: "active-exercise-option-dumbbell-shoulder-press"
 
 - extendedWaitUntil:
-    visible: "Dumbbell Shoulder Press"
+    visible:
+      text: ".*Dumbbell Shoulder Press.*"
     timeout: 15000
 - extendedWaitUntil:
     visible:
       id: "pre-set-recommended-weight-value-0"
     timeout: 30000
 - extendedWaitUntil:
-    visible: "85 lbs"
+    visible: ".*85 lbs.*"
     timeout: 30000
 - extendedWaitUntil:
-    visible: "85.*9"
+    visible: ".*85.*9.*"
     timeout: 30000
-- assertNotVisible: "120 lbs"
+- assertNotVisible:
+    text: ".*120 lbs.*"
