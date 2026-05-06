@@ -4,6 +4,9 @@ import json
 import math
 import os
 import re
+import time
+from collections import defaultdict, deque
+from datetime import datetime, time as datetime_time, timezone
 
 import openai
 from openai import OpenAI
@@ -36,16 +39,20 @@ progression_engine = WorkoutProgressionEngine()
 def get_openai_api_key() -> str | None:
     return os.getenv("OPENAI_API_KEY")
 
+
+class AIUsageLimitError(RuntimeError):
+    """Raised when a route exceeds a configured AI budget."""
+
 # ── Model selectors (all configurable via .env) ───────────────────────────────
 # Model-selection policy (2026-Q2):
-#   - gpt-5 is ONLY used for image tasks (food photo, meal photo,
-#     body scan, form photo, supplement label). Vision-specialized.
+#   - gpt-5.4-mini is used for dedicated image-analysis tasks (food photo,
+#     meal photo, body scan, form photo, supplement label).
 #   - Everything else runs on gpt-4o-mini for cost + latency.
 # Override any via .env.
 def model_image() -> str:
     """Vision / image-analysis model. Used only when the prompt includes
     an image_url content part."""
-    return os.getenv("MODEL_IMAGE", "gpt-5")
+    return os.getenv("MODEL_IMAGE", "gpt-5.4-mini")
 
 def model_plan_generation() -> str:
     return os.getenv("MODEL_PLAN_GENERATION", "gpt-4o-mini")
@@ -69,6 +76,146 @@ def model_intent() -> str:
 
 def model_food_enrichment() -> str:
     return os.getenv("MODEL_FOOD_ENRICHMENT", "gpt-4o-mini")
+
+
+_MODEL_PRICES_PER_1M: dict[str, tuple[float, float]] = {
+    "gpt-4o-mini": (0.15, 0.60),
+    "gpt-5-mini": (0.25, 2.00),
+    "gpt-5.4-nano": (0.20, 1.25),
+    "gpt-5.4-mini": (0.75, 4.50),
+    "gpt-5.4": (2.50, 15.00),
+    "gpt-5.5": (5.00, 30.00),
+}
+
+_PUBLIC_RATE_WINDOWS: dict[str, deque[float]] = defaultdict(deque)
+
+
+def _price_for_model(model: str) -> tuple[float, float] | None:
+    for prefix, price in _MODEL_PRICES_PER_1M.items():
+        if model.startswith(prefix):
+            return price
+    return None
+
+
+def _estimate_cost_usd(model: str, prompt_tokens: int | None, completion_tokens: int | None) -> float | None:
+    price = _price_for_model(model)
+    if not price:
+        return None
+    input_price, output_price = price
+    return round(((prompt_tokens or 0) * input_price + (completion_tokens or 0) * output_price) / 1_000_000, 8)
+
+
+def _usage_token_counts(response: object) -> tuple[int | None, int | None, int | None]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None, None, None
+    prompt = getattr(usage, "prompt_tokens", None)
+    completion = getattr(usage, "completion_tokens", None)
+    total = getattr(usage, "total_tokens", None)
+    return prompt, completion, total
+
+
+def _record_ai_usage_event(
+    *,
+    user_id: int | None,
+    route: str,
+    budget_bucket: str | None,
+    model: str,
+    success: bool,
+    image_count: int,
+    latency_ms: int | None,
+    response: object | None = None,
+    error: Exception | None = None,
+) -> None:
+    """Best-effort DB log for OpenAI usage. Never affects user flows."""
+    try:
+        from sqlmodel import Session
+        from app.database import engine
+        from app.models import AIUsageEvent
+        prompt_tokens, completion_tokens, total_tokens = _usage_token_counts(response) if response is not None else (None, None, None)
+        row = AIUsageEvent(
+            user_id=user_id,
+            route=route[:120] or "unknown",
+            budget_bucket=(budget_bucket or None),
+            model=model[:80] or "unknown",
+            success=success,
+            image_count=max(0, int(image_count or 0)),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            estimated_cost_usd=_estimate_cost_usd(model, prompt_tokens, completion_tokens),
+            latency_ms=latency_ms,
+            error_type=type(error).__name__[:120] if error else None,
+        )
+        with Session(engine) as session:
+            session.add(row)
+            session.commit()
+    except Exception as exc:
+        print(f"[ai_usage] record failed (non-fatal): {exc}")
+
+
+def _daily_ai_call_count(user_id: int, *, budget_bucket: str | None = None) -> int:
+    try:
+        from sqlmodel import Session, select
+        from app.database import engine
+        from app.models import AIUsageEvent
+        start = datetime.combine(datetime.now(timezone.utc).date(), datetime_time.min, tzinfo=timezone.utc)
+        with Session(engine) as session:
+            stmt = (
+                select(AIUsageEvent)
+                .where(AIUsageEvent.user_id == user_id)
+                .where(AIUsageEvent.created_at >= start)
+            )
+            if budget_bucket:
+                stmt = stmt.where(AIUsageEvent.budget_bucket == budget_bucket)
+            return len(session.exec(stmt).all())
+    except Exception as exc:
+        print(f"[ai_usage] budget count failed (non-fatal): {exc}")
+        return 0
+
+
+def _enforce_ai_budget(user_id: int | None, budget_bucket: str | None) -> None:
+    if user_id is None:
+        return
+    total_limit = int(os.getenv("AI_DAILY_CALL_LIMIT_PER_USER", "120"))
+    bucket_limit = None
+    if budget_bucket in {"image_scan", "vision"}:
+        bucket_limit = int(os.getenv("AI_DAILY_IMAGE_SCAN_LIMIT_PER_USER", "40"))
+    elif budget_bucket:
+        env_name = f"AI_DAILY_{budget_bucket.upper()}_LIMIT_PER_USER"
+        raw = os.getenv(env_name)
+        bucket_limit = int(raw) if raw and raw.isdigit() else None
+
+    if total_limit > 0 and _daily_ai_call_count(user_id) >= total_limit:
+        raise AIUsageLimitError("Daily AI call limit reached")
+    if bucket_limit and bucket_limit > 0 and _daily_ai_call_count(user_id, budget_bucket=budget_bucket) >= bucket_limit:
+        raise AIUsageLimitError(f"Daily {budget_bucket.replace('_', ' ')} limit reached")
+
+
+def check_public_ai_rate_limit(
+    key: str,
+    *,
+    bucket: str,
+    limit: int | None = None,
+    window_secs: int = 3600,
+) -> bool:
+    """In-process throttle for unauthenticated AI helpers.
+
+    Returns True when the caller may spend tokens. False means use the
+    deterministic fallback. This intentionally fails closed to "no AI",
+    not to "error".
+    """
+    max_calls = limit if limit is not None else int(os.getenv("AI_PUBLIC_MATCH_GOAL_LIMIT_PER_HOUR", "20"))
+    if max_calls <= 0:
+        return False
+    now = time.time()
+    q = _PUBLIC_RATE_WINDOWS[f"{bucket}:{key or 'unknown'}"]
+    while q and now - q[0] > window_secs:
+        q.popleft()
+    if len(q) >= max_calls:
+        return False
+    q.append(now)
+    return True
 
 
 def _hydrate_foods_from_db(food_names: list[str], *, user_id: int | None = None) -> tuple[list[dict], list[str]]:
@@ -920,8 +1067,28 @@ def _chat_create(client: OpenAI, **kwargs) -> object:
       - add a model-supported low-latency reasoning_effort if not already set
     All other models: params passed through unchanged.
     """
+    ai_route = kwargs.pop("ai_route", None)
+    ai_user_id = kwargs.pop("ai_user_id", None)
+    ai_budget_bucket = kwargs.pop("ai_budget_bucket", None)
+    ai_image_count = int(kwargs.pop("ai_image_count", 0) or 0)
     model = kwargs.get("model", "")
     print(f"[_chat_create] CODE_VERSION=V7_GPT5_MINI model={model!r} keys={list(kwargs.keys())} rf={kwargs.get('response_format')}")
+    start = time.perf_counter()
+    if ai_route:
+        try:
+            _enforce_ai_budget(ai_user_id, ai_budget_bucket)
+        except Exception as exc:
+            _record_ai_usage_event(
+                user_id=ai_user_id,
+                route=ai_route,
+                budget_bucket=ai_budget_bucket,
+                model=str(model or "unknown"),
+                success=False,
+                image_count=ai_image_count,
+                latency_ms=int((time.perf_counter() - start) * 1000),
+                error=exc,
+            )
+            raise
     if _is_gpt5(model):
         # Reasoning models reject temperature and top_p
         kwargs.pop("temperature", None)
@@ -938,7 +1105,33 @@ def _chat_create(client: OpenAI, **kwargs) -> object:
             model,
             kwargs.get("reasoning_effort"),
         )
-    return client.chat.completions.create(**kwargs)
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        if ai_route:
+            _record_ai_usage_event(
+                user_id=ai_user_id,
+                route=ai_route,
+                budget_bucket=ai_budget_bucket,
+                model=str(model or "unknown"),
+                success=False,
+                image_count=ai_image_count,
+                latency_ms=int((time.perf_counter() - start) * 1000),
+                error=exc,
+            )
+        raise
+    if ai_route:
+        _record_ai_usage_event(
+            user_id=ai_user_id,
+            route=ai_route,
+            budget_bucket=ai_budget_bucket,
+            model=str(model or "unknown"),
+            success=True,
+            image_count=ai_image_count,
+            latency_ms=int((time.perf_counter() - start) * 1000),
+            response=response,
+        )
+    return response
 
 
 def _build_chat_kwargs(
@@ -947,6 +1140,10 @@ def _build_chat_kwargs(
     json_schema: dict | None = None,
     max_tokens: int | None = None,
     timeout_secs: int = 120,
+    ai_route: str | None = None,
+    ai_user_id: int | None = None,
+    ai_budget_bucket: str | None = None,
+    ai_image_count: int = 0,
 ) -> dict:
     """
     Build kwargs for _chat_create adapted to model family.
@@ -959,6 +1156,11 @@ def _build_chat_kwargs(
                      falls back to prompt-enforced JSON otherwise.
     """
     kwargs: dict = dict(model=model, messages=messages, timeout=timeout_secs)
+    if ai_route:
+        kwargs["ai_route"] = ai_route
+        kwargs["ai_user_id"] = ai_user_id
+        kwargs["ai_budget_bucket"] = ai_budget_bucket
+        kwargs["ai_image_count"] = ai_image_count
     if _is_gpt5(model):
         # Reasoning model: use max_completion_tokens, add reasoning control,
         # do NOT pass temperature or top_p.

@@ -134,7 +134,7 @@ def test_food_search_force_ai_returns_ai_only() -> None:
 
     engine = make_seed_test_engine()
     original_ai = food_router._search_ai
-    food_router._search_ai = lambda query: [{
+    food_router._search_ai = lambda query, **kwargs: [{
         "name": "Homemade Pizza Slice",
         "serving": "1 slice",
         "calories": 285,
@@ -527,7 +527,7 @@ def test_food_search_can_disable_ai_fallback_for_signup() -> None:
         calls.append(("usda", query))
         return []
 
-    def fake_ai(query: str) -> list[dict]:
+    def fake_ai(query: str, **kwargs) -> list[dict]:
         calls.append(("ai", query))
         return [{
             "name": "AI Only Food",

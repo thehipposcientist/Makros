@@ -1332,7 +1332,16 @@ def generate_workout_summary(
                 },
             },
         }
-        kwargs = _build_chat_kwargs(model_chat(), _ws_messages, json_schema=schema, max_tokens=400, timeout_secs=30)
+        kwargs = _build_chat_kwargs(
+            model_chat(),
+            _ws_messages,
+            json_schema=schema,
+            max_tokens=400,
+            timeout_secs=30,
+            ai_route="/ai/workout-summary",
+            ai_user_id=current_user.id,
+            ai_budget_bucket="coach_chat",
+        )
         response = _chat_create(client, **kwargs)
         ai = _extract_json(response.choices[0].message.content)
         headline       = str(ai.get("headline") or "").strip()
@@ -1548,6 +1557,9 @@ def generate_warmup(
             json_schema=_WARMUP_SCHEMA,
             max_tokens=500,
             timeout_secs=20,
+            ai_route="/ai/warmup",
+            ai_user_id=current_user.id,
+            ai_budget_bucket="coach_chat",
         )
         response = _chat_create(client, **kwargs)
         data = _extract_json(response.choices[0].message.content or "")
@@ -1957,6 +1969,9 @@ def validate_food_macros(
             json_schema=_FOOD_VALIDATION_SCHEMA,
             max_tokens=500,
             timeout_secs=20,
+            ai_route="/ai/validate-food-macros",
+            ai_user_id=current_user.id,
+            ai_budget_bucket="food_enrichment",
         )
         response = _chat_create(client, **kwargs)
         data = _extract_json(response.choices[0].message.content or "")

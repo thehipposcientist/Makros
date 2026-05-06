@@ -17,8 +17,22 @@ public class ThalloHealthKitModule: Module {
             for name in readTypes {
                 if let t = self.objectType(for: name) { types.insert(t) }
             }
+            var shareTypes = Set<HKSampleType>()
+            shareTypes.insert(HKObjectType.workoutType())
+            if let activeEnergy = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned) {
+                shareTypes.insert(activeEnergy)
+            }
+            if let walkingRunning = HKQuantityType.quantityType(forIdentifier: .distanceWalkingRunning) {
+                shareTypes.insert(walkingRunning)
+            }
+            if let cycling = HKQuantityType.quantityType(forIdentifier: .distanceCycling) {
+                shareTypes.insert(cycling)
+            }
+            if let swimming = HKQuantityType.quantityType(forIdentifier: .distanceSwimming) {
+                shareTypes.insert(swimming)
+            }
             return try await withCheckedThrowingContinuation { cont in
-                self.store.requestAuthorization(toShare: nil, read: types) { ok, err in
+                self.store.requestAuthorization(toShare: shareTypes, read: types) { ok, err in
                     if let err { cont.resume(throwing: err) } else { cont.resume(returning: ok) }
                 }
             }
@@ -141,6 +155,14 @@ public class ThalloHealthKitModule: Module {
         AsyncFunction("getBasalEnergyBurned") { (startMs: Double, endMs: Double) -> [[String: Any]] in
             guard let qt = HKQuantityType.quantityType(forIdentifier: .basalEnergyBurned) else { return [] }
             return try await self.statisticsPerDay(type: qt, unit: .kilocalorie(), start: startMs, end: endMs)
+        }
+
+        AsyncFunction("getWeight") { (startMs: Double, endMs: Double, limit: Int) -> [[String: Any]] in
+            guard let qt = HKQuantityType.quantityType(forIdentifier: .bodyMass) else { return [] }
+            return try await self.querySamples(type: qt, start: startMs, end: endMs, limit: limit) { sample in
+                ["value": sample.quantity.doubleValue(for: .pound()),
+                 "startDate": ThalloHealthKitModule.iso(sample.startDate), "endDate": ThalloHealthKitModule.iso(sample.endDate)]
+            }
         }
 
         AsyncFunction("saveWorkout") { (

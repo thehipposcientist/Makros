@@ -536,8 +536,8 @@ export async function pushMealsToWatch(
 }
 
 /** Push today's hydration status to the watch. The phone/backend remain
- *  authoritative; the watch sends absolute ounce totals back via the
- *  `log_hydration` command after optimistic local updates. */
+ *  authoritative; the watch sends quick-add deltas or absolute set totals
+ *  back via the `log_hydration` command after optimistic local updates. */
 export async function pushHydrationToWatch(opts: {
   dateISO?: string;
   ounces?: number | null;

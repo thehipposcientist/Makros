@@ -142,6 +142,14 @@ export default function DetectedWorkoutsCard({ themeName, appleWorkouts, authTok
           caloriesBurned: session.manualActivity.caloriesBurned,
           avgHeartRate: session.manualActivity.avgHeartRate,
         } : undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          startedAt: session.startedAt ?? session.date,
+          endedAt: session.endedAt ?? null,
+          externalSourceId: session.id,
+        },
       ).catch(() => undefined);
     }
     setCandidates(prev => (prev ?? []).filter(c => c.externalId !== session.id));

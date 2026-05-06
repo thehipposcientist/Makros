@@ -4,6 +4,8 @@ import type { ActivitySource, WorkoutSession } from '../types';
 const MANUAL_COMPLETION_CONTEXTS = new Set([
   'manual_activity',
   'apple_health',
+  'watch',
+  'coach_log',
 ]);
 
 function normalizedContext(completion: WorkoutCompletionRecord): string {
@@ -40,8 +42,10 @@ export function mergeCompletionIntoWorkoutSession(
   const manualActivity = manualActivityFromCompletion(completion);
   return {
     ...session,
-    date: session.date || completion.completed_at || `${completion.workout_date}T12:00:00.000Z`,
+    date: session.date || completion.started_at || completion.completed_at || `${completion.workout_date}T12:00:00.000Z`,
     durationSeconds: session.durationSeconds || completion.duration_seconds || 0,
+    startedAt: session.startedAt ?? completion.started_at ?? undefined,
+    endedAt: session.endedAt ?? completion.ended_at ?? completion.completed_at ?? undefined,
     completed: true,
     manualActivity,
   };

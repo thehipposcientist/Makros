@@ -43,7 +43,7 @@ If a phone rest timer is currently active, the phone also sends a fresh `pushPro
 
 TabView: **Today** (workout) / **Meals** / **Hydration** / **Supps** / **Sleep** / **Readiness** / **Quick Start** / **Weight**. Page dots always visible.
 
-**Hydration**: quick-add 8 / 16 / 24 oz buttons, -8 oz correction, and a Digital Crown total setter. Watch sends absolute `log_hydration` ounce totals; phone persists through `POST /meals/hydration` and re-pushes the server-computed target.
+**Hydration**: quick-add 8 / 16 / 24 oz buttons, -8 oz correction, and a Digital Crown total setter. Watch quick-add/correction sends `log_hydration` deltas so queued taps compose after the phone wakes; Digital Crown set sends an absolute ounce total. Phone persists through `POST /meals/hydration` and re-pushes the server-computed target.
 
 **Active workout**: Digital Crown + −/+ steppers, recommended-weight quick-use row, rest timer, HR persistent chip, live recommendation text, swipe-right HR zones tab, warm-up card before first set, end + cancel + skip/swap-exercise menu.
 

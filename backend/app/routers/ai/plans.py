@@ -397,8 +397,8 @@ def _persist_active_workout_plan(
         # edits can regenerate the legacy WorkoutPlan artifact, but they must
         # not replace a dated active PlanWeek mid-week.
         try:
-            from app.services.workout.week_manager import create_plan_week, default_training_pattern
-            from app.models import PlanWeek
+            from app.services.workout.week_manager import create_plan_week, training_pattern_from_preferences
+            from app.models import PlanWeek, UserPreferences
             from datetime import date as _date2, timedelta as _td2
             wp_data = plan_json.get("workout_plan", plan_json) if isinstance(plan_json, dict) else {}
             workout_days = wp_data.get("days", [])
@@ -415,6 +415,10 @@ def _persist_active_workout_plan(
                     f"id={active_week.id} start={active_week.start_date}"
                 )
             elif workout_days and dpw:
+                prefs = db.exec(
+                    select(UserPreferences).where(UserPreferences.user_id == user_id)
+                ).first()
+                session_minutes = int(getattr(req, "workoutDurationMinutes", 0) or 0) or None
                 # Anchor to today (sign-up day) so the user's plan +
                 # weekly review cadence follows the day they engaged,
                 # not the calendar Monday boundary. Mirrors the logic
@@ -427,12 +431,13 @@ def _persist_active_workout_plan(
                     start_date=week_start,
                     workout_days=workout_days,
                     nutrition_templates=[],
-                    training_day_pattern=default_training_pattern(dpw),
+                    training_day_pattern=training_pattern_from_preferences(prefs, dpw),
                     goal=str(getattr(req, "goal", "") or ""),
                     days_per_week=dpw,
                     preferred_split=getattr(req, "preferredSplit", None) or None,
                     planner_version=PLANNER_VERSION,
                     generation_source="regen",
+                    session_minutes=session_minutes,
                 )
                 print(f"[workout-plan] dual-write PlanWeek for user={user_id} start={week_start}")
             else:

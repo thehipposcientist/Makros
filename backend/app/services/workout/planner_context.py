@@ -14,6 +14,7 @@ class PlannerBuildContext:
     inputs: PlannerInputs
     history_familiarity: dict[str, int]
     recent_muscle_exercises: dict[str, set[str]]
+    perf_profiles: dict | None = None
 
 
 def active_injury_tokens(profile: object | None, prefs: object | None) -> list[str]:
@@ -106,6 +107,19 @@ def build_planweek_planner_context(
         recent_muscle_exercises = recent_exercise_slugs_by_muscle(user_id, db)
     except Exception:
         recent_muscle_exercises = {}
+    try:
+        from app.services.workout.performance import (
+            build_performance_profile,
+            merge_strength_anchor_profiles,
+        )
+        perf_profiles = merge_strength_anchor_profiles(
+            user_id,
+            db,
+            build_performance_profile(user_id, db),
+            getattr(prefs, "strength_baselines", None),
+        )
+    except Exception:
+        perf_profiles = None
 
     inputs = PlannerInputs(
         goal=goal,
@@ -130,4 +144,5 @@ def build_planweek_planner_context(
         inputs=inputs,
         history_familiarity=history_familiarity,
         recent_muscle_exercises=recent_muscle_exercises,
+        perf_profiles=perf_profiles,
     )

@@ -3,9 +3,10 @@ import { Platform, TextStyle, ViewStyle } from 'react-native';
 export type AppThemeName =
   | 'midnight' | 'ocean'    | 'amethyst'
   | 'ember'    | 'wine'     | 'obsidian'
-  | 'blossom'  | 'void'     | 'dusk'     | 'lavender' | 'aurora'
+  | 'blossom'  | 'void'     | 'dusk'     | 'lavender' | 'aurora' | 'evergreen'
   | 'sunrise'  | 'parchment'| 'linen'    | 'mint'
   | 'butter'   | 'seaglass' | 'lilac'    | 'sky'
+  | 'porcelain'| 'citrus'
   | 'slate'    | 'ash'      | 'cosmos'
   | 'cinder'   | 'smoke'    | 'maroon'
   | 'rose'
@@ -419,6 +420,35 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
     },
   },
 
+  evergreen: {
+    name: 'evergreen',
+    label: 'Evergreen Night',
+    description: 'Deep forest green with mint primary and warm amber contrast - grounded and dark.',
+    colors: {
+      background:    '#06110C',
+      surface:       '#0B1A12',
+      surfaceRaised: '#12251A',
+      border:        '#1F3A2A',
+      primary:       '#42D982',
+      primaryDark:   '#1FA35A',
+      primaryLight:  '#92F2B8',
+      accent:        '#D6A13A',
+      textPrimary:   '#ECF8EF',
+      textSecondary: '#9FC4A8',
+      textMuted:     '#5E7D68',
+      error:         '#F05A64',
+      warning:       '#D6A13A',
+      success:       '#4ED88A',
+    },
+    sections: {
+      workout: { soft: '#0A2214', strong: '#42D982', text: '#9EF2BC' },
+      meals:   { soft: '#231B08', strong: '#D6A13A', text: '#F2CD78' },
+      ai:      { soft: '#071C20', strong: '#38C8D0', text: '#92E8EC' },
+      planner: { soft: '#14200C', strong: '#A6D94A', text: '#D8F298' },
+      account: { soft: '#241008', strong: '#D77A3D', text: '#F0AE80' },
+    },
+  },
+
   // ── LIGHT / WARM ─────────────────────────────────────────────────────────────
 
   sunrise: {
@@ -652,6 +682,64 @@ export const APP_THEMES: Record<AppThemeName, AppTheme> = {
       ai:      { soft: '#E0E0F8', strong: '#4040C8', text: '#101058' },
       planner: { soft: '#F8ECC8', strong: '#B07820', text: '#503808' },
       account: { soft: '#D0EDE8', strong: '#1A8888', text: '#063030' },
+    },
+  },
+
+  porcelain: {
+    name: 'porcelain',
+    label: 'Porcelain Blue',
+    description: 'Cool white background with crisp blue primary and soft apricot contrast.',
+    colors: {
+      background:    '#F6FAFF',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#E7F0FA',
+      border:        '#BFD0E2',
+      primary:       '#1E6FB8',
+      primaryDark:   '#104E86',
+      primaryLight:  '#69A7DD',
+      accent:        '#E07A5F',
+      textPrimary:   '#071A2C',
+      textSecondary: '#35516A',
+      textMuted:     '#6D8196',
+      error:         '#C73A42',
+      warning:       '#B4770E',
+      success:       '#247A56',
+    },
+    sections: {
+      workout: { soft: '#D7E9FA', strong: '#1E6FB8', text: '#0E3E68' },
+      meals:   { soft: '#DDF1E5', strong: '#247A56', text: '#0C3A26' },
+      ai:      { soft: '#E8E1F7', strong: '#6652B8', text: '#21156A' },
+      planner: { soft: '#F9E4D8', strong: '#C95F43', text: '#632010' },
+      account: { soft: '#D9F0F0', strong: '#267D84', text: '#0C3B40' },
+    },
+  },
+
+  citrus: {
+    name: 'citrus',
+    label: 'Citrus Studio',
+    description: 'Pale citrus background with leafy green primary and orange studio accents.',
+    colors: {
+      background:    '#FBFDEB',
+      surface:       '#FFFFFF',
+      surfaceRaised: '#EEF4C8',
+      border:        '#CBDC8A',
+      primary:       '#5D8A18',
+      primaryDark:   '#3D5F0B',
+      primaryLight:  '#9CCB43',
+      accent:        '#E36F35',
+      textPrimary:   '#17220A',
+      textSecondary: '#43562A',
+      textMuted:     '#77885A',
+      error:         '#C33A34',
+      warning:       '#B87900',
+      success:       '#2F8C55',
+    },
+    sections: {
+      workout: { soft: '#E4F3C4', strong: '#5D8A18', text: '#243E08' },
+      meals:   { soft: '#FBE0CE', strong: '#E36F35', text: '#642208' },
+      ai:      { soft: '#DDE7F8', strong: '#386FB4', text: '#123760' },
+      planner: { soft: '#FFF0BD', strong: '#B87900', text: '#513600' },
+      account: { soft: '#F4DCEB', strong: '#B73A7E', text: '#551238' },
     },
   },
 
@@ -919,16 +1007,16 @@ export const THEME_PICKER_ORDER = [
   'onyx', 'paper',
   'midnight', 'ocean', 'amethyst',
   'ember', 'wine', 'obsidian',
-  'slate', 'blossom', 'void', 'dusk', 'lavender', 'aurora',
+  'slate', 'blossom', 'void', 'dusk', 'lavender', 'aurora', 'evergreen',
   'sunrise', 'parchment', 'linen', 'mint',
   'butter', 'seaglass', 'lilac', 'sky',
-  'rose', 'ash', 'cosmos',
+  'porcelain', 'citrus', 'rose', 'ash', 'cosmos',
   'cinder', 'smoke', 'maroon',
 ] as const satisfies readonly AppThemeName[];
 
 export const LIGHT_THEME_NAMES = [
   'sunrise', 'parchment', 'linen', 'mint',
-  'butter', 'seaglass', 'lilac', 'sky', 'rose',
+  'butter', 'seaglass', 'lilac', 'sky', 'porcelain', 'citrus', 'rose',
   // Paper is a light theme — drives status-bar style + "is light"
   // branching in HomeScreen so the dark statusbar text shows up
   // correctly against the white background.

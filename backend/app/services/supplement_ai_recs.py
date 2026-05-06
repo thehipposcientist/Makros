@@ -132,7 +132,7 @@ Return ONLY valid JSON in this shape:
 """
 
 
-def _call_ai(prompt: str) -> dict | None:
+def _call_ai(prompt: str, *, user_id: int | None = None) -> dict | None:
     """Synchronous AI call. Returns parsed JSON or None on failure.
     Errors are logged + non-fatal — caller falls through to no AI recs."""
     try:
@@ -156,6 +156,9 @@ def _call_ai(prompt: str) -> dict | None:
             messages,
             max_tokens=900,
             timeout_secs=30,
+            ai_route="/supplements/ai-recs",
+            ai_user_id=user_id,
+            ai_budget_bucket="supplement_lookup",
         )
         resp = _chat_create(
             client,
@@ -291,7 +294,7 @@ def get_or_generate_ai_recs(
         "fermented_servings": rollup.get("fermented_servings", 0) or 0,
     }
     prompt = _build_prompt(context, deterministic_slugs)
-    parsed = _call_ai(prompt)
+    parsed = _call_ai(prompt, user_id=user_id)
     if not parsed or not isinstance(parsed.get("recommendations"), list):
         # AI failed — return empty without caching, so next call retries.
         return {"recommendations": [], "generated_at": now_utc.isoformat(), "from_cache": False}

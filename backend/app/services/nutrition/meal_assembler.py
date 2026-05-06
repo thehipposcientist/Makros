@@ -504,6 +504,9 @@ def call_skeleton_ai(
                 json_schema=_SKELETON_SCHEMA,
                 max_tokens=1200,
                 timeout_secs=60,
+                ai_route="/nutrition/meal-skeleton",
+                ai_user_id=user_id,
+                ai_budget_bucket="meal_parsing",
             )
             response = _chat_create(client, **kwargs)
             raw = response.choices[0].message.content

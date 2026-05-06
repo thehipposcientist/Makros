@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 from app.services.workout.week_manager import (
     default_training_pattern,
+    training_pattern_from_preferences,
     _preferred_split_for_next_week,
     week_needs_renewal,
 )
@@ -86,6 +87,16 @@ def test_training_pattern_7_days():
 def test_training_pattern_1_day():
     p = default_training_pattern(1)
     assert p == [0]
+
+
+def test_training_pattern_uses_valid_preference_pattern():
+    prefs = type("Prefs", (), {"training_day_pattern": [6, 2, 4]})()
+    assert training_pattern_from_preferences(prefs, 3) == [2, 4, 6]
+
+
+def test_training_pattern_rejects_invalid_preference_pattern():
+    prefs = type("Prefs", (), {"training_day_pattern": [0, 0, 8]})()
+    assert training_pattern_from_preferences(prefs, 3) == [0, 2, 4]
 
 
 # ─── week_needs_renewal ───────────────────────────────────────────────────────

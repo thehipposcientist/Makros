@@ -64,6 +64,14 @@ def _dump_model(row):
 def _dump_rows(rows):
     return [_dump_model(row) for row in rows]
 
+def _merge_day_nutrition_plan(existing: dict | None, incoming: dict) -> dict:
+    merged = dict(incoming)
+    if isinstance(existing, dict):
+        for key in ("_hydration_oz",):
+            if key not in merged and key in existing:
+                merged[key] = existing[key]
+    return merged
+
 router = APIRouter(prefix="/profile", tags=["profile"])
 
 VALID_PREFERRED_SPLITS = {
@@ -162,16 +170,56 @@ def get_calorie_ranges(
     prefs = session.exec(
         select(UserPreferences).where(UserPreferences.user_id == current_user.id)
     ).first()
+    today = date.today()
+    if profile.birthdate is not None:
+        fresh_age = _derive_age(profile.birthdate, today)
+        if fresh_age is not None and fresh_age != profile.age:
+            profile.age = fresh_age
+            profile.updated_at = datetime.now(timezone.utc)
+            session.add(profile)
+            session.commit()
+
+    weight_candidates: list[tuple[date, int, float, str]] = []
     latest_weight = session.exec(
         select(WeightEntry)
         .where(WeightEntry.user_id == current_user.id)
-        .where(WeightEntry.entry_date <= date.today())
+        .where(WeightEntry.entry_date <= today)
         .order_by(WeightEntry.entry_date.desc(), WeightEntry.created_at.desc())
     ).first()
+    if latest_weight and latest_weight.weight_lbs > 0:
+        weight_candidates.append((
+            latest_weight.entry_date,
+            2,
+            float(latest_weight.weight_lbs),
+            latest_weight.source or "manual",
+        ))
+    health_weight = session.exec(
+        select(DailyHealthSnapshot)
+        .where(DailyHealthSnapshot.user_id == current_user.id)
+        .where(DailyHealthSnapshot.snapshot_date <= today)
+        .where(DailyHealthSnapshot.weight_lbs != None)  # noqa: E711
+        .order_by(DailyHealthSnapshot.snapshot_date.desc())
+    ).first()
+    if health_weight and health_weight.weight_lbs and health_weight.weight_lbs > 0:
+        weight_candidates.append((
+            health_weight.snapshot_date,
+            1,
+            float(health_weight.weight_lbs),
+            "apple_health",
+        ))
+
+    source_weight_lbs = float(profile.weight_lbs)
+    source_weight_kind = "profile"
+    if weight_candidates:
+        weight_candidates.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        weight_date, _priority, weight_value, weight_source = weight_candidates[0]
+        if (today - weight_date).days <= 30:
+            source_weight_lbs = weight_value
+            source_weight_kind = weight_source
 
     gender_value = profile.gender.value if hasattr(profile.gender, "value") else str(profile.gender)
     inputs = CalorieInputs(
-        weight_lbs=latest_weight.weight_lbs if latest_weight else profile.weight_lbs,
+        weight_lbs=source_weight_lbs,
         height_feet=profile.height_feet,
         height_inches=profile.height_inches,
         age=profile.age,
@@ -189,6 +237,20 @@ def get_calorie_ranges(
         "cut_protein_g": card.cut_protein_g,
         "maintain_protein_g": card.maintain_protein_g,
         "bulk_protein_g": card.bulk_protein_g,
+        "source_weight_lbs": card.weight_lbs,
+        "source_weight_kind": source_weight_kind,
+        "height_feet": card.height_feet,
+        "height_inches": card.height_inches,
+        "age": card.age,
+        "gender": card.gender,
+        "training_days_per_week": card.training_days_per_week,
+        "session_minutes": card.session_minutes,
+        "session_duration_label": card.session_duration_label,
+        "formula": card.formula,
+        "activity_level": card.activity_level,
+        "cut_adjustment_kcal": card.cut_adjustment_kcal,
+        "maintenance_adjustment_kcal": card.maintenance_adjustment_kcal,
+        "bulk_adjustment_kcal": card.bulk_adjustment_kcal,
     }
 
 
@@ -347,6 +409,7 @@ def sync_onboarding(
         prefs.preferred_split  = body.preferences.preferred_split
         prefs.equipment        = body.preferences.equipment
         prefs.equipment_settings = body.preferences.equipment_settings
+        prefs.training_day_pattern = body.preferences.training_day_pattern
         prefs.experience_level = body.preferences.experience_level
         prefs.strength_baselines = body.preferences.strength_baselines
         prefs.cardio_baseline = body.preferences.cardio_baseline
@@ -633,7 +696,8 @@ def get_day_state(
     session: Session = Depends(get_session),
 ):
     state = session.exec(
-        select(UserDayState).where(UserDayState.user_id == current_user.id, UserDayState.day_key == day_key)
+        select(UserDayState)
+        .where(UserDayState.user_id == current_user.id, UserDayState.day_key == day_key)
     ).first()
     if not state:
         return {
@@ -656,7 +720,9 @@ def upsert_day_state(
 ):
     now = datetime.now(timezone.utc)
     state = session.exec(
-        select(UserDayState).where(UserDayState.user_id == current_user.id, UserDayState.day_key == day_key)
+        select(UserDayState)
+        .where(UserDayState.user_id == current_user.id, UserDayState.day_key == day_key)
+        .with_for_update()
     ).first()
     if state:
         # Patch semantics — only update fields the caller actually passed.
@@ -674,7 +740,7 @@ def upsert_day_state(
         if body.meal_checks is not None:
             state.meal_checks = body.meal_checks
         if body.nutrition_plan is not None:
-            state.nutrition_plan = body.nutrition_plan
+            state.nutrition_plan = _merge_day_nutrition_plan(state.nutrition_plan, body.nutrition_plan)
         if body.macro_overrides is not None:
             state.macro_overrides = body.macro_overrides
         state.updated_at = now

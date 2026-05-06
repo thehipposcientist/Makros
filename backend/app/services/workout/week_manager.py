@@ -771,6 +771,26 @@ def default_training_pattern(days_per_week: int) -> list[int]:
     return patterns.get(days_per_week, list(range(min(days_per_week, 7))))
 
 
+def training_pattern_from_preferences(prefs: object | None, days_per_week: int) -> list[int]:
+    raw = getattr(prefs, "training_day_pattern", None)
+    if isinstance(raw, list):
+        pattern: list[int] = []
+        seen: set[int] = set()
+        for value in raw:
+            try:
+                dow = int(value)
+            except (TypeError, ValueError):
+                continue
+            if dow < 0 or dow > 6 or dow in seen:
+                continue
+            seen.add(dow)
+            pattern.append(dow)
+        pattern.sort()
+        if len(pattern) == days_per_week:
+            return pattern
+    return default_training_pattern(days_per_week)
+
+
 # ─── Safe Auto-Apply Defaults ─────────────────────────────────────────────────
 
 # Actions that are safe to auto-apply without user confirmation.
@@ -947,6 +967,7 @@ def auto_renew_week(
     plan = generate_workout_plan(
         planner_ctx.inputs, SEED_EXERCISES,
         history_familiarity=planner_ctx.history_familiarity,
+        perf_profiles=planner_ctx.perf_profiles,
         recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
     )
     workout_days = plan.get("workout_plan", {}).get("days", [])
@@ -981,7 +1002,7 @@ def auto_renew_week(
         # Stamp the user so subsequent renewals stay on this rhythm.
         set_plan_cadence_anchor_if_unset(db, user_id, anchor)
     week_start = next_plan_week_start(anchor, today)
-    training_pattern = default_training_pattern(days_per_week)
+    training_pattern = training_pattern_from_preferences(prefs, days_per_week)
 
     pw = create_plan_week(
         db, user_id,

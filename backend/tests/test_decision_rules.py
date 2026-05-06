@@ -55,6 +55,48 @@ def _payload_with_logged(days_logged: int, *, flags: list[dict] | None = None) -
     }
 
 
+def _payload_with_workout_review(
+    recommendation: str = "small_adjust",
+    *,
+    adherence_pct: float = 50.0,
+    missed: int = 1,
+) -> dict:
+    return {
+        "metrics_trends": {"w7": {"days_logged": 0}},
+        "flags": [],
+        "recommendation": recommendation,
+        "evaluation": {
+            "adherencePct": adherence_pct,
+            "sessionsLogged": 1,
+            "sessionsPlanned": 3,
+            "counts": {"hit": 0, "partial": 1, "missed": missed},
+            "commitments": [
+                {
+                    "kind": "cardio_count",
+                    "bucket": "missed" if missed else "partial",
+                    "promised": "2x cardio",
+                    "actual": "0x cardio",
+                    "deltaPct": 0.0,
+                }
+            ],
+        },
+        "weekly_review": {
+            "sessions_planned": 3,
+            "sessions_completed": 1,
+            "adherence_pct": adherence_pct,
+            "days_logged": 0,
+            "recommendations": [
+                {
+                    "area": "workout",
+                    "priority": "warn" if recommendation == "deep_review" else "suggest",
+                    "title": "Adjust next week",
+                    "action": {"type": "change_days_per_week", "value": 2},
+                }
+            ],
+        },
+    }
+
+
 # ── Passthrough cases (no delta, no gating) ─────────────────────
 
 def test_coach_only_passes_through():
@@ -105,6 +147,69 @@ def test_unknown_response_type_downgrades_to_coach_only():
     )
     assert res.response_type == "coach_only"
     assert any("unknown response_type" in o for o in res.overrides)
+
+
+def test_deterministic_recommendation_overrides_ai_response_type():
+    """The rules engine already picked the weekly recommendation; the LLM
+    can phrase it, but cannot silently downgrade it."""
+    print("\n[test] gate: deterministic recommendation overrides AI response_type")
+    from app.services.coach.decision_rules import gate
+    s, u = _setup()
+    res = gate(
+        {"response_type": "coach_only", "message": "looks okay"},
+        _payload_with_workout_review("small_adjust"),
+        s, u.id,
+    )
+    assert res.response_type == "small_adjust"
+    assert any("deterministic recommendation" in o for o in res.overrides)
+
+
+def test_workout_review_evidence_allows_adjustment_without_meal_logs():
+    """Workout recommendations should not be flattened just because the
+    user did not log enough meals this week."""
+    print("\n[test] gate: workout evidence allows small_adjust without nutrition logs")
+    from app.services.coach.decision_rules import gate
+    s, u = _setup()
+    res = gate(
+        {"response_type": "small_adjust", "delta": None, "message": "trim the week"},
+        _payload_with_workout_review("small_adjust"),
+        s, u.id,
+    )
+    assert res.response_type == "small_adjust"
+    assert any("deterministic weekly evaluation" in o for o in res.overrides)
+
+
+def test_workout_only_adjustment_strips_nutrition_delta():
+    """If the evidence is workout-only, keep the program recommendation
+    but remove macro deltas that lack nutrition support."""
+    print("\n[test] gate: workout-only evidence strips kcal/protein delta")
+    from app.services.coach.decision_rules import gate
+    s, u = _setup()
+    res = gate(
+        {
+            "response_type": "small_adjust",
+            "delta": {"kcal": -100, "protein_g": 30},
+            "message": "trim the week",
+        },
+        _payload_with_workout_review("small_adjust"),
+        s, u.id,
+    )
+    assert res.response_type == "small_adjust"
+    assert res.delta is None
+    assert any("nutrition delta removed" in o for o in res.overrides)
+
+
+def test_deep_review_can_be_supported_by_deterministic_evaluation():
+    print("\n[test] gate: deterministic deep_review can pass without flag rows")
+    from app.services.coach.decision_rules import gate
+    s, u = _setup()
+    res = gate(
+        {"response_type": "deep_review", "delta": None, "message": "review the week"},
+        _payload_with_workout_review("deep_review", adherence_pct=25.0, missed=2),
+        s, u.id,
+    )
+    assert res.response_type == "deep_review"
+    assert any("deep_review allowed" in o for o in res.overrides)
 
 
 # ── Data sufficiency ───────────────────────────────────────────
@@ -257,6 +362,33 @@ def test_small_adjust_kcal_within_cap_unclamped():
         s, u.id,
     )
     assert res.delta["kcal"] == -50
+
+
+def test_small_adjust_protein_delta_capped_at_20g():
+    """small_adjust also caps protein, not only calories."""
+    print("\n[test] gate: small_adjust protein_g=80 clamped to +20g")
+    from app.services.coach.decision_rules import gate
+    s, u = _setup()
+    res = gate(
+        {"response_type": "small_adjust", "delta": {"protein_g": 80},
+         "message": "raise protein"},
+        _payload_with_logged(7, flags=[{"severity": "med"}]),
+        s, u.id,
+    )
+    assert res.response_type == "small_adjust"
+    assert res.delta["protein_g"] == 20
+    assert any("protein delta clamped" in o for o in res.overrides)
+
+
+def test_no_prior_commitments_with_logged_sessions_is_coach_only():
+    """No commitments means there is nothing to grade; logged sessions
+    should not become a fake 0% adherence deep review."""
+    print("\n[test] evaluator: no commitments + sessions logged → coach_only")
+    from datetime import date
+    from app.services.coach.checkin_evaluator import WeeklyEvaluation, recommend_from_evaluation
+    today = date.today()
+    ev = WeeklyEvaluation(week_start=today, week_end=today, sessions_logged=2)
+    assert recommend_from_evaluation(ev) == "coach_only"
 
 
 # ── Cooldown ────────────────────────────────────────────────

@@ -28,14 +28,9 @@ from dataclasses import dataclass, field
 
 from .goal_params import (
     CALORIES_PER_LB,
-    FAT_LOSS,
-    GENERAL_HEALTH,
     GoalBucketParams,
     MAX_GAIN_RATE_LBS_PER_WEEK,
     MAX_LOSS_RATE_LBS_PER_WEEK,
-    MIN_SAFE_CALORIES,
-    MUSCLE_GAIN,
-    BODY_RECOMP,
     get_bucket_for_goal,
 )
 
@@ -651,10 +646,10 @@ class CalorieRangeCard:
     and muscle gain. Shown to the user in the profile so they can see
     their cut / maintenance / bulk calories at a glance.
 
-    Only top-level calories + protein are included — the full macro
-    split is still available via `compute_targets()` if needed.
+    Calories, protein, and the user-visible calculation basis are included.
+    The full macro split is still available via `compute_targets()` if needed.
     """
-    maintenance_calories: int        # TDEE, unadjusted
+    maintenance_calories: int        # TDEE/maintenance target at moderate pace
     cut_calories: int                # fat-loss bucket, moderate pace
     bulk_calories: int               # muscle-gain bucket, moderate pace
     cut_protein_g: int
@@ -662,6 +657,19 @@ class CalorieRangeCard:
     bulk_protein_g: int
     bmr: int
     activity_multiplier: float
+    weight_lbs: float
+    height_feet: int
+    height_inches: int
+    age: int
+    gender: str
+    training_days_per_week: int
+    session_minutes: int
+    session_duration_label: str
+    formula: str
+    activity_level: str
+    cut_adjustment_kcal: int
+    maintenance_adjustment_kcal: int
+    bulk_adjustment_kcal: int
 
 
 def calculate_reference_ranges(inputs: CalorieInputs) -> CalorieRangeCard:
@@ -673,30 +681,63 @@ def calculate_reference_ranges(inputs: CalorieInputs) -> CalorieRangeCard:
     whole point of the card is "here's what a sensible default looks like
     in each direction".
     """
-    bmr = step_1_calculate_bmr(inputs)
-    multiplier = step_2_calculate_activity_multiplier(
-        inputs.training_days_per_week, inputs.session_minutes,
-    )
-    tdee = step_3_calculate_tdee(bmr, multiplier)
+    def _inputs_for(goal_id: str) -> CalorieInputs:
+        return CalorieInputs(
+            weight_lbs=inputs.weight_lbs,
+            height_feet=inputs.height_feet,
+            height_inches=inputs.height_inches,
+            age=inputs.age,
+            gender=inputs.gender,
+            training_days_per_week=inputs.training_days_per_week,
+            session_minutes=inputs.session_minutes,
+            goal_id=goal_id,
+            pace="moderate",
+        )
 
-    def _run(bucket: GoalBucketParams) -> tuple[int, int]:
-        """Return (calories, protein_g) for one bucket at moderate pace."""
-        delta = bucket.calorie_adjustment_by_pace.get("moderate", 0)
-        cals = max(0, tdee + delta)
-        protein = step_5_calculate_protein_g(inputs.weight_lbs, bucket)
-        return cals, protein
+    cut = compute_targets(_inputs_for("fat_loss"))
+    maintain = compute_targets(_inputs_for("body_recomp"))
+    bulk = compute_targets(_inputs_for("muscle_gain"))
 
-    cut_cals, cut_protein = _run(FAT_LOSS)
-    maintain_cals, maintain_protein = _run(BODY_RECOMP)
-    bulk_cals, bulk_protein = _run(MUSCLE_GAIN)
+    def _duration_label(minutes: int) -> str:
+        if minutes <= 30:
+            return "20-30 min"
+        if minutes <= 45:
+            return "30-45 min"
+        if minutes <= 60:
+            return "45-60 min"
+        if minutes <= 75:
+            return "60-75 min"
+        return "75-90 min"
+
+    def _activity_level(multiplier: float) -> str:
+        if multiplier <= 1.2:
+            return "sedentary"
+        if multiplier <= 1.375:
+            return "light"
+        if multiplier <= 1.55:
+            return "moderate"
+        return "very_active"
 
     return CalorieRangeCard(
-        maintenance_calories=tdee,
-        cut_calories=cut_cals,
-        bulk_calories=bulk_cals,
-        cut_protein_g=cut_protein,
-        maintain_protein_g=maintain_protein,
-        bulk_protein_g=bulk_protein,
-        bmr=bmr,
-        activity_multiplier=multiplier,
+        maintenance_calories=maintain.calories,
+        cut_calories=cut.calories,
+        bulk_calories=bulk.calories,
+        cut_protein_g=cut.protein_g,
+        maintain_protein_g=maintain.protein_g,
+        bulk_protein_g=bulk.protein_g,
+        bmr=maintain.bmr,
+        activity_multiplier=maintain.activity_multiplier,
+        weight_lbs=inputs.weight_lbs,
+        height_feet=inputs.height_feet,
+        height_inches=inputs.height_inches,
+        age=inputs.age,
+        gender=(inputs.gender or "").lower(),
+        training_days_per_week=inputs.training_days_per_week,
+        session_minutes=inputs.session_minutes,
+        session_duration_label=_duration_label(inputs.session_minutes),
+        formula="Mifflin-St Jeor",
+        activity_level=_activity_level(maintain.activity_multiplier),
+        cut_adjustment_kcal=cut.goal_adjustment_kcal,
+        maintenance_adjustment_kcal=maintain.goal_adjustment_kcal,
+        bulk_adjustment_kcal=bulk.goal_adjustment_kcal,
     )

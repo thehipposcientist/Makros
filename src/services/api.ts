@@ -1290,6 +1290,14 @@ export async function syncOnboarding(token: string, profile: import('../types').
   if (mappedGoal !== profile.goal) {
     console.log('[syncOnboarding] mapped goal', profile.goal, '→', mappedGoal);
   }
+  const trainingDayPattern = Array.isArray(profile.trainingDays)
+    && profile.trainingDays.length === profile.daysPerWeek
+    ? [...new Set(profile.trainingDays)]
+        .map(d => Number(d))
+        .filter(d => Number.isInteger(d) && d >= 0 && d <= 6)
+        .map(d => (d + 6) % 7)
+        .sort((a, b) => a - b)
+    : null;
   const result = await request('/profile/onboarding', {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },
@@ -1315,6 +1323,7 @@ export async function syncOnboarding(token: string, profile: import('../types').
         preferred_split: profile.preferredSplit ?? null,
         equipment:       profile.equipment,
         equipment_settings: profile.equipmentSettings ?? null,
+        training_day_pattern: trainingDayPattern && trainingDayPattern.length === profile.daysPerWeek ? trainingDayPattern : null,
         experience_level: profile.experienceLevel ?? null,
         strength_baselines: profile.strengthBaselines ?? null,
         cardio_baseline: profile.cardioBaseline ?? null,
@@ -1651,6 +1660,9 @@ export async function logWorkoutDone(
     templateId?: string | null;
     planDayId?: number | null;
     stimulus?: string | null;
+    startedAt?: string | null;
+    endedAt?: string | null;
+    externalSourceId?: string | null;
   },
 ): Promise<WorkoutCompleteResponse> {
   const activityHrSummary = activity?.avgHeartRate
@@ -1675,6 +1687,9 @@ export async function logWorkoutDone(
       ...(source?.templateId ? { template_id: source.templateId } : {}),
       ...(source?.planDayId != null ? { plan_day_id: source.planDayId } : {}),
       ...(source?.stimulus ? { stimulus: source.stimulus } : {}),
+      ...(source?.startedAt ? { started_at: source.startedAt } : {}),
+      ...(source?.endedAt ? { ended_at: source.endedAt } : {}),
+      ...(source?.externalSourceId ? { external_source_id: source.externalSourceId } : {}),
       ...(exercises && exercises.length > 0 ? { exercises } : {}),
       ...(activity?.category ? {
         activity_category: activity.category,
@@ -1732,6 +1747,9 @@ export interface WorkoutCompletionRecord {
   template_id?: string | null;
   plan_day_id?: number | null;
   completed_at?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  external_source_id?: string | null;
   activity_category?: string | null;
   activity_subtype?: string | null;
   activity_intensity?: string | null;
@@ -2313,6 +2331,20 @@ export interface CalorieRanges {
   cut_protein_g: number;
   maintain_protein_g: number;
   bulk_protein_g: number;
+  source_weight_lbs?: number;
+  source_weight_kind?: string;
+  height_feet?: number;
+  height_inches?: number;
+  age?: number;
+  gender?: string;
+  training_days_per_week?: number;
+  session_minutes?: number;
+  session_duration_label?: string;
+  formula?: string;
+  activity_level?: string;
+  cut_adjustment_kcal?: number;
+  maintenance_adjustment_kcal?: number;
+  bulk_adjustment_kcal?: number;
 }
 
 /** Cut / maintain / bulk calorie reference card for the signed-in user.
@@ -4375,12 +4407,27 @@ export async function applyRecommendationAction(
   });
 }
 
-/** Wipe every WorkoutCompletion + WorkoutSession row for `dateISO`.
- *  Used by the day-card "Undo done" path when a phantom completion
- *  appears (timezone bug at midnight, partial sync, manual error). */
-export async function deleteWorkoutCompletion(token: string, dateISO: string, focusLabel?: string): Promise<void> {
-  let url = `/workouts/completion?workout_date=${dateISO}`;
-  if (focusLabel) url += `&focus_label=${encodeURIComponent(focusLabel)}`;
+/** Delete WorkoutCompletion rows for `dateISO`. Passing only a date keeps
+ *  the legacy "wipe the whole day" behavior; passing an id/source/focus
+ *  targets a single row or focus. */
+export async function deleteWorkoutCompletion(
+  token: string,
+  dateISO: string,
+  focusOrOptions?: string | {
+    focusLabel?: string | null;
+    completionId?: number | null;
+    externalSourceId?: string | null;
+  },
+): Promise<void> {
+  const params = new URLSearchParams({ workout_date: dateISO });
+  if (typeof focusOrOptions === 'string') {
+    if (focusOrOptions) params.set('focus_label', focusOrOptions);
+  } else if (focusOrOptions) {
+    if (focusOrOptions.focusLabel) params.set('focus_label', focusOrOptions.focusLabel);
+    if (focusOrOptions.completionId != null) params.set('completion_id', String(focusOrOptions.completionId));
+    if (focusOrOptions.externalSourceId) params.set('external_source_id', focusOrOptions.externalSourceId);
+  }
+  const url = `/workouts/completion?${params.toString()}`;
   await request(url, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${token}` },

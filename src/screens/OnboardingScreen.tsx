@@ -46,7 +46,8 @@ import {
   StrengthBaselineLiftKey, StrengthBaselines, StrengthEquipmentSettings,
 } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
-import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal, getMe, searchFoodNutrition, type FoodSearchResult } from '../services/api';
+import { useLiveFoodSearch } from '../hooks/useLiveFoodSearch';
+import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal, getMe, type FoodSearchResult } from '../services/api';
 import { requirePro, type ProFeature } from '../utils/subscription';
 import { APPLE_HEALTH_PERMISSION_COPY, isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
 import { setAppleHealthEnabled as persistHealthEnabled } from '../utils/workoutHistory';
@@ -514,9 +515,11 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const [foodsAvailable, setFoodsAvailable] = useState<string[]>([]);
   const [foodScanLoading, setFoodScanLoading] = useState(false);
   const [scannedFoods, setScannedFoods] = useState<{ name: string; selected: boolean }[]>([]);
-  const [foodCatalogSearchLoading, setFoodCatalogSearchLoading] = useState(false);
-  const [foodCatalogResults, setFoodCatalogResults] = useState<FoodSearchResult[]>([]);
-  const [foodCatalogSearchError, setFoodCatalogSearchError] = useState<string | null>(null);
+  const {
+    results: foodCatalogResults,
+    loading: foodCatalogSearchLoading,
+    error: foodCatalogSearchError,
+  } = useLiveFoodSearch(authToken, foodSearch, { minChars: 2, allowAiFallback: false });
 
   // Allergies / dietary restrictions — plumbed through to UserProfile.allergies
   // and read by the meal-planner so suggested meals filter these out. Stored
@@ -2204,36 +2207,10 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const handleFoodSearchChange = (text: string) => {
     setFoodSearch(text);
-    setFoodCatalogResults([]);
-    setFoodCatalogSearchError(null);
-  };
-
-  const handleFoodCatalogSearch = async () => {
-    const query = foodSearch.trim();
-    if (!authToken || query.length < 3 || foodCatalogSearchLoading) return;
-    setFoodCatalogSearchLoading(true);
-    setFoodCatalogSearchError(null);
-    try {
-      const res = await searchFoodNutrition(authToken, query, { allowAiFallback: false });
-      setFoodCatalogResults(res.results ?? []);
-      if (!res.results?.length) {
-        setFoodCatalogSearchError(`No USDA matches for "${query}".`);
-      }
-    } catch (e: any) {
-      setFoodCatalogResults([]);
-      setFoodCatalogSearchError(e?.message ?? 'Food search failed.');
-    } finally {
-      setFoodCatalogSearchLoading(false);
-    }
   };
 
   const addFoodSearchResultToKitchen = (item: FoodSearchResult) => {
     addFoodToKitchen(item.name);
-    setFoodCatalogResults(prev => prev.filter(result => {
-      const sameId = (result.food_id ?? result.fdc_id ?? result.external_id ?? null)
-        === (item.food_id ?? item.fdc_id ?? item.external_id ?? null);
-      return result.name.toLowerCase() !== item.name.toLowerCase() || !sameId;
-    }));
   };
 
   const toggleFood = (food: string) => {
@@ -2420,13 +2397,17 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           onChangeText={handleFoodSearchChange}
           autoCapitalize="none"
           onSubmitEditing={() => {
-            if (foodSearchTerm.length >= 3) handleFoodCatalogSearch();
-            else if (canAddSearchTerm) addFoodToKitchen(foodSearchTerm);
+            if (foodSearchTerm.length < 2 && canAddSearchTerm) {
+              addFoodToKitchen(foodSearchTerm);
+              setFoodSearch('');
+            } else {
+              Keyboard.dismiss();
+            }
           }}
           returnKeyType="search"
         />
         {foodSearch.length > 0 && (
-          <TouchableOpacity style={styles.clearBtn} onPress={() => { setFoodSearch(''); setFoodCatalogResults([]); setFoodCatalogSearchError(null); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <TouchableOpacity style={styles.clearBtn} onPress={() => setFoodSearch('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <Text style={styles.clearBtnText}><Ionicons name="close" size={16} /></Text>
           </TouchableOpacity>
         )}
@@ -2435,22 +2416,20 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
       ) : (
         <>
-          {authToken && foodSearchTerm.length >= 3 && (
-            <TouchableOpacity
-              style={[styles.scanBtnSecondary, { marginBottom: 12, borderColor: colors.primary, backgroundColor: colors.primary + '12' }, foodCatalogSearchLoading && { opacity: 0.6 }]}
-              onPress={handleFoodCatalogSearch}
-              disabled={foodCatalogSearchLoading}>
-              {foodCatalogSearchLoading
-                ? <ActivityIndicator size="small" color={colors.primary} />
-                : <Text style={[styles.scanBtnSecondaryText, { color: colors.primary }]}>Search USDA catalog for "{foodSearchTerm}"</Text>}
-            </TouchableOpacity>
-          )}
+          {foodCatalogSearchLoading ? (
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={[styles.hint, { marginTop: 0, marginBottom: 0 }]}>Searching foods...</Text>
+            </View>
+          ) : null}
           {foodCatalogSearchError ? (
-            <Text style={[styles.hint, { marginTop: 0, marginBottom: 12 }]}>{foodCatalogSearchError}</Text>
+            <Text style={[styles.hint, { marginTop: 0, marginBottom: 12 }]}>
+              {foodCatalogSearchError}
+            </Text>
           ) : null}
           {visibleFoodCatalogResults.length > 0 ? (
             <View style={{ marginBottom: 16 }}>
-              <Text style={[styles.foodCategoryLabel, { marginBottom: 8 }]}>USDA Search Results</Text>
+              <Text style={[styles.foodCategoryLabel, { marginBottom: 8 }]}>Catalog Results</Text>
               {visibleFoodCatalogResults.map((item, idx) => {
                 const sourceLabel = badgeLabelForSource(item.source);
                 return (

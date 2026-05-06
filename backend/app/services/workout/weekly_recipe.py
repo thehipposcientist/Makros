@@ -2888,12 +2888,12 @@ def generate_weekly_recipe(
         elif lifting_split in ("lower_focused", "upper_focused"):
             _str_cycle = list(_lifting_recipe(profile, lifting_split, lift_days))
         # ── Upper/Lower strength cycle (default) ──────────────────
-        # Keeps historical behavior for UL and the no-split-argument
-        # case. `_ul_strict` mirrors the previous `_ul_only` — when
-        # the user explicitly picked UL we drop Full Body fillers so
-        # the week is strictly U/L.
         else:
-            _ul_strict = user_chose_split and _is_ul
+            # If the effective split is Upper/Lower, keep the strength recipe
+            # truly U/L. The UI may display "Auto · Upper/Lower" while
+            # `user_chose_split` is false; leaking Full Body into that week
+            # makes the rendered plan look like it ignored the split.
+            _ul_strict = _is_ul
             if lift_days <= 3:
                 if _ul_strict:
                     _str_cycle = [_A.LIFT_UPPER_HEAVY, _A.LIFT_LOWER_HEAVY, _A.LIFT_UPPER_HYPERTROPHY]

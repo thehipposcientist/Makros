@@ -255,6 +255,22 @@ async function pushUserStateToBackend(token: string): Promise<void> {
   }
 }
 
+async function hydrateTodayHydrationFromBackend(token: string): Promise<void> {
+  try {
+    const today = todayKey();
+    const pendingLocal = await loadCachedHydration(today).catch(() => null);
+    if (pendingLocal?.pending) {
+      console.log(`[user-state] hydration restore skipped pending local row ${today}`);
+      return;
+    }
+    const row = await getHydration(token, today);
+    await saveCachedHydration(row);
+    console.log(`[user-state] hydrated hydration ${row.date}: ${row.ounces}oz`);
+  } catch (e: any) {
+    console.warn('[user-state] hydration restore failed:', e?.message ?? e);
+  }
+}
+
 /** Pull the backend state blob and write it into AsyncStorage. Called on
  *  sign-in (especially on a new device) so the user's data comes back. */
 async function pullUserStateFromBackend(token: string): Promise<void> {
@@ -279,6 +295,11 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
   } catch (e: any) {
     console.warn('[user-state] pull failed:', e?.message ?? e);
   }
+
+  // Hydration has its own server-authoritative endpoint. Restore today's row
+  // directly so sign-out cache wipes cannot hide water logged in UserDayState
+  // when the opaque synced-state blob is stale, missing, or too large to save.
+  await hydrateTodayHydrationFromBackend(token);
 
   // Workout-history fallback: if local is empty (wipe / fresh install on a
   // user whose pre-sync state blob didn't include workoutHistory), rebuild
@@ -362,9 +383,10 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
   }
 }
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, getAIRemainingWeekNutritionPlan, repairPlanWeekInjuryConflicts, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName, saveWeightEntryAPI } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, getAIRemainingWeekNutritionPlan, repairPlanWeekInjuryConflicts, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName, saveWeightEntryAPI, getHydration } from '../src/services/api';
 import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday, clearSavedNutritionPlansForDates, clearPreservedMealsForDates, clearMealChecksForDates } from '../src/utils/mealTracker';
 import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
+import { loadCachedHydration, saveCachedHydration } from '../src/utils/hydrationCache';
 import { encodePulledStateValueForStorage, mergePulledUserProfileWithCurrentStats, preserveLocalPreferredSplitWhenRemoteMissing } from '../src/utils/profileCache';
 import AuthScreen from '../src/screens/AuthScreen';
 import OnboardingScreen from '../src/screens/OnboardingScreen';
@@ -884,12 +906,8 @@ export default function Index() {
     setNutritionistNote(null);
     if (aiPlans?.workout_plan) {
       await AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(aiPlans.workout_plan));
-      await AsyncStorage.setItem('_skipNextPlanHydration', '1');
-      // A fresh plan replaces today's slot too. Clear the once-per-day
-      // freshDay marker so HomeScreen's loadPlans regenerates today's
-      // exercises against the new plan + recent history. Without this,
-      // a user who changes their split sees the new split's days at
-      // future positions but today's slot stays as the old split's day.
+      // A fresh plan replaces today's cached slot too. PlanWeek remains
+      // the source of truth; AsyncStorage is only the hot/offline cache.
       try {
         const t = new Date();
         const todayKey = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;

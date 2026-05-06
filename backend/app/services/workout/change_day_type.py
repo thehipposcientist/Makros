@@ -342,12 +342,13 @@ def detect_conflicts(
     # 4. Fatigue risk
     if focus_readiness and new_is_lift:
         fam = _focus_family(new_focus)
-        readiness = focus_readiness.get(fam)
-        if readiness is not None and readiness < 30:
+        readiness = _readiness_01(focus_readiness, fam)
+        if readiness is not None and readiness < 0.40:
+            readiness_pct = int(round(readiness * 100))
             conflicts.append(Conflict(
                 kind="fatigue_risk",
                 severity="warn",
-                message=f"Low readiness ({readiness:.0f}%) for {new_focus}. Muscles may still be recovering.",
+                message=f"Low readiness ({readiness_pct}%) for {new_focus}. Muscles may still be recovering.",
                 affected_days=[changed_idx],
                 suggestion=f"A lighter {fam.replace('_', ' ').title()} session or a different focus may be safer.",
             ))

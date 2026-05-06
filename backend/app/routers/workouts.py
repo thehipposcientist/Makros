@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 from sqlalchemy import func
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 from typing import Literal
 from pydantic import BaseModel
 
@@ -89,6 +89,9 @@ class WorkoutCompleteRequest(BaseModel):
     distance_miles: float | None = None
     calories_burned: int | None = None
     hr_summary: dict | None = None  # {avgBpm, maxBpm, zoneMinutes}
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    external_source_id: str | None = None
     # Post-workout feedback. Used by weekly_review's struggle metrics
     # (e.g. 3 of 4 sessions felt rough → trainer suggests pulling back).
     # All optional — silent log paths still work.
@@ -133,6 +136,28 @@ def _is_feedback_only_patch(body: WorkoutCompleteRequest) -> bool:
         and not _has_exercise_detail(body)
         and not _has_activity_detail(body)
     )
+
+
+_MANUAL_COMPLETION_CONTEXTS = {"manual_activity", "apple_health", "watch", "coach_log"}
+
+
+def _as_aware_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _activity_time_bounds(body: WorkoutCompleteRequest) -> tuple[datetime | None, datetime]:
+    started_at = _as_aware_utc(body.started_at)
+    ended_at = _as_aware_utc(body.ended_at)
+    duration = int(body.duration_seconds or 0)
+    if ended_at is None and started_at is not None and duration > 0:
+        ended_at = started_at + timedelta(seconds=duration)
+    if started_at is None and ended_at is not None and duration > 0:
+        started_at = ended_at - timedelta(seconds=duration)
+    return started_at, ended_at or datetime.now(timezone.utc)
 
 # ─── Response models ──────────────────────────────────────────────────────────
 
@@ -1411,6 +1436,9 @@ def mark_workout_complete(
     """
     plan_lock_focus_label = body.focus_label
     feedback_only_patch = _is_feedback_only_patch(body)
+    source_context = (body.source_context or "").strip().lower()
+    external_source_id = (body.external_source_id or "").strip() or None
+    activity_started_at, activity_ended_at = _activity_time_bounds(body)
 
     # Defensive guard: reject completions that have NO sets logged AND
     # no duration AND aren't a manual activity (cardio / sport / etc).
@@ -1428,15 +1456,24 @@ def mark_workout_complete(
             detail="Empty completion rejected — log sets, duration, or pick an activity first.",
         )
 
-    # Upsert by (user, date, focus). Multiple activities per day are allowed
-    # (e.g. legs workout in the morning + sauna recovery in the evening).
-    # Each gets its own completion row so fatigue accumulates correctly.
-    existing = db.exec(
-        select(WorkoutCompletion)
-        .where(WorkoutCompletion.user_id == current_user.id)
-        .where(WorkoutCompletion.workout_date == body.workout_date)
-        .where(WorkoutCompletion.focus_label == body.focus_label)
-    ).first()
+    existing = None
+    if external_source_id:
+        existing = db.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == current_user.id)
+            .where(WorkoutCompletion.external_source_id == external_source_id)
+        ).first()
+    allow_date_focus_upsert = (
+        feedback_only_patch
+        or source_context not in _MANUAL_COMPLETION_CONTEXTS
+    )
+    if existing is None and allow_date_focus_upsert:
+        existing = db.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == current_user.id)
+            .where(WorkoutCompletion.workout_date == body.workout_date)
+            .where(WorkoutCompletion.focus_label == body.focus_label)
+        ).first()
     if existing is None and feedback_only_patch:
         existing = db.exec(
             select(WorkoutCompletion)
@@ -1447,7 +1484,8 @@ def mark_workout_complete(
 
     completion_row_for_request: WorkoutCompletion | None = None
     if existing:
-        existing.duration_seconds   = body.duration_seconds
+        if not feedback_only_patch or body.duration_seconds > 0:
+            existing.duration_seconds = body.duration_seconds
         existing.stimulus           = body.stimulus if body.stimulus is not None else existing.stimulus
         existing.source_context     = body.source_context or existing.source_context
         existing.template_id        = body.template_id or existing.template_id
@@ -1464,7 +1502,11 @@ def mark_workout_complete(
         existing.intensity          = body.intensity if body.intensity is not None else existing.intensity
         existing.soreness_areas     = body.soreness_areas if body.soreness_areas is not None else existing.soreness_areas
         existing.feedback_notes     = body.feedback_notes if body.feedback_notes is not None else existing.feedback_notes
-        existing.completed_at       = datetime.now(timezone.utc)
+        existing.started_at         = activity_started_at if activity_started_at is not None else existing.started_at
+        existing.ended_at           = activity_ended_at if body.ended_at is not None or body.started_at is not None else existing.ended_at
+        existing.external_source_id = external_source_id or existing.external_source_id
+        if not feedback_only_patch:
+            existing.completed_at = activity_ended_at
         db.add(existing)
         completion_row_for_request = existing
     else:
@@ -1485,10 +1527,14 @@ def mark_workout_complete(
             distance_miles=body.distance_miles,
             calories_burned=body.calories_burned,
             hr_summary=body.hr_summary,
+            started_at=activity_started_at,
+            ended_at=activity_ended_at,
+            external_source_id=external_source_id,
             feeling=body.feeling,
             intensity=body.intensity,
             soreness_areas=body.soreness_areas,
             feedback_notes=body.feedback_notes,
+            completed_at=activity_ended_at,
         )
         db.add(completion_row_for_request)
 
@@ -1579,7 +1625,7 @@ def mark_workout_complete(
                 if old_ex_ids:
                     db.exec(sql_delete(ExerciseSet).where(col(ExerciseSet.workout_exercise_id).in_(old_ex_ids)))
                     db.exec(sql_delete(WorkoutExercise).where(col(WorkoutExercise.id).in_(old_ex_ids)))
-                existing_session.completed_at = datetime.now(timezone.utc)
+                existing_session.completed_at = activity_ended_at
                 existing_session.source = _session_source(body.source_context)
                 session_row = existing_session
                 db.add(session_row)
@@ -1591,7 +1637,7 @@ def mark_workout_complete(
                     focus=body.focus_label or "",
                     workout_date=body.workout_date,
                     source=_session_source(body.source_context),
-                    completed_at=datetime.now(timezone.utc),
+                    completed_at=activity_ended_at,
                 )
                 db.add(session_row)
                 db.flush()
@@ -1660,7 +1706,7 @@ def mark_workout_complete(
                         heart_rate_avg=set_payload.heart_rate_avg,
                         cardio_metrics=set_payload.cardio_metrics,
                         completed=True,
-                        completed_at=datetime.now(timezone.utc),
+                        completed_at=activity_ended_at,
                     ))
             session_rows_created = 1
         except Exception as e:
@@ -1684,12 +1730,17 @@ def mark_workout_complete(
             else None
         )
         if completion_row is None:
-            completion_row = db.exec(
-                select(WorkoutCompletion)
-                .where(WorkoutCompletion.user_id == current_user.id)
-                .where(WorkoutCompletion.workout_date == body.workout_date)
-                .where(WorkoutCompletion.focus_label == body.focus_label)
-            ).first()
+            fallback_q = select(WorkoutCompletion).where(WorkoutCompletion.user_id == current_user.id)
+            if external_source_id:
+                fallback_q = fallback_q.where(WorkoutCompletion.external_source_id == external_source_id)
+            else:
+                fallback_q = (
+                    fallback_q
+                    .where(WorkoutCompletion.workout_date == body.workout_date)
+                    .where(WorkoutCompletion.focus_label == body.focus_label)
+                    .order_by(WorkoutCompletion.completed_at.desc(), WorkoutCompletion.id.desc())
+                )
+            completion_row = db.exec(fallback_q).first()
         if completion_row:
             # Lookup user's age so fatigue scales correctly with biology.
             # Missing age defaults to baseline (no scaling) inside the resolver.
@@ -1991,12 +2042,13 @@ def mark_workout_complete(
 def delete_workout_completion(
     workout_date: date = Query(..., description="YYYY-MM-DD"),
     focus_label: str | None = Query(None, description="Optional focus to delete a specific session instead of all"),
+    completion_id: int | None = Query(None, description="Optional WorkoutCompletion id to delete one exact row"),
+    external_source_id: str | None = Query(None, description="Optional client/HealthKit id to delete one exact row"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_session),
 ):
-    """Delete `WorkoutCompletion` rows for the given date. When
-    `focus_label` is provided, only the matching row is removed;
-    otherwise ALL rows for the date are wiped (legacy behaviour).
+    """Delete `WorkoutCompletion` rows for the given date. Exact ids
+    remove one row; focus-only/date-only preserves legacy behavior.
 
     Also wipes any matching `WorkoutSession` rows so per-set detail
     + downstream PR / volume rollups don't keep referencing the
@@ -2004,25 +2056,35 @@ def delete_workout_completion(
     cascade through the FK, but we don't define cascade on these
     tables — clean them up explicitly.
     """
+    focus_label = focus_label if isinstance(focus_label, str) else None
+    completion_id = completion_id if isinstance(completion_id, int) else None
+    external_source_id = external_source_id if isinstance(external_source_id, str) else None
+
     q = (
         select(WorkoutCompletion)
         .where(WorkoutCompletion.user_id == current_user.id)
         .where(WorkoutCompletion.workout_date == workout_date)
     )
-    if focus_label:
+    if completion_id is not None:
+        q = q.where(WorkoutCompletion.id == completion_id)
+    elif external_source_id:
+        q = q.where(WorkoutCompletion.external_source_id == external_source_id)
+    elif focus_label:
         q = q.where(WorkoutCompletion.focus_label == focus_label)
     rows = db.exec(q).all()
     for r in rows:
         db.delete(r)
 
-    sq = (
-        select(WorkoutSession)
-        .where(WorkoutSession.user_id == current_user.id)
-        .where(WorkoutSession.workout_date == workout_date)
-    )
-    if focus_label:
-        sq = sq.where(WorkoutSession.focus == focus_label)
-    sessions = db.exec(sq).all()
+    sessions = []
+    if completion_id is None and not external_source_id:
+        sq = (
+            select(WorkoutSession)
+            .where(WorkoutSession.user_id == current_user.id)
+            .where(WorkoutSession.workout_date == workout_date)
+        )
+        if focus_label:
+            sq = sq.where(WorkoutSession.focus == focus_label)
+        sessions = db.exec(sq).all()
     if sessions:
         # Cascade: drop child exercise rows + set rows. Was a 3-level
         # nested per-row delete; now three bulk DELETEs total (sets,
@@ -2447,6 +2509,9 @@ def list_completions(
             "template_id": r.template_id,
             "plan_day_id": r.plan_day_id,
             "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+            "external_source_id": r.external_source_id,
             "activity_category": r.activity_category,
             "activity_subtype": r.activity_subtype,
             "activity_intensity": r.activity_intensity,

@@ -1,6 +1,6 @@
 # UI Layout
 
-Last updated: 2026-05-05
+Last updated: 2026-05-06
 
 ## Tab Structure
 
@@ -27,11 +27,11 @@ Last updated: 2026-05-05
 - **Supps** — supplements.
 
 ### Progress Screen Tabs
-- **Today** — goal-aware on-track check using the user's active goal, current week pace, strength trend, cardio trend, weight/body trend, and nutrition signal; cards link into the relevant detail tab.
+- **Today** — goal-aware on-track check using the user's active goal, current week pace, strength trend, cardio trend, weight/body trend, and nutrition signal; also owns actionable current-week surfaces such as in-progress workout resume, the weekly check-in card, and Zone 2 plan-week progress.
 - **Trends** — goal trajectory, strength / cardio charts, and the top estimated 1RM.
 - **History** — workout calendar + chronological logged workout/session history only; trend summaries stay out of this tab.
 - **Body** — recovery, muscle balance, weight history, measurements, and body-scan history.
-- **Health** — Apple Health vitals, stored Health/Sleep history, and Nutrition & Gut Facts (adaptive window up to 14 days).
+- **Health** — Apple Health vitals, detected Apple Health workout imports, stored Health/Sleep history, and Nutrition & Gut Facts (adaptive window up to 14 days).
 - Tab transitions: `FadeInView` keyed on tab + haptic selection.
 
 ## UI Helpers + Conventions

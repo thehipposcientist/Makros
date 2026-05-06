@@ -23,6 +23,7 @@ import {
   loadQuietHours, saveQuietHours, type QuietHoursSettings,
 } from '../utils/notificationPrefs';
 import type { WeightUnit, DistanceUnit } from '../utils/units';
+import { configureExpandAnimation } from '../utils/layoutAnim';
 
 interface Props {
   visible: boolean;
@@ -38,6 +39,8 @@ interface Props {
    *  for other preference toggles so we don't introduce a new path. */
   onProfileUpdate: (changes: Partial<UserProfile>, skipRegen?: boolean) => void;
 }
+
+const COLLAPSED_THEME_COUNT = 9;
 
 function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
@@ -84,6 +87,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
   const [quietHours, setQuietHours] = useState<QuietHoursSettings>({ enabled: false, startHour: 22, endHour: 7 });
   const [pausedUntil, setPausedUntil] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [themesExpanded, setThemesExpanded] = useState(false);
 
   // Load reminder settings on every open so toggles reflect actual stored
   // state — important because reminders can also be modified during
@@ -118,6 +122,13 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
   const weightUnit: WeightUnit = profile.weightUnit ?? 'lbs';
   const distanceUnit: DistanceUnit = profile.distanceUnit ?? 'mi';
   const currentTheme = resolveThemeName(profile.themePreference ?? themeName);
+  const collapsedThemeKeys: AppThemeName[] = [];
+  for (const key of [currentTheme, ...THEME_PICKER_ORDER]) {
+    if (!collapsedThemeKeys.includes(key)) collapsedThemeKeys.push(key);
+    if (collapsedThemeKeys.length >= COLLAPSED_THEME_COUNT) break;
+  }
+  const themeKeys = themesExpanded ? THEME_PICKER_ORDER : collapsedThemeKeys;
+  const canCollapseThemes = THEME_PICKER_ORDER.length > COLLAPSED_THEME_COUNT;
 
   const updateWorkoutReminder = async (next: ReminderSettings) => {
     setWorkoutReminder(next);
@@ -168,6 +179,11 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
     return { hour: Math.floor(total / 60), minute: total % 60 };
   };
 
+  const toggleThemesExpanded = () => {
+    configureExpandAnimation(240);
+    setThemesExpanded(v => !v);
+  };
+
   return (
     <View
       testID="settings-screen"
@@ -189,10 +205,29 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: insets.bottom + 40 }}>
 
         {/* ── Appearance ────────────────────────────────────────────── */}
-        <Text style={[styles.sectionLabel, { color: tc.textMuted }]}>APPEARANCE</Text>
+        <View style={styles.sectionHeaderRow}>
+          <Text style={[styles.sectionLabel, styles.sectionLabelInline, { color: tc.textMuted }]}>APPEARANCE</Text>
+          {canCollapseThemes && (
+            <TouchableOpacity
+              testID="settings-themes-toggle"
+              accessibilityLabel="settings-themes-toggle"
+              onPress={toggleThemesExpanded}
+              activeOpacity={0.75}
+              style={[styles.themeToggle, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+              <Text style={[styles.themeToggleText, { color: tc.primary }]}>
+                {themesExpanded ? 'Show fewer' : 'Show all'}
+              </Text>
+              <Ionicons
+                name={themesExpanded ? 'chevron-up' : 'chevron-down'}
+                size={13}
+                color={tc.primary}
+              />
+            </TouchableOpacity>
+          )}
+        </View>
         <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
           <View style={styles.themeGrid}>
-            {THEME_PICKER_ORDER.map((key) => {
+            {themeKeys.map((key) => {
               const theme = APP_THEMES[key];
               const active = currentTheme === key;
               return (
@@ -603,6 +638,19 @@ const styles = StyleSheet.create({
     fontSize: 11, fontWeight: '700', letterSpacing: 1.0,
     marginTop: 12, marginBottom: 8, paddingHorizontal: 4,
   },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 12,
+    marginBottom: 8,
+    paddingHorizontal: 4,
+  },
+  sectionLabelInline: {
+    marginTop: 0,
+    marginBottom: 0,
+    paddingHorizontal: 0,
+  },
   card: {
     borderRadius: radius.lg, borderWidth: 1, padding: 14,
   },
@@ -646,6 +694,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 10,
+  },
+  themeToggle: {
+    minHeight: 28,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  themeToggleText: {
+    fontSize: 11,
+    fontWeight: '800',
   },
   themeTile: {
     width: '30.9%',

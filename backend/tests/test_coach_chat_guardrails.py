@@ -1,7 +1,7 @@
 """Pure-function guardrail tests for Home Trainer chat responses."""
 from __future__ import annotations
 
-from app.routers.ai.chat import _enforce_trainer_plan_guardrails
+from app.routers.ai.chat import _enforce_trainer_plan_guardrails, _sanitize_trainer_setting_proposals
 
 
 def _ok(label: str) -> None:
@@ -66,7 +66,7 @@ def test_nutrition_plan_promise_redirects_to_meal_controls() -> None:
 
 
 def test_goal_setting_update_survives_but_plan_payload_is_stripped() -> None:
-    result = _enforce_trainer_plan_guardrails({
+    result = _sanitize_trainer_setting_proposals(_enforce_trainer_plan_guardrails({
         "answer": "I recommend switching your goal to fat loss.",
         "action_items": ["Confirm the goal change"],
         "needs_plan_update": True,
@@ -74,10 +74,10 @@ def test_goal_setting_update_survives_but_plan_payload_is_stripped() -> None:
         "updated_workout_plan": {"days": [{"day": "Day 1", "exercises": [{"name": "Squat"}]}]},
         "updated_nutrition_plan": None,
         "updated_injuries": None,
-    }, is_nutritionist=False)
+    }, is_nutritionist=False), profile={})
 
     assert result["needs_plan_update"] is False
-    assert result["updated_goal"] == "fat_loss"
+    assert result["updated_goal"] == "lose_fat"
     assert result["updated_workout_plan"] is None
     assert "can't directly rewrite" not in result["answer"]
     _ok("supported goal proposals survive while legacy plan payloads are stripped")

@@ -105,6 +105,7 @@ def _onboarding_body(
     experience_level: str | None = None,
     strength_baselines: dict | None = None,
     cardio_baseline: dict | None = None,
+    training_day_pattern: list[int] | None = None,
 ) -> OnboardingSync:
     return OnboardingSync(
         profile=ProfileUpsert(
@@ -126,6 +127,7 @@ def _onboarding_body(
             workout_duration_minutes=60,
             preferred_split=preferred_split,
             equipment=["Dumbbells"],
+            training_day_pattern=training_day_pattern,
             foods_available=["chicken breast"],
             injuries=injuries or [],
             experience_level=experience_level,
@@ -256,6 +258,7 @@ def test_onboarding_sync_updates_planner_preferences():
                 experience_level="intermediate",
                 strength_baselines=strength_baselines,
                 cardio_baseline=cardio_baseline,
+                training_day_pattern=[1, 3, 5, 6],
             ),
             current_user=user,
             session=session,
@@ -268,7 +271,8 @@ def test_onboarding_sync_updates_planner_preferences():
         assert prefs.experience_level == "intermediate"
         assert prefs.strength_baselines == strength_baselines
         assert prefs.cardio_baseline == cardio_baseline
-    _ok("onboarding sync persists planner-visible split, injuries, and baselines")
+        assert prefs.training_day_pattern == [1, 3, 5, 6]
+    _ok("onboarding sync persists planner-visible split, injuries, baselines, and weekdays")
 
 
 def test_user_state_backfills_missing_preferred_split():
@@ -555,6 +559,11 @@ def test_calorie_ranges_use_latest_weight_and_session_duration():
     assert payload["cut_calories"] == expected.cut_calories
     assert payload["bulk_protein_g"] == expected.bulk_protein_g
     assert payload["maintenance_calories"] != stale.maintenance_calories
+    assert payload["source_weight_lbs"] == 171.2
+    assert payload["source_weight_kind"] == "manual"
+    assert payload["training_days_per_week"] == 4
+    assert payload["session_minutes"] == 90
+    assert payload["session_duration_label"] == "75-90 min"
     _ok("calorie ranges use latest WeightEntry and persisted workout duration")
 
 

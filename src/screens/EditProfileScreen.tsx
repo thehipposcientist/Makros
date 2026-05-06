@@ -29,6 +29,7 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
 })();
 import { UserProfile, CustomFoodItem, GoalPace, GoalSelection, SavedMealTemplate, AppThemeName, InjuryEntry, InjuryStatus, MealRoutineEntry, MealRoutineFood, Gender, StrengthEquipmentSettings } from '../types';
 import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
+import { useLiveFoodSearch } from '../hooks/useLiveFoodSearch';
 import { APP_THEMES, THEME_PICKER_ORDER, colors, getContrastingTextColor, getTheme, radius, resolveThemeName } from '../constants/theme';
 import { analyzeFoodPhoto, scanFoodsPhoto, getExercises, searchFoodNutrition, searchExerciseAI, AIExerciseResult, getCalorieRanges, CalorieRanges } from '../services/api';
 import type { FoodSearchResult } from '../services/api';
@@ -42,6 +43,7 @@ import SearchInput from '../components/SearchInput';
 import { ExerciseLibraryItem, humanizeToken, buildExerciseGuide } from '../utils/exerciseGuide';
 import { tierOf } from '../utils/subscription';
 import { groupKitchenFoodsByCategory } from '../utils/foodGrouping';
+import { badgeLabelForSource } from '../utils/customFoodSearch';
 import {
   DEFAULT_ADJUSTABLE_DUMBBELLS,
   DEFAULT_PLATE_PAIRS_LBS,
@@ -101,6 +103,51 @@ const DURATION_OPTIONS = [
   { value: 75, label: '60–75 min', desc: 'Extended' },
   { value: 90, label: '75–90 min', desc: 'Deep' },
 ];
+
+const durationRangeLabel = (minutes?: number | null) => {
+  if (!minutes) return null;
+  return DURATION_OPTIONS.find(opt => opt.value === minutes)?.label ?? `${minutes} min`;
+};
+
+const formatHeightLabel = (feet?: number | null, inches?: number | null) => {
+  if (feet == null || inches == null) return null;
+  return `${feet}'${inches}"`;
+};
+
+const calorieWeightSourceLabel = (source?: string | null) => {
+  if (source === 'apple_health') return 'Apple Health weight';
+  if (source && source !== 'profile') return 'latest weigh-in';
+  return 'profile weight';
+};
+
+const calorieBasisText = (ranges: CalorieRanges, profile: UserProfile) => {
+  const weight = ranges.source_weight_lbs ?? profile.physicalStats.weightLbs;
+  const height = formatHeightLabel(
+    ranges.height_feet ?? profile.physicalStats.heightFeet,
+    ranges.height_inches ?? profile.physicalStats.heightInches,
+  );
+  const age = ranges.age ?? deriveAge(profile.physicalStats.birthdate) ?? profile.physicalStats.age;
+  const days = ranges.training_days_per_week ?? profile.daysPerWeek ?? 3;
+  const duration = ranges.session_duration_label
+    ?? durationRangeLabel(ranges.session_minutes ?? profile.workoutDurationMinutes)
+    ?? '45-60 min';
+  const parts = [
+    `${Math.round(weight)} lb (${calorieWeightSourceLabel(ranges.source_weight_kind)})`,
+    height,
+    `age ${age}`,
+    `${days} days/week`,
+    `${duration} sessions`,
+  ].filter(Boolean);
+  return `Based on ${parts.join(', ')}.`;
+};
+
+const calorieFormulaText = (ranges: CalorieRanges) => {
+  const formula = ranges.formula ?? 'Mifflin-St Jeor';
+  const activity = (ranges.activity_level ?? 'moderate').replace(/_/g, ' ');
+  const cutDelta = ranges.cut_adjustment_kcal ?? (ranges.cut_calories - ranges.maintenance_calories);
+  const bulkDelta = ranges.bulk_adjustment_kcal ?? (ranges.bulk_calories - ranges.maintenance_calories);
+  return `${formula} BMR ${ranges.bmr} x ${ranges.activity_multiplier} ${activity} activity; cut ${cutDelta > 0 ? '+' : ''}${cutDelta}, bulk ${bulkDelta > 0 ? '+' : ''}${bulkDelta} cal/day.`;
+};
 
 // ── Reusable single-field input modal ─────────────────────────────────────────
 
@@ -511,9 +558,16 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const [suppSearchQuery, setSuppSearchQuery] = useState('');
   const [suppSearchLoading, setSuppSearchLoading] = useState(false);
   const [suppSearchResult, setSuppSearchResult] = useState<any>(null);
-  const [aiFoodSearchLoading, setAiFoodSearchLoading] = useState(false);
   const [barcodeScanVisible, setBarcodeScanVisible] = useState(false);
-  const [aiFoodResults, setAiFoodResults] = useState<FoodSearchResult[]>([]);
+  const {
+    results: foodCatalogResults,
+    loading: foodCatalogSearchLoading,
+    error: foodCatalogSearchError,
+  } = useLiveFoodSearch(authToken, foodSearch, {
+    enabled: foodsExpanded,
+    minChars: 2,
+    allowAiFallback: false,
+  });
 
   // Custom macro overrides
   const [useCustomMacros, setUseCustomMacros] = useState(!!profile.customMacros);
@@ -1016,7 +1070,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
 
   const handleFoodSearchText = (text: string) => {
     setFoodSearch(text);
-    if (!text.trim()) setAiFoodResults([]);
   };
 
   const handleAddCustomFood = (item: CustomFoodItem) => {
@@ -1222,20 +1275,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     }
   };
 
-  const handleAiFoodSearch = async () => {
-    if (!authToken || !foodSearch.trim()) return;
-    setAiFoodSearchLoading(true);
-    try {
-      const res = await searchFoodNutrition(authToken, foodSearch.trim());
-      setAiFoodResults(res.results ?? []);
-      if (!res.results?.length) Alert.alert('No results', `Could not find nutrition info for "${foodSearch}".`);
-    } catch (e: any) {
-      Alert.alert('Search failed', e.message ?? 'Could not reach the AI server.');
-    } finally {
-      setAiFoodSearchLoading(false);
-    }
-  };
-
   const addAiFoodResult = (item: FoodSearchResult) => {
     const customItem: CustomFoodItem = {
       name: item.name,
@@ -1249,7 +1288,6 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     const standardMatch = meta.allFoods.some(f => f.name.toLowerCase() === item.name.toLowerCase());
     if (standardMatch) addFoodToKitchen(item.name);
     else handleAddCustomFood(customItem);
-    setAiFoodResults(prev => prev.filter(r => r.name !== item.name));
   };
 
   const handleBarcodeScan = async (barcode: string) => {
@@ -1571,7 +1609,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
     if (foodCategoryFilter !== 'all' && foodCategoryFilter !== 'custom') return false;
     return `${food.name} ${food.unit ?? ''}`.toLowerCase().includes(foodSearchLower);
   }) : [];
-  const visibleFoodSearchResults = aiFoodResults.filter(item => !selectedFoodNameSet.has(item.name.toLowerCase()));
+  const visibleFoodSearchResults = foodCatalogResults.filter(item => !selectedFoodNameSet.has(item.name.toLowerCase()));
 
   const screenTitle = mode === 'workout'
     ? 'Edit Workout'
@@ -2923,7 +2961,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   placeholder="Search foods to add..."
                   placeholderTextColor={tc.textMuted}
                   returnKeyType="search"
-                  onSubmitEditing={handleAiFoodSearch}
+                  onSubmitEditing={() => Keyboard.dismiss()}
                 />
               </View>
 
@@ -2952,8 +2990,8 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
             {meta.loading ? <ActivityIndicator color={colors.primary} /> : (
               <>
                 {/* When the user is actively searching, collapse the
-                    "In Your Kitchen" current-selection panel so the AI
-                    search button + catalog results sit immediately below
+                    "In Your Kitchen" current-selection panel so catalog
+                    results sit immediately below
                     the search input instead of being pushed to the bottom
                     of the screen. A short hint preserves context. */}
                 {!foodSearchLower ? (
@@ -3019,39 +3057,49 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   </ScrollView>
                 ) : null}
 
-                {foodSearchLower && filteredFoodCategories.length === 0 && filteredCustomFoods.length === 0 && !aiFoodSearchLoading && visibleFoodSearchResults.length === 0 ? (
-                  <Text style={styles.emptySearchText}>No matching foods yet.</Text>
+                {foodCatalogSearchLoading ? (
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <ActivityIndicator size="small" color={tc.primary} />
+                    <Text style={styles.emptySearchText}>Searching foods...</Text>
+                  </View>
                 ) : null}
 
-                {authToken && foodSearch.length > 1 && (
-                  <TouchableOpacity
-                    style={[styles.sectionAddBtn, { alignItems: 'center', marginBottom: 10, backgroundColor: tc.primary + '18', borderColor: tc.primary }]}
-                    onPress={handleAiFoodSearch}
-                    disabled={aiFoodSearchLoading}>
-                    {aiFoodSearchLoading
-                      ? <ActivityIndicator size="small" color={tc.primary} />
-                      : <Text style={[styles.sectionAddBtnText, { color: tc.primary, fontWeight: '700' }]}>Search full catalog for "{foodSearch}"</Text>}
-                  </TouchableOpacity>
-                )}
+                {foodCatalogSearchError ? (
+                  <Text style={styles.emptySearchText}>{foodCatalogSearchError}</Text>
+                ) : null}
+
+                {foodSearchLower && filteredFoodCategories.length === 0 && filteredCustomFoods.length === 0 && !foodCatalogSearchLoading && visibleFoodSearchResults.length === 0 ? (
+                  <Text style={styles.emptySearchText}>No matching foods yet.</Text>
+                ) : null}
 
                 {visibleFoodSearchResults.length > 0 && (
                   <View style={{ marginBottom: 16 }}>
                     <Text style={[styles.chipGroupLabel, { marginBottom: 8 }]}>Catalog Results</Text>
-                    {visibleFoodSearchResults.map((item, idx) => (
-                      <TouchableOpacity
-                        key={`${item.name}-${idx}`}
-                        style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tc.surface, borderRadius: radius.md, borderWidth: 1, borderColor: tc.primary + '44', padding: 12, marginBottom: 8 }}
-                        onPress={() => addAiFoodResult(item)}>
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ fontSize: 14, fontWeight: '600', color: tc.textPrimary }}>{item.name}</Text>
-                          <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>{item.serving}</Text>
-                          <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 2 }}>
-                            {item.calories} cal · {item.protein}g pro · {item.carbs}g carbs · {item.fat}g fat
-                          </Text>
-                        </View>
-                        <Text style={{ fontSize: 13, fontWeight: '700', color: tc.primary, marginLeft: 8 }}>+ Add</Text>
-                      </TouchableOpacity>
-                    ))}
+                    {visibleFoodSearchResults.map((item, idx) => {
+                      const sourceLabel = badgeLabelForSource(item.source);
+                      return (
+                        <TouchableOpacity
+                          key={`${item.source ?? ''}-${item.name}-${item.fdc_id ?? item.food_id ?? idx}`}
+                          style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: tc.surface, borderRadius: radius.md, borderWidth: 1, borderColor: tc.primary + '44', padding: 12, marginBottom: 8 }}
+                          onPress={() => addAiFoodResult(item)}>
+                          <View style={{ flex: 1 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                              <Text style={{ flex: 1, fontSize: 14, fontWeight: '600', color: tc.textPrimary }}>{item.name}</Text>
+                              {sourceLabel ? (
+                                <Text style={{ fontSize: 10, fontWeight: '800', color: tc.primary }}>
+                                  {sourceLabel}
+                                </Text>
+                              ) : null}
+                            </View>
+                            <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }}>{item.serving}</Text>
+                            <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 2 }}>
+                              {Math.round(item.calories)} cal · {Math.round(item.protein)}g pro · {Math.round(item.carbs)}g carbs · {Math.round(item.fat)}g fat
+                            </Text>
+                          </View>
+                          <Text style={{ fontSize: 13, fontWeight: '700', color: tc.primary, marginLeft: 8 }}>+ Add</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
                   </View>
                 )}
 
@@ -3394,7 +3442,10 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                 </View>
               </View>
               <Text style={{ fontSize: 10, color: tc.textMuted, lineHeight: 14, marginTop: 4 }}>
-                BMR {calorieRanges.bmr} · activity multiplier {calorieRanges.activity_multiplier}× · ranges use a moderate pace
+                {calorieBasisText(calorieRanges, profile)}
+              </Text>
+              <Text style={{ fontSize: 10, color: tc.textMuted, lineHeight: 14 }}>
+                {calorieFormulaText(calorieRanges)}
               </Text>
             </View>
           ) : (

@@ -219,6 +219,31 @@ def test_decimal_rounding_to_one_place() -> None:
     _ok("0.1 + 0.2 + 0.3 = 0.6 (no float dust in the DB)")
 
 
+def test_day_state_nutrition_patch_preserves_hydration() -> None:
+    print("\n[test] day-state nutrition patch preserves logged hydration")
+    from sqlmodel import Session
+    from app.models import DayStateUpsert
+    from app.routers.profile import upsert_day_state
+
+    engine = _make_mem_engine()
+    with Session(engine) as s:
+        user = _insert_user(s)
+        d = date.today()
+        _post_hydration(s, user, ounces=32.0, log_date=str(d))
+        upsert_day_state(
+            d,
+            DayStateUpsert(nutrition_plan={
+                "targets": {"calories": 2200, "protein": 160, "carbs": 240, "fat": 70},
+                "meals": [{"meal": "Breakfast", "calories": 500, "protein": 35, "carbs": 55, "fat": 16}],
+            }),
+            current_user=user,
+            session=s,
+        )
+        final = _read_hydration(s, user, d)
+    assert final == 32.0, final
+    _ok("meal-plan save did not wipe _hydration_oz")
+
+
 cases = [
     test_delta_on_fresh_day_starts_at_zero,
     test_delta_adds_onto_prior_value,
@@ -230,6 +255,7 @@ cases = [
     test_missing_both_returns_422,
     test_delta_persists_to_db,
     test_decimal_rounding_to_one_place,
+    test_day_state_nutrition_patch_preserves_hydration,
 ]
 
 

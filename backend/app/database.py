@@ -362,6 +362,43 @@ def _ensure_workout_history_source_columns() -> None:
         print(f"[migration] workout history source columns add failed (non-fatal): {e}")
 
 
+def _ensure_workout_completion_activity_identity_columns() -> None:
+    """Add wall-clock activity timestamps + external identity.
+
+    Manual/Apple imports can be backlogged and multiple same-focus
+    activities can happen on the same day. These fields let the backend
+    preserve the activity's actual window and upsert by a stable local/HealthKit
+    id instead of collapsing everything to `(date, focus)`.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ"
+            ))
+            conn.execute(text(
+                "ALTER TABLE workout_completions "
+                "ADD COLUMN IF NOT EXISTS external_source_id VARCHAR"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_workout_completions_external_source "
+                "ON workout_completions(user_id, external_source_id)"
+            ))
+            conn.execute(text(
+                "UPDATE workout_completions "
+                "SET ended_at = completed_at "
+                "WHERE ended_at IS NULL AND completed_at IS NOT NULL"
+            ))
+    except Exception as e:
+        print(f"[migration] workout completion identity columns add failed (non-fatal): {e}")
+
+
 def _ensure_user_preferences_equipment_settings_column() -> None:
     """Add strength-equipment load settings to user_preferences.
 
@@ -402,6 +439,10 @@ def _ensure_user_preferences_baseline_columns() -> None:
             conn.execute(text(
                 "ALTER TABLE user_preferences "
                 "ADD COLUMN IF NOT EXISTS cardio_baseline JSONB"
+            ))
+            conn.execute(text(
+                "ALTER TABLE user_preferences "
+                "ADD COLUMN IF NOT EXISTS training_day_pattern JSONB"
             ))
     except Exception as e:
         print(f"[migration] user_preferences baseline columns add failed (non-fatal): {e}")
@@ -1788,7 +1829,7 @@ def startup_data_maintenance_settings(
 
 def create_db_and_tables():
     # Import all models to register them with SQLModel.metadata
-    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, ClientTelemetryEvent, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, SocialNotification, PlanWeek, PlanDay, UserEquipmentProfile, GearItem
+    from app.models import Exercise, Food, FoodNutrition, FoodServing, FoodAlias, UserRecentFood, Equipment, ExerciseEquipment, GoalOption, PaceOption, User, ClientTelemetryEvent, AIUsageEvent, UserProfile, UserGoal, UserPreferences, WorkoutSession, WorkoutExercise, Meal, MealItem, ExerciseSet, UserDayState, WeeklyCheckIn, CoachMemory, UserCoachingState, DailyRollup, UserRollup, UserFlag, AIDecision, PlanJob, UserState, WorkoutPlan, NutritionPlan, FoodMetadata, DailyNutritionMetrics, WorkoutCompletion, BodyScan, SavedMeal, SupplementIngredient, SupplementProduct, SupplementProductIngredient, UserSupplementStack, SupplementLog, SleepLog, SupplementAICache, DailyHealthSnapshot, UserSocialProfile, Friendship, WeeklyDigestCache, ActivityFeedItem, FeedLike, SocialNotification, PlanWeek, PlanDay, UserEquipmentProfile, GearItem
 
     SQLModel.metadata.create_all(engine)
     _ensure_food_category_enum_values()
@@ -1797,6 +1838,7 @@ def create_db_and_tables():
     _ensure_workout_completion_stimulus_column()
     _ensure_workout_completion_health_columns()
     _ensure_workout_history_source_columns()
+    _ensure_workout_completion_activity_identity_columns()
     _ensure_user_preferences_equipment_settings_column()
     _ensure_user_preferences_baseline_columns()
     _ensure_user_supplement_stack_group_column()

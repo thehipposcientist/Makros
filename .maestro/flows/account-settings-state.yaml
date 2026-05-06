@@ -70,8 +70,7 @@ tags:
     direction: DOWN
     timeout: 15000
     visibilityPercentage: 50
-- tapOn:
-    id: "profile-settings-row"
+- tapOn: "Settings"
 - extendedWaitUntil:
     visible:
       id: "settings-screen"
@@ -93,16 +92,6 @@ tags:
     visibilityPercentage: 50
 - assertVisible:
     id: "settings-meal-reminder-toggle"
-- scrollUntilVisible:
-    element:
-      text: "UNITS"
-    direction: DOWN
-    timeout: 15000
-    visibilityPercentage: 50
-- assertVisible:
-    id: "settings-weight-unit-lbs"
-- assertVisible:
-    id: "settings-distance-unit-mi"
 - tapOn:
     id: "settings-back"
 - extendedWaitUntil:

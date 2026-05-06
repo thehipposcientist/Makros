@@ -2753,6 +2753,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // Activity, lock-screen alert when rest ends). The dismissal is
   // remembered in AsyncStorage so the alert never repeats.
   useEffect(() => {
+    if (showStartCountdown) return;
     let cancelled = false;
     (async () => {
       try {
@@ -2781,7 +2782,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       } catch { /* notif unavailable — silently degrade */ }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [showStartCountdown]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -4062,6 +4063,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   sorenessAreas: captured.soreness,
                   notes: captured.notes.trim() || undefined,
                 },
+                undefined,
+                {
+                  startedAt: captured.session.startedAt ?? captured.session.date,
+                  endedAt: captured.session.endedAt ?? null,
+                  externalSourceId: captured.session.id,
+                },
               );
             } catch (e) {
               console.log('[handleSubmitFeedback] backend feedback patch failed:', e);
@@ -4313,6 +4320,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           templateId,
           planDayId,
           stimulus: workout.stimulus ?? null,
+          startedAt: startedAtIso,
+          endedAt: endedAtIso,
+          externalSourceId: session.id,
         });
         console.log('[workout] logWorkoutDone OK — fatigue should update on next load');
 

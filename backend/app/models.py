@@ -69,6 +69,29 @@ class ClientTelemetryEvent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
 
 
+class AIUsageEvent(SQLModel, table=True):
+    """Best-effort server-side accounting for OpenAI calls.
+
+    This is not invoice-grade billing. It gives us enough signal to spot
+    runaway routes, per-user scan spikes, and model-routing mistakes.
+    """
+    __tablename__ = "ai_usage_events"
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int | None = Field(default=None, foreign_key="user.id", index=True)
+    route: str = Field(index=True)
+    budget_bucket: str | None = Field(default=None, index=True)
+    model: str = Field(index=True)
+    success: bool = Field(default=True, index=True)
+    image_count: int = Field(default=0)
+    prompt_tokens: int | None = Field(default=None)
+    completion_tokens: int | None = Field(default=None)
+    total_tokens: int | None = Field(default=None)
+    estimated_cost_usd: float | None = Field(default=None)
+    latency_ms: int | None = Field(default=None)
+    error_type: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
 # ─── User profile / stats ─────────────────────────────────────────────────────
 
 class UserProfile(SQLModel, table=True):
@@ -121,6 +144,7 @@ class UserPreferences(SQLModel, table=True):
     preferred_split: str | None = Field(default=None)
     equipment: list = Field(default_factory=list, sa_column=Column(JSON))
     equipment_settings: dict | None = Field(default=None, sa_column=Column(JSON))
+    training_day_pattern: list | None = Field(default=None, sa_column=Column(JSON))
     experience_level: str | None = Field(default=None)
     strength_baselines: dict | None = Field(default=None, sa_column=Column(JSON))
     cardio_baseline: dict | None = Field(default=None, sa_column=Column(JSON))
@@ -1014,6 +1038,9 @@ class WorkoutCompletion(SQLModel, table=True):
     calories_burned: int | None = Field(default=None)
     hr_summary: dict | None = Field(default=None, sa_column=Column(JSON))
     resolved_muscle_fatigue: dict | None = Field(default=None, sa_column=Column(JSON))
+    started_at: datetime | None = Field(default=None)
+    ended_at: datetime | None = Field(default=None)
+    external_source_id: str | None = Field(default=None, index=True)
     # Post-workout feedback. Used by weekly_review for struggle metrics
     # and by the trainer for context. All optional — pre-feedback
     # completions and silent log paths still work.
@@ -1586,6 +1613,7 @@ class PreferencesUpsert(SQLModel):
     preferred_split: str | None = None
     equipment: list[str]       # item names e.g. "Dumbbells", "Pull-up bar"
     equipment_settings: dict | None = None
+    training_day_pattern: list[int] | None = None
     experience_level: str | None = None
     strength_baselines: dict | None = None
     cardio_baseline: dict | None = None

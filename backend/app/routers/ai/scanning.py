@@ -7,7 +7,7 @@ import re
 
 import openai
 from openai import OpenAI
-from fastapi import HTTPException, Depends
+from fastapi import HTTPException, Depends, Request
 from pydantic import BaseModel as _PydanticBaseModel
 
 
@@ -88,7 +88,7 @@ from .models import (
 from .utils import (
     get_openai_api_key, model_meal_parsing, model_chat, model_image,
     _is_gpt5, _build_chat_kwargs, _chat_create, _extract_json,
-    _log_openai_error,
+    _log_openai_error, check_public_ai_rate_limit,
     SCHEMA_FOOD_PHOTO, SCHEMA_SCAN_FOODS, SCHEMA_SUPPLEMENT_INFO,
     SCHEMA_SCAN_EQUIPMENT, SCHEMA_FORM_PHOTO,
     MICRONUTRIENT_AI_FIELDS, MICRONUTRIENT_PROMPT_GUIDE,
@@ -144,7 +144,12 @@ def analyze_food_photo(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_image(), _fp_messages, json_schema=SCHEMA_FOOD_PHOTO, max_tokens=900, timeout_secs=45)
+        kwargs = _build_chat_kwargs(
+            model_image(), _fp_messages,
+            json_schema=SCHEMA_FOOD_PHOTO, max_tokens=900, timeout_secs=45,
+            ai_route="/ai/food-photo", ai_user_id=current_user.id,
+            ai_budget_bucket="image_scan", ai_image_count=1,
+        )
         response = _chat_create(client, **kwargs)
         result = _extract_json(response.choices[0].message.content)
         for item_name in (result.get("items") or []):
@@ -211,7 +216,12 @@ def scan_foods_photo(
         # Bumped from 500 → 1500 to fit the full micronutrient panel for
         # multiple foods. With ~31 fields per food and 3-5 foods per scan,
         # 500 tokens truncated mid-object and produced invalid JSON.
-        kwargs = _build_chat_kwargs(model_image(), _sf_messages, json_schema=SCHEMA_SCAN_FOODS, max_tokens=1500, timeout_secs=45)
+        kwargs = _build_chat_kwargs(
+            model_image(), _sf_messages,
+            json_schema=SCHEMA_SCAN_FOODS, max_tokens=1500, timeout_secs=45,
+            ai_route="/ai/scan-foods", ai_user_id=current_user.id,
+            ai_budget_bucket="image_scan", ai_image_count=len(body.images),
+        )
         response = _chat_create(client, **kwargs)
         result = _extract_json(response.choices[0].message.content)
         for food in (result.get("foods") or []):
@@ -323,6 +333,8 @@ def speech_to_meal(
         kwargs = _build_chat_kwargs(
             model_meal_parsing(), parser_messages,
             max_tokens=900, timeout_secs=30,
+            ai_route="/ai/speech-to-meal", ai_user_id=current_user.id,
+            ai_budget_bucket="meal_parsing",
         )
         response = _chat_create(client, **kwargs)
         parsed = _extract_json(response.choices[0].message.content)
@@ -714,7 +726,11 @@ def food_nutrition_search(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_meal_parsing(), messages, max_tokens=1500, timeout_secs=30)
+        kwargs = _build_chat_kwargs(
+            model_meal_parsing(), messages, max_tokens=1500, timeout_secs=30,
+            ai_route="/ai/food-search", ai_user_id=current_user.id,
+            ai_budget_bucket="meal_parsing",
+        )
         resp = _chat_create(client, **kwargs)
         data = json.loads(resp.choices[0].message.content or '{"results": []}')
         results = data if isinstance(data, list) else data.get("results", [])
@@ -1071,7 +1087,11 @@ def exercise_ai_search(
 
     client = OpenAI(api_key=api_key)
     try:
-        kwargs = _build_chat_kwargs(model_meal_parsing(), messages, max_tokens=800, timeout_secs=20)
+        kwargs = _build_chat_kwargs(
+            model_meal_parsing(), messages, max_tokens=800, timeout_secs=20,
+            ai_route="/ai/exercise-search", ai_user_id=current_user.id,
+            ai_budget_bucket="exercise_search",
+        )
         resp = _chat_create(client, **kwargs)
         data = json.loads(resp.choices[0].message.content or '{"results": []}')
         results = data if isinstance(data, list) else data.get("results", [])
@@ -1178,7 +1198,11 @@ def exercise_suggest(
 
     client = OpenAI(api_key=api_key)
     try:
-        kwargs = _build_chat_kwargs(model_meal_parsing(), messages, max_tokens=1200, timeout_secs=25)
+        kwargs = _build_chat_kwargs(
+            model_meal_parsing(), messages, max_tokens=1200, timeout_secs=25,
+            ai_route="/ai/exercise-suggest", ai_user_id=current_user.id,
+            ai_budget_bucket="exercise_search",
+        )
         resp = _chat_create(client, **kwargs)
         data = json.loads(resp.choices[0].message.content or '{"results": []}')
         results = data if isinstance(data, list) else data.get("results", [])
@@ -1286,7 +1310,11 @@ def generate_meal_instructions(
             {"role": "system", "content": "You are a practical home cook. Return plain text only."},
             {"role": "user", "content": prompt},
         ]
-        kwargs = _build_chat_kwargs(model_meal_parsing(), _mi_messages, max_tokens=400, timeout_secs=20)
+        kwargs = _build_chat_kwargs(
+            model_meal_parsing(), _mi_messages, max_tokens=400, timeout_secs=20,
+            ai_route="/ai/meal-instructions", ai_user_id=current_user.id,
+            ai_budget_bucket="meal_parsing",
+        )
         # meal-instructions returns plain text, not JSON — remove response_format
         kwargs.pop("response_format", None)
         resp = _chat_create(client, **kwargs)
@@ -1341,7 +1369,12 @@ def get_supplement_info(
     ]
     client = OpenAI(api_key=api_key)
     try:
-        kwargs = _build_chat_kwargs(model_chat(), _si_messages, json_schema=SCHEMA_SUPPLEMENT_INFO, max_tokens=400, timeout_secs=30)
+        kwargs = _build_chat_kwargs(
+            model_chat(), _si_messages,
+            json_schema=SCHEMA_SUPPLEMENT_INFO, max_tokens=400, timeout_secs=30,
+            ai_route="/ai/supplement-info", ai_user_id=current_user.id,
+            ai_budget_bucket="supplement_lookup",
+        )
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
@@ -1391,7 +1424,12 @@ def get_supplement_from_photo(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_image(), _sp_messages, json_schema=SCHEMA_SUPPLEMENT_INFO, max_tokens=400, timeout_secs=30)
+        kwargs = _build_chat_kwargs(
+            model_image(), _sp_messages,
+            json_schema=SCHEMA_SUPPLEMENT_INFO, max_tokens=400, timeout_secs=30,
+            ai_route="/ai/supplement-photo", ai_user_id=current_user.id,
+            ai_budget_bucket="image_scan", ai_image_count=1,
+        )
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
@@ -1459,7 +1497,11 @@ def scan_supplements_photo(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_image(), _msgs, max_tokens=900, timeout_secs=45)
+        kwargs = _build_chat_kwargs(
+            model_image(), _msgs, max_tokens=900, timeout_secs=45,
+            ai_route="/ai/scan-supplements", ai_user_id=current_user.id,
+            ai_budget_bucket="image_scan", ai_image_count=1,
+        )
         response = _chat_create(client, **kwargs)
         data = _extract_json(response.choices[0].message.content)
         supps = data.get("supplements") if isinstance(data, dict) else None
@@ -1552,7 +1594,12 @@ def scan_equipment_photo(
         # Bump max_tokens for multi-photo so a 6-photo gym walkthrough
         # has room to list everything; single-photo stayed within 150
         # historically so 300 covers the full grid.
-        kwargs = _build_chat_kwargs(model_image(), _eq_messages, json_schema=SCHEMA_SCAN_EQUIPMENT, max_tokens=300, timeout_secs=30)
+        kwargs = _build_chat_kwargs(
+            model_image(), _eq_messages,
+            json_schema=SCHEMA_SCAN_EQUIPMENT, max_tokens=300, timeout_secs=30,
+            ai_route="/ai/scan-equipment", ai_user_id=current_user.id,
+            ai_budget_bucket="image_scan", ai_image_count=len(image_data_urls),
+        )
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
@@ -1604,7 +1651,12 @@ def analyze_form_photo(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_image(), _form_messages, json_schema=SCHEMA_FORM_PHOTO, max_tokens=400, timeout_secs=30)
+        kwargs = _build_chat_kwargs(
+            model_image(), _form_messages,
+            json_schema=SCHEMA_FORM_PHOTO, max_tokens=400, timeout_secs=30,
+            ai_route="/ai/form-photo", ai_user_id=current_user.id,
+            ai_budget_bucket="image_scan", ai_image_count=1,
+        )
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
@@ -1688,7 +1740,12 @@ def body_scan(
         # intentionally call the vision-specialized model; other paths
         # stay on the default MODEL_CHAT (gpt-4o-mini).
         from app.routers.ai.utils import model_image
-        kwargs = _build_chat_kwargs(model_image(), _scan_messages, json_schema=None, max_tokens=500, timeout_secs=40)
+        kwargs = _build_chat_kwargs(
+            model_image(), _scan_messages,
+            json_schema=None, max_tokens=500, timeout_secs=40,
+            ai_route="/ai/body-scan", ai_user_id=current_user.id,
+            ai_budget_bucket="image_scan", ai_image_count=1,
+        )
         response = _chat_create(client, **kwargs)
         result = _extract_json(response.choices[0].message.content)
     except json.JSONDecodeError:
@@ -1969,6 +2026,7 @@ def _deterministic_goal_match(description: str, available_goal_ids: list[str] | 
 @router.post("/match-goal")
 def match_goal(
     body: GoalMatchRequest,
+    request: Request,
 ):
     """Match a natural language description to the best fitness goal.
 
@@ -1978,12 +2036,15 @@ def match_goal(
     api_key = get_openai_api_key()
     if not api_key:
         return _deterministic_goal_match(body.description, allowed_goal_ids)
+    client_host = request.client.host if request.client else "unknown"
+    if not check_public_ai_rate_limit(client_host, bucket="match_goal"):
+        return _deterministic_goal_match(body.description, allowed_goal_ids)
 
     goals_list = "\n".join(f"{goal_id}: {_GOAL_MATCH_LABELS[goal_id]}" for goal_id in allowed_goal_ids)
     try:
         client = OpenAI(api_key=api_key)
-        resp = client.chat.completions.create(
-            model=model_chat(),
+        kwargs = _build_chat_kwargs(
+            model_chat(),
             messages=[
                 {"role": "system", "content": (
                     "You match user fitness descriptions to the app's signup goals. "
@@ -1999,10 +2060,12 @@ def match_goal(
                     '{"goal_id": "...", "reason": "..."}'
                 )},
             ],
-            response_format={"type": "json_object"},
             max_tokens=100,
-            timeout=10,
+            timeout_secs=10,
+            ai_route="/ai/match-goal",
+            ai_budget_bucket="public_onboarding",
         )
+        resp = _chat_create(client, **kwargs)
         result = json.loads(resp.choices[0].message.content or "{}")
         goal_id = result.get("goal_id", "body_recomp")
         reason = result.get("reason", "")
@@ -2062,7 +2125,11 @@ def parse_meal_text(
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_meal_parsing(), messages, max_tokens=600, timeout_secs=20)
+        kwargs = _build_chat_kwargs(
+            model_meal_parsing(), messages, max_tokens=600, timeout_secs=20,
+            ai_route="/ai/parse-meal-text", ai_user_id=current_user.id,
+            ai_budget_bucket="meal_parsing",
+        )
         response = _chat_create(client, **kwargs)
         result = _extract_json(response.choices[0].message.content)
         raw_items = result.get("items") or []

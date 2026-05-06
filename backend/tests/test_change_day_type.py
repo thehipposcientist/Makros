@@ -342,6 +342,27 @@ def test_fatigue_risk_conflict_low_readiness():
     assert_true(len(fatigue_conflicts) > 0, "fatigue_risk conflict at 15% readiness")
 
 
+def test_fatigue_risk_conflict_float_readiness():
+    """0..1 readiness values are normalized before fatigue-risk checks."""
+    print("[change_day_type] fatigue risk with float readiness")
+    from app.services.workout.change_day_type import change_day_type
+
+    days = _make_days("Push", "Pull", "Legs", "Push", "Pull")
+    statuses = _statuses("pending", "pending", "pending", "pending", "pending")
+    result = change_day_type(
+        days,
+        day_index=2,
+        new_focus="Legs",
+        day_statuses=statuses,
+        mode="single",
+        split="ppl",
+        focus_readiness={"legs": 0.35},
+    )
+    fatigue_conflicts = [c for c in result.conflicts if c.kind == "fatigue_risk"]
+    assert_true(len(fatigue_conflicts) > 0, "fatigue_risk conflict at 35% readiness")
+    assert_true("35%" in fatigue_conflicts[0].message, "message displays normalized percentage")
+
+
 def test_no_fatigue_risk_when_readiness_ok():
     """Adequate readiness does not trigger fatigue_risk."""
     print("[change_day_type] no fatigue risk when readiness ok")
@@ -739,6 +760,7 @@ cases = [
     test_no_recovery_streak_detection,
     test_no_recovery_conflict_absent_with_break,
     test_fatigue_risk_conflict_low_readiness,
+    test_fatigue_risk_conflict_float_readiness,
     test_no_fatigue_risk_when_readiness_ok,
     test_missing_focus_conflict_ppl,
     test_out_of_range_day_index_raises,

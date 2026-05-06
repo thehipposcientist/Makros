@@ -221,6 +221,9 @@ _TEST_MODULES = (
     # Coach chat guardrails: AI may propose settings/injuries, but never
     # return replacement workout/nutrition plans.
     "tests.test_coach_chat_guardrails",
+    # AI governance: identity redaction, usage metadata, throttles, and
+    # deterministic prompt-output evals for Home Trainer setting proposals.
+    "tests.test_ai_governance",
     # Gear tracker: photo identification should use the shared vision-model
     # selector and multipart image payloads.
     "tests.test_gear_tracking",

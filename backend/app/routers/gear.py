@@ -357,6 +357,10 @@ def identify_gear(
         messages,
         max_tokens=300,
         timeout_secs=30,
+        ai_route="/gear/identify",
+        ai_user_id=current_user.id,
+        ai_budget_bucket="image_scan",
+        ai_image_count=photo_count,
     )
     resp = _chat_create(
         client,

@@ -136,13 +136,8 @@ tags:
     when:
       visible: "Legal And Safety"
     commands:
-      - scrollUntilVisible:
-          element:
-            text: "I Agree"
-          direction: DOWN
-          timeout: 15000
-          visibilityPercentage: 50
-      - tapOn: "I Agree"
+      - tapOn:
+          id: "legal-done"
 
 - runFlow:
     when:

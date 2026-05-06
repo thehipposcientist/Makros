@@ -136,6 +136,129 @@ def _enforce_trainer_plan_guardrails(result: dict, *, is_nutritionist: bool) -> 
     return result
 
 
+_TRAINER_ALLOWED_GOALS = {
+    "build_muscle", "body_recomp", "lose_fat", "build_strength",
+    "improve_cardio", "train_5k", "train_10k", "train_half",
+    "train_marathon", "improve_athleticism", "hyrox", "longevity",
+    "maintain",
+}
+_TRAINER_GOAL_ALIASES = {
+    "fat_loss": "lose_fat",
+    "cut": "lose_fat",
+    "get_lean": "lose_fat",
+    "toning": "lose_fat",
+    "muscle_gain": "build_muscle",
+    "strength": "build_strength",
+    "endurance": "improve_cardio",
+    "cardio": "improve_cardio",
+    "athletic_performance": "improve_athleticism",
+    "athletic": "improve_athleticism",
+    "health": "longevity",
+    "general_health": "longevity",
+    "flexibility": "longevity",
+    "stress_relief": "maintain",
+    "maintain_physique": "maintain",
+}
+_TRAINER_MACRO_BOUNDS = {
+    "calories": (1200, 6000, 250),
+    "protein": (40, 350, 40),
+    "carbs": (25, 800, 100),
+    "fat": (20, 250, 40),
+}
+
+
+def _sanitize_trainer_setting_proposals(result: dict, profile: dict | None) -> dict:
+    """Validate Home Trainer goal/macro proposals before the client sees them."""
+    if not isinstance(result, dict):
+        return result
+    goal = result.get("updated_goal")
+    if goal is not None:
+        goal_id = str(goal).strip()
+        goal_id = _TRAINER_GOAL_ALIASES.get(goal_id, goal_id)
+        result["updated_goal"] = goal_id if goal_id in _TRAINER_ALLOWED_GOALS else None
+
+    macros = result.get("updated_macros")
+    if not isinstance(macros, dict):
+        result["updated_macros"] = None
+        return result
+
+    current = {}
+    if isinstance(profile, dict) and isinstance(profile.get("customMacros"), dict):
+        current = profile.get("customMacros") or {}
+
+    cleaned: dict[str, int] = {}
+    notes: list[str] = []
+    for key, raw in macros.items():
+        if key not in _TRAINER_MACRO_BOUNDS:
+            continue
+        lo, hi, max_delta = _TRAINER_MACRO_BOUNDS[key]
+        try:
+            value = int(round(float(raw)))
+        except (TypeError, ValueError):
+            continue
+        value = max(lo, min(hi, value))
+        old = current.get(key)
+        if old is not None:
+            try:
+                old_i = int(round(float(old)))
+            except (TypeError, ValueError):
+                old_i = value
+            delta = value - old_i
+            if abs(delta) > max_delta:
+                value = old_i + (max_delta if delta > 0 else -max_delta)
+                notes.append(f"{key} change capped for safety")
+        cleaned[key] = value
+    result["updated_macros"] = cleaned or None
+    if notes:
+        items = result.get("action_items")
+        if not isinstance(items, list):
+            items = []
+        result["action_items"] = [*items, *notes]
+    return result
+
+
+def _persist_trainer_setting_decision(
+    db,
+    user_id: int,
+    result: dict,
+    *,
+    model: str | None,
+) -> None:
+    """Persist Home Trainer goal/macro proposals for audit + cooldown context."""
+    if not isinstance(result, dict):
+        return
+    updated_goal = result.get("updated_goal")
+    updated_macros = result.get("updated_macros")
+    if not updated_goal and not updated_macros:
+        return
+    try:
+        from app.models import AIDecision
+        from app.services.coach.decision_rules import gate
+        gated = gate(
+            {"response_type": "coach_only", "message": result.get("answer") or "Trainer setting proposal."},
+            {"metrics_trends": {"w7": {"days_logged": 7}}, "flags": []},
+            db,
+            user_id,
+        )
+        db.add(AIDecision(
+            user_id=user_id,
+            checkin_type="trainer_chat",
+            response_type=gated.response_type,
+            rationale_key="home_trainer_setting_proposal",
+            delta={
+                "updated_goal": updated_goal,
+                "updated_macros": updated_macros,
+            },
+            flags_snapshot=[],
+            message=(result.get("answer") or "")[:1000],
+            accepted=False,
+            model=model,
+        ))
+        db.commit()
+    except Exception as exc:
+        logger.warning(f"[trainer-question] decision persist failed: {exc}")
+
+
 @router.get("/smoke-test")
 async def smoke_test(model: str = "gpt-4o-mini", current_user: User = Depends(require_pro_feature("AI diagnostics"))):
     """
@@ -262,12 +385,22 @@ def ask_trainer_question(
         ]
         try:
             from .utils import model_intent
-            fast_kwargs = _build_chat_kwargs(model_intent(), fast_messages, json_schema=None, max_tokens=800, timeout_secs=15)
+            _fast_model = model_intent()
+            fast_kwargs = _build_chat_kwargs(
+                _fast_model, fast_messages,
+                json_schema=None, max_tokens=800, timeout_secs=15,
+                ai_route="/ai/trainer-question:fast",
+                ai_user_id=current_user.id,
+                ai_budget_bucket="coach_chat",
+            )
             fast_resp = _chat_create(client, **fast_kwargs)
             fast_raw = fast_resp.choices[0].message.content
             if fast_raw:
                 fast_result = _extract_json(fast_raw)
                 if fast_result.get("answer"):
+                    fast_result = _enforce_trainer_plan_guardrails(fast_result, is_nutritionist=is_nutritionist)
+                    fast_result = _sanitize_trainer_setting_proposals(fast_result, body.profile if isinstance(body.profile, dict) else None)
+                    _persist_trainer_setting_decision(db, current_user.id, fast_result, model=_fast_model)
                     logger.info(f"[trainer-question] FAST PATH success: {len(fast_result['answer'])} chars")
                     return fast_result
         except Exception as e:
@@ -596,7 +729,7 @@ def ask_trainer_question(
         '  "action_items": ["specific actionable step 1", "..."],\n'
         '  "needs_plan_update": false,\n'
         '  "safety_note": "string or empty string",\n'
-        '  "updated_goal": "fat_loss|muscle_gain|body_recomp|strength|endurance|athletic_performance|toning|maintain" or null,\n'
+        '  "updated_goal": "build_muscle|body_recomp|lose_fat|build_strength|improve_cardio|train_5k|train_10k|train_half|train_marathon|improve_athleticism|hyrox|longevity|maintain" or null,\n'
         '  "updated_macros": {"calories": N, "protein": N, "carbs": N, "fat": N} or null,\n'
         + plan_schema
         + workout_log_schema
@@ -683,7 +816,14 @@ def ask_trainer_question(
         # Don't pass json_schema for gpt-5 — the trainer schema has optional/typeless
         # fields (updated_workout_plan: {}) that gpt-5's json_schema mode rejects.
         # Instead, rely on prompt-enforced JSON which works reliably.
-        kwargs = _build_chat_kwargs(_m_fast, messages, json_schema=None, max_tokens=4000, timeout_secs=60)
+        kwargs = _build_chat_kwargs(
+            _m_fast, messages,
+            json_schema=None, max_tokens=4000, timeout_secs=60,
+            ai_route="/ai/trainer-question",
+            ai_user_id=current_user.id,
+            ai_budget_bucket="coach_chat",
+            ai_image_count=1 if body.image_base64 else 0,
+        )
         response = _chat_create(client, **kwargs)
         choice = response.choices[0]
         raw = choice.message.content
@@ -704,10 +844,15 @@ def ask_trainer_question(
 
             # Retry 1: same model, NO response_format (prompt-enforced JSON)
             print(f"[trainer-question] retry-1: {_m_fast} without response_format")
-            kwargs_r1 = dict(model=_m_fast, messages=messages, timeout=55, max_tokens=2500, temperature=1)
-            if _is_gpt5(_m_fast):
-                kwargs_r1["max_completion_tokens"] = kwargs_r1.pop("max_tokens")
-            response = client.chat.completions.create(**kwargs_r1)
+            kwargs_r1 = _build_chat_kwargs(
+                _m_fast, messages,
+                json_schema=None, max_tokens=2500, timeout_secs=55,
+                ai_route="/ai/trainer-question:retry-empty",
+                ai_user_id=current_user.id,
+                ai_budget_bucket="coach_chat",
+                ai_image_count=1 if body.image_base64 else 0,
+            )
+            response = _chat_create(client, **kwargs_r1)
             raw = response.choices[0].message.content
             print(f"[trainer-question] retry-1 result: len={len(raw) if raw else 0} finish={getattr(response.choices[0], 'finish_reason', '?')}")
 
@@ -737,7 +882,14 @@ def ask_trainer_question(
 
         if _looks_truncated(raw):
             print(f"[trainer-question] phase-1 truncated — retrying at 5000 tokens")
-            kwargs1b = _build_chat_kwargs(_m_fast, messages, json_schema=None, max_tokens=5000, timeout_secs=65)
+            kwargs1b = _build_chat_kwargs(
+                _m_fast, messages,
+                json_schema=None, max_tokens=5000, timeout_secs=65,
+                ai_route="/ai/trainer-question:retry",
+                ai_user_id=current_user.id,
+                ai_budget_bucket="coach_chat",
+                ai_image_count=1 if body.image_base64 else 0,
+            )
             response = _chat_create(client, **kwargs1b)
             raw = response.choices[0].message.content or raw
 
@@ -745,6 +897,8 @@ def ask_trainer_question(
         logger.info(f"[trainer-question] phase-1: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')} logged_workouts={len(result.get('logged_workouts') or [])}")
 
         result = _enforce_trainer_plan_guardrails(result, is_nutritionist=is_nutritionist)
+        result = _sanitize_trainer_setting_proposals(result, body.profile if isinstance(body.profile, dict) else None)
+        _persist_trainer_setting_decision(db, current_user.id, result, model=_m_fast)
 
         # Validate workout plan — reject if any day has 0 exercises
         wp = result.get("updated_workout_plan")
@@ -996,6 +1150,10 @@ def ask_workout_question(
             model_chat(), _wq_messages,
             json_schema=SCHEMA_WORKOUT_QUESTION,
             max_tokens=_max, timeout_secs=30,
+            ai_route="/ai/workout-question",
+            ai_user_id=current_user.id,
+            ai_budget_bucket="coach_chat",
+            ai_image_count=1 if body.image_base64 else 0,
         )
         response = _chat_create(client, **kwargs)
         return _extract_json(response.choices[0].message.content)

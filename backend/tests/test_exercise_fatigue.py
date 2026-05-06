@@ -304,6 +304,14 @@ def test_focus_recovery_negative():
     assert all(v < 0 for v in result.values())
 
 
+def test_focus_yoga_and_stretching_negative():
+    """Mobility imports should reduce fatigue instead of adding load."""
+    for label in ("Yoga", "Stretching", "Foam rolling", "Pilates"):
+        result = resolve_focus_fatigue(label)
+        assert result.get("systemic", 0) < 0, (label, result)
+        assert any(v < 0 for v in result.values()), (label, result)
+
+
 def test_focus_plus_cardio_merges():
     """'Push + Cardio' merges push fatigue with cardio fatigue."""
     result = resolve_focus_fatigue("Push + Cardio")

@@ -1,7 +1,7 @@
 .PHONY: start tunnel stop reset-db wait-backend test dev maintenance maintenance-food-micros seed-e2e seed-e2e-recovery-apply \
         deploy deploy-backend deploy-ios deploy-ios-clean smoke-prod smoke-mobile smoke-mobile-seeded \
         smoke-mobile-workouts smoke-mobile-state smoke-mobile-social smoke-mobile-free-gates \
-        smoke-mobile-plan-adaptation smoke-mobile-preflight
+        smoke-mobile-plan-adaptation smoke-mobile-preflight smoke-mobile-preflight-fast smoke-mobile-preflight-parallel
 
 # ── AWS / deploy config ──────────────────────────────────────────────────────
 AWS_ACCOUNT_ID  := 225629394823
@@ -10,6 +10,10 @@ ECR_REPO        := $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/thallo-
 APP_RUNNER_URL  := https://q4q8mjjhmp.us-east-1.awsapprunner.com
 MAESTRO_DRIVER_STARTUP_TIMEOUT ?= 120000
 MAESTRO ?= MAESTRO_DRIVER_STARTUP_TIMEOUT=$(MAESTRO_DRIVER_STARTUP_TIMEOUT) maestro
+MAESTRO_FAST_FLAGS ?= --no-reinstall-driver
+MAESTRO_PARALLEL_SHARDS ?= 2
+MAESTRO_PARALLEL_DEVICES ?=
+MAESTRO_PARALLEL_DEVICE_ARG = $(if $(MAESTRO_PARALLEL_DEVICES),--device "$(MAESTRO_PARALLEL_DEVICES)",)
 
 # Run recipes in a login zsh so ~/.zprofile (brew shellenv, etc.) is sourced
 # and tools like `npx` / `node` are on PATH.
@@ -306,6 +310,65 @@ smoke-mobile-preflight:
 	@$(MAESTRO) test .maestro/flows/meal-history-facts-alignment.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/social-digest.yaml
+
+# Faster local preflight: same coverage as smoke-mobile-preflight, but grouped
+# to avoid paying seed + Maestro driver startup for every individual flow.
+smoke-mobile-preflight-fast:
+	@echo "Running faster Maestro preflight pack with grouped safe flows and fewer reseeds..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) \
+	  .maestro/flows/ppl-history-ordering.yaml \
+	  .maestro/flows/account-settings-state.yaml \
+	  .maestro/flows/meal-history-facts-alignment.yaml \
+	  .maestro/flows/social-digest.yaml \
+	  .maestro/flows/auth-recovery.yaml \
+	  .maestro/flows/seeded-returning-user.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/plan-settings-immutability.yaml
+	@$(MAKE) seed-e2e-recovery-apply
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/recovery-recommendation-apply.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) \
+	  .maestro/flows/active-workout-swap-recommendations.yaml \
+	  .maestro/flows/activity-nutrition-hydration.yaml \
+	  .maestro/flows/meals-supplements-state.yaml \
+	  .maestro/flows/workout-templates.yaml \
+	  .maestro/flows/recovery-live-workouts.yaml \
+	  .maestro/flows/active-workout-completion.yaml
+
+# Parallel local preflight. Requires MAESTRO_PARALLEL_SHARDS booted devices.
+# Keep shared-user mutating flows sequential to avoid backend fixture races.
+smoke-mobile-preflight-parallel:
+	@echo "Running parallel Maestro preflight pack across $(MAESTRO_PARALLEL_SHARDS) devices..."
+	@command -v maestro >/dev/null 2>&1 || { \
+	  echo "ERROR: maestro not found. Install with:"; \
+	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
+	  exit 1; }
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) $(MAESTRO_PARALLEL_DEVICE_ARG) --shard-split=$(MAESTRO_PARALLEL_SHARDS) \
+	  .maestro/flows/ppl-history-ordering.yaml \
+	  .maestro/flows/account-settings-state.yaml \
+	  .maestro/flows/meal-history-facts-alignment.yaml \
+	  .maestro/flows/social-digest.yaml \
+	  .maestro/flows/seeded-returning-user.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/plan-settings-immutability.yaml
+	@$(MAKE) seed-e2e-recovery-apply
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) $(MAESTRO_PARALLEL_DEVICE_ARG) --shard-split=$(MAESTRO_PARALLEL_SHARDS) \
+	  .maestro/flows/recovery-recommendation-apply.yaml \
+	  .maestro/flows/active-workout-swap-recommendations.yaml \
+	  .maestro/flows/activity-nutrition-hydration.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) \
+	  .maestro/flows/auth-recovery.yaml \
+	  .maestro/flows/meals-supplements-state.yaml \
+	  .maestro/flows/workout-templates.yaml \
+	  .maestro/flows/recovery-live-workouts.yaml \
+	  .maestro/flows/active-workout-completion.yaml
 
 # ── Smoke-test the prod backend ──────────────────────────────────────────────
 smoke-prod:

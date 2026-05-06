@@ -147,6 +147,36 @@ flows:
 make smoke-mobile-preflight
 ```
 
+For faster local iteration, run the same seeded preflight coverage with grouped
+flows and fewer data resets:
+
+```bash
+make smoke-mobile-preflight-fast
+```
+
+The fast lane batches flows that can safely share a seed, uses
+`--no-reinstall-driver`, and reseeds only around stateful checks that need a
+clean backend fixture. If the Maestro driver gets stale locally, rerun with
+`MAESTRO_FAST_FLAGS=` to fall back to driver reinstall behavior.
+
+If you have multiple simulators/devices booted, shard the safe phases across
+them:
+
+```bash
+MAESTRO_PARALLEL_SHARDS=2 make smoke-mobile-preflight-parallel
+```
+
+To pin specific devices, pass comma-separated Maestro device names or UDIDs:
+
+```bash
+MAESTRO_PARALLEL_SHARDS=2 \
+MAESTRO_PARALLEL_DEVICES="iPhone-17-Pro,iPhone-17" \
+make smoke-mobile-preflight-parallel
+```
+
+The parallel lane only shards phases that do not race on the same backend
+fixture. Same-user mutation flows still run sequentially after a fresh seed.
+
 Free-vs-Pro gates need beta full-access disabled for the running JS bundle:
 
 ```bash

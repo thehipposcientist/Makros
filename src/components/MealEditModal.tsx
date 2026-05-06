@@ -17,6 +17,7 @@ import {
   MealItem, FoodUnit, FOOD_UNIT_LABELS, FOOD_UNIT_GROUPS,
 } from '../types';
 import { FoodItem, FoodCategoryGroup, lookupFood } from '../hooks/useMetaData';
+import { useLiveFoodSearch } from '../hooks/useLiveFoodSearch';
 import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { scanFoodsPhoto, searchFoodNutrition, getMealInstructions } from '../services/api';
@@ -394,7 +395,22 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     };
   }, []);
 
-  const foodSearchActive = foodSearchFocused || search.trim().length > 0 || aiSearchLoading || aiResults.length > 0;
+  const {
+    results: catalogSearchResults,
+    loading: catalogSearchLoading,
+    error: catalogSearchError,
+  } = useLiveFoodSearch(authToken, search, {
+    enabled: visible,
+    minChars: 2,
+    allowAiFallback: false,
+  });
+
+  const foodSearchActive = foodSearchFocused
+    || search.trim().length > 0
+    || catalogSearchLoading
+    || catalogSearchResults.length > 0
+    || aiSearchLoading
+    || aiResults.length > 0;
 
   const gapSuggestionFoods = useMemo(() => {
     const byName = new Map<string, FoodItem>();
@@ -412,10 +428,18 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     [foodCategories, search],
   );
   const remoteSearchResults = useMemo(() => {
-    if (localSearchResults.length === 0) return aiResults;
+    const mergedResults: FoodSearchResult[] = [];
+    const seen = new Set<string>();
+    for (const result of [...catalogSearchResults, ...aiResults]) {
+      const key = `${result.source ?? ''}:${result.name.trim().toLowerCase()}|${String(result.serving ?? '').trim().toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      mergedResults.push(result);
+    }
+    if (localSearchResults.length === 0) return mergedResults;
     const localKeys = new Set(localSearchResults.map(r => `${r.name.trim().toLowerCase()}|${r.serving.trim().toLowerCase()}`));
-    return aiResults.filter(r => !localKeys.has(`${r.name.trim().toLowerCase()}|${String(r.serving ?? '').trim().toLowerCase()}`));
-  }, [aiResults, localSearchResults]);
+    return mergedResults.filter(r => !localKeys.has(`${r.name.trim().toLowerCase()}|${String(r.serving ?? '').trim().toLowerCase()}`));
+  }, [aiResults, catalogSearchResults, localSearchResults]);
 
   useEffect(() => {
     if (!foodSearchActive) return;
@@ -428,7 +452,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       scrollRef.current?.scrollTo({ y: 0, animated: true });
     }, Platform.OS === 'ios' ? 120 : 180);
     return () => clearTimeout(timer);
-  }, [foodSearchActive, aiResults.length, localSearchResults.length, aiSearchLoading]);
+  }, [foodSearchActive, aiResults.length, catalogSearchLoading, catalogSearchResults.length, localSearchResults.length, aiSearchLoading]);
 
   const requireStoredPro = async (feature: ProFeature): Promise<boolean> => {
     try {
@@ -859,20 +883,13 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
     }
   };
 
-  const handleAiSearch = async (opts?: { forceAi?: boolean; append?: boolean }) => {
+  const handleAiSearch = async (opts?: { append?: boolean }) => {
     if (!search.trim()) return;
-    // Pro gate — only the AI-forced search route hits OpenAI. Plain
-    // searches against the seed/USDA library stay free; the `forceAi`
-    // call below is the one that incurs cost + needs gating. The
-    // bound button at line ~1492 is `forceAi: true` which is what
-    // this guard catches.
-    if (opts?.forceAi) {
-      if (!(await requireStoredPro('ai_food_enrichment'))) return;
-    }
+    if (!(await requireStoredPro('ai_food_enrichment'))) return;
     if (!authToken) return;
     setAiSearchLoading(true);
     try {
-      const res = await searchFoodNutrition(authToken, search.trim(), { forceAi: opts?.forceAi });
+      const res = await searchFoodNutrition(authToken, search.trim(), { forceAi: true });
       const incoming = res.results ?? [];
       if (opts?.append) {
         setAiResults(prev => {
@@ -887,8 +904,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
       } else {
         setAiResults(incoming);
       }
-      if (!incoming.length && !opts?.append) Alert.alert('No results', `Could not find nutrition info for "${search}".`);
-      if (!incoming.length && opts?.append) Alert.alert('No AI results', `AI had nothing to add for "${search}".`);
+      if (!incoming.length) Alert.alert('No AI results', `AI had nothing to add for "${search}".`);
     } catch (e: any) {
       Alert.alert('Search failed', e.message ?? 'Could not reach the server.');
     } finally {
@@ -1486,22 +1502,15 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                 returnKeyType="search"
                 onFocus={() => setFoodSearchFocused(true)}
                 onBlur={() => setFoodSearchFocused(false)}
-                onSubmitEditing={authToken && search.length > 1 ? () => handleAiSearch() : undefined}
+                onSubmitEditing={() => Keyboard.dismiss()}
               />
               {search.length > 0 && (
                 <TouchableOpacity style={s.clearBtn} onPress={() => { setSearch(''); setAiResults([]); setSearchFeedback(null); }} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                   <Ionicons name="close-circle" size={18} color={colors.textMuted} />
                 </TouchableOpacity>
               )}
-              {authToken && search.length > 1 && (
-                <TouchableOpacity
-                  style={[s.aiSearchInlineBtn, aiSearchLoading && { opacity: 0.5 }]}
-                  onPress={() => handleAiSearch()}
-                  disabled={aiSearchLoading}>
-                  {aiSearchLoading
-                    ? <ActivityIndicator size="small" color="#FFFFFF" />
-                    : <Text style={s.aiSearchInlineBtnText}>Search</Text>}
-                </TouchableOpacity>
+              {(catalogSearchLoading || aiSearchLoading) && (
+                <ActivityIndicator size="small" color={colors.primary} />
               )}
             </View>
 
@@ -1564,9 +1573,6 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
               </View>
             )}
 
-            {/* Hint when search has text but the user hasn't tapped Search yet
-                (or the AI returned nothing). Replaces the old "No local matches"
-                copy from when there was an inline category list to filter. */}
             {localSearchResults.length > 0 && (
               <View style={{ marginBottom: 16 }}>
                 <Text style={s.sectionLabel}>From Your Foods</Text>
@@ -1595,19 +1601,27 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                     </TouchableOpacity>
                   );
                 })}
-                {authToken && search.trim().length > 1 && remoteSearchResults.length === 0 && !aiSearchLoading && (
+                {authToken && search.trim().length > 1 && remoteSearchResults.length === 0 && !catalogSearchLoading && !aiSearchLoading && (
                   <TouchableOpacity
                     style={s.alsoAskAiBtn}
-                    onPress={() => handleAiSearch()}>
-                    <Ionicons name="search-outline" size={14} color={colors.primary} />
-                    <Text style={s.alsoAskAiText}>Search USDA and AI</Text>
+                    onPress={() => handleAiSearch({ append: true })}>
+                    <Ionicons name="sparkles-outline" size={14} color={colors.primary} />
+                    <Text style={s.alsoAskAiText}>Ask AI for more options</Text>
                   </TouchableOpacity>
                 )}
               </View>
             )}
 
-            {search.length > 1 && !aiSearchLoading && localSearchResults.length === 0 && remoteSearchResults.length === 0 && (
-              <Text style={s.emptyText}>Tap Search to look up "{search.trim()}"</Text>
+            {catalogSearchError ? (
+              <Text style={s.emptyText}>{catalogSearchError}</Text>
+            ) : null}
+
+            {search.length > 1 && catalogSearchLoading && localSearchResults.length === 0 && remoteSearchResults.length === 0 && (
+              <Text style={s.emptyText}>Searching foods...</Text>
+            )}
+
+            {search.length > 1 && !catalogSearchLoading && !aiSearchLoading && localSearchResults.length === 0 && remoteSearchResults.length === 0 && (
+              <Text style={s.emptyText}>No matching foods.</Text>
             )}
 
             {remoteSearchResults.length > 0 && (() => {
@@ -1648,7 +1662,7 @@ export default function MealEditModal({ visible, mealType, meal, nutritionPlan, 
                 {hasVerified && !hasAi && !aiSearchLoading && (
                   <TouchableOpacity
                     style={s.alsoAskAiBtn}
-                    onPress={() => handleAiSearch({ forceAi: true, append: true })}>
+                    onPress={() => handleAiSearch({ append: true })}>
                     <Ionicons name="sparkles-outline" size={14} color={colors.primary} />
                     <Text style={s.alsoAskAiText}>Also ask AI for more options</Text>
                   </TouchableOpacity>

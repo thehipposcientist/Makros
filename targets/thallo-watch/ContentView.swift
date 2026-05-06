@@ -1007,7 +1007,7 @@ private struct HydrationView: View {
                     }
 
                     Button {
-                        logTotal(max(0, ounces - 8))
+                        logDelta(-8)
                     } label: {
                         HStack(spacing: 5) {
                             Image(systemName: "minus.circle.fill")
@@ -1076,7 +1076,7 @@ private struct HydrationView: View {
 
     private func quickButton(_ oz: Double) -> some View {
         Button {
-            logTotal(ounces + oz)
+            logDelta(oz)
         } label: {
             VStack(spacing: 3) {
                 Image(systemName: "plus.circle.fill")
@@ -1091,6 +1091,19 @@ private struct HydrationView: View {
             .cornerRadius(9)
         }
         .buttonStyle(.plain)
+    }
+
+    private func logDelta(_ rawDelta: Double) {
+        let delta = (rawDelta * 10).rounded() / 10
+        let next = max(0, ((ounces + delta) * 10).rounded() / 10)
+        WKInterfaceDevice.current().play(.success)
+        conn.setHydrationLocal(ounces: next, dateISO: dateISO)
+        pendingOunces = next
+        conn.sendCommand("log_hydration", payload: [
+            "dateISO": dateISO,
+            "ounces": next,
+            "deltaOz": delta,
+        ])
     }
 
     private func logTotal(_ rawOunces: Double) {

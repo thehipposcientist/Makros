@@ -105,13 +105,14 @@ def recommend_from_evaluation(ev: WeeklyEvaluation) -> Recommendation:
 
     Rules (order matters):
     - No commitments AND no sessions logged → ask_more
+    - No commitments BUT sessions logged → coach_only (nothing promised to grade)
     - adherence ≥ 85% AND no missed safety items → leave_alone
     - adherence 60-85% → coach_only (positive reinforcement)
     - adherence 40-60% → small_adjust (name the adjustment)
     - adherence < 40% OR 2+ missed compounds → deep_review
     """
-    if not ev.commitments and ev.sessions_logged == 0:
-        return "ask_more"
+    if not ev.commitments:
+        return "ask_more" if ev.sessions_logged == 0 else "coach_only"
     pct = ev.adherence_pct
     missed = ev.counts()["missed"]
     if pct >= 85.0:

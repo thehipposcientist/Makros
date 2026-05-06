@@ -279,7 +279,7 @@ Workout completion upsert key: `(user_id, workout_date, focus_label)` — not `(
 | Exercise search (fallback) | Yes | gpt-4o-mini | wger primary |
 | Supplement / equipment / form / body photo scans | Yes | gpt-5.4-mini | Dedicated image-analysis routes |
 | Plan review (legacy path) | No | — | Permanently disabled in current app path |
-| In-workout set review | Yes | gpt-4o-mini | Only when deterministic result is suspicious |
+| In-workout set review | No | — | Deterministic suspicion reviewer only |
 | Food enrichment | Yes | gpt-4o-mini | food_quality classification |
 | Injury assessment | Yes | gpt-4o-mini | Severity, muscle groups, recovery estimate |
 

@@ -1,7 +1,7 @@
 // Bump this whenever the body of any LEGAL_SECTIONS entry changes. The
 // frontend compares the active user's accepted version against this and
 // shows the LegalDisclosureModal on next launch when they differ.
-export const LEGAL_VERSION = '2026-04-29.2';
+export const LEGAL_VERSION = '2026-05-06.1';
 export const SUPPORT_EMAIL = 'thallosupport@gmail.com';
 
 export const LEGAL_SECTIONS = [
@@ -15,7 +15,7 @@ export const LEGAL_SECTIONS = [
   },
   {
     title: 'Third-Party Services',
-    body: 'Thallo uses OpenAI to power meal parsing, coach chat, food photo scanning, and gear photo identification — anonymized prompts, not your name or email, are sent. Food nutrition data comes from the USDA FoodData Central database. Apple Health data stays on your device unless you explicitly share workout-only activity with a friend. We do not sell your data to advertisers and do not share calorie, macro, or weight data outside your account.',
+    body: 'Thallo uses OpenAI to power meal parsing, coach chat, food photo scanning, and gear photo identification. Prompts may include relevant workout, nutrition, macro, recovery, supplement, and photo-derived context needed for the feature; direct account identifiers such as your name or email are not required and are stripped from server-generated coach check-in payloads. Food nutrition data comes from the USDA FoodData Central database. Apple Health data stays on your device unless you explicitly share workout-only activity with a friend. We do not sell your data to advertisers, and calorie, macro, and weight data never crosses the social sharing boundary.',
   },
   {
     title: 'Health And Fitness Disclaimer',

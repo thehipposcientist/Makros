@@ -1,6 +1,6 @@
 # AI Usage & Cost
 
-Last updated: 2026-04-29
+Last updated: 2026-05-06
 
 Pricing below reflects current OpenAI list prices used for internal planning. Thallo is deterministic first: AI adds content, classification, or coaching, but it does not drive workout-plan structure.
 
@@ -8,7 +8,7 @@ Pricing below reflects current OpenAI list prices used for internal planning. Th
 
 | Flow | Default model | Notes |
 |---|---|---|
-| Trainer chat / workout coach / check-in coach | `gpt-4o-mini` | Text-first coaching and structured JSON responses |
+| Trainer chat / workout coach / check-in coach | `gpt-4o-mini` | Text-first coaching and structured JSON responses; routed through the shared chat wrapper |
 | Meal parsing and text fallback search | `gpt-4o-mini` | Text-only parsing and fallback interpretation |
 | Food enrichment / classification fallback | `gpt-4o-mini` | Cached or one-time enrichment paths |
 | Dedicated image-analysis endpoints | `gpt-5.4-mini` | Food photo, multi-food scan, supplement photo, multi-supplement scan, equipment scan, form photo, body scan |
@@ -16,7 +16,7 @@ Pricing below reflects current OpenAI list prices used for internal planning. Th
 
 ## Image Model Change: Cost Impact
 
-On 2026-04-29, the dedicated image-analysis default moved from `gpt-5-mini` to `gpt-5.4-mini` via `MODEL_IMAGE`.
+On 2026-04-29, the dedicated image-analysis default moved from `gpt-5-mini` to `gpt-5.4-mini` via `MODEL_IMAGE`. As of 2026-05-06, the code fallback also matches this policy, so missing `MODEL_IMAGE` no longer falls back to stale `gpt-5`.
 
 | Model | Input / 1M tokens | Output / 1M tokens |
 |---|---|---|
@@ -42,6 +42,7 @@ These endpoints now use `MODEL_IMAGE` by default:
 - `POST /ai/scan-equipment`
 - `POST /ai/form-photo`
 - `POST /ai/body-scan`
+- `POST /gear/identify`
 
 These flows are not affected by the `MODEL_IMAGE` switch:
 
@@ -49,7 +50,7 @@ These flows are not affected by the `MODEL_IMAGE` switch:
 - Weekly/daily check-in coach
 - Text-only meal parsing and search fallback
 - Food enrichment / classification fallback
-- In-workout recommendation review
+- In-workout next-set review (deterministic reviewer)
 
 One nuance: `POST /ai/workout-question` can accept an attached image, but it still runs on `MODEL_CHAT` today rather than `MODEL_IMAGE`.
 
@@ -61,6 +62,17 @@ One nuance: `POST /ai/workout-question` can accept an attached image, but it sti
 | `NUTRITION_REVIEW_ENABLED=0` | Disabled no-op | Legacy nutrition review path is effectively off |
 | `STARTUP_ENRICH_FOODS_ENABLED=0` | Off by default | Food enrichment is an explicit maintenance job, not a boot-time OpenAI call |
 | Missing `OPENAI_API_KEY` | Graceful degradation | Deterministic paths still work |
+| `AI_DAILY_CALL_LIMIT_PER_USER` | Default `120` | Per-user daily cap for tagged OpenAI calls |
+| `AI_DAILY_IMAGE_SCAN_LIMIT_PER_USER` | Default `40` | Per-user daily cap for image/vision scan calls |
+| `AI_PUBLIC_MATCH_GOAL_LIMIT_PER_HOUR` | Default `20` | In-process throttle for unauthenticated `/ai/match-goal`; over-limit requests use deterministic matching |
+
+## Usage Accounting & Privacy
+
+Tagged OpenAI calls write best-effort `ai_usage_events` rows with route, model, success/failure, token counts when returned by OpenAI, estimated cost, latency, image count, and budget bucket. This is operational telemetry, not invoice-grade billing.
+
+The shared chat wrapper normalizes GPT-5-family kwargs, enforces tagged per-user daily budgets, and records success/failure telemetry. Home Trainer, workout coach, check-in coach, image scans, gear identification, warmups, workout summaries, food lookup fallbacks, meal skeleton generation, and supplement AI recs are now tagged.
+
+Coach check-in payloads strip direct account identifiers (`user_id`, `first_name`, `username`, `display_name`, `email`) before sending structured context to OpenAI. Prompts may still include fitness, workout, meal, macro, recovery, supplement, and photo-derived context needed for the requested feature.
 
 ## Zero-AI Systems
 
@@ -76,7 +88,7 @@ These systems remain fully deterministic and have no model cost:
 
 ## Practical Cost Read
 
-The image-model switch raises the cost ceiling of photo-driven features, but it does not change the cost of the app's core planner, chat, or weekly coaching flows. If AI cost starts climbing after this change, the most likely source will be higher volume in food scans, supplement scans, form-photo analysis, or body scans rather than routine text chat.
+The image-model switch raises the cost ceiling of photo-driven features, but it does not change the cost of the app's core planner, chat, or weekly coaching flows. If AI cost starts climbing after this change, the most likely source will be higher volume in food scans, supplement scans, form-photo analysis, body scans, or gear identification rather than routine text chat.
 
 ## Estimated Monthly Cost Per User
 

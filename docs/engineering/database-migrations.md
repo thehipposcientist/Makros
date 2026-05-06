@@ -1,6 +1,6 @@
 # Database Migrations
 
-Last updated: 2026-05-05
+Last updated: 2026-05-06
 
 ## Pattern
 
@@ -53,6 +53,15 @@ Lifecycle managed by `backend/app/services/workout/week_manager.py`:
 `create_plan_week` / `get_active_week` / `get_week_days` / `lock_day` /
 `complete_day` / `skip_day` / `patch_day_workout` / `patch_day_nutrition`
 / `auto_renew_week` / `week_needs_renewal`.
+
+## AI Usage Events Table
+
+Created via `SQLModel.create_all` (new table; no `ADD COLUMN` helper needed).
+
+- **`ai_usage_events`** — best-effort OpenAI accounting rows. Columns:
+  `id`, `user_id`, `route`, `budget_bucket`, `model`, `success`,
+  `image_count`, `prompt_tokens`, `completion_tokens`, `total_tokens`,
+  `estimated_cost_usd`, `latency_ms`, `error_type`, `created_at`.
 
 ## Adding a New Migration
 

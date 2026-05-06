@@ -192,6 +192,38 @@ def test_reference_ranges_card() -> None:
     print(f"    protein: cut={card.cut_protein_g}g / maintain={card.maintain_protein_g}g / bulk={card.bulk_protein_g}g")
 
 
+def test_reference_ranges_match_visible_example() -> None:
+    """User-visible example: 215 lb, 6'2", 5 days/week, 60-75 min."""
+    print("\n[test] reference ranges visible basis: 215lb, 6'2\", 5d/wk, 60-75 min")
+    card = calculate_reference_ranges(CalorieInputs(
+        weight_lbs=215, height_feet=6, height_inches=2,
+        age=30, gender="male",
+        training_days_per_week=5,
+        session_minutes=75,
+    ))
+    assert card.bmr == 2005, f"expected BMR 2005, got {card.bmr}"
+    assert card.activity_multiplier == 1.55
+    assert card.maintenance_calories == 3108
+    assert card.cut_calories == 2608
+    assert card.bulk_calories == 3408
+    assert card.session_duration_label == "60-75 min"
+    assert card.formula == "Mifflin-St Jeor"
+    print(f"  ✓ cut={card.cut_calories} / maintain={card.maintenance_calories} / bulk={card.bulk_calories}")
+
+
+def test_reference_ranges_honor_minimum_floor() -> None:
+    """The reference card should not display an unsafe cut target."""
+    print("\n[test] reference ranges honor minimum calorie floor")
+    card = calculate_reference_ranges(CalorieInputs(
+        weight_lbs=110, height_feet=5, height_inches=0,
+        age=50, gender="female",
+        training_days_per_week=1,
+        session_minutes=60,
+    ))
+    assert card.cut_calories >= 1200, f"unsafe cut target shown: {card.cut_calories}"
+    print(f"  ✓ cut floor held at {card.cut_calories}")
+
+
 # ─── Partial override recalculation ──────────────────────────────────────────
 # These tests cover the fix to `step_8_apply_custom_overrides`. The old
 # implementation just swapped pinned fields; the new one recomputes the
@@ -341,6 +373,8 @@ if __name__ == "__main__":
         test_minimum_calorie_floor,
         test_custom_override_pins_value,
         test_reference_ranges_card,
+        test_reference_ranges_match_visible_example,
+        test_reference_ranges_honor_minimum_floor,
         test_override_calories_only_recomputes_fat_and_carbs,
         test_override_protein_only_recomputes_carbs_fat,
         test_override_fat_only_recomputes_carbs,

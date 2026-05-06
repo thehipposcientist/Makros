@@ -659,6 +659,7 @@ def start_new_week(
     plan = generate_workout_plan(
         planner_ctx.inputs, SEED_EXERCISES,
         history_familiarity=planner_ctx.history_familiarity,
+        perf_profiles=planner_ctx.perf_profiles,
         recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
     )
     workout_days = plan.get("workout_plan", {}).get("days", [])
@@ -691,7 +692,8 @@ def start_new_week(
     # Auto-renewal uses prev.end_date + 1 so this anchor sticks across
     # week boundaries (Friday-Thursday cycle persists every week).
     week_start = today
-    training_pattern = default_training_pattern(days_per_week)
+    from app.services.workout.week_manager import training_pattern_from_preferences
+    training_pattern = training_pattern_from_preferences(prefs, days_per_week)
 
     pw = create_plan_week(
         db,
@@ -1560,6 +1562,7 @@ def adapt_remaining(
     plan = generate_workout_plan(
         planner_ctx.inputs, SEED_EXERCISES,
         history_familiarity=planner_ctx.history_familiarity,
+        perf_profiles=planner_ctx.perf_profiles,
         recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
     )
     fresh_days = plan.get("workout_plan", {}).get("days", [])
@@ -1625,6 +1628,7 @@ def repair_injury_conflicts(
     plan = generate_workout_plan(
         planner_ctx.inputs, SEED_EXERCISES,
         history_familiarity=planner_ctx.history_familiarity,
+        perf_profiles=planner_ctx.perf_profiles,
         recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
     )
     fresh_days = plan.get("workout_plan", {}).get("days", [])
@@ -1686,10 +1690,12 @@ def regenerate_remaining(
     plan = generate_workout_plan(
         planner_ctx.inputs, SEED_EXERCISES,
         history_familiarity=planner_ctx.history_familiarity,
+        perf_profiles=planner_ctx.perf_profiles,
         recent_muscle_exercises=planner_ctx.recent_muscle_exercises,
     )
     fresh_days = plan.get("workout_plan", {}).get("days", [])
-    training_pattern = default_training_pattern(new_dpw)
+    from app.services.workout.week_manager import training_pattern_from_preferences
+    training_pattern = training_pattern_from_preferences(prefs, new_dpw)
 
     regenerate_remaining_days(
         db, pw, fresh_days, training_pattern,

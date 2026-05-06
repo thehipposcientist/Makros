@@ -421,7 +421,9 @@ def resolve_focus_fatigue(focus_label: str, intensity: str = "moderate", duratio
         # subtract from accumulated fatigue when processed by the rolling calc.
         "recovery":   {"chest": -0.08, "back": -0.08, "shoulders": -0.06, "quads": -0.08, "hamstrings": -0.08, "glutes": -0.06, "core": -0.05, "systemic": -0.10},
         "mobility":   {"chest": -0.05, "back": -0.05, "shoulders": -0.05, "quads": -0.05, "hamstrings": -0.05, "glutes": -0.05, "core": -0.05, "systemic": -0.08},
-        "yoga":       {"core": 0.1, "systemic": 0.05},
+        "yoga":       {"chest": -0.05, "back": -0.05, "shoulders": -0.05, "quads": -0.05, "hamstrings": -0.05, "glutes": -0.05, "core": -0.05, "systemic": -0.08},
+        "stretching": {"chest": -0.05, "back": -0.05, "shoulders": -0.05, "quads": -0.05, "hamstrings": -0.05, "glutes": -0.05, "core": -0.05, "systemic": -0.08},
+        "pilates":    {"chest": -0.05, "back": -0.05, "shoulders": -0.05, "quads": -0.05, "hamstrings": -0.05, "glutes": -0.05, "core": -0.05, "systemic": -0.08},
         "walking":    {"cardio": 0.1, "systemic": 0.05},
         "running":    {"cardio": 0.5, "quads": 0.2, "hamstrings": 0.15, "calves": 0.15, "systemic": 0.25},
         "cycling":    {"cardio": 0.45, "quads": 0.25, "glutes": 0.15, "systemic": 0.2},
@@ -467,7 +469,7 @@ def resolve_focus_fatigue(focus_label: str, intensity: str = "moderate", duratio
         elif any(k in fl for k in ("full",)):            base = _FOCUS_FATIGUE["full_body"]
         elif any(k in fl for k in ("run",)):             base = _FOCUS_FATIGUE["running"]
         elif any(k in fl for k in ("cardio", "cycling", "bike")): base = _FOCUS_FATIGUE["cardio"]
-        elif any(k in fl for k in ("yoga", "stretch", "mobil")): base = _FOCUS_FATIGUE["yoga"]
+        elif any(k in fl for k in ("yoga", "stretch", "mobil", "foam", "pilates")): base = _FOCUS_FATIGUE["mobility"]
         elif any(k in fl for k in ("chop", "wood", "shovel", "construct")): base = _FOCUS_FATIGUE["chopping_wood"]
         elif any(k in fl for k in ("yard", "garden", "mow")): base = _FOCUS_FATIGUE["yard_work"]
         elif any(k in fl for k in ("moving", "lifting", "haul")): base = _FOCUS_FATIGUE["moving"]

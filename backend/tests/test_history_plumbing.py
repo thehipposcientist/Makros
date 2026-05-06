@@ -1631,6 +1631,153 @@ def test_custom_exercise_muscles_feed_completion_fatigue() -> None:
     _ok("custom exercise metadata produces specific muscle fatigue")
 
 
+def test_manual_activity_identity_preserves_same_focus_rows_and_time() -> None:
+    """Manual/Apple-style completions should use the activity's real
+    end time for fatigue decay and external ids for idempotent updates."""
+    print("\n[test] manual activity identity preserves same-focus rows and end time")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, WorkoutCompletion  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import WorkoutCompleteRequest, mark_workout_complete
+
+    def _utc(dt):
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    workout_date = date(2026, 5, 4)
+    first_start = datetime(2026, 5, 4, 7, 0, tzinfo=timezone.utc)
+    first_end = datetime(2026, 5, 4, 7, 30, tzinfo=timezone.utc)
+    second_start = datetime(2026, 5, 4, 18, 0, tzinfo=timezone.utc)
+    second_end = datetime(2026, 5, 4, 18, 25, tzinfo=timezone.utc)
+    with Session(engine) as s:
+        u = User(email="manual-identity@example.com", username="manualidentity", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        for external_id, start, end, calories in (
+            ("manual-run-1", first_start, first_end, 240),
+            ("manual-run-2", second_start, second_end, 210),
+        ):
+            mark_workout_complete(
+                WorkoutCompleteRequest(
+                    workout_date=workout_date,
+                    focus_label="Running",
+                    duration_seconds=int((end - start).total_seconds()),
+                    source_context="manual_activity",
+                    activity_category="cardio",
+                    activity_subtype="run",
+                    activity_intensity="moderate",
+                    activity_source="manual",
+                    started_at=start,
+                    ended_at=end,
+                    external_source_id=external_id,
+                    calories_burned=calories,
+                ),
+                current_user=u,
+                db=s,
+            )
+
+        rows = s.exec(
+            select(WorkoutCompletion)
+            .where(WorkoutCompletion.user_id == u.id)
+            .order_by(WorkoutCompletion.external_source_id)
+        ).all()
+        assert len(rows) == 2, rows
+        assert rows[0].external_source_id == "manual-run-1", rows[0].external_source_id
+        assert abs((_utc(rows[0].completed_at) - first_end).total_seconds()) < 1, rows[0].completed_at
+        assert rows[1].external_source_id == "manual-run-2", rows[1].external_source_id
+        assert abs((_utc(rows[1].completed_at) - second_end).total_seconds()) < 1, rows[1].completed_at
+
+        updated_end = datetime(2026, 5, 4, 7, 35, tzinfo=timezone.utc)
+        mark_workout_complete(
+            WorkoutCompleteRequest(
+                workout_date=workout_date,
+                focus_label="Running",
+                duration_seconds=2100,
+                source_context="manual_activity",
+                activity_category="cardio",
+                activity_subtype="run",
+                activity_intensity="moderate",
+                activity_source="manual",
+                started_at=first_start,
+                ended_at=updated_end,
+                external_source_id="manual-run-1",
+                calories_burned=275,
+            ),
+            current_user=u,
+            db=s,
+        )
+        rows = s.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == u.id)).all()
+        assert len(rows) == 2, rows
+        updated = [r for r in rows if r.external_source_id == "manual-run-1"][0]
+        assert updated.duration_seconds == 2100, updated.duration_seconds
+        assert updated.calories_burned == 275, updated.calories_burned
+        assert abs((_utc(updated.completed_at) - updated_end).total_seconds()) < 1, updated.completed_at
+    _ok("same-focus manual rows stay distinct and decay from activity end")
+
+
+def test_delete_completion_by_external_source_id_keeps_same_day_rows() -> None:
+    """Deleting one local/HK row should not wipe every completion for the day."""
+    print("\n[test] delete completion by external source id keeps same-day rows")
+    from datetime import date, datetime, timezone
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine, select
+    from app.models import User, WorkoutCompletion  # noqa: F401
+    import app.models  # noqa: F401
+    from app.routers.workouts import (
+        WorkoutCompleteRequest,
+        delete_workout_completion,
+        mark_workout_complete,
+    )
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    workout_date = date(2026, 5, 4)
+    with Session(engine) as s:
+        u = User(email="manual-delete@example.com", username="manualdelete", hashed_password="x")
+        s.add(u); s.commit(); s.refresh(u)
+
+        for idx in (1, 2):
+            start = datetime(2026, 5, 4, 7 + idx, 0, tzinfo=timezone.utc)
+            mark_workout_complete(
+                WorkoutCompleteRequest(
+                    workout_date=workout_date,
+                    focus_label="Running",
+                    duration_seconds=1200,
+                    source_context="manual_activity",
+                    activity_category="cardio",
+                    activity_subtype="run",
+                    activity_intensity="moderate",
+                    started_at=start,
+                    ended_at=start.replace(minute=20),
+                    external_source_id=f"manual-run-{idx}",
+                ),
+                current_user=u,
+                db=s,
+            )
+
+        delete_workout_completion(
+            workout_date=workout_date,
+            external_source_id="manual-run-1",
+            current_user=u,
+            db=s,
+        )
+        rows = s.exec(select(WorkoutCompletion).where(WorkoutCompletion.user_id == u.id)).all()
+        assert len(rows) == 1, rows
+        assert rows[0].external_source_id == "manual-run-2", rows[0].external_source_id
+    _ok("exact completion delete leaves sibling activity intact")
+
+
 # ── Runner ──────────────────────────────────────────────────────────
 
 cases = [
@@ -1662,6 +1809,8 @@ cases = [
     test_feedback_patch_targets_focus_corrected_completion,
     test_planned_completion_keeps_plan_focus_after_partial_exercise_log,
     test_custom_exercise_muscles_feed_completion_fatigue,
+    test_manual_activity_identity_preserves_same_focus_rows_and_time,
+    test_delete_completion_by_external_source_id_keeps_same_day_rows,
 ]
 
 

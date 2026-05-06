@@ -19,7 +19,13 @@ from typing import Any
 
 from openai import OpenAI
 
-from app.routers.ai.utils import get_openai_api_key, model_chat
+from app.routers.ai.utils import (
+    _build_chat_kwargs,
+    _chat_create,
+    _extract_json,
+    get_openai_api_key,
+    model_chat,
+)
 
 
 SYSTEM_PROMPT = """You are a fitness check-in coach. You receive a STRUCTURED weekly evaluation from a deterministic rules engine, plus the user's self-reported state. You do NOT re-interpret the numbers — you only phrase the verdict in plain language.
@@ -30,7 +36,6 @@ Inputs you will see:
 - `evaluation.commitments[]`: each with {kind, bucket, promised, actual, note}
 - `evaluation.biggestWin` and `evaluation.biggestGap` (if any)
 - `recommendation`: the response_type ALREADY chosen by the rules engine. Use this as-is. Do NOT override.
-- `profile.first_name`, `profile.username`, `profile.display_name`: user identity fields.
 - `summary_history`: whether this is the user's first weekly summary and up to 3 compact prior summaries.
 - `weekly_review`: deterministic trainer's read the user JUST SAW on the check-in modal. Includes:
     - `headline`: one-sentence summary already shown to the user
@@ -44,7 +49,7 @@ Inputs you will see:
 CRITICAL: the user has already seen the `weekly_review`. Do NOT re-summarise the numbers from scratch — the modal already showed them. Your job is to react to the user's self-rating in the CONTEXT of those numbers and recommendations. Reference at least one specific number from the review and at least one recommendation by short name.
 
 Your job:
-1. Write a ONE-sentence weekly summary that cites the adherence % and total hit/partial/missed counts. Use the user's first name once if present; otherwise use their username once if it looks human-readable.
+1. Write a ONE-sentence weekly summary that cites the adherence % and total hit/partial/missed counts.
 2. Reinforce the biggestWin by name with its actual number.
 3. Name the biggestGap with its actual number and propose one concrete adjustment.
 4. If `summary_history.is_first_summary` is true, frame this as the baseline week; otherwise reference the direction versus prior summaries without over-explaining.
@@ -86,6 +91,22 @@ class CheckinAIError(Exception):
     pass
 
 
+def _redacted_payload_for_openai(payload: dict[str, Any]) -> tuple[dict[str, Any], int | None]:
+    """Strip direct account identifiers before sending check-in context."""
+    user_id = None
+    out = json.loads(json.dumps(payload, default=str))
+    profile = out.get("profile")
+    if isinstance(profile, dict):
+        raw_user_id = profile.pop("user_id", None)
+        try:
+            user_id = int(raw_user_id) if raw_user_id is not None else None
+        except (TypeError, ValueError):
+            user_id = None
+        for key in ("first_name", "username", "display_name", "email"):
+            profile.pop(key, None)
+    return out, user_id
+
+
 def call_checkin_llm(payload: dict[str, Any], model: str | None = None) -> dict[str, Any]:
     api_key = get_openai_api_key()
     if not api_key:
@@ -94,19 +115,23 @@ def call_checkin_llm(payload: dict[str, Any], model: str | None = None) -> dict[
     client = OpenAI(api_key=api_key)
     model_name = model or os.getenv("MODEL_CHECKIN", model_chat())
 
-    user_content = json.dumps(payload, default=str, separators=(",", ":"))
+    openai_payload, user_id = _redacted_payload_for_openai(payload)
+    user_content = json.dumps(openai_payload, default=str, separators=(",", ":"))
 
     try:
-        resp = client.chat.completions.create(
+        kwargs = _build_chat_kwargs(
             model=model_name,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
             ],
-            response_format={"type": "json_object"},
-            temperature=0.4,
             max_tokens=500,
+            timeout_secs=35,
+            ai_route="/coach/checkin",
+            ai_user_id=user_id,
+            ai_budget_bucket="coach_chat",
         )
+        resp = _chat_create(client, **kwargs)
     except Exception as e:
         raise CheckinAIError(f"OpenAI call failed: {e}") from e
 
@@ -114,7 +139,7 @@ def call_checkin_llm(payload: dict[str, Any], model: str | None = None) -> dict[
     if not content:
         raise CheckinAIError("empty LLM response")
     try:
-        parsed = json.loads(content)
+        parsed = _extract_json(content)
     except json.JSONDecodeError as e:
         raise CheckinAIError(f"LLM returned non-JSON: {e}") from e
 

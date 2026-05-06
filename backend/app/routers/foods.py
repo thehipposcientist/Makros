@@ -158,7 +158,7 @@ def _search_usda(query: str, max_results: int) -> list[dict]:
         return []
 
 
-def _search_ai(query: str) -> list[dict]:
+def _search_ai(query: str, *, user_id: int | None = None) -> list[dict]:
     from app.routers.ai.utils import (
         MICRONUTRIENT_AI_FIELDS,
         MICRONUTRIENT_PROMPT_GUIDE,
@@ -198,7 +198,15 @@ def _search_ai(query: str) -> list[dict]:
         },
     ]
     try:
-        kwargs = _build_chat_kwargs(model_meal_parsing(), messages, max_tokens=1500, timeout_secs=30)
+        kwargs = _build_chat_kwargs(
+            model_meal_parsing(),
+            messages,
+            max_tokens=1500,
+            timeout_secs=30,
+            ai_route="/foods/search",
+            ai_user_id=user_id,
+            ai_budget_bucket="meal_parsing",
+        )
         resp = _chat_create(client, **kwargs)
         data = json.loads(resp.choices[0].message.content or '{"results": []}')
         results = data if isinstance(data, list) else data.get("results", [])
@@ -238,7 +246,7 @@ def search_food_catalog(
 
     if force_ai:
         ensure_pro(current_user, "AI food lookup")
-        ai_results = _search_ai(query)
+        ai_results = _search_ai(query, user_id=current_user.id)
         return {
             "results": merge_food_search_results(
                 local_results=[],
@@ -274,7 +282,7 @@ def search_food_catalog(
     ai_results: list[dict] = []
     if allow_ai and include_remote and can_search_remote and not merged:
         ensure_pro(current_user, "AI food lookup")
-        ai_results = _search_ai(query)
+        ai_results = _search_ai(query, user_id=current_user.id)
         merged = merge_food_search_results(
             local_results=[],
             remote_results=ai_results,

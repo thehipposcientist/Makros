@@ -402,6 +402,44 @@ def test_build_strength_ul_5_days_has_no_full_body() -> None:
     _ok(f"recipe={[a.value for a in recipe]}")
 
 
+def test_build_strength_auto_ul_5_days_has_no_full_body() -> None:
+    """Auto-picked Upper/Lower at 5 days must honor the displayed split."""
+    print("\n[test] strength goal + auto UL 5d → no Full Body days")
+    from app.services.workout.goal_profiles import goal_profile_for
+    from app.services.workout.weekly_recipe import generate_weekly_recipe
+    from app.services.workout.day_templates import pick_split, SPLIT_UPPER_LOWER
+    from app.services.workout.archetypes import DayArchetype
+
+    class _FakeInputs:
+        goal = "build_strength"
+        days_per_week = 5
+        experience = "intermediate"
+        preferred_split = None
+        priority_region = "balanced"
+        focused_muscle = None
+
+    chosen = pick_split(_FakeInputs())
+    assert chosen == SPLIT_UPPER_LOWER, f"auto-pick for strength+5d expected UL, got {chosen}"
+
+    profile = goal_profile_for("build_strength")
+    recipe = generate_weekly_recipe(
+        profile, 5,
+        lifting_split=chosen,
+        user_chose_split=False,
+    )
+    forbidden = {
+        DayArchetype.LIFT_FULL_BODY,
+        DayArchetype.LIFT_FULL_BODY_STRENGTH,
+        DayArchetype.LIFT_FULL_BODY_PLUS_CARDIO,
+    }
+    bad = [a.value for a in recipe if a in forbidden]
+    assert not bad, (
+        f"strength+auto UL 5d emitted Full Body day(s) "
+        f"{bad} in recipe={[a.value for a in recipe]}"
+    )
+    _ok(f"recipe={[a.value for a in recipe]}")
+
+
 # ── Fix 7: build_strength must emit split-balanced recipes ─────────
 # Production regression: a user on `build_strength` + 6 days + auto
 # split got [Legs, Push, Legs, Legs, rest, Push, Pull] — 3 Legs /
@@ -1349,6 +1387,7 @@ cases = [
     test_launch_preflight_common_profiles_are_strict_ready,
     test_build_strength_ul_6_days_has_no_full_body,
     test_build_strength_ul_5_days_has_no_full_body,
+    test_build_strength_auto_ul_5_days_has_no_full_body,
     test_build_strength_auto_6_days_is_split_balanced,
     test_build_strength_user_chose_ppl_6_days_is_balanced,
     test_build_strength_user_chose_ul_6_days_is_alternating,

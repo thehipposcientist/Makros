@@ -65,6 +65,12 @@ import {
 
 type ProgressTab = 'today' | 'trends' | 'body' | 'health';
 
+type InProgressWorkoutSummary = {
+  focus: string;
+  setsLogged: number;
+  startedAt: number;
+};
+
 interface ProgressScreenProps {
   onBack: () => void;
   authToken: string;
@@ -80,6 +86,9 @@ interface ProgressScreenProps {
   nutritionLogRefreshKey?: number;
   isActive?: boolean;
   planWeekWindow?: ProgressPlanWeekWindow | null;
+  inProgressWorkout?: InProgressWorkoutSummary | null;
+  onResumeInProgressWorkout?: () => void;
+  onDiscardInProgressWorkout?: () => void | Promise<void>;
 }
 
 function sentenceLabel(value: unknown): string {
@@ -348,6 +357,14 @@ function formatLoggedTime(loggedAt?: string): string {
   const d = new Date(loggedAt);
   if (Number.isNaN(d.getTime())) return '';
   return ` · ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+}
+
+function formatStartedAgo(startedAt: number): string {
+  const mins = Math.max(0, Math.round((Date.now() - startedAt) / 60000));
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem > 0 ? `${hours}h ${rem}m ago` : `${hours}h ago`;
 }
 
 function formatHealthDateLabel(dateISO: string): string {
@@ -1186,7 +1203,7 @@ function buildThisWeekOverview(
         : `aerobic minutes ${currentWindowText}`,
       icon: 'walk-outline',
       color: '#EF4444',
-      targetTab: 'health',
+      targetTab: 'today',
     });
   }
 
@@ -1472,7 +1489,7 @@ function buildCardioGoalSignal(
       action: 'Keep easy cardio easy so it supports recovery.',
       icon: 'walk-outline',
       color: tc.success,
-      targetTab: 'health',
+      targetTab: 'today',
       status: 'good',
       score: 0.8,
       pct: clampPct(currentZone2),
@@ -1692,10 +1709,36 @@ function buildTodayTrackSummary(input: {
   };
 }
 
-function workoutCompletionKey(dateISO?: string | null, focus?: string | null): string | null {
+function serverCompletionIdFromLocalId(id?: string | null): number | undefined {
+  const match = String(id ?? '').match(/^server(?:-summary)?-(\d+)$/);
+  const parsed = match ? Number(match[1]) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function externalSourceIdFromLocalId(id?: string | null): string | undefined {
+  const value = String(id ?? '').trim();
+  if (!value || /^server(?:-summary|-session)?-\d+$/.test(value)) return undefined;
+  return value;
+}
+
+function workoutCompletionKey(dateISO?: string | null, focus?: string | null, externalSourceId?: string | null): string | null {
+  const sourceKey = typeof externalSourceId === 'string' ? externalSourceId.trim() : '';
+  if (sourceKey) return `source|${sourceKey}`;
   const date = typeof dateISO === 'string' ? dateISO.slice(0, 10) : '';
   const focusKey = typeof focus === 'string' ? focus.trim().toLowerCase() : '';
   return date && focusKey ? `${date}|${focusKey}` : null;
+}
+
+function workoutSessionCompletionKey(session: WorkoutSession): string | null {
+  return workoutCompletionKey(session.date, session.focus, externalSourceIdFromLocalId(session.id));
+}
+
+function workoutSummaryCompletionKey(summary: StoredWorkoutSummary): string | null {
+  return workoutCompletionKey(summary.date, summary.focus, externalSourceIdFromLocalId(summary.id));
+}
+
+function serverCompletionKey(completion: WorkoutCompletionRecord): string | null {
+  return workoutCompletionKey(completion.workout_date, completion.focus_label, completion.external_source_id);
 }
 
 function normalizeHrZoneMinutes(raw?: number[] | null): [number, number, number, number, number] | undefined {
@@ -1727,9 +1770,11 @@ function summaryFromCompletion(completion: WorkoutCompletionRecord): StoredWorko
   if (!hasHealthMetrics) return null;
   return mergeCompletionMetrics({
     id: `server-summary-${completion.id}`,
-    date: completion.completed_at ?? `${completion.workout_date}T12:00:00.000Z`,
+    date: completion.started_at ?? completion.ended_at ?? completion.completed_at ?? `${completion.workout_date}T12:00:00.000Z`,
     focus: completion.focus_label,
     durationSeconds: completion.duration_seconds,
+    startedAt: completion.started_at ?? undefined,
+    endedAt: completion.ended_at ?? completion.completed_at ?? undefined,
     totalSets: 0,
     totalReps: 0,
     caloriesBurned: completion.calories_burned ?? 0,
@@ -1804,12 +1849,12 @@ function mergeWorkoutSessionSources(localHistory: WorkoutSession[], serverRows: 
   if (!serverRows) return localHistory;
   const byKey = new Map<string, WorkoutSession>();
   for (const session of localHistory) {
-    const key = workoutCompletionKey(session.date, session.focus);
+    const key = workoutSessionCompletionKey(session);
     if (key) byKey.set(key, session);
   }
   for (const row of serverRows) {
     const session = workoutSessionFromServer(row);
-    const key = workoutCompletionKey(session.date, session.focus);
+    const key = workoutSessionCompletionKey(session);
     if (!key) continue;
     const existing = byKey.get(key);
     const existingSetCount = existing?.exercises?.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0) ?? 0;
@@ -1829,7 +1874,7 @@ function reconcileWorkoutProgressData(
   if (!completions) return { history, summaries };
   const completionsByKey = new Map(
     completions
-      .map(c => [workoutCompletionKey(c.workout_date, c.focus_label), c] as const)
+      .map(c => [serverCompletionKey(c), c] as const)
       .filter((entry): entry is [string, WorkoutCompletionRecord] => !!entry[0]),
   );
   const completionKeys = new Set(
@@ -1839,27 +1884,29 @@ function reconcileWorkoutProgressData(
 
   const scopedHistory = history
     .map(session => {
-      const key = workoutCompletionKey(session.date, session.focus);
+      const key = workoutSessionCompletionKey(session);
       const completion = key ? completionsByKey.get(key) : undefined;
       return completion ? mergeCompletionIntoSession(session, completion) : session;
     })
     .filter(session => {
-      const key = workoutCompletionKey(session.date, session.focus);
+      const key = workoutSessionCompletionKey(session);
       return !!key && completionKeys.has(key);
     });
   const existingKeys = new Set(
     scopedHistory
-      .map(session => workoutCompletionKey(session.date, session.focus))
+      .map(session => workoutSessionCompletionKey(session))
       .filter((key): key is string => !!key),
   );
   for (const completion of completions) {
-    const key = workoutCompletionKey(completion.workout_date, completion.focus_label);
+    const key = serverCompletionKey(completion);
     if (!key || existingKeys.has(key)) continue;
     scopedHistory.push({
       id: `server-${completion.id}`,
-      date: completion.completed_at ?? `${completion.workout_date}T12:00:00.000Z`,
+      date: completion.started_at ?? completion.ended_at ?? completion.completed_at ?? `${completion.workout_date}T12:00:00.000Z`,
       focus: completion.focus_label,
       durationSeconds: completion.duration_seconds,
+      startedAt: completion.started_at ?? undefined,
+      endedAt: completion.ended_at ?? completion.completed_at ?? undefined,
       exercises: [],
       completed: true,
       ...(manualActivityFromCompletion(completion) ? { manualActivity: manualActivityFromCompletion(completion) } : {}),
@@ -1869,16 +1916,16 @@ function reconcileWorkoutProgressData(
   scopedHistory.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
 
   const scopedSummaries = summaries.filter(summary => {
-    const key = workoutCompletionKey(summary.date, summary.focus);
+    const key = workoutSummaryCompletionKey(summary);
     return !!key && completionKeys.has(key);
   });
   const summariesByKey = new Map(
     scopedSummaries
-      .map(summary => [workoutCompletionKey(summary.date, summary.focus), summary] as const)
+      .map(summary => [workoutSummaryCompletionKey(summary), summary] as const)
       .filter((entry): entry is [string, StoredWorkoutSummary] => !!entry[0]),
   );
   for (const completion of completions) {
-    const key = workoutCompletionKey(completion.workout_date, completion.focus_label);
+    const key = serverCompletionKey(completion);
     if (!key) continue;
     const existing = summariesByKey.get(key);
     if (existing) {
@@ -2172,7 +2219,7 @@ function AnimatedPressable({
   );
 }
 
-export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true, planWeekWindow }: ProgressScreenProps) {
+export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true, planWeekWindow, inProgressWorkout = null, onResumeInProgressWorkout, onDiscardInProgressWorkout }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
   const styles = useMemo(() => createStyles(tc), [themeName]);
   const primaryButtonTextColor = getContrastingTextColor(tc.primary);
@@ -3114,6 +3161,98 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Text style={styles.todayActionText} numberOfLines={2}>{todayTrack.action}</Text>
             </View>
           </View>
+
+          {inProgressWorkout && (
+            <FadeInView delay={20} duration={TIMING_STANDARD.duration} slideDistance={6}>
+              <View
+                testID="progress-today-in-progress-workout-card"
+                style={{
+                  backgroundColor: tc.surface,
+                  borderRadius: radius.lg,
+                  padding: 14,
+                  marginBottom: 12,
+                  borderWidth: 1.5,
+                  borderColor: tc.primary + '88',
+                }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                  <View style={{
+                    width: 34, height: 34, borderRadius: 17,
+                    alignItems: 'center', justifyContent: 'center',
+                    backgroundColor: tc.primary + '20',
+                  }}>
+                    <Ionicons name="play-circle-outline" size={19} color={tc.primary} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 10, fontWeight: '900', color: tc.primary, letterSpacing: 0.8 }}>
+                      IN PROGRESS
+                    </Text>
+                    <Text style={{ fontSize: 15, fontWeight: '900', color: tc.textPrimary, marginTop: 1 }} numberOfLines={1}>
+                      Continue {inProgressWorkout.focus || 'workout'}
+                    </Text>
+                  </View>
+                </View>
+                <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 8, lineHeight: 17 }}>
+                  {inProgressWorkout.setsLogged} set{inProgressWorkout.setsLogged === 1 ? '' : 's'} logged · started {formatStartedAgo(inProgressWorkout.startedAt)}
+                </Text>
+                <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+                  {onResumeInProgressWorkout && (
+                    <TouchableOpacity
+                      style={{ flex: 1, backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 10, alignItems: 'center' }}
+                      onPress={() => {
+                        import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
+                        onResumeInProgressWorkout();
+                      }}>
+                      <Text style={{ color: getContrastingTextColor(tc.primary), fontSize: 13, fontWeight: '900' }}>Resume</Text>
+                    </TouchableOpacity>
+                  )}
+                  {onDiscardInProgressWorkout && (
+                    <TouchableOpacity
+                      style={{ flex: 1, borderRadius: radius.md, paddingVertical: 10, alignItems: 'center', borderWidth: 1, borderColor: tc.border }}
+                      onPress={() => {
+                        Alert.alert(
+                          'Discard in-progress workout?',
+                          'Your logged sets for this session will be cleared.',
+                          [
+                            { text: 'Keep', style: 'cancel' },
+                            {
+                              text: 'Discard',
+                              style: 'destructive',
+                              onPress: () => { void onDiscardInProgressWorkout(); },
+                            },
+                          ],
+                        );
+                      }}>
+                      <Text style={{ color: tc.error ?? '#EF4444', fontSize: 13, fontWeight: '800' }}>Discard</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+            </FadeInView>
+          )}
+
+          {isProTier && authToken && (
+            <FadeInView delay={40} duration={TIMING_STANDARD.duration} slideDistance={6}>
+              <WeeklyCheckinCard
+                authToken={authToken}
+                themeName={userProfile.themePreference}
+              />
+            </FadeInView>
+          )}
+
+          {isProTier && authToken && (
+            <FadeInView delay={80} duration={TIMING_STANDARD.duration} slideDistance={6}>
+              <Zone2TargetCard
+                authToken={authToken}
+                themeName={userProfile.themePreference}
+                currentMinutes={planWeekZone2.current}
+                previousMinutes={planWeekZone2.previous}
+                weekEndDate={progressWeekWindow.endDate}
+                weekLabel={progressWeekWindow.label}
+                previousWeekLabel={progressWeekWindow.previousLabel}
+              />
+            </FadeInView>
+          )}
 
           <Text style={styles.sectionLabel}>What matters today</Text>
           <View style={styles.todaySignalGrid}>
@@ -4218,7 +4357,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                           if (authToken && session.date) {
                             const dateISO = session.date.slice(0, 10);
                             const { deleteWorkoutCompletion } = await import('../services/api');
-                            await deleteWorkoutCompletion(authToken, dateISO).catch(() => null);
+                            const completionId = serverCompletionIdFromLocalId(session.id);
+                            await deleteWorkoutCompletion(authToken, dateISO, {
+                              focusLabel: session.focus,
+                              completionId,
+                              externalSourceId: completionId ? undefined : externalSourceIdFromLocalId(session.id),
+                            }).catch(() => null);
                           }
                           setHistory(prev => prev.filter(x => x.id !== session.id));
                           setSummaries(prev => prev.filter(x => x.id !== session.id));
@@ -4515,7 +4659,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                             if (authToken && s.date) {
                               const dateISO = s.date.slice(0, 10);
                               const { deleteWorkoutCompletion } = await import('../services/api');
-                              await deleteWorkoutCompletion(authToken, dateISO).catch(() => null);
+                              const completionId = serverCompletionIdFromLocalId(s.id);
+                              await deleteWorkoutCompletion(authToken, dateISO, {
+                                focusLabel: s.focus,
+                                completionId,
+                                externalSourceId: completionId ? undefined : externalSourceIdFromLocalId(s.id),
+                              }).catch(() => null);
                             }
                             setSummaries(prev => prev.filter(x => x.id !== s.id));
                             setHistory(prev => prev.filter(x => x.id !== s.id));
@@ -4770,30 +4919,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </View>
             </FadeInView>
           )}
-          {isProTier && authToken && (
-            <FadeInView delay={0} duration={TIMING_STANDARD.duration} slideDistance={6}>
-            <WeeklyCheckinCard
-              authToken={authToken}
-              themeName={userProfile.themePreference}
-            />
-            </FadeInView>
-          )}
-          {isProTier && authToken && (() => {
-            return (
-              <FadeInView delay={50} duration={TIMING_STANDARD.duration} slideDistance={6}>
-              <Zone2TargetCard
-                authToken={authToken}
-                themeName={userProfile.themePreference}
-                currentMinutes={planWeekZone2.current}
-                previousMinutes={planWeekZone2.previous}
-                weekEndDate={progressWeekWindow.endDate}
-                weekLabel={progressWeekWindow.label}
-                previousWeekLabel={progressWeekWindow.previousLabel}
-              />
-              </FadeInView>
-            );
-          })()}
-
           {isProTier && !isHealthKitAvailable() && (
             <View style={styles.vitalsCard}>
               <View style={{ alignItems: 'center', paddingVertical: 12 }}>
@@ -6824,6 +6949,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   caloriesBurned: session.manualActivity.caloriesBurned,
                   avgHeartRate: session.manualActivity.avgHeartRate,
                 } : undefined,
+                undefined,
+                undefined,
+                undefined,
+                {
+                  startedAt: session.startedAt ?? session.date,
+                  endedAt: session.endedAt ?? null,
+                  externalSourceId: session.id,
+                },
               );
             } catch {}
           }

@@ -398,6 +398,16 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
     setSaving(true);
     try {
       const date = getDateForOffset(dateOffset);
+      const endDateCandidate = prefill?.endedAtISO ? new Date(prefill.endedAtISO) : date;
+      const endDate = Number.isFinite(endDateCandidate.getTime()) ? endDateCandidate : date;
+      const startDateCandidate = prefill?.startedAtISO
+        ? new Date(prefill.startedAtISO)
+        : new Date(endDate.getTime() - Math.max(1, durationMin) * 60_000);
+      const startDate = Number.isFinite(startDateCandidate.getTime())
+        ? startDateCandidate
+        : new Date(endDate.getTime() - Math.max(1, durationMin) * 60_000);
+      const startedAtISO = startDate.toISOString();
+      const endedAtISO = endDate.toISOString();
       const legacyFocus = getLegacyFocus(category, subtype, customSubtype);
       const session: WorkoutSession = {
         // Keep the HK externalId (or whatever the caller passed) as
@@ -405,14 +415,11 @@ export default function LogActivityModal({ visible, onClose, onSave, themeName, 
         // via `alreadyImportedIds` in detectUnloggedWorkouts.
         id: prefill?.externalId
           ?? `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        date: date.toISOString(),
+        date: startedAtISO,
         focus: legacyFocus,
         durationSeconds: durationMin * 60,
-        // When an import or live-tracker gave us exact timestamps
-        // carry them through — the fatigue model + overlap-dedupe
-        // both benefit from real intervals instead of synthesized ones.
-        ...(prefill?.startedAtISO ? { startedAt: prefill.startedAtISO } : {}),
-        ...(prefill?.endedAtISO ? { endedAt: prefill.endedAtISO } : {}),
+        startedAt: startedAtISO,
+        endedAt: endedAtISO,
         exercises: [],
         completed: true,
         manualActivity: {
