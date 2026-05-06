@@ -200,10 +200,10 @@ def test_partial_week_single_session() -> None:
     assert digest["sessions"]["distinct_days"] == 1
     assert digest["sessions"]["planned"] == 5
     assert digest["sessions"]["adherence_pct"] == 20.0
-    # First-ever lift: one PR set emits heaviest_weight + 1rm + volume.
-    kinds = {p["kind"] for p in digest["prs"]}
-    assert "heaviest_weight" in kinds
-    _ok("1 session on a 5-day plan → 20% adherence, PRs surfaced")
+    # First-ever lift establishes a baseline; it is not shown as a PR.
+    assert digest["prs"] == []
+    assert digest["pr_count"] == 0
+    _ok("1 session on a 5-day plan → 20% adherence, baseline PRs omitted")
 
 
 def test_deltas_vs_prior_week() -> None:

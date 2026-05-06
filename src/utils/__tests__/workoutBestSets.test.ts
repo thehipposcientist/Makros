@@ -58,6 +58,30 @@ describe('workout best set highlights', () => {
     expect(rows[1].label).toBe('Row: 155 lb x 8');
   });
 
+  it('does not label first-session baselines as PR highlights', () => {
+    const rows = buildWorkoutBestSetHighlights([
+      {
+        name: 'Bench Press',
+        targetSets: 3,
+        targetReps: '5',
+        targetRestSeconds: 120,
+        sets: [{ setNumber: 1, weightLbs: 135, reps: 8 }],
+      },
+    ] as any, [
+      {
+        exercise_name: 'Bench Press',
+        kind: 'heaviest_weight',
+        new_value: 135,
+        old_value: 0,
+        reps: 8,
+        weight_lbs: 135,
+      },
+    ] as any);
+
+    expect(rows[0].label).toBe('Bench Press: 135 lb x 8');
+    expect(rows[0].source).toBe('set');
+  });
+
   it('falls back to existing achievement text when no set data is available', () => {
     const rows = buildWorkoutBestSetHighlights([], [], 4, ['Leg press: 300 lbs x 10']);
     expect(rows).toEqual([

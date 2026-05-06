@@ -316,6 +316,9 @@ class WorkoutSummaryRequest(BaseModel):
     focus: str
     goal: str
     weightLbs: float = 150.0
+    caloriesBurned: int | None = None
+    hrSummary: dict | None = None
+    prs: list[dict] = []
 
 
 class WarmupRequest(BaseModel):

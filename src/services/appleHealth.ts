@@ -532,7 +532,8 @@ export async function getLatestHeartRate(): Promise<number | null> {
 }
 
 // Pulls raw HR samples for a workout window and summarizes them into avg, max,
-// and minutes-in-zone. Zones are %MHR bands (220 - age formula).
+// and minutes-in-zone. When resting HR is available, zones use heart-rate
+// reserve so the summary matches the personalized training-zone endpoint.
 
 export interface WorkoutHrSummary {
   avgBpm: number;
@@ -545,6 +546,7 @@ export async function getWorkoutHrSummary(
   startMs: number,
   endMs: number,
   age: number | null = null,
+  restingHeartRate: number | null = null,
 ): Promise<WorkoutHrSummary | null> {
   const mod = getModule();
   if (!mod || typeof mod.getHeartRate !== 'function') return null;
@@ -552,6 +554,9 @@ export async function getWorkoutHrSummary(
     const samples = await mod.getHeartRate(startMs, endMs, 500);
     if (!Array.isArray(samples) || samples.length === 0) return null;
     const maxHR = age && age > 0 ? 220 - age : 190;
+    const rhr = restingHeartRate && restingHeartRate > 0 && restingHeartRate < maxHR
+      ? restingHeartRate
+      : null;
 
     let sum = 0;
     let max = 0;
@@ -569,7 +574,9 @@ export async function getWorkoutHrSummary(
       // Assign the gap until next sample (or end) to this zone.
       const nextT = i + 1 < sorted.length ? sorted[i + 1].t : endMs;
       const minutes = Math.max(0, (nextT - t) / 60000);
-      const pct = (v / maxHR) * 100;
+      const pct = rhr
+        ? ((v - rhr) / Math.max(1, maxHR - rhr)) * 100
+        : (v / maxHR) * 100;
       const zIdx = pct >= 90 ? 4 : pct >= 80 ? 3 : pct >= 70 ? 2 : pct >= 60 ? 1 : 0;
       zones[zIdx] += minutes;
     }

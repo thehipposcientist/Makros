@@ -1158,7 +1158,12 @@ def generate_workout_summary(
 
     met = _met_for_focus(body.focus)
 
-    calories_burned = max(1, round(met * weight_kg * duration_hours))
+    estimated_calories = max(1, round(met * weight_kg * duration_hours))
+    calories_burned = (
+        int(body.caloriesBurned)
+        if body.caloriesBurned is not None and int(body.caloriesBurned) > 0
+        else estimated_calories
+    )
 
     total_sets     = sum(len(ex.get("sets", [])) for ex in body.exercises)
     exercises_done = sum(1 for ex in body.exercises if len(ex.get("sets", [])) > 0)
@@ -1171,6 +1176,42 @@ def generate_workout_summary(
             reps   = best.get("reps", 0)
             if weight > 0:
                 achievements.append(f"{ex['name']}: {weight} lbs × {reps} reps")
+
+    hr_summary = body.hrSummary if isinstance(body.hrSummary, dict) else {}
+    hr_avg = hr_summary.get("avgBpm")
+    hr_max = hr_summary.get("maxBpm")
+    zone_minutes = hr_summary.get("zoneMinutes")
+    hr_line = "  (no heart-rate data)"
+    if isinstance(zone_minutes, list) and len(zone_minutes) >= 5:
+        try:
+            z2 = float(zone_minutes[1] or 0)
+            z3p = sum(float(zone_minutes[i] or 0) for i in range(2, 5))
+            hr_line = (
+                f"  Avg HR {int(round(float(hr_avg)))} bpm, max {int(round(float(hr_max)))} bpm, "
+                f"{round(z2, 1)} min Z2, {round(z3p, 1)} min Z3+"
+            )
+        except Exception:
+            hr_line = "  (heart-rate data unavailable)"
+    elif hr_avg or hr_max:
+        hr_line = f"  Avg HR {hr_avg or 'n/a'} bpm, max {hr_max or 'n/a'} bpm"
+
+    def _has_prior_best(p: dict) -> bool:
+        try:
+            return float(p.get("old_value") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    established_prs = [
+        p for p in (body.prs or [])
+        if isinstance(p, dict) and _has_prior_best(p)
+    ]
+    pr_lines = []
+    for p in established_prs[:6]:
+        name = str(p.get("exercise_name") or "Exercise")
+        kind = str(p.get("kind") or "record").replace("_", " ")
+        new_value = p.get("new_value")
+        old_value = p.get("old_value")
+        pr_lines.append(f"  {name}: {kind} {new_value} (prev {old_value})")
 
     api_key = get_openai_api_key()
     if not api_key:
@@ -1191,14 +1232,14 @@ def generate_workout_summary(
     last_session_lines = ""
     last_session_date = None
     try:
-        from app.models import WorkoutSession, ExerciseSet
+        from app.models import WorkoutSession, WorkoutExercise, ExerciseSet
         last = db.exec(
             select(WorkoutSession)
             .where(
                 WorkoutSession.user_id == current_user.id,
                 WorkoutSession.focus == body.focus,
             )
-            .order_by(WorkoutSession.workout_date.desc())
+            .order_by(WorkoutSession.workout_date.desc(), WorkoutSession.id.desc())
             .limit(2)
         ).all()
         # Skip the most recent (that's THIS session that was just logged);
@@ -1207,14 +1248,18 @@ def generate_workout_summary(
         if prior:
             last_session_date = str(prior.workout_date)
             prior_sets = db.exec(
-                select(ExerciseSet)
-                .where(ExerciseSet.session_id == prior.id)
-                .order_by(ExerciseSet.exercise_name, ExerciseSet.set_number)
+                select(WorkoutExercise.name, ExerciseSet.actual_reps, ExerciseSet.actual_weight_lbs)
+                .join(ExerciseSet, ExerciseSet.workout_exercise_id == WorkoutExercise.id)
+                .where(WorkoutExercise.session_id == prior.id)
+                .where(ExerciseSet.completed == True)  # noqa: E712
+                .order_by(WorkoutExercise.order_index, ExerciseSet.set_number)
             ).all()
             per_ex: dict[str, list[str]] = {}
-            for s in prior_sets:
-                per_ex.setdefault(s.exercise_name, []).append(
-                    f"{s.reps}×{int(s.weight_lbs)}"
+            for name, reps, weight in prior_sets:
+                if not name:
+                    continue
+                per_ex.setdefault(name, []).append(
+                    f"{int(reps or 0)}×{int(round(float(weight or 0)))}"
                 )
             last_session_lines = "\n".join(
                 f"  {name}: {', '.join(sets[:4])}"
@@ -1233,7 +1278,9 @@ def generate_workout_summary(
             "FORBIDDEN: 'Great work!', 'Keep pushing!', 'Crush it', generic motivation, "
             "'every rep counts', 'stay consistent'.\n"
             "REQUIRED: Every claim must cite a specific exercise, weight, or rep count "
-            "from today or the comparison session. If there is no comparison session, "
+            "from today or the comparison session, or an explicit heart-rate/PR signal if supplied. "
+            "Only mention PRs listed under ESTABLISHED PRS; first-session baselines are not PRs. "
+            "If there is no comparison session, "
             "say so in `comparison` and skip the comparison — do not invent one.\n\n"
             "Return JSON only. Single-sentence values, plain prose, no markdown."
         )
@@ -1244,9 +1291,13 @@ def generate_workout_summary(
             f"- Duration: {body.durationSeconds // 60} min\n"
             f"- Exercises completed: {exercises_done}\n"
             f"- Total sets logged: {total_sets}\n"
-            f"- Estimated calories burned: {calories_burned}\n"
+            f"- Calories burned: {calories_burned}\n"
+            f"- Heart rate:\n{hr_line}\n"
             f"- Top sets today:\n"
             + ("\n".join(f"  {a}" for a in achievements[:6]) or "  (none logged)")
+            + "\n\n"
+            "ESTABLISHED PRS (prior best existed before today):\n"
+            + ("\n".join(pr_lines) or "  (none)")
             + "\n\n"
             f"LAST COMPARABLE {body.focus.upper()} SESSION "
             f"({last_session_date or 'none on file'}):\n"

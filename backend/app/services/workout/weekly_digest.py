@@ -6,7 +6,8 @@ Sources:
     volume load (weight * reps summed across every logged set)
   - `meal_history.get_rolling_averages` for protein / calorie averages
   - ``detect_prs``-style logic reusing `pr_detection.epley_1rm` to
-    identify PRs hit within the window
+    identify established PRs hit within the window. First-ever baseline
+    sets are intentionally omitted from the digest's PR list.
   - The user's active `WorkoutPlan.days_per_week` for adherence %
 
 Design is intentionally pure-Python + deterministic (no AI). Returns a
@@ -110,6 +111,12 @@ def _prs_in_window(user_id: int, start: date, end: date, db: Session) -> list[di
     for s in sessions:
         try:
             for pr in detect_prs(user_id, s.id, db):
+                try:
+                    old_value = float(pr.get("old_value") or 0)
+                except (TypeError, ValueError):
+                    old_value = 0
+                if old_value <= 0:
+                    continue
                 out.append({**pr, "session_date": s.workout_date.isoformat()})
         except Exception:
             # PR is best-effort — a failure on one session shouldn't blow up the digest.

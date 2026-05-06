@@ -2790,6 +2790,9 @@ export async function getWorkoutSummary(
     focus: string;
     goal: string;
     weightLbs?: number;
+    caloriesBurned?: number;
+    hrSummary?: { avgBpm: number; maxBpm: number; zoneMinutes: number[] };
+    prs?: PRAchievement[];
   },
 ): Promise<import('../types').WorkoutSummary> {
   return request('/ai/workout-summary', {

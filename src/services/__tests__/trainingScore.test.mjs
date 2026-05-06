@@ -208,5 +208,25 @@ console.log('\n[trainingScore]\n');
   }
 }
 
+// ─── Regression: removed/skipped planned work cannot rate as "Crushed" ───────
+{
+  const halfDone = computeTrainingScore({
+    archetype: 'hypertrophy_lift',
+    goal: 'muscle_gain',
+    actualDurationSec: 28 * 60,
+    estimatedDurationSec: 55 * 60,
+    setsCompleted: 6,
+    setsPlanned: 15,
+    exercisesCompleted: 2,
+    exercisesPlanned: 5,
+    progressionAchieved: false,
+    hitTargetLoad: false,
+  });
+  assert(halfDone.score < 65, 'half-completed planned lift does not score Solid/Crushed',
+         `got ${halfDone.score} (${halfDone.rating})`);
+  assert(halfDone.rating === 'Light' || halfDone.rating === 'Below',
+         `half-completed rating is Light/Below (got ${halfDone.rating})`);
+}
+
 console.log(`\ntrainingScore: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

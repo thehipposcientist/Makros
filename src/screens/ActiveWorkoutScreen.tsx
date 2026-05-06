@@ -38,7 +38,7 @@ import ViewShot from 'react-native-view-shot';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle } from 'react-native-svg';
 import { WorkoutDay, WorkoutSession, SessionExercise, CompletedSet, WorkoutSummary, AppThemeName, WorkoutFeeling, WorkoutIntensity, SavedWorkoutTemplate, UserProfile, PlannedSet } from '../types';
-import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, savePreservedCompletedWorkout, getExerciseBests, loadWorkoutTemplates, upsertWorkoutTemplate, exerciseHistoryNamesMatch } from '../utils/workoutHistory';
+import { saveWorkoutSession, getLastSetsForExercise, dateKey, saveWorkoutSummary, updateWorkoutSummary, saveHealthSummary, saveHealthScore, isAppleHealthEnabled, loadWorkoutHistory, loadHealthSummary, savePreservedCompletedWorkout, getExerciseBests, loadWorkoutTemplates, upsertWorkoutTemplate, exerciseHistoryNamesMatch } from '../utils/workoutHistory';
 import {
   getAppleWorkoutCaloriesForWindow,
   getLatestHeartRate,
@@ -102,6 +102,10 @@ function profileAgeFromStoredProfile(profile: any): number | null {
 function shouldPromptRir(actualReps: number, targetReps: string | number | null | undefined): boolean {
   const targetMax = parseTargetRepMax(targetReps);
   return targetMax != null && actualReps >= targetMax + 2;
+}
+
+function isEstablishedPr(pr: PRAchievement): boolean {
+  return Number(pr.old_value) > 0;
 }
 
 function loadIncrementForSessionExercise(ex: SessionExercise): number {
@@ -4158,6 +4162,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // real WorkoutSession + WorkoutExercise + ExerciseSet rows for
     // downstream systems (plan reviewer, progression engine, analytics).
     let healthMetrics: { caloriesBurned?: number; hrSummary?: { avgBpm: number; maxBpm: number; zoneMinutes: number[] } } | undefined;
+    let completedPrs: PRAchievement[] = [];
     try {
       const canUseHealth = await cachedProfileIsPro();
       let healthEnabled = canUseHealth && await isAppleHealthEnabled();
@@ -4179,13 +4184,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
       if (healthEnabled && isHealthKitAvailable()) {
         let profileAge: number | null = null;
+        let restingHeartRate: number | null = null;
         try {
           const raw = await AsyncStorage.getItem('userProfile');
           if (raw) profileAge = profileAgeFromStoredProfile(JSON.parse(raw));
         } catch {}
+        try {
+          const cachedHealth = await loadHealthSummary();
+          const rhr = Number(cachedHealth?.restingHeartRate ?? null);
+          restingHeartRate = Number.isFinite(rhr) && rhr > 0 ? rhr : null;
+        } catch {}
 
         const [hrSummary, appleCalories] = await Promise.all([
-          getWorkoutHrSummary(startTime.current, now.getTime(), profileAge).catch((err) => {
+          getWorkoutHrSummary(startTime.current, now.getTime(), profileAge, restingHeartRate).catch((err) => {
             console.warn('[handleFinish] workout HR summary read failed:', err);
             return null;
           }),
@@ -4320,6 +4331,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
         // PR toast + persist on session for Progress history to show "🏆 PR!"
         const prs: PRAchievement[] = completeResp?.prs ?? [];
+        completedPrs = prs;
         setSessionPrs(prs);
         if (prs.length > 0) {
           try {
@@ -4344,23 +4356,34 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setSummaryData(null);
     try {
       const canUseAiSummary = !!authToken && await cachedProfileIsPro();
-      const s: WorkoutSummary | null = canUseAiSummary && authToken
-        ? await getWorkoutSummary(authToken, {
-          exercises: session.exercises,
-          durationSeconds: session.durationSeconds,
-          focus: session.focus,
-          goal,
-          weightLbs,
-        })
-        : {
-          caloriesBurned: healthMetrics?.caloriesBurned ?? 0,
-          motivationMessage: 'Workout logged.',
-          achievements: [],
-          recommendations: [],
-          headline: 'Workout logged',
-          coachingPoint: 'Review your sets and add notes while the session is fresh.',
-          motivation: '',
-        };
+      const establishedPrs = completedPrs.filter(isEstablishedPr);
+      const fallbackSummary: WorkoutSummary = {
+        caloriesBurned: healthMetrics?.caloriesBurned ?? 0,
+        motivationMessage: 'Workout logged.',
+        achievements: [],
+        recommendations: [],
+        headline: 'Workout logged',
+        coachingPoint: 'Review your sets and add notes while the session is fresh.',
+        motivation: '',
+      };
+      let s: WorkoutSummary | null = fallbackSummary;
+      if (canUseAiSummary && authToken) {
+        try {
+          s = await getWorkoutSummary(authToken, {
+            exercises: session.exercises,
+            durationSeconds: session.durationSeconds,
+            focus: session.focus,
+            goal,
+            weightLbs,
+            caloriesBurned: healthMetrics?.caloriesBurned,
+            hrSummary: healthMetrics?.hrSummary,
+            prs: establishedPrs,
+          });
+        } catch (e) {
+          console.log('[workout-summary] AI summary failed; using deterministic fallback:', (e as any)?.message ?? e);
+          s = fallbackSummary;
+        }
+      }
       if (s) {
         // Reuse Apple Health data fetched before logWorkoutDone — no second fetch.
         if (healthMetrics?.caloriesBurned) (s as any).caloriesBurned = healthMetrics.caloriesBurned;
@@ -4372,12 +4395,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         // Compute training score from what we just gathered. Fed into
         // the summary view + persisted on StoredWorkoutSummary so the
         // Progress chart can plot it against the day's readiness.
-        if (canUseAiSummary) try {
+        try {
           const { computeTrainingScore, archetypeFromWorkout } = await import('../services/trainingScore');
           const setsCompleted = session.exercises.reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0);
-          const setsPlanned = session.exercises.reduce((sum, ex) => sum + (typeof ex.targetSets === 'number' ? ex.targetSets : 0), 0);
+          const originalPlannedSets = (workout.exercises ?? []).reduce((sum, ex: any) => sum + getTargetSetCount(ex.targetSets ?? ex.sets), 0);
+          const currentPlannedSets = session.exercises.reduce((sum, ex) => sum + getTargetSetCount(ex.targetSets), 0);
+          const setsPlanned = Math.max(originalPlannedSets, currentPlannedSets);
           const exercisesCompleted = session.exercises.filter(ex => (ex.sets?.length ?? 0) > 0).length;
-          const exercisesPlanned = session.exercises.length;
+          const exercisesPlanned = Math.max((workout.exercises ?? []).length, session.exercises.length);
           const estimatedSec = (workout as any)?.estimatedDurationMinutes
             ? Number((workout as any).estimatedDurationMinutes) * 60
             : null;
@@ -4394,9 +4419,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             const raw = await AsyncStorage.getItem('userProfile');
             if (raw) userGoal = JSON.parse(raw)?.goal ?? null;
           } catch { /* best-effort */ }
+          const hitTargetLoad = session.exercises.some(ex => {
+            const targetReps = parseTargetRepMax(ex.targetReps);
+            const targetWeight = Number(ex.targetWeightLbs ?? 0);
+            return (ex.sets ?? []).some(set => {
+              const reps = Number(set.reps ?? 0);
+              const weight = Number(set.weightLbs ?? 0);
+              if (!Number.isFinite(reps) || reps <= 0 || targetReps == null || reps < targetReps) return false;
+              return !Number.isFinite(targetWeight) || targetWeight <= 0 || weight >= targetWeight * 0.98;
+            });
+          });
           const ts = computeTrainingScore({
             archetype,
-            goal: userGoal,
+            goal: userGoal || goal,
             actualDurationSec: session.durationSeconds,
             estimatedDurationSec: estimatedSec,
             setsCompleted, setsPlanned: setsPlanned > 0 ? setsPlanned : null,
@@ -4406,6 +4441,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             hrZoneMinutes: healthMetrics?.hrSummary?.zoneMinutes
               ? healthMetrics.hrSummary.zoneMinutes.slice(0, 5) as [number, number, number, number, number]
               : null,
+            progressionAchieved: establishedPrs.length > 0,
+            hitTargetLoad,
           });
           (s as any).trainingScore = ts.score;
           (s as any).trainingRating = ts.rating;

@@ -71,6 +71,7 @@ export function buildWorkoutBestSetHighlights(
 
   const prByExercise = new Map();
   for (const pr of prs) {
+    if (numeric(pr.old_value) <= 0) continue;
     const key = pr.exercise_name.trim().toLowerCase();
     if (!key) continue;
     const current = prByExercise.get(key);
