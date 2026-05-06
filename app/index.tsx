@@ -2165,6 +2165,10 @@ export default function Index() {
             setShowAccount(false);
             setTimeout(() => setShowTutorial(true), 200);
           }}
+          onOpenSettings={() => {
+            setShowAccount(false);
+            setTimeout(() => setShowSettings(true), 200);
+          }}
         />
       )}
 
@@ -2604,7 +2608,7 @@ function SplashLoadingScreen() {
 // ── Account Info Modal ────────────────────────────────────────────────────────
 
 function AccountInfoModal({
-  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut, onShowTutorial,
+  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut, onShowTutorial, onOpenSettings,
 }: {
   token: string;
   profile: UserProfile;
@@ -2617,6 +2621,7 @@ function AccountInfoModal({
    *  to navigate). Owner is the app root, which renders the
    *  TutorialOverlay. */
   onShowTutorial?: () => void;
+  onOpenSettings?: () => void;
 }) {
   const tc = getTheme(profile.themePreference).colors;
   const c = tc; // alias for the new Developer-logs block below
@@ -3043,6 +3048,15 @@ function AccountInfoModal({
               visible={showRecoveryModal}
               authToken={token}
               onDone={() => { setShowRecoveryModal(false); setHasRecoveryQuestion(true); }}
+            />
+          )}
+
+          {onOpenSettings && (
+            <ActionRow
+              label="Settings"
+              desc="Notifications, units (lbs/kg, mi/km), and permissions."
+              onPress={onOpenSettings}
+              testID="account-settings-open"
             />
           )}
 

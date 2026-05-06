@@ -9,13 +9,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel, create_engine, select
 from app.services.workout.week_manager import (
+    create_plan_week,
     default_training_pattern,
     training_pattern_from_preferences,
     _preferred_split_for_next_week,
     week_needs_renewal,
 )
-from app.models import PlanWeek, PlanDay
+from app.models import PlanWeek, PlanDay, User
 
 
 from dataclasses import dataclass, field as dc_field
@@ -63,6 +66,16 @@ def _make_plan_week(start_date: date, **kwargs) -> FakePlanWeek:
 
 def _make_plan_day(day_date: date, **kwargs) -> FakePlanDay:
     return FakePlanDay(day_date=day_date, **kwargs)
+
+
+def _make_engine():
+    eng = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(eng)
+    return eng
 
 
 # ─── default_training_pattern ─────────────────────────────────────────────────
@@ -167,6 +180,53 @@ def test_plan_week_days_coverage():
     assert len(rest_days) == 2
     assert training_days[0].workout_json["focus"] == "Push"
     assert training_days[4].workout_json["focus"] == "Lower"
+
+
+def test_create_plan_week_uses_calendar_weekdays_for_non_monday_start():
+    """A Mon-Fri preference must stay Mon-Fri even when the cadence starts midweek."""
+    eng = _make_engine()
+    with Session(eng) as db:
+        user = User(
+            id=101,
+            email="plan-week-calendar@test.thallo",
+            username="plan_week_calendar",
+            hashed_password="x",
+        )
+        db.add(user)
+        db.commit()
+
+        start = date(2026, 5, 6)  # Wednesday
+        workout_days = [{"focus": f"F{i}", "exercises": []} for i in range(5)]
+        pw = create_plan_week(
+            db,
+            user.id,
+            start_date=start,
+            workout_days=workout_days,
+            nutrition_templates=[],
+            training_day_pattern=[0, 1, 2, 3, 4],
+            goal="body_recomp",
+            days_per_week=5,
+            preferred_split="upper_lower",
+            planner_version="test",
+        )
+        days = list(
+            db.exec(
+                select(PlanDay)
+                .where(PlanDay.plan_week_id == pw.id)
+                .order_by(PlanDay.day_index)
+            ).all()
+        )
+
+    training_dates = [d.day_date for d in days if not d.is_rest]
+    assert training_dates == [
+        date(2026, 5, 6),
+        date(2026, 5, 7),
+        date(2026, 5, 8),
+        date(2026, 5, 11),
+        date(2026, 5, 12),
+    ]
+    assert date(2026, 5, 9) not in training_dates
+    assert date(2026, 5, 10) not in training_dates
 
 
 # ─── Adapt remaining respects locks ──────────────────────────────────────────

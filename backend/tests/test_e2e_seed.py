@@ -135,7 +135,7 @@ def test_e2e_seed_creates_full_idempotent_personas() -> None:
             .order_by(PlanDay.day_index)
         ).all()
         assert len(returning_days) == 7
-        expected_training_indices = {0, 1, 3, 4}
+        expected_training_indices = {2, 3, 5, 6}
         for idx, day in enumerate(returning_days):
             assert day.day_index == idx
             assert day.day_date == today + timedelta(days=idx)

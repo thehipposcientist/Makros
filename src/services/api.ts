@@ -461,6 +461,13 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
         )[weightEntries.length - 1]
       : null;
     const currentWeightLbs = latestWeightEntry?.weight_lbs ?? data.profile.weight_lbs;
+    const trainingDays = Array.isArray(data.preferences.training_day_pattern)
+      ? [...new Set(data.preferences.training_day_pattern)]
+          .map(d => Number(d))
+          .filter(d => Number.isInteger(d) && d >= 0 && d <= 6)
+          .map(d => (d + 1) % 7)
+          .sort((a, b) => a - b)
+      : undefined;
     // Map backend snake_case → frontend UserProfile shape
     return {
       firstName:  data.first_name ?? undefined,
@@ -482,6 +489,7 @@ export async function getMyProfile(token: string): Promise<import('../types').Us
         gender:       data.profile.gender,
       },
       daysPerWeek:            data.preferences.days_per_week,
+      trainingDays:           trainingDays?.length === data.preferences.days_per_week ? trainingDays : undefined,
       workoutDurationMinutes: data.preferences.workout_duration_minutes ?? 60,
       preferredSplit:         data.preferences.preferred_split ?? undefined,
       equipment:              data.preferences.equipment ?? [],

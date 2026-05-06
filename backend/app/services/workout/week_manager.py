@@ -164,10 +164,11 @@ def create_plan_week(
     db.add(pw)
     db.flush()
 
+    training_dows = set(training_day_pattern)
     workout_idx = 0
     for i in range(7):
         d = start_date + timedelta(days=i)
-        is_training = i in training_day_pattern
+        is_training = d.weekday() in training_dows
         is_rest = not is_training
 
         workout_payload = None

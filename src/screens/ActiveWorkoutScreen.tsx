@@ -1318,8 +1318,23 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // workout start would show yesterday's (scheduled) state because
   // iOS only delivers the latest applicationContext once, when the
   // watch app next opens — and even that delivery can race the UI.
+  // Visible "syncing watch…" indicator while the first push is in
+  // flight. Pre-fix this push ran during the 3-2-1 countdown and the
+  // JSON.stringify + native bridge call congested the JS thread,
+  // making each digit hang for a beat. Now we defer until the
+  // countdown finishes, run async, and surface a small indicator so
+  // users see that work is happening — they keep moving while the
+  // watch catches up.
+  const [watchSyncing, setWatchSyncing] = useState(false);
   useEffect(() => {
     if (!watchSessionHydrated || !activeWorkoutStateRestored) return;
+    // CRITICAL: don't push to the watch while the start countdown is
+    // animating. iOS WCSession `updateApplicationContext` and the
+    // pre-stringify of a 100KB+ envelope contend for the JS thread
+    // and the Animated.sequence completion callbacks fire late —
+    // resulting in the "3 hangs forever, then 2 hangs forever, then
+    // 1" symptom. Defer until the overlay reports complete.
+    if (showStartCountdown) return;
     // Ref-token cleanup: the async import below can resolve AFTER
     // React has already torn this effect down (e.g. workout swap mid-
     // mount). A plain `let unsubscribe` was null at cleanup time, so
@@ -1331,20 +1346,32 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         // Capture the current warmup steps (ref'd so the closure
         // always reads the freshest set — warmupSteps may get
         // replaced when the AI warmup resolves a beat after mount).
-        const pushActive = () => pushWorkoutToWatch(buildWatchWorkoutSnapshotRef.current(), {
-          dateISO: dateKey(new Date()),
-          status: 'active',
-          sessionId: watchSessionId.current,
-          warmupSteps: warmupStepsRef.current,
-          reason: 'active_snapshot',
-        })
-          .then(async () => {
-            await pushRestProgressToWatchRef.current();
-            reassertRestProgressToWatchRef.current();
+        const pushActive = () => {
+          if (!token.cancelled) setWatchSyncing(true);
+          return pushWorkoutToWatch(buildWatchWorkoutSnapshotRef.current(), {
+            dateISO: dateKey(new Date()),
+            status: 'active',
+            sessionId: watchSessionId.current,
+            warmupSteps: warmupStepsRef.current,
+            reason: 'active_snapshot',
           })
-          .catch(() => {});
-        // Initial push on mount.
-        pushActive();
+            .then(async () => {
+              await pushRestProgressToWatchRef.current();
+              reassertRestProgressToWatchRef.current();
+            })
+            .catch(() => {})
+            .finally(() => {
+              if (!token.cancelled) setWatchSyncing(false);
+            });
+        };
+        // Initial push on mount, but kicked off via setTimeout so the
+        // current JS tick can settle (rendering, timer state init, etc.)
+        // before we start the bridge call. This is the difference
+        // between "watch syncs eventually" (good) and "first set tap
+        // feels sluggish for 600ms" (bad).
+        setTimeout(() => {
+          if (!token.cancelled) { pushActive(); }
+        }, 250);
         // Snapshot the current watch status for the active header.
         // Watch launch itself is fired from the root start handler before
         // this screen mounts; doing it here caused a second launch attempt
@@ -1370,7 +1397,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       token.cancelled = true;
       if (token.unsub) { try { token.unsub(); } catch {} }
     };
-  }, [activeWorkoutStateRestored, watchSessionHydrated, workout]);
+  }, [activeWorkoutStateRestored, watchSessionHydrated, workout, showStartCountdown]);
 
   // Watch→phone command handler. The watch is a remote control for the
   // phone's workout state — log_set commits weight/reps into the same
@@ -4949,6 +4976,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               <Text style={styles.headerMetaText} numberOfLines={1}>
                 {totalLoggedSets}/{totalPlannedSets} sets logged
                 {liveHR != null && liveHR > 0 ? `  ·  ${liveHR} bpm` : ''}
+                {watchSyncing ? '  ·  syncing watch…' : ''}
               </Text>
             </View>
             <View style={styles.headerActionRow}>

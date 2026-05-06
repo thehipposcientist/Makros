@@ -9736,10 +9736,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             {/* Account */}
             <Pressable
               style={({ pressed }) => [styles.profileMenuItem, pressed && { opacity: 0.72 }]}
-              onPress={() => {
-                console.warn('[e2e] profile account pressed');
-                onViewAccount();
-              }}
+              onPress={onViewAccount}
               testID="profile-account-open"
               accessibilityLabel="profile-account-open"
               accessibilityRole="button">
@@ -14391,7 +14388,7 @@ const styles = StyleSheet.create({
   checkinCardSub: { fontSize: 12 },
   checkinCardChevron: { fontSize: 22, marginLeft: 8, fontWeight: '300' },
 
-  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 12, paddingRight: 16, paddingBottom: 10, borderBottomWidth: 1 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 12, paddingRight: 16, paddingBottom: 10, borderBottomWidth: 1, zIndex: 40 },
   headerLogoWrap: { height: 70, justifyContent: 'center', alignItems: 'flex-start' },
   headerLogo: { width: 280, height: 70 },
   headerLogoDark: { width: 280, height: 70 },
@@ -14865,7 +14862,7 @@ const styles = StyleSheet.create({
   tabText:   { fontSize: 14, fontWeight: '700', letterSpacing: 0.2 },
 
   scrollView:    { flex: 1 },
-  profileScrollView: { flex: 1, zIndex: 10 },
+  profileScrollView: { flex: 1, zIndex: 40 },
   scrollContent: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 166 },
 
   dayCard:         { backgroundColor: colors.surface, borderRadius: 22, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border, paddingHorizontal: 16, paddingBottom: 16, paddingTop: 0, marginBottom: 16, overflow: 'hidden', ...elevations.card },
