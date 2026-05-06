@@ -32,8 +32,8 @@ export function unitToLbs(value: number, unit: WeightUnit): number {
 }
 
 /** Render a weight in the user's preferred unit with sensible precision.
- *  Body weight uses 1 decimal in kg, integer in lbs (matching common app
- *  conventions). Lifting weight uses integers either way. */
+ *  Body weight uses 1 decimal in kg. Pounds stay integer unless the
+ *  stored value is a real half-step, so 22.5 lb does not render as 23 lb. */
 export function formatWeight(
   lbs: number | null | undefined,
   unit: WeightUnit = 'lbs',
@@ -41,7 +41,10 @@ export function formatWeight(
 ): string {
   if (lbs == null || !Number.isFinite(lbs)) return '—';
   const value = lbsToUnit(lbs, unit);
-  const precision = opts?.precision ?? (unit === 'kg' ? 1 : 0);
+  const defaultPrecision = unit === 'kg'
+    ? 1
+    : (Math.abs(value - Math.round(value)) > 0.001 ? 1 : 0);
+  const precision = opts?.precision ?? defaultPrecision;
   const formatted = precision > 0 ? value.toFixed(precision) : Math.round(value).toString();
   if (opts?.suffix === false) return formatted;
   return `${formatted} ${unit}`;

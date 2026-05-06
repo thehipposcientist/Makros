@@ -1364,7 +1364,7 @@ def test_feedback_patch_preserves_exercise_based_fatigue_same_focus() -> None:
     from datetime import date
     from sqlalchemy.pool import StaticPool
     from sqlmodel import SQLModel, Session, create_engine, select
-    from app.models import User, WorkoutCompletion  # noqa: F401
+    from app.models import ActivityFeedItem, User, WorkoutCompletion  # noqa: F401
     import app.models  # noqa: F401
     from app.routers.workouts import (
         CompletedExercisePayload,
@@ -1409,6 +1409,10 @@ def test_feedback_patch_preserves_exercise_based_fatigue_same_focus() -> None:
         assert row is not None
         before = dict(row.resolved_muscle_fatigue or {})
         assert before.get("quads", 0) > 0, before
+        feed_rows = s.exec(select(ActivityFeedItem).where(ActivityFeedItem.user_id == u.id)).all()
+        workout_feed_rows = [r for r in feed_rows if r.event_type == "workout_completed"]
+        assert len(workout_feed_rows) == 1, feed_rows
+        assert workout_feed_rows[0].payload["exercises"][0]["sets"][0]["weight_lbs"] == 225.0
 
         mark_workout_complete(
             WorkoutCompleteRequest(
@@ -1428,6 +1432,9 @@ def test_feedback_patch_preserves_exercise_based_fatigue_same_focus() -> None:
         assert rows[0].resolved_muscle_fatigue == before, rows[0].resolved_muscle_fatigue
         assert rows[0].feeling == "rough", rows[0].feeling
         assert rows[0].intensity == 4, rows[0].intensity
+        feed_rows = s.exec(select(ActivityFeedItem).where(ActivityFeedItem.user_id == u.id)).all()
+        workout_feed_rows = [r for r in feed_rows if r.event_type == "workout_completed"]
+        assert len(workout_feed_rows) == 1, feed_rows
     _ok("feedback updates row without replacing actual muscle fatigue")
 
 

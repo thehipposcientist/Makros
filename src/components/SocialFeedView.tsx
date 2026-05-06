@@ -18,8 +18,8 @@
 //
 // De-duplication: one card per (user_id, workout_date). A single
 // workout can produce both an auto `workout_completed` row and a manual
-// `workout_post` share. The feed groups them so workout_post beats
-// workout_completed for the headline card.
+// `workout_post` share. The feed groups them so workout_post keeps
+// the headline card while preserving the richest exercise details.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -38,6 +38,7 @@ import {
 } from '../services/api';
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import {
+  chooseSocialWorkoutFeedItem,
   compactSocialSetSummaries,
   formatSocialDistance,
   formatSocialDuration,
@@ -238,9 +239,8 @@ export default function SocialFeedView({
       const existing = groups.get(key);
       if (!existing) {
         groups.set(key, { workout: item, prs: [] });
-      } else if (item.event_type === 'workout_post' && existing.workout.event_type !== 'workout_post') {
-        // Prefer the intentional manual share over the auto-written event
-        existing.workout = item;
+      } else {
+        existing.workout = chooseSocialWorkoutFeedItem(existing.workout, item);
       }
     }
 

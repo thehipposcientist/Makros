@@ -388,6 +388,7 @@ import { nextPlanWeekStart, formatPlanStartDateShort } from '../src/utils/planEf
 import { workoutSessionToLoggedPayload } from '../src/utils/workoutLogPayload';
 import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
 import { effectiveAge } from '../src/utils/age';
+import { setActiveWatchSessionId } from '../src/utils/activeWatchSession';
 
 /** Stamp startWeightLbs + goalStartedAt when a goal is first set or changes. */
 function stampGoalStart(profile: UserProfile, previous: UserProfile | null): UserProfile {
@@ -605,7 +606,26 @@ export default function Index() {
   // windows where a watch tap could land between cleanup and the new
   // async listener registration.
   const handleStartWorkout = useCallback((workout: WorkoutDay, options?: { playCountdown?: boolean }) => {
-    setPlayStartCountdown(options?.playCountdown !== false);
+    const shouldPlayCountdown = options?.playCountdown !== false;
+    setPlayStartCountdown(shouldPlayCountdown);
+    if (shouldPlayCountdown) {
+      const startedAtMs = Date.now();
+      const sessionId = `${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
+      setActiveWatchSessionId(sessionId);
+      AsyncStorage.setItem('activeWatchSessionId', sessionId).catch(() => {});
+      AsyncStorage.setItem('activeWorkoutStartTime', String(startedAtMs)).catch(() => {});
+      import('../src/utils/watchSync')
+        .then(async ({ pushWorkoutToWatch, WatchBridge }) => {
+          await pushWorkoutToWatch(workout, {
+            dateISO: todayKey(),
+            status: 'active',
+            sessionId,
+            reason: 'active_snapshot',
+          }).catch(() => false);
+          await WatchBridge.startWatchWorkout().catch(() => false);
+        })
+        .catch(() => {});
+    }
     setActiveWorkout(workout);
   }, [setActiveWorkout]);
   const handleCancelActiveWorkout = useCallback(() => {
@@ -618,15 +638,14 @@ export default function Index() {
       const plan = raw ? JSON.parse(raw) : null;
       const today = plan?.days?.[0] as WorkoutDay | undefined;
       if (today) {
-        setPlayStartCountdown(true);
-        setActiveWorkout(today);
+        handleStartWorkout(today);
       } else {
         Alert.alert('Workout not ready', 'Open the Workout tab once so Thallo can load today’s plan.');
       }
     } catch {
       Alert.alert('Workout not ready', 'Could not load today’s workout from the shortcut.');
     }
-  }, [setActiveWorkout]);
+  }, [handleStartWorkout]);
 
   useEffect(() => {
     if (!authToken || !userProfile) return;

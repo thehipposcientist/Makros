@@ -263,13 +263,12 @@ def test_feed_sanitizer_keeps_workout_metrics_and_removes_sensitive_fields():
             "sets": [{
                 "reps": 5,
                 "weight": 225,
-                "weight_lbs": 225,
                 "calories": 80,
-                "duration_seconds": 90,
-                "actual_distance": 0.25,
-                "actual_pace": "8:00 /mi",
-                "heart_rate_avg": 142,
-                "cardio_metrics": {
+                "durationSeconds": 90,
+                "actualDistance": 0.25,
+                "actualPace": "8:00 /mi",
+                "heartRateAvg": 142,
+                "cardioMetrics": {
                     "speed": "7.5 mph",
                     "calories": "80",
                     "body_weight_lbs": "185",
@@ -303,10 +302,15 @@ def test_feed_sanitizer_keeps_post_metrics_and_removes_sensitive_fields():
             "duration_seconds": 3600,
             "date": "2026-05-01",
             "calories": 700,
+            "activity_category": "cardio",
+            "activity_subtype": "run",
+            "cardio_style": "steady",
+            "distanceMiles": 3.1,
+            "hrSummary": {"avg_bpm": 144, "max_bpm": 171},
             "exercises": [{
                 "name": "Back Squat",
                 "equipment": "barbell",
-                "sets": [{"reps": 3, "weight_lbs": 315, "cardio_metrics": {"calories": "25"}}],
+                "sets": [{"reps": 3, "weightLbs": 315, "cardioMetrics": {"calories": "25"}}],
             }],
             "total_sets": 1,
             "total_reps": 3,
@@ -315,6 +319,8 @@ def test_feed_sanitizer_keeps_post_metrics_and_removes_sensitive_fields():
     dumped = json.dumps(clean).lower()
     assert clean["caption"] == "Solid session"
     assert clean["workout_summary"]["exercises"][0]["sets"] == [{"reps": 3, "weight_lbs": 315.0}]
+    assert clean["workout_summary"]["distance_miles"] == 3.1
+    assert clean["workout_summary"]["hr_summary"] == {"avgBpm": 144, "maxBpm": 171}
     assert "body_weight" not in dumped
     assert "calorie" not in dumped
     _ok("manual post payload keeps caption/photo plus sanitized workout metrics")

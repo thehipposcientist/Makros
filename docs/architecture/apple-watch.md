@@ -18,7 +18,7 @@ Active workout exercise rows can include `plannedTargetWeightLbs` and up to five
 **Inbound (watch → phone):**
 `start_workout`, `skip_workout`, `cancel_workout`, `end_workout`, `log_set`, `swap_exercise`, `toggle_meal`, `log_hydration`, `toggle_supplement`, `take_all_supplements`, `pull_state`.
 
-`log_set` includes weight/reps/duration and, when the watch user overshoots the target rep range, an optional `rir` value captured on-watch before the command is sent.
+`log_set` includes `exerciseIndex`, explicit 1-indexed `setNumber`, weight/reps/duration and, when the watch user overshoots the target rep range, an optional `rir` value captured on-watch before the command is sent. The phone commits the set locally first and runs rest notifications, recommendations, and `/workouts/sync` as follow-up side effects so a slow backend or notification permission path cannot block later watch taps.
 
 Watch commands carry a `commandId`; the phone bridge de-dupes recent IDs so `sendMessage` fallback to `transferUserInfo` cannot double-apply a set log or end command.
 
@@ -31,6 +31,8 @@ Rest timers are synced as live progress with an absolute `restEndsAtMs`. The nat
 **Pull-on-wake handshake:**
 Watch fires `pull_state` on `WCSession.activate` + `sessionReachabilityDidChange(reachable=true)` + SwiftUI `scenePhase == .active`. Phone responds with fresh full snapshot.
 If a phone rest timer is currently active, the phone also sends a fresh `pushProgressToWatch` after the snapshot so the watch receives an absolute `restEndsAtMs` even when it joins mid-rest.
+
+**Phone-start behavior:** phone Start pre-stamps `activeWatchSessionId` / `activeWorkoutStartTime`, pushes an `active_snapshot` immediately, then calls the native bridge's `HKHealthStore.startWatchApp(with:)` path. The watch app handles that launch via `WKApplicationDelegate.handle(_:)`, requests a pull, and opens `ActiveWorkoutView` as soon as the active snapshot arrives. If watchOS declines the launch or reachability does not come up shortly after, the phone shows a nudge telling the user to open Thallo on the watch; the workout is already queued, so no second Start tap should be needed.
 
 **Key implementation decisions:**
 - `isPaired` silent gate **REMOVED** — it dropped payloads during transient unpaired states. Now only `isAvailable()` (platform support) gates pushes.

@@ -124,6 +124,11 @@ function loadIncrementForSessionExercise(ex: SessionExercise): number {
   return 5;
 }
 
+function isDumbbellLoadExercise(ex: { name?: string | null; equipment?: string | null } | null | undefined): boolean {
+  const text = `${ex?.equipment ?? ''} ${ex?.name ?? ''}`.toLowerCase();
+  return /\bdumbbell(s)?\b|\bdb\b/.test(text);
+}
+
 function buildRirNextSetSuggestion(
   ex: SessionExercise,
   loggedSet: CompletedSet,
@@ -149,7 +154,7 @@ function buildRirNextSetSuggestion(
     cue = 'That was clearly under target effort. Add load on the next set.';
   }
   const displayWeight = formatWeight(nextWeight, weightUnit, {
-    precision: weightUnit === 'kg' ? 1 : 0,
+    precision: undefined,
   });
   const nextTarget = `Set ${nextSetNumber}: ${displayWeight} x ${targetReps}`;
   return {
@@ -1092,14 +1097,29 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }, [loadCachedProfile]);
     const displayWeight = useCallback((lbs: number | null | undefined, opts?: { precision?: number; suffix?: boolean }) =>
       formatWeight(lbs, weightUnit, {
-        precision: opts?.precision ?? (weightUnit === 'kg' ? 1 : 0),
+        precision: opts?.precision,
         suffix: opts?.suffix,
       }),
     [weightUnit]);
+    const displayExerciseWeight = useCallback((
+      lbs: number | null | undefined,
+      ex: { name?: string | null; equipment?: string | null } | null | undefined,
+      opts?: { precision?: number; suffix?: boolean },
+    ) => {
+      const base = displayWeight(lbs, opts);
+      return opts?.suffix === false || !isDumbbellLoadExercise(ex) ? base : `${base} each`;
+    }, [displayWeight]);
+    const exerciseWeightSuffix = useCallback((
+      ex: { name?: string | null; equipment?: string | null } | null | undefined,
+    ) => isDumbbellLoadExercise(ex) ? `${weightSuffix(weightUnit)} each` : weightSuffix(weightUnit), [weightUnit]);
     const displayWeightNumber = useCallback((lbs: number | null | undefined) => {
       if (lbs == null || !Number.isFinite(Number(lbs))) return '';
       const value = lbsToUnit(Number(lbs), weightUnit);
-      return weightUnit === 'kg' ? String(Math.round(value * 10) / 10) : String(Math.round(value));
+      if (weightUnit === 'kg') return String(Math.round(value * 10) / 10);
+      const rounded = Math.round(value);
+      return Math.abs(value - rounded) < 0.001
+        ? String(rounded)
+        : String(Math.round(value * 10) / 10);
     }, [weightUnit]);
     const parseInputWeightLbs = useCallback((raw: string | number | undefined | null): number => {
       const value = typeof raw === 'number' ? raw : parseFloat(String(raw ?? ''));
@@ -1179,13 +1199,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // persisted start time on mount, the user is resuming after a
   // background / app restart and the countdown would be jarring.
   const [showStartCountdown, setShowStartCountdown] = useState(
-    () => playStartCountdown && !getActiveWatchSessionId(),
+    () => playStartCountdown,
   );
-  // When the phone starts a workout and the user has a paired but
-  // currently-closed Thallo watch app, we can't auto-launch it — iOS
-  // blocks that. So we nudge: show a dismissable prompt telling the
-  // user to open Thallo on the watch. Auto-hides the moment the watch
-  // reports reachable (i.e., the user opened it).
+  // When the phone starts a workout and the paired watch does not
+  // become reachable after the HealthKit launch request, show a
+  // dismissable prompt telling the user to open Thallo on the watch.
+  // Auto-hides the moment the watch reports reachable.
   const [showOpenWatchPrompt, setShowOpenWatchPrompt] = useState(false);
   const [watchStatus, setWatchStatus] = useState<{ paired: boolean; reachable: boolean } | null>(null);
   const watchSessionId = useRef(getActiveWatchSessionId() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -1214,15 +1233,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         ? savedSessionIdRaw.trim()
         : null;
       const liveSessionId = getActiveWatchSessionId();
-      const isWatchInitiatedEmptyStart = Boolean(
+      const isSameProcessEmptyStart = Boolean(
         hasValidSavedStart
         && !hasLoggedSets
         && savedSessionId
         && liveSessionId
         && savedSessionId === liveSessionId,
       );
-      if (hasValidSavedStart && (hasLoggedSets || isWatchInitiatedEmptyStart)) {
-        setShowStartCountdown(false);
+      const isWatchInitiatedEmptyStart = Boolean(
+        isSameProcessEmptyStart
+        && savedSessionId?.startsWith('watch-')
+      );
+      if (hasValidSavedStart && (hasLoggedSets || isSameProcessEmptyStart)) {
+        setShowStartCountdown(hasLoggedSets || isWatchInitiatedEmptyStart ? false : playStartCountdown);
         startTime.current = savedStartMs;
         if (savedSessionId) {
           watchSessionId.current = savedSessionId;
@@ -1243,9 +1266,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       AsyncStorage.setItem('activeWorkoutStartTime', String(startTime.current)).catch(() => {});
       AsyncStorage.setItem('activeWatchSessionId', watchSessionId.current).catch(() => {});
       setWatchSessionHydrated(true);
-      // Fresh phone start — play the countdown. A same-process
-      // watch-initiated start keeps its pre-seeded session id above and
-      // skips this so the wrist stays local-first.
+      // Brand-new mount without a pre-seeded session — use the local
+      // session id and play the countdown for phone starts. Same-process
+      // phone/watch starts reuse their pre-seeded session above.
       setShowStartCountdown(playStartCountdown);
     }).catch(() => {
       startTime.current = Date.now();
@@ -1320,14 +1343,36 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           .catch(() => {});
         // Initial push on mount.
         pushActive();
-        // If the watch is paired but not reachable right now, keep
-        // that as passive status only. Starting a workout on the
-        // phone should never be blocked by a watch-open prompt.
+        // If this is a phone-originated start, ask watchOS to open the
+        // companion app after the active snapshot is queued. A normal
+        // WCSession push cannot launch a closed watch app; the
+        // HealthKit startWatchApp path can. Fall back to a nudge only
+        // if watchOS declines or the app still isn't reachable shortly
+        // after the request.
         try {
           const paired = WatchBridge.isPaired();
           const reachable = isWatchReachable();
           setWatchStatus({ paired, reachable });
-          if (!reachable) setShowOpenWatchPrompt(false);
+          if (!paired || reachable || !playStartCountdown) {
+            setShowOpenWatchPrompt(false);
+          } else {
+            WatchBridge.startWatchWorkout()
+              .then((opened) => {
+                if (token.cancelled) return;
+                if (!opened) {
+                  setShowOpenWatchPrompt(true);
+                  return;
+                }
+                setTimeout(() => {
+                  if (!token.cancelled && !isWatchReachable()) {
+                    setShowOpenWatchPrompt(true);
+                  }
+                }, 2500);
+              })
+              .catch(() => {
+                if (!token.cancelled) setShowOpenWatchPrompt(true);
+              });
+          }
         } catch { /* bridge optional */ }
         // Re-push whenever the watch becomes reachable. Idempotent.
         const unsub = onWatchReachabilityChange((info) => {
@@ -1347,7 +1392,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       token.cancelled = true;
       if (token.unsub) { try { token.unsub(); } catch {} }
     };
-  }, [activeWorkoutStateRestored, watchSessionHydrated, workout]);
+  }, [activeWorkoutStateRestored, playStartCountdown, watchSessionHydrated, workout]);
 
   // Watch→phone command handler. The watch is a remote control for the
   // phone's workout state — log_set commits weight/reps into the same
@@ -1469,6 +1514,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           if (activeWorkoutCommands.has(command) && !rememberWatchCommandId(payload)) return;
           if (command === 'log_set') {
             const exIdx = Number(payload?.exerciseIndex ?? -1);
+            const incomingSetNumber = Number(payload?.setNumber ?? NaN);
             const weight = payload?.weightLbs;
             const reps = payload?.reps;
             const rir = Number(payload?.rir ?? NaN);
@@ -1480,9 +1526,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 if (exIdx < 0 || !Number.isFinite(exIdx)) return;
                 const exs = exercisesRef.current;
                 if (!exs[exIdx]) return;
-                // Slot = next unfilled set slot for this exercise.
-                const slot = exs[exIdx].sets.length;
-                await handleLogSetInlineRef.current(
+                // Prefer the watch's explicit set number so delayed or
+                // transferUserInfo-delivered commands still land in the
+                // intended slot instead of whatever is currently next.
+                const slot = Number.isFinite(incomingSetNumber) && incomingSetNumber > 0
+                  ? Math.max(0, Math.floor(incomingSetNumber) - 1)
+                  : exs[exIdx].sets.length;
+                Promise.resolve(handleLogSetInlineRef.current(
                   exIdx,
                   slot,
                   true, // silent — no Alerts, watch already confirmed
@@ -1493,7 +1543,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   reps != null ? String(reps) : undefined,
                   Number.isFinite(actionAtMs) && actionAtMs > 0 ? actionAtMs : undefined,
                   Number.isFinite(rir) ? Math.max(0, Math.min(4, Math.round(rir))) : undefined,
-                );
+                )).catch(() => undefined);
               });
             watchLogSetChainRef.current.catch(() => undefined);
           } else if (command === 'skip_rest') {
@@ -2574,7 +2624,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const hint = index === opts?.skipHintIndex ? undefined : preSetHints[index];
       const recommendedWeight = guide ? null : hint?.recommendedWeight ?? ex.targetWeightLbs ?? null;
 	      const recommendation = guide ? null : hint?.recommendedWeight != null
-	        ? `Try ${displayWeight(hint.recommendedWeight)}${hint.recommendedReps ? ` x ${hint.recommendedReps}` : ''}`
+	        ? `Try ${displayExerciseWeight(hint.recommendedWeight, ex)}${hint.recommendedReps ? ` x ${hint.recommendedReps}` : ''}`
         : ex.aiRecommendation;
       return {
         name: ex.name,
@@ -2596,7 +2646,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         })),
       };
     }),
-	  }), [displayWeight, preSetHints, swapCandidatesForExercise, workout]);
+	  }), [displayExerciseWeight, preSetHints, swapCandidatesForExercise, workout]);
 
   buildWatchWorkoutSnapshotRef.current = buildWatchWorkoutSnapshot;
 
@@ -3085,7 +3135,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const clearedAfterRestStarted = Boolean(sourceActionAtMs && lastRestClearedAtMsRef.current >= restStartedAtMs);
       const nextSetLabel = timed
         ? `Set ${cleanSets.length + 1}: ${ex.targetReps}`
-        : `Set ${cleanSets.length + 1}: ${displayWeight(newSet.weightLbs)} x ${ex.targetReps}`;
+        : `Set ${cleanSets.length + 1}: ${displayExerciseWeight(newSet.weightLbs, ex)} x ${ex.targetReps}`;
       if (!clearedAfterRestStarted && remainingRestSeconds > 0) {
         restDurationSeconds.current = restSeconds;
         setRestForExercise(ex.name);
@@ -3114,13 +3164,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             reassertRestProgressToWatchRef.current();
           } catch { /* watch bridge optional */ }
         })();
-        await rescheduleRestNotificationsRef.current({
+        rescheduleRestNotificationsRef.current({
           seconds: remainingRestSeconds,
           exerciseName: ex.name,
           nextSetLabel,
           aiCue: null,
           includeStartAlert: sourceActionAtMs == null,
-        });
+        }).catch(() => undefined);
       } else if (!sourceActionAtMs || restStartAtRef.current <= restStartedAtMs) {
         clearRestStateRef.current();
       }
@@ -3145,7 +3195,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } else if (pendingRir?.exIdx === exIdx) {
       setPendingRir(null);
     }
-  }, [authToken, clearLiveRecommendationState, displayWeight, exercises, getEffectiveTargetSetCount, parseInputWeightLbs, pendingRir, setInputs, workout.focus, workout.stimulus]);
+  }, [authToken, clearLiveRecommendationState, displayExerciseWeight, exercises, getEffectiveTargetSetCount, parseInputWeightLbs, pendingRir, setInputs, workout.focus, workout.stimulus]);
   handleLogSetInlineRef.current = handleLogSetInline;
 
   const openAddExerciseModal = useCallback(async () => {
@@ -3720,7 +3770,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Start rest timer automatically if more sets remain for this exercise.
     if (!guide && updatedSets.length < targetSetCount) {
       const restSeconds = Math.max(15, ex.targetRestSeconds || 60);
-      const nextSetLabel = `Set ${updatedSets.length + 1}: ${displayWeight(weightNum)} x ${ex.targetReps}`;
+      const nextSetLabel = `Set ${updatedSets.length + 1}: ${displayExerciseWeight(weightNum, ex)} x ${ex.targetReps}`;
       restDurationSeconds.current = restSeconds;
       setRestForExercise(ex.name);
       setRestRemaining(restSeconds);
@@ -3862,7 +3912,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       const setN = setsForExercise.length + 1;
       const last = setsForExercise[setsForExercise.length - 1];
 	      const baseTip = last && Number(last.weightLbs) > 0
-	        ? `Set ${setN}: aim to match ${displayWeight(last.weightLbs)} for ${last.reps || ex.targetReps} reps with clean form.`
+	        ? `Set ${setN}: aim to match ${displayExerciseWeight(last.weightLbs, ex)} for ${last.reps || ex.targetReps} reps with clean form.`
         : `Set ${setN}: use a comfortable load for ${ex.targetReps} clean reps.`;
       setRestNextTarget(`Set ${setN}: ${ex.targetReps} reps`);
       setRestCue(baseTip);
@@ -3893,7 +3943,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         equipment: ex.equipment,
         primaryMuscle: ex.primaryMuscle ?? undefined,
       });
-	      const recWeightText = displayWeight(rec.weightLbs);
+	      const recWeightText = displayExerciseWeight(rec.weightLbs, ex);
 	      const tip = `Set ${setsForExercise.length + 1}: try ${recWeightText} x ${rec.reps} reps — ${rec.tip}`;
 	      setRestNextTarget(`Set ${setsForExercise.length + 1}: ${recWeightText} x ${rec.reps}`);
       setRestCue(rec.tip);
@@ -3925,7 +3975,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } finally {
       setAiLoadingIdx(null);
     }
-	  }, [authToken, cachedProfileIsPro, clearLiveRecommendationState, displayWeight, exercises, getEffectiveTargetSetCount, goal, rescheduleRestNotifications, restForExercise, restRemaining, theme.colors.primary, workout.focus, workout.stimulus]);
+	  }, [authToken, cachedProfileIsPro, clearLiveRecommendationState, displayExerciseWeight, exercises, getEffectiveTargetSetCount, goal, rescheduleRestNotifications, restForExercise, restRemaining, theme.colors.primary, workout.focus, workout.stimulus]);
 
   const maybeRefreshRecommendationForExercise = useCallback(async (
     exIdx: number,
@@ -5236,7 +5286,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   })()}
                   {bestLastSet && bestLastSet.weightLbs > 0 && !isDone && (
                     <Text style={{ fontSize: 13, color: themeColors.primary, fontWeight: '700', marginTop: 1 }}>
-                      Last: {displayWeight(bestLastSet.weightLbs, { suffix: false })}×{bestLastSet.reps} {weightSuffix(weightUnit)}
+                      Last: {displayExerciseWeight(bestLastSet.weightLbs, ex)} × {bestLastSet.reps}
                     </Text>
                   )}
                 </View>
@@ -5379,13 +5429,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       borderRadius: 8, marginTop: 8, marginBottom: 4,
                     }}>
                       <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                        Recommended weight
+                        {isDumbbellLoadExercise(ex) ? 'Recommended weight (each)' : 'Recommended weight'}
                       </Text>
                       <Text
                         testID={`pre-set-recommended-weight-value-${i}`}
-                        accessibilityLabel={`Recommended weight ${displayWeight(preSetHints[i].recommendedWeight!)}${preSetHints[i].recommendedReps ? ` x ${preSetHints[i].recommendedReps}` : ''}`}
+                        accessibilityLabel={`Recommended weight ${displayExerciseWeight(preSetHints[i].recommendedWeight!, ex)}${preSetHints[i].recommendedReps ? ` x ${preSetHints[i].recommendedReps}` : ''}`}
                         style={{ fontSize: 18, fontWeight: '800', color: themeColors.textPrimary, marginTop: 2 }}>
-	                        {displayWeight(preSetHints[i].recommendedWeight!)}
+	                        {displayExerciseWeight(preSetHints[i].recommendedWeight!, ex)}
                         {preSetHints[i].recommendedReps ? (
                           <Text style={{ fontSize: 14, fontWeight: '600', color: themeColors.textSecondary }}>
                             {' '}× {preSetHints[i].recommendedReps}
@@ -5709,7 +5759,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           return (
                         <View style={styles.inlineSetsHeader}>
                           <Text style={[styles.inlineSetsLabel, { width: 20, flex: 0 }]}>#</Text>
-                          {!hideWeight && <Text style={styles.inlineSetsLabel}>Weight ({weightSuffix(weightUnit)})</Text>}
+                          {!hideWeight && <Text style={styles.inlineSetsLabel}>Weight ({exerciseWeightSuffix(ex)})</Text>}
                           <Text style={styles.inlineSetsLabel}>{hideReps ? 'Duration' : 'Reps'}</Text>
                           <Text style={styles.inlineSetsLabel}>Last time</Text>
                           <View style={{ width: 40 }} />
@@ -5830,7 +5880,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   }
                                 }}
                                 keyboardType="decimal-pad"
-	                                placeholder={weightSuffix(weightUnit)}
+	                                placeholder={exerciseWeightSuffix(ex)}
                                 placeholderTextColor={themeColors.textMuted}
                                 selectTextOnFocus
                               />}
@@ -6196,7 +6246,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
               <View style={styles.logInputRow}>
                 <View style={styles.logInputWrap}>
-                  <Text style={styles.logInputLabel}>Weight ({weightSuffix(weightUnit)})</Text>
+                  <Text style={styles.logInputLabel}>Weight ({exerciseWeightSuffix(exercises[logExIdx])})</Text>
                   <TextInput
                     style={styles.logInput}
                     value={logWeight}
@@ -6794,7 +6844,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           <View style={[styles.finishModal, { padding: 24, gap: 14 }]}>
             <Text style={[styles.summaryTitle, { fontSize: 18 }]}>Edit Set</Text>
             <View style={{ gap: 10 }}>
-              <Text style={{ color: themeColors.textSecondary, fontSize: 13, fontWeight: '600' }}>Weight ({weightSuffix(weightUnit)})</Text>
+              <Text style={{ color: themeColors.textSecondary, fontSize: 13, fontWeight: '600' }}>Weight ({exerciseWeightSuffix(exercises[editSetExIdx])})</Text>
               <TextInput
                 value={editSetWeight}
                 onChangeText={setEditSetWeight}
@@ -7029,11 +7079,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }}
       />
 
-      {/* Open-on-watch nudge. iOS can't auto-launch the watch app from
-          the phone, so when a user starts a workout on the phone and
-          the watch app is closed, tell them to open Thallo on their
-          wrist to mirror the session. Auto-dismisses the moment the
-          watch reports reachable (reachability listener flips it). */}
+      {/* Open-on-watch nudge. If watchOS declines the phone's HealthKit
+          launch request or reachability does not come up shortly after,
+          tell the user to open Thallo manually. Auto-dismisses the
+          moment the watch reports reachable. */}
       <Modal
         visible={showOpenWatchPrompt}
         transparent
@@ -7061,7 +7110,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               Open Thallo on your watch
             </Text>
             <Text style={{ fontSize: 12, color: themeColors.textSecondary, textAlign: 'center', marginTop: 8, lineHeight: 17 }}>
-              Launch the Thallo app on your Apple Watch and tap Start — your phone workout and watch will stay in sync from there.
+              The workout is already queued. Launch Thallo on your Apple Watch and it will rejoin this phone session.
             </Text>
             <TouchableOpacity
               onPress={() => setShowOpenWatchPrompt(false)}

@@ -239,16 +239,18 @@ def test_strength_load_settings_snap_to_available_weights() -> None:
     assert load_increment_lbs("Dumbbells", dumbbell_settings, fallback=2.5) == 5
     assert snap_load_lbs(52.5, "Dumbbells", dumbbell_settings, fallback_increment=5) == 50
     assert snap_load_lbs(17, "Dumbbells", dumbbell_settings, fallback_increment=5) == 15
-    assert snap_load_lbs(27.8, "Dumbbells", None, fallback_increment=2.5) == 27.8
-    assert load_increment_lbs("Dumbbells", None, fallback=0) == 1.0
+    assert snap_load_lbs(27.8, "Dumbbells", None, fallback_increment=2.5) == 30
+    assert load_increment_lbs("Dumbbells", None, fallback=0) == 5.0
 
     plate_settings = {"barbell": {"barWeightLbs": 45, "platePairsLbs": [10]}}
     assert load_increment_lbs("Barbell", plate_settings, fallback=5) == 20
     assert snap_load_lbs(146, "Barbell", plate_settings, fallback_increment=20) == 145
     assert snap_load_lbs(142.5, "Barbell", plate_settings, fallback_increment=20) == 125
 
-    assert snap_load_lbs(82.5, "Cable machine", None, fallback_increment=5) == 82.5
-    _ok("adjustable dumbbell, plate-loaded, and missing-setting paths behave")
+    assert snap_load_lbs(82.5, "Cable machine", None, fallback_increment=5) == 85
+    assert snap_load_lbs(57.5, "T-bar", None, fallback_increment=5) == 60
+    assert snap_load_lbs(22.5, "Dumbbells", None, fallback_increment=2.5) == 25
+    _ok("adjustable dumbbell, plate-loaded, and missing-setting paths snap to usable loads")
 
 
 def test_scan_equipment_list_covers_new_equipment_names() -> None:

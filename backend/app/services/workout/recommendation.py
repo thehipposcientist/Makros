@@ -88,12 +88,59 @@ def _round_to_plate(weight_lbs: float, increment: float = 2.5) -> float:
     return round(round(weight_lbs / increment) * increment, 1)
 
 
+def _equipment_text(exercise: dict | None) -> str:
+    if not isinstance(exercise, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("equipment_bucket", "equipment", "name", "slug"):
+        value = exercise.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("slug") or item.get("name") or ""))
+                else:
+                    parts.append(str(item))
+        elif value is not None:
+            parts.append(str(value))
+    return " ".join(parts).lower().replace("-", "_").replace(" ", "_")
+
+
+def _uses_per_dumbbell_load(exercise: dict | None) -> bool:
+    """Whether logged/recommended load is one dumbbell, not the pair total."""
+    text = _equipment_text(exercise)
+    return "dumbbell" in text or "_db_" in f"_{text}_"
+
+
+def _display_to_total_factor(exercise: dict | None) -> float:
+    return 2.0 if _uses_per_dumbbell_load(exercise) else 1.0
+
+
+def _load_unit_transfer_factor(source_exercise: dict | None, target_exercise: dict | None) -> float:
+    """Convert a source profile's displayed load into target display units.
+
+    Dumbbell movements are logged as the load of one dumbbell. Barbell,
+    T-bar, cable, and machine movements are logged as total implement/stack
+    load. When transferring between those worlds, normalize through a rough
+    total-load equivalent so a 110 lb T-bar row does not become a 110 lb
+    dumbbell row per hand, and a 55 lb dumbbell row does not become a 55 lb
+    T-bar row.
+    """
+    return _display_to_total_factor(source_exercise) / _display_to_total_factor(target_exercise)
+
+
+def _recommendation_increment(target_exercise: dict) -> float:
+    if _uses_per_dumbbell_load(target_exercise):
+        return 5.0 if target_exercise.get("is_compound") else 2.5
+    return 5.0 if target_exercise.get("is_compound") else 2.5
+
+
 def _estimate_working_weight(
     profile: ExercisePerformance,
     target_reps: Optional[str],
     *,
     transfer_factor: float = 1.0,
     increment: float = 2.5,
+    load_unit_factor: float = 1.0,
 ) -> float:
     """Convert a performance profile into a working weight for the
     target rep range, with an optional discount when the profile comes
@@ -109,7 +156,7 @@ def _estimate_working_weight(
         return 0.0
     reps = max(1, min(20, _mid_reps(target_reps)))
     pct = _RPE_PCT.get(reps, 0.75)
-    working = profile.estimated_1rm_lbs * pct * transfer_factor
+    working = profile.estimated_1rm_lbs * load_unit_factor * pct * transfer_factor
     return _round_to_plate(working, increment=increment)
 
 
@@ -203,7 +250,7 @@ def recommend_starting_weight(
     """Layered lookup for a planned exercise. See module docstring."""
     target_slug = target_exercise.get("slug") or ""
     target_name = target_exercise.get("name") or target_slug
-    target_inc = 5.0 if target_exercise.get("is_compound") else 2.5
+    target_inc = _recommendation_increment(target_exercise)
 
     # Tier 1: exact history. Confidence calibration:
     #   1 session  → 0.53  (some data, but one point is weak)
@@ -249,8 +296,13 @@ def recommend_starting_weight(
         best = _pick_most_recent(candidates)
         if best is not None:
             slug, p = best
+            source_ex = all_exercises_by_slug.get(slug)
             weight = _estimate_working_weight(
-                p, target_reps, transfer_factor=0.95, increment=target_inc,
+                p,
+                target_reps,
+                transfer_factor=0.95,
+                increment=target_inc,
+                load_unit_factor=_load_unit_transfer_factor(source_ex, target_exercise),
             )
             if weight > 0:
                 name = all_exercises_by_slug[slug].get("name", slug)
@@ -289,8 +341,13 @@ def recommend_starting_weight(
         best = _pick_best_1rm(candidates)
         if best is not None:
             slug, p = best
+            source_ex = all_exercises_by_slug.get(slug)
             weight = _estimate_working_weight(
-                p, target_reps, transfer_factor=0.85, increment=target_inc,
+                p,
+                target_reps,
+                transfer_factor=0.85,
+                increment=target_inc,
+                load_unit_factor=_load_unit_transfer_factor(source_ex, target_exercise),
             )
             if weight > 0:
                 name = all_exercises_by_slug[slug].get("name", slug)
@@ -329,8 +386,13 @@ def recommend_starting_weight(
         best = _pick_best_1rm(candidates)
         if best is not None:
             slug, p = best
+            source_ex = all_exercises_by_slug.get(slug)
             weight = _estimate_working_weight(
-                p, target_reps, transfer_factor=0.75, increment=target_inc,
+                p,
+                target_reps,
+                transfer_factor=0.75,
+                increment=target_inc,
+                load_unit_factor=_load_unit_transfer_factor(source_ex, target_exercise),
             )
             if weight > 0:
                 # Muscle-bucket transfer: the data is about the right
@@ -353,6 +415,8 @@ def recommend_starting_weight(
     if exp_key not in ("beginner", "intermediate", "advanced"):
         exp_key = "intermediate"
     weight = _CATEGORY_DEFAULTS.get((cat, exp_key), 45.0)
+    if _uses_per_dumbbell_load(target_exercise) and cat in ("upper_push", "upper_pull", "squat", "hinge"):
+        weight = _round_to_plate(weight / 2.0, increment=target_inc)
     pretty_cat = cat.replace("_", " ")
     return WeightRecommendation(
         weight_lbs=weight,

@@ -7,6 +7,8 @@
 //     are immediate.
 //   • syncTheme({...palette}) — pushes the user's current theme colors.
 //   • syncHydration({...}) — pushes today's water total + target.
+//   • startWatchWorkout() — asks watchOS to launch the companion app
+//     for the active phone-started workout via HealthKit.
 //   • updateProgress({exerciseIndex, setNumber, restRemainingSec,
 //                     restEndsAtMs, progressRevision, sessionId,
 //                     recommendation}) — live mid-workout updates.

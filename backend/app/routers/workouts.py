@@ -1803,40 +1803,41 @@ def mark_workout_complete(
     except Exception as e:
         logger.info(f"[workouts/complete] muscle fatigue resolution failed (non-fatal): {e}")
 
-    try:
-        from app.routers.social import write_activity
-        write_activity(db, current_user.id, "workout_completed", {
-            "focus": body.focus_label,
-            "duration_seconds": body.duration_seconds,
-            "date": str(body.workout_date),
-            "exercise_count": len(body.exercises) if body.exercises else 0,
-            "activity_category": body.activity_category,
-            "activity_subtype": body.activity_subtype,
-            "cardio_style": body.cardio_style,
-            "distance_miles": body.distance_miles,
-            "hr_summary": body.hr_summary,
-            "exercises": [
-                {
-                    "name": ex.name,
-                    "equipment": ex.equipment,
-                    "sets": [
-                        {
-                            "reps": s.reps,
-                            "weight_lbs": s.weight_lbs,
-                            "duration_seconds": s.duration_seconds,
-                            "actual_distance": s.actual_distance,
-                            "actual_pace": s.actual_pace,
-                            "heart_rate_avg": s.heart_rate_avg,
-                            "cardio_metrics": s.cardio_metrics,
-                        }
-                        for s in ex.sets
-                    ],
-                }
-                for ex in (body.exercises or [])
-            ],
-        })
-    except Exception:
-        pass
+    if not feedback_only_patch:
+        try:
+            from app.routers.social import write_activity
+            write_activity(db, current_user.id, "workout_completed", {
+                "focus": body.focus_label,
+                "duration_seconds": body.duration_seconds,
+                "date": str(body.workout_date),
+                "exercise_count": len(body.exercises) if body.exercises else 0,
+                "activity_category": body.activity_category,
+                "activity_subtype": body.activity_subtype,
+                "cardio_style": body.cardio_style,
+                "distance_miles": body.distance_miles,
+                "hr_summary": body.hr_summary,
+                "exercises": [
+                    {
+                        "name": ex.name,
+                        "equipment": ex.equipment,
+                        "sets": [
+                            {
+                                "reps": s.reps,
+                                "weight_lbs": s.weight_lbs,
+                                "duration_seconds": s.duration_seconds,
+                                "actual_distance": s.actual_distance,
+                                "actual_pace": s.actual_pace,
+                                "heart_rate_avg": s.heart_rate_avg,
+                                "cardio_metrics": s.cardio_metrics,
+                            }
+                            for s in ex.sets
+                        ],
+                    }
+                    for ex in (body.exercises or [])
+                ],
+            })
+        except Exception:
+            pass
 
     db.commit()
     logger.info(f"[workouts/complete] COMMITTED user={current_user.id} date={body.workout_date} focus={body.focus_label} dur={body.duration_seconds}s exercises={len(body.exercises) if body.exercises else 0}")

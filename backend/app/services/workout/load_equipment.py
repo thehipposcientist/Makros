@@ -41,6 +41,26 @@ def _equipment_text(equipment: str | None) -> str:
     return (equipment or "").lower().replace("-", " ").replace("_", " ")
 
 
+def _practical_fallback_increment(equipment: str | None, fallback: float) -> float:
+    """Default load grid when the user has not configured exact gear.
+
+    A 2.5 lb calculation is mathematically tidy, but most users cannot
+    select "23 lb" or "58 lb" in the gym. Until we know their actual
+    adjustable dumbbell/plate setup, keep recommendations on whole 5 lb
+    jumps.
+    """
+    safe_fallback = max(1.0, fallback)
+    if any(token in _equipment_text(equipment) for token in ("bodyweight", "none", "bw")):
+        return safe_fallback
+    return max(5.0, safe_fallback)
+
+
+def _round_to_increment(weight: float, increment: float) -> float:
+    if increment <= 0:
+        return round(weight, 1)
+    return round(floor(weight / increment + 0.5) * increment, 1)
+
+
 def _settings(settings: dict | None) -> dict[str, Any]:
     return settings if isinstance(settings, dict) else {}
 
@@ -77,7 +97,7 @@ def load_increment_lbs(
     user configured plates or adjustable dumbbells, we use the smallest
     loadable jump instead of pretending 2.5/5 lb is always possible.
     """
-    safe_fallback = max(1.0, fallback)
+    safe_fallback = _practical_fallback_increment(equipment, fallback)
     if is_dumbbell_equipment(equipment):
         db = _dumbbell_settings(settings)
         increment = _as_float(_get_any(db, "incrementLbs", "increment_lbs", "stepLbs", "step_lbs"))
@@ -104,9 +124,9 @@ def snap_load_lbs(
 ) -> float | None:
     """Snap a recommended load to what the user can actually set up.
 
-    The helper is conservative: it rounds down to the nearest loadable
-    value after clamping to configured min/max. That avoids suggesting a
-    heavier-than-intended jump just because the exact value is unavailable.
+    Configured gear rounds down to the nearest loadable value after
+    clamping to min/max. Missing settings use a practical fallback grid
+    so generic recommendations stay selectable in a normal gym.
     """
     weight = _as_float(weight_lbs)
     if weight is None:
@@ -115,7 +135,10 @@ def snap_load_lbs(
     if is_dumbbell_equipment(equipment):
         db = _dumbbell_settings(settings)
         if not db:
-            return round(weight, 1)
+            return _round_to_increment(
+                weight,
+                _practical_fallback_increment(equipment, fallback_increment),
+            )
         increment = load_increment_lbs(equipment, settings, fallback=fallback_increment)
         min_lbs = _as_float(_get_any(db, "minLbs", "min_lbs"), 0.0) or 0.0
         max_lbs = _as_float(_get_any(db, "maxLbs", "max_lbs"))
@@ -140,4 +163,7 @@ def snap_load_lbs(
             snapped = bar_lbs + floor((weight - bar_lbs) / increment) * increment
             return round(max(bar_lbs, snapped), 1)
 
-    return round(weight, 1)
+    return _round_to_increment(
+        weight,
+        _practical_fallback_increment(equipment, fallback_increment),
+    )

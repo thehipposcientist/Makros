@@ -8,6 +8,12 @@ export type SocialWorkoutSet = {
   cardio_metrics?: Record<string, string | number | null | undefined> | null;
 };
 
+export type SocialWorkoutExercise = {
+  name?: string | null;
+  equipment?: string | null;
+  sets?: SocialWorkoutSet[] | null;
+};
+
 const SENSITIVE_METRIC_KEYS = new Set([
   'calorie', 'calories', 'kcal', 'body_weight', 'body_weight_lbs',
   'body_fat', 'bodyfat', 'macros', 'protein', 'carbs', 'fat',
@@ -149,4 +155,93 @@ export function compactSocialSetSummaries(sets: SocialWorkoutSet[] | null | unde
 
 export function hasSocialSetMetrics(set: SocialWorkoutSet): boolean {
   return socialSetMetricParts(set).length > 0;
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function workoutSummaryRecord(payload: unknown): Record<string, any> {
+  if (!isRecord(payload)) return {};
+  return isRecord(payload.workout_summary) ? payload.workout_summary : payload;
+}
+
+export function socialWorkoutExercises(payload: unknown): SocialWorkoutExercise[] {
+  const summary = workoutSummaryRecord(payload);
+  return Array.isArray(summary.exercises) ? summary.exercises : [];
+}
+
+export function socialWorkoutDetailScore(payload: unknown): number {
+  const summary = workoutSummaryRecord(payload);
+  const exercises = socialWorkoutExercises(payload);
+  let score = exercises.length * 100;
+  for (const exercise of exercises) {
+    const sets = Array.isArray(exercise?.sets) ? exercise.sets : [];
+    score += sets.length * 20;
+    for (const set of sets) {
+      if (!set || typeof set !== 'object') continue;
+      score += socialSetMetricParts(set).length * 5;
+      score += Object.keys(set).length > 0 ? 1 : 0;
+    }
+  }
+  const totalSets = numeric(summary.total_sets);
+  const totalReps = numeric(summary.total_reps);
+  if (totalSets && totalSets > 0) score += Math.min(50, Math.round(totalSets));
+  if (totalReps && totalReps > 0) score += Math.min(50, Math.round(totalReps / 5));
+  return score;
+}
+
+function mergeWorkoutSummary(primaryPayload: unknown, detailPayload: unknown): Record<string, any> {
+  const primarySummary = workoutSummaryRecord(primaryPayload);
+  const detailSummary = workoutSummaryRecord(detailPayload);
+  const merged = { ...detailSummary, ...primarySummary };
+  const detailExercises = socialWorkoutExercises(detailPayload);
+  if (detailExercises.length) merged.exercises = detailExercises;
+  for (const key of ['total_sets', 'total_reps', 'duration_seconds', 'distance_miles', 'hr_summary']) {
+    const primaryValue = primarySummary[key];
+    const detailValue = detailSummary[key];
+    if (
+      (primaryValue == null || primaryValue === '' || primaryValue === 0)
+      && detailValue != null
+      && detailValue !== ''
+    ) {
+      merged[key] = detailValue;
+    }
+  }
+  return merged;
+}
+
+export function mergeSocialWorkoutDetails<T extends { payload: any; event_type?: string }>(
+  primary: T,
+  detailSource: T,
+): T {
+  if (socialWorkoutDetailScore(primary.payload) >= socialWorkoutDetailScore(detailSource.payload)) {
+    return primary;
+  }
+  const payload = isRecord(primary.payload) ? { ...primary.payload } : {};
+  const mergedSummary = mergeWorkoutSummary(primary.payload, detailSource.payload);
+  if (primary.event_type === 'workout_post' || isRecord(payload.workout_summary)) {
+    payload.workout_summary = mergedSummary;
+  } else {
+    Object.assign(payload, mergedSummary);
+  }
+  return { ...primary, payload };
+}
+
+export function chooseSocialWorkoutFeedItem<T extends { payload: any; event_type?: string; id?: number }>(
+  existing: T,
+  candidate: T,
+): T {
+  const existingIsPost = existing.event_type === 'workout_post';
+  const candidateIsPost = candidate.event_type === 'workout_post';
+
+  if (candidateIsPost && !existingIsPost) return mergeSocialWorkoutDetails(candidate, existing);
+  if (existingIsPost && !candidateIsPost) return mergeSocialWorkoutDetails(existing, candidate);
+
+  const existingScore = socialWorkoutDetailScore(existing.payload);
+  const candidateScore = socialWorkoutDetailScore(candidate.payload);
+  if (candidateScore > existingScore) return candidate;
+  if (existingScore > candidateScore) return existing;
+
+  return Number(candidate.id ?? 0) > Number(existing.id ?? 0) ? candidate : existing;
 }

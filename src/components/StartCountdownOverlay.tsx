@@ -51,7 +51,7 @@ export default function StartCountdownOverlay({ themeName, onComplete, finalMess
 
   const [idx, setIdx] = useState(0);
   const scale = useRef(new Animated.Value(1.22)).current;
-  const opacity = useRef(new Animated.Value(0)).current;
+  const opacity = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
     if (idx >= ticks.length) {
@@ -67,8 +67,9 @@ export default function StartCountdownOverlay({ themeName, onComplete, finalMess
 
     // Reset and animate as one sequence so the beat doesn't drift
     // between fade and advance timers.
+    const firstTick = idx === 0;
     scale.setValue(tick.isFinal ? 1.12 : 1.22);
-    opacity.setValue(0);
+    opacity.setValue(firstTick ? 1 : 0);
     const enterMs = tick.isFinal ? 190 : 170;
     const exitMs = 170;
     const holdMs = Math.max(80, tick.duration - enterMs - exitMs);
@@ -82,7 +83,7 @@ export default function StartCountdownOverlay({ themeName, onComplete, finalMess
         }),
         Animated.timing(opacity, {
           toValue: 1,
-          duration: enterMs,
+          duration: firstTick ? 1 : enterMs,
           easing: Easing.out(Easing.quad),
           useNativeDriver: true,
         }),

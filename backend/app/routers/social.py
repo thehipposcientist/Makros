@@ -856,6 +856,13 @@ def _coerce_positive_int(value) -> int | None:
     return int(round(n)) if n is not None else None
 
 
+def _first_present(raw: dict, *keys: str):
+    for key in keys:
+        if key in raw and raw.get(key) is not None:
+            return raw.get(key)
+    return None
+
+
 _SENSITIVE_SOCIAL_METRIC_KEYS = {
     "calorie", "calories", "kcal", "calories_burned", "body_weight",
     "body_weight_lbs", "weight_entry", "body_fat", "bodyfat", "macros",
@@ -889,25 +896,33 @@ def _sanitize_cardio_metrics(raw) -> dict | None:
 
 def _sanitize_workout_set(raw: dict) -> dict:
     clean: dict = {}
-    reps = _coerce_positive_int(raw.get("reps") or raw.get("actual_reps"))
+    reps = _coerce_positive_int(_first_present(raw, "reps", "actual_reps", "actualReps"))
     if reps is not None:
         clean["reps"] = reps
-    weight = _coerce_positive_number(raw.get("weight_lbs") or raw.get("actual_weight_lbs"))
+    weight = _coerce_positive_number(_first_present(
+        raw,
+        "weight_lbs",
+        "actual_weight_lbs",
+        "weightLbs",
+        "actualWeightLbs",
+        "weight",
+        "load",
+    ))
     if weight is not None:
         clean["weight_lbs"] = weight
-    duration = _coerce_positive_int(raw.get("duration_seconds"))
+    duration = _coerce_positive_int(_first_present(raw, "duration_seconds", "durationSeconds"))
     if duration is not None:
         clean["duration_seconds"] = duration
-    distance = _coerce_positive_number(raw.get("actual_distance"))
+    distance = _coerce_positive_number(_first_present(raw, "actual_distance", "actualDistance"))
     if distance is not None:
         clean["actual_distance"] = distance
-    pace = raw.get("actual_pace")
+    pace = _first_present(raw, "actual_pace", "actualPace")
     if isinstance(pace, str) and pace.strip():
         clean["actual_pace"] = pace.strip()[:40]
-    heart_rate = _coerce_positive_int(raw.get("heart_rate_avg"))
+    heart_rate = _coerce_positive_int(_first_present(raw, "heart_rate_avg", "heartRateAvg"))
     if heart_rate is not None:
         clean["heart_rate_avg"] = heart_rate
-    cardio_metrics = _sanitize_cardio_metrics(raw.get("cardio_metrics"))
+    cardio_metrics = _sanitize_cardio_metrics(_first_present(raw, "cardio_metrics", "cardioMetrics"))
     if cardio_metrics:
         clean["cardio_metrics"] = cardio_metrics
     return clean
@@ -917,8 +932,8 @@ def _sanitize_hr_summary(raw) -> dict | None:
     if not isinstance(raw, dict):
         return None
     clean: dict = {}
-    avg = _coerce_positive_int(raw.get("avgBpm") or raw.get("avg_bpm"))
-    max_bpm = _coerce_positive_int(raw.get("maxBpm") or raw.get("max_bpm"))
+    avg = _coerce_positive_int(_first_present(raw, "avgBpm", "avg_bpm"))
+    max_bpm = _coerce_positive_int(_first_present(raw, "maxBpm", "max_bpm"))
     if avg is not None:
         clean["avgBpm"] = avg
     if max_bpm is not None:
@@ -967,10 +982,10 @@ def _sanitize_feed_payload_for_read(event_type: str, payload: dict | None) -> di
             value = raw.get(key)
             if isinstance(value, str) and value.strip():
                 clean[key] = value.strip()[:40]
-        distance_miles = _coerce_positive_number(raw.get("distance_miles"))
+        distance_miles = _coerce_positive_number(_first_present(raw, "distance_miles", "distanceMiles"))
         if distance_miles is not None:
             clean["distance_miles"] = distance_miles
-        hr_summary = _sanitize_hr_summary(raw.get("hr_summary"))
+        hr_summary = _sanitize_hr_summary(_first_present(raw, "hr_summary", "hrSummary"))
         if hr_summary:
             clean["hr_summary"] = hr_summary
         return clean
@@ -1215,16 +1230,29 @@ def _sanitize_workout_summary(raw: dict) -> dict:
             "sets": sets,
         })
 
-    return {
+    training_score = _first_present(raw, "training_score", "trainingScore")
+    training_rating = _first_present(raw, "training_rating", "trainingRating")
+    clean = {
         "focus": str(raw.get("focus") or "Workout")[:80],
-        "duration_seconds": int(raw.get("duration_seconds") or 0),
+        "duration_seconds": int(_first_present(raw, "duration_seconds", "durationSeconds") or 0),
         "date": str(raw.get("date") or "")[:10],
         "exercises": exercises,
-        "total_sets": int(raw.get("total_sets") or 0),
-        "total_reps": int(raw.get("total_reps") or 0),
-        "training_score": raw.get("training_score") if isinstance(raw.get("training_score"), (int, float)) else None,
-        "training_rating": str(raw.get("training_rating"))[:40] if raw.get("training_rating") else None,
+        "total_sets": int(_first_present(raw, "total_sets", "totalSets") or 0),
+        "total_reps": int(_first_present(raw, "total_reps", "totalReps") or 0),
+        "training_score": training_score if isinstance(training_score, (int, float)) else None,
+        "training_rating": str(training_rating)[:40] if training_rating else None,
     }
+    for key in ("activity_category", "activity_subtype", "cardio_style"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            clean[key] = value.strip()[:40]
+    distance_miles = _coerce_positive_number(_first_present(raw, "distance_miles", "distanceMiles"))
+    if distance_miles is not None:
+        clean["distance_miles"] = distance_miles
+    hr_summary = _sanitize_hr_summary(_first_present(raw, "hr_summary", "hrSummary"))
+    if hr_summary:
+        clean["hr_summary"] = hr_summary
+    return clean
 
 
 @router.post("/posts")

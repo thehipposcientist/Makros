@@ -187,10 +187,16 @@ interface Props {
   /** When true the card reframes from "are you ready?" to "how is recovery
    *  going?" — different dial label, copy, and muscle-bar framing. */
   workoutDone?: boolean;
+  /** When true the card still mounts + fetches + fires callbacks but
+   *  renders nothing. Lets a parent host the data pipeline (badge, watch
+   *  push) without showing a second visible card. Used pre-workout where
+   *  the readiness badge inside the workout card already conveys the
+   *  signal — a duplicate card below felt like noise. */
+  hidden?: boolean;
 }
 
 export default function TrainingReadinessCard({
-  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed, onDataComputed, initialPrep, defaultExpanded, lockedExpanded, workoutDone,
+  authToken, themeName, age, proteinTarget, calorieTarget, todaysFocus, healthSummary: parentSummary, onScoreComputed, onDataComputed, initialPrep, defaultExpanded, lockedExpanded, workoutDone, hidden,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -384,6 +390,11 @@ export default function TrainingReadinessCard({
   }, [authToken, parentSummary, age, proteinTarget, calorieTarget, todaysFocus]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Hidden mode: data pipeline runs (callbacks already fired in `load`),
+  // but no UI. Parent uses this when it wants the score for a badge /
+  // watch push without rendering a second visible card.
+  if (hidden) return null;
 
   if (!prep) return null;
   // Zero real signals → don't show a misleading "0 Fatigued" dial. Show

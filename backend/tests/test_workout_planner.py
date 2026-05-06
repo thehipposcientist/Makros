@@ -1087,6 +1087,100 @@ def test_recommender_uses_signup_strength_anchor_for_exact_lift() -> None:
     _ok(f"signup anchor source={rec.source} weight={rec.weight_lbs}")
 
 
+def test_recommender_converts_row_loads_between_total_and_per_dumbbell() -> None:
+    """Dumbbell rows are recommended per dumbbell, while T-bar rows are
+    total implement load. Transfers must normalize those units."""
+    from datetime import date
+    from app.services.workout.recommendation import recommend_starting_weight
+    from app.services.workout.performance import ExercisePerformance
+
+    print("\n[test] row transfer normalizes total load vs per-dumbbell load")
+    tbar = {
+        "slug": "t_bar_row",
+        "name": "T-Bar Row",
+        "primary_muscle": "back",
+        "movement_pattern": "horizontal_pull",
+        "equipment_bucket": "gym",
+        "is_compound": True,
+        "is_machine": False,
+        "equipment": [{"slug": "barbell", "role": "primary", "required": True}],
+    }
+    db_row = {
+        "slug": "dumbbell_row",
+        "name": "Dumbbell Row",
+        "primary_muscle": "back",
+        "movement_pattern": "horizontal_pull",
+        "equipment_bucket": "dumbbells",
+        "is_compound": True,
+        "is_machine": False,
+        "is_unilateral": True,
+        "equipment": [{"slug": "dumbbells", "role": "primary", "required": True}],
+    }
+
+    tbar_profile = ExercisePerformance(
+        slug="t_bar_row",
+        name="T-Bar Row",
+        session_count=2,
+        recent_top_weight_lbs=110.0,
+        recent_top_reps=10,
+        estimated_1rm_lbs=146.7,
+        recent_volume_load=2200.0,
+        last_performed_on=date.today(),
+        confidence=0.33,
+    )
+    db_from_tbar = recommend_starting_weight(
+        db_row,
+        profiles={"t_bar_row": tbar_profile},
+        all_exercises_by_slug={"t_bar_row": tbar, "dumbbell_row": db_row},
+        target_reps="8-10",
+        experience="intermediate",
+    )
+    assert db_from_tbar.source == "movement_pattern"
+    assert 40.0 <= db_from_tbar.weight_lbs <= 55.0, db_from_tbar
+
+    db_profile = ExercisePerformance(
+        slug="dumbbell_row",
+        name="Dumbbell Row",
+        session_count=2,
+        recent_top_weight_lbs=55.0,
+        recent_top_reps=10,
+        estimated_1rm_lbs=73.3,
+        recent_volume_load=1100.0,
+        last_performed_on=date.today(),
+        confidence=0.33,
+    )
+    tbar_from_db = recommend_starting_weight(
+        tbar,
+        profiles={"dumbbell_row": db_profile},
+        all_exercises_by_slug={"t_bar_row": tbar, "dumbbell_row": db_row},
+        target_reps="8-10",
+        experience="intermediate",
+    )
+    assert tbar_from_db.source == "movement_pattern"
+    assert tbar_from_db.weight_lbs >= 85.0, tbar_from_db
+    _ok(f"T-bar 110 total -> DB {db_from_tbar.weight_lbs} each; DB 55 each -> T-bar {tbar_from_db.weight_lbs} total")
+
+
+def test_dumbbell_compound_defaults_are_per_dumbbell() -> None:
+    from app.services.workout.recommendation import recommend_starting_weight
+
+    print("\n[test] dumbbell compound defaults are per-dumbbell")
+    db_row = {
+        "slug": "dumbbell_row",
+        "name": "Dumbbell Row",
+        "primary_muscle": "back",
+        "movement_pattern": "horizontal_pull",
+        "equipment_bucket": "dumbbells",
+        "is_compound": True,
+        "is_machine": False,
+        "equipment": [{"slug": "dumbbells", "role": "primary", "required": True}],
+    }
+    rec = recommend_starting_weight(db_row, {}, {}, target_reps="8-10", experience="intermediate")
+    assert rec.source == "default"
+    assert rec.weight_lbs < 60.0, rec
+    _ok(f"dumbbell row default={rec.weight_lbs} lb each")
+
+
 def test_default_category_differentiates_by_pattern() -> None:
     """Category defaults should distinguish squat, hinge, upper_push,
     upper_pull rather than lump all compounds into one number."""
@@ -1324,6 +1418,8 @@ if __name__ == "__main__":
         test_accessory_host_prefers_secondary_touch_day,
         test_recommender_confidence_single_session_below_075,
         test_recommender_uses_signup_strength_anchor_for_exact_lift,
+        test_recommender_converts_row_loads_between_total_and_per_dumbbell,
+        test_dumbbell_compound_defaults_are_per_dumbbell,
         test_default_category_differentiates_by_pattern,
         test_full_body_3_day_rotates_slots,
         test_full_plan_intermediate_muscle_gain,

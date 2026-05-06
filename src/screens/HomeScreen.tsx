@@ -83,7 +83,7 @@ import { exerciseEquipmentLabel } from '../utils/swapScoring';
 import ExerciseVideoCard from '../components/ExerciseVideoCard';
 import { exerciseThumbSmall, primeThumbnailIndex } from '../utils/exerciseThumb';
 import { configureExpandAnimation } from '../utils/layoutAnim';
-import { compactSocialSetSummaries, formatSocialDistance, formatSocialDuration } from '../utils/socialWorkoutDetails';
+import { chooseSocialWorkoutFeedItem, compactSocialSetSummaries, formatSocialDistance, formatSocialDuration } from '../utils/socialWorkoutDetails';
 import AnimatedCollapsible from '../components/AnimatedCollapsible';
 import MealEditModal from '../components/MealEditModal';
 import FormVideoModal from '../components/FormVideoModal';
@@ -3173,14 +3173,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // at initial-mount checkedMealsByDate, so every watch toggle after
   // the first one was operating on stale check state.
   const watchCmdHandlersRef = useRef({
-    start: (today: any) => { onStartWorkout?.(today); },
+    start: (today: any) => { onStartWorkout?.(today, { playCountdown: false }); },
     skip: (_focus: string) => {},
     toggleMeal: (_date: string, _mealType: string) => {},
   });
   const homeWatchLogSetChainRef = useRef(Promise.resolve());
   useEffect(() => {
     watchCmdHandlersRef.current = {
-      start: (today: any) => { onStartWorkout?.(today); },
+      start: (today: any) => { onStartWorkout?.(today, { playCountdown: false }); },
       skip: (focus: string) => handleSkipToday(focus),
       toggleMeal: (date: string, mealType: string) => handleToggleMeal(date, mealType),
     };
@@ -3741,7 +3741,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     startedAt: mirrored.startedAt,
                   });
                   if (authToken && today?.focus && mirrored.loggedPayload.length > 0) {
-                    await syncInProgressWorkout(
+                    syncInProgressWorkout(
                       authToken,
                       todayKey(),
                       today.focus,
@@ -7846,6 +7846,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 {isToday ? (
                   <View style={styles.todayPlanCardsWrap}>
                     {!isFreeTier && authToken && (() => {
+                      // Always mount so the readiness data pipeline runs
+                      // (badge inside the workout card + watch push). But
+                      // pre-workout, the badge already conveys the signal —
+                      // a second card with the same number below felt like
+                      // duplicate noise. Hide visually until the user has
+                      // trained today; then it reframes as "how is recovery
+                      // going?" via the workoutDone prop.
                       const todayPlan = nutritionPlansByDate[todayKey()] ?? null;
                       const todaysFocus = item.workout?.focus ?? workoutPlan?.days?.[0]?.focus ?? null;
                       return (
@@ -7857,6 +7864,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           calorieTarget={todayPlan?.targets?.calories ?? null}
                           todaysFocus={todaysFocus}
                           workoutDone={todayDone}
+                          hidden={!todayDone}
                           onScoreComputed={applyReadinessScore}
                           onDataComputed={(prep) => { bgPrepDataRef.current = prep; }}
                         />
@@ -9234,8 +9242,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     ).then(res => {
                       // Accept both auto-logged and manual-post events.
                       // Deduplicate by workout date — one card per day.
-                      // workout_post (manual share) beats workout_completed
-                      // for the same date; otherwise keep the highest id (latest).
+                      // Keep manual-post chrome when present, but preserve
+                      // the richest exercise/set details for expansion.
                       const raw = res.items.filter(
                         (i: import('../services/api').FeedItem) =>
                           i.event_type === 'workout_completed' || i.event_type === 'workout_post',
@@ -9244,12 +9252,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       for (const item of raw) {
                         const date = item.payload.date ?? item.created_at.slice(0, 10);
                         const existing = byDate.get(date);
-                        if (
-                          !existing ||
-                          (item.event_type === 'workout_post' && existing.event_type !== 'workout_post') ||
-                          item.id > existing.id
-                        ) {
+                        if (!existing) {
                           byDate.set(date, item);
+                        } else {
+                          byDate.set(date, chooseSocialWorkoutFeedItem(existing, item));
                         }
                       }
                       setFriendFeedItems(

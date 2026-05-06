@@ -15,6 +15,7 @@ const tests = [
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/profileCache.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/workoutTemplates.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/workoutCompletion.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/socialWorkoutDetails.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/workoutBestSets.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/workoutProgressFilters.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/screens/__tests__/progressData.test.ts'],
