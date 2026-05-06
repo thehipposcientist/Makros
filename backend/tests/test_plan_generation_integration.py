@@ -145,6 +145,49 @@ def test_stair_climber_excluded_without_equipment():
     _ok("stair climber excluded when not in equipment_slugs")
 
 
+def test_cardio_uses_owned_stationary_bike_before_outdoor_fallbacks():
+    """Bike-only endurance users should get bike intervals and bike Zone 2."""
+    print("\n[test] equipment: stationary-bike-only cardio uses the bike first")
+    inputs = PlannerInputs(
+        goal="improve_cardio",
+        days_per_week=4,
+        experience="beginner",
+        equipment_slugs=("stationary_bike",),
+        session_minutes=60,
+        rng_seed=7,
+    )
+    result = generate_workout_plan(inputs, SEED_EXERCISES)
+    outdoor_fallbacks = {
+        "Outdoor Walk",
+        "Brisk Walk",
+        "Hiking",
+        "Running (Outdoor)",
+        "Jogging",
+    }
+    cardio_days = [
+        d for d in result["workout_plan"]["days"]
+        if d.get("category") == "cond"
+    ]
+    assert cardio_days, "expected conditioning days in cardio plan"
+    all_cardio_names = [
+        ex.get("name")
+        for day in cardio_days
+        for ex in day.get("exercises", [])
+    ]
+    assert "Stationary Bike Intervals" in all_cardio_names, \
+        f"bike should be used for high-rpm interval work: {all_cardio_names}"
+    assert any(name in ("Bike Zone 2", "Stationary Bike") for name in all_cardio_names), \
+        f"bike should be used for steady Zone 2 work: {all_cardio_names}"
+    for day in cardio_days:
+        names = [ex.get("name") for ex in day.get("exercises", [])]
+        assert any("Bike" in str(name) for name in names), \
+            f"cardio day did not use owned bike: {day.get('focus')} {names}"
+        bad = [name for name in names if name in outdoor_fallbacks]
+        assert not bad, \
+            f"outdoor fallback beat owned stationary bike on {day.get('focus')}: {bad}"
+    _ok("bike-only cardio days choose bike work over outdoor fallbacks")
+
+
 # ─── Injury blocking ───────────────────────────────────────────────────────
 
 def test_injury_blocks_dangerous_exercises():
@@ -384,6 +427,7 @@ cases = [
     # Equipment
     test_equipment_filtering_minimal_gym,
     test_stair_climber_excluded_without_equipment,
+    test_cardio_uses_owned_stationary_bike_before_outdoor_fallbacks,
     # Injury
     test_injury_blocks_dangerous_exercises,
     # Dislike

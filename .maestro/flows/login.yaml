@@ -28,28 +28,7 @@ tags:
     clearKeychain: false
 
 - runFlow:
-    when:
-      visible: "http://localhost:8081"
-    commands:
-      - tapOn: "http://localhost:8081"
-
-- waitForAnimationToEnd:
-    timeout: 3000
-
-- runFlow:
-    when:
-      visible: "Continue"
-    commands:
-      - tapOn: "Continue"
-
-- waitForAnimationToEnd:
-    timeout: 1000
-
-- runFlow:
-    when:
-      visible: "Close"
-    commands:
-      - tapOn: "Close"
+    file: dismiss-dev-client.yaml
 
 - waitForAnimationToEnd:
     timeout: 1000
@@ -65,9 +44,22 @@ tags:
 
 - runFlow:
     when:
-      visible: "Close"
+      visible: "Connected to:|Runtime version:.*"
     commands:
-      - tapOn: "Close"
+      - tapOn:
+          point: "90%,48%"
+          waitToSettleTimeoutMs: 0
+      - waitForAnimationToEnd:
+          timeout: 1000
+
+- runFlow:
+    when:
+      visible: "Close"
+      notVisible: "Connected to:|Runtime version:.*"
+    commands:
+      - tapOn:
+          text: "Close"
+          waitToSettleTimeoutMs: 0
 
 - waitForAnimationToEnd:
     timeout: 1000
@@ -191,9 +183,22 @@ tags:
 
 - runFlow:
     when:
-      visible: "Close"
+      visible: "Connected to:|Runtime version:.*"
     commands:
-      - tapOn: "Close"
+      - tapOn:
+          point: "90%,48%"
+          waitToSettleTimeoutMs: 0
+      - waitForAnimationToEnd:
+          timeout: 1000
+
+- runFlow:
+    when:
+      visible: "Close"
+      notVisible: "Connected to:|Runtime version:.*"
+    commands:
+      - tapOn:
+          text: "Close"
+          waitToSettleTimeoutMs: 0
 
 - runFlow:
     when:

@@ -62,6 +62,7 @@ import {
   normalizeStrengthEquipmentSettings,
 } from '../utils/strengthEquipmentSettings';
 import { dynamicTextProps } from '../utils/dynamicType';
+import { goalEquipmentWarnings } from '../utils/goalEquipmentGuardrails';
 import {
   LAUNCH_GOALS, PRIMARY_GOALS, GOAL_CATEGORIES, ENDURANCE_EVENT_GOALS,
   SIGNUP_GOAL_MATCH_IDS,
@@ -545,6 +546,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const totalSteps = steps.length;
   const currentStepKey = steps[currentStep];
   useEffect(() => { setStepError(''); }, [currentStepKey]);
+  const equipmentGoalWarnings = goalEquipmentWarnings(selectedGoal, selectedEquipment);
 
   // ── Onboarding draft persistence ─────────────────────────────────────
   // Without this, closing the app mid-onboarding loses every step's input
@@ -1987,6 +1989,20 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
       {renderStrengthLoadSettings()}
 
+      {equipmentGoalWarnings.length > 0 && (
+        <View style={styles.guardrailBox}>
+          <View style={styles.guardrailHeader}>
+            <Ionicons name="warning-outline" size={15} color={colors.warning ?? '#F59E0B'} />
+            <Text style={styles.guardrailTitle}>Goal and equipment mismatch</Text>
+          </View>
+          {equipmentGoalWarnings.map((warning, index) => (
+            <Text key={`${warning}-${index}`} {...dynamicTextProps} style={styles.guardrailText}>
+              {warning}
+            </Text>
+          ))}
+        </View>
+      )}
+
       {/* Equipment scan confirm modal */}
       <Modal visible={showEquipScanModal} transparent animationType="slide" onRequestClose={() => setShowEquipScanModal(false)}>
         <View style={styles.modalBackdrop}>
@@ -3076,6 +3092,18 @@ const styles = StyleSheet.create({
   foodChipActive:    { borderColor: colors.primary, backgroundColor: colors.surfaceRaised },
   foodChipText:      { fontSize: 13, color: colors.textSecondary, fontWeight: '500' },
   foodChipTextActive:{ color: colors.primary, fontWeight: '600' },
+  guardrailBox: {
+    marginTop: 2,
+    marginBottom: 18,
+    padding: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: (colors.warning ?? '#F59E0B') + '66',
+    backgroundColor: (colors.warning ?? '#F59E0B') + '12',
+  },
+  guardrailHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 6 },
+  guardrailTitle: { fontSize: 12, fontWeight: '800', color: colors.warning ?? '#F59E0B', textTransform: 'uppercase', letterSpacing: 0.5 },
+  guardrailText: { fontSize: 12, lineHeight: 17, color: colors.textSecondary, marginTop: 4 },
 
   // Scan result modal
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end' },

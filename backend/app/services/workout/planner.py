@@ -592,6 +592,95 @@ def _exercise_load_tier(exercise: dict) -> int:
     return best
 
 
+_CARDIO_EQUIPMENT_SLUGS = {
+    "treadmill",
+    "stationary_bike",
+    "elliptical",
+    "rowing_machine",
+    "stair_climber",
+    "assault_bike",
+    "swimming_pool",
+    "battle_ropes",
+    "outdoor_bike",
+    "skierg",
+    "versaclimber",
+    "heavy_bag",
+    "ruck_pack",
+    "jump_rope",
+    "step_platform",
+    "agility_ladder",
+    "training_cones",
+}
+
+
+def _exercise_equipment_slugs(exercise: dict, *, primary_only: bool = False) -> set[str]:
+    roles = {"primary"} if primary_only else {"primary", "support"}
+    return {
+        str(e.get("slug") or "")
+        for e in (exercise.get("equipment") or [])
+        if e.get("slug") and (e.get("role") in roles or e.get("required"))
+    }
+
+
+def _owns_cardio_equipment(owned: set[str]) -> bool:
+    return bool(_expanded_owned_equipment(set(owned)) & _CARDIO_EQUIPMENT_SLUGS)
+
+
+def _exercise_uses_owned_equipment(exercise: dict, owned: set[str]) -> bool:
+    owned = _expanded_owned_equipment(set(owned))
+    primary_slugs = _exercise_equipment_slugs(exercise, primary_only=True)
+    if primary_slugs:
+        return bool(primary_slugs & owned)
+    required_slugs = {
+        str(e.get("slug") or "")
+        for e in (exercise.get("equipment") or [])
+        if e.get("slug") and e.get("required")
+    }
+    return bool(required_slugs & owned)
+
+
+def _cardio_slot_intensity_intent(slot: Slot) -> str:
+    label_lower = (slot.label or "").lower()
+    if (
+        "interval" in label_lower
+        or "sprint" in label_lower
+        or "main" in label_lower
+        or "circuit" in label_lower
+        or "burst" in label_lower
+    ):
+        return "intervals"
+    if (
+        "steady" in label_lower
+        or "warmup" in label_lower
+        or "cooldown" in label_lower
+        or "spin" in label_lower
+        or "zone 2" in label_lower
+        or "tempo" in label_lower
+    ):
+        return "steady"
+    if (
+        "easy" in label_lower
+        or "recovery" in label_lower
+        or "gentle" in label_lower
+    ):
+        return "easy"
+    return "any"
+
+
+def _cardio_matches_slot_intensity(slot: Slot, exercise: dict) -> bool:
+    intent = _cardio_slot_intensity_intent(slot)
+    intensity = classify_cardio(exercise)
+    if intensity == "not_cardio":
+        return False
+    if intent == "intervals":
+        return intensity == "intervals"
+    if intent == "steady":
+        return intensity != "intervals"
+    if intent == "easy":
+        return intensity != "intervals"
+    return True
+
+
 def _stable_slug_seed(slug: str) -> int:
     digest = hashlib.sha256((slug or "").encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big")
@@ -618,6 +707,8 @@ def score_candidate(
     bucket = _goal_bucket(inputs.goal)
     is_lift_focused = bucket in _LIFT_FOCUSED_BUCKETS
     is_bodyweight = exercise.get("equipment_bucket") == "bodyweight"
+    cardio_intensity = classify_cardio(exercise)
+    is_cardio_exercise = cardio_intensity != "not_cardio"
 
     # 1. Preference bonus — preferred exercises get a strong push.
     if name_lower in {p.lower() for p in inputs.preferred_exercises}:
@@ -626,11 +717,11 @@ def score_candidate(
     # 2. Slot-role match.
     role = slot.role
     is_compound = exercise.get("is_compound", False)
-    if role == "primary" and is_compound:
+    if not is_cardio_exercise and role == "primary" and is_compound:
         score += 3.0
-    elif role == "secondary" and is_compound:
+    elif not is_cardio_exercise and role == "secondary" and is_compound:
         score += 1.5
-    elif role == "isolation" and not is_compound:
+    elif not is_cardio_exercise and role == "isolation" and not is_compound:
         score += 2.0
     elif role == "core":
         # Core slot is fine with whatever the slot's pattern accepts.
@@ -684,19 +775,19 @@ def score_candidate(
     #      e.g. bodyweight calf raise — but loaded still wins ties)
     #   not lift-focused (fat_loss / general_health / minimal equipment):
     #     no penalty — bodyweight is fine when it fits the goal
-    if is_lift_focused and role in ("primary", "secondary"):
+    if not is_cardio_exercise and is_lift_focused and role in ("primary", "secondary"):
         if is_bodyweight:
             score -= 4.0
         else:
             score += 3.0
             score += 0.1 * _exercise_load_tier(exercise)
-    elif is_lift_focused and role == "isolation":
+    elif not is_cardio_exercise and is_lift_focused and role == "isolation":
         if is_bodyweight:
             score -= 1.5
         else:
             score += 1.5
             score += 0.05 * _exercise_load_tier(exercise)
-    else:
+    elif not is_cardio_exercise:
         # Preserve the old light "free-weight primary" bonus for the
         # non-lift-focused goals so behavior there is unchanged.
         if role == "primary" and not exercise.get("is_machine", False):
@@ -752,31 +843,14 @@ def score_candidate(
     # intensity classification lives in `cardio.classify_cardio` so
     # nothing outside that module depends on the seed's `is_compound`
     # field for cardio semantics.
-    if classify_cardio(exercise) != "not_cardio":
-        label_lower = (slot.label or "").lower()
-        intensity = classify_cardio(exercise)
+    if is_cardio_exercise:
+        intensity = cardio_intensity
         is_interval_ex = intensity == "intervals"
         is_easy_ex = intensity == "easy"
-        wants_intervals = (
-            "interval" in label_lower
-            or "sprint" in label_lower
-            or "main" in label_lower
-            or "circuit" in label_lower
-            or "burst" in label_lower
-        )
-        wants_steady = (
-            "steady" in label_lower
-            or "warmup" in label_lower
-            or "cooldown" in label_lower
-            or "spin" in label_lower
-            or "zone 2" in label_lower
-            or "tempo" in label_lower
-        )
-        wants_easy = (
-            "easy" in label_lower
-            or "recovery" in label_lower
-            or "gentle" in label_lower
-        )
+        intent = _cardio_slot_intensity_intent(slot)
+        wants_intervals = intent == "intervals"
+        wants_steady = intent == "steady"
+        wants_easy = intent == "easy"
         if wants_easy:
             # Recovery / stress-relief labels hard-ban intervals. Easy
             # cardio gets the biggest bonus; steady still fine.
@@ -794,6 +868,12 @@ def score_candidate(
             score += 2.5
         elif wants_steady and is_interval_ex:
             score -= 2.5
+
+        owned = set(inputs.equipment_slugs)
+        if _exercise_uses_owned_equipment(exercise, owned):
+            score += 5.0
+        elif _owns_cardio_equipment(owned) and not _exercise_equipment_slugs(exercise):
+            score -= 3.0
 
     # 7d. Yoga, mobility drills, and stretches should ONLY appear on
     # mobility, recovery, or flexibility days — never on lifting,
@@ -876,6 +956,17 @@ def pick_for_slot(
     )
     if not candidates:
         return None
+    if slot.movement_pattern == "cardio" and _owns_cardio_equipment(owned):
+        equipped_candidates = [
+            c for c in candidates
+            if _exercise_uses_owned_equipment(c, owned)
+        ]
+        equipped_intensity_matches = [
+            c for c in equipped_candidates
+            if _cardio_matches_slot_intensity(slot, c)
+        ]
+        if equipped_intensity_matches:
+            candidates = equipped_intensity_matches
 
     def _slot_intent_pool(pool: list[dict]) -> list[dict]:
         if slot.role not in ("primary", "secondary") or not slot.primary_muscle_hint:

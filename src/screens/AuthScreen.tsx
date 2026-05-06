@@ -25,7 +25,7 @@ WebBrowser.maybeCompleteAuthSession();
 
 function configured(value?: string | null): string | undefined {
   const cleaned = (value ?? '').trim();
-  if (!cleaned || cleaned.includes('missing-google-client-id')) return undefined;
+  if (!cleaned || cleaned.startsWith('$') || cleaned.includes('missing-google-client-id')) return undefined;
   return cleaned;
 }
 

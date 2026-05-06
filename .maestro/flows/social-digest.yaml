@@ -18,22 +18,7 @@ tags:
     clearKeychain: true
 
 - runFlow:
-    when:
-      visible: "http://localhost:8081"
-    commands:
-      - tapOn: "http://localhost:8081"
-
-- runFlow:
-    when:
-      visible: "Continue"
-    commands:
-      - tapOn: "Continue"
-
-- runFlow:
-    when:
-      visible: "Close"
-    commands:
-      - tapOn: "Close"
+    file: dismiss-dev-client.yaml
 
 - runFlow:
     file: login.yaml
@@ -53,6 +38,21 @@ tags:
 
 - tapOn:
     id: "bottom-tab-social"
+- waitForAnimationToEnd:
+    timeout: 1000
+- runFlow:
+    when:
+      notVisible:
+        id: "social-feed-list"
+    commands:
+      - tapOn:
+          id: "bottom-tab-workouts"
+      - waitForAnimationToEnd:
+          timeout: 1000
+      - tapOn:
+          id: "bottom-tab-social"
+      - waitForAnimationToEnd:
+          timeout: 1000
 
 # Activity should load the bounded feed plus the privacy boundary copy. The
 # seeded graph has one sharing friend and one sharing-off friend.
@@ -60,8 +60,10 @@ tags:
     visible:
       id: "social-feed-list"
     timeout: 30000
+- tapOn:
+    id: "social-feed-privacy-toggle"
 - assertVisible:
-    text: ".*Friends only see workouts.*"
+    text: ".*Calories, macros, meals, body weight, and measurements stay private.*"
 - extendedWaitUntil:
     visible:
       id: "social-feed-row-0"
@@ -78,8 +80,10 @@ tags:
     visible:
       id: "social-friend-row-e2e_social_a"
     timeout: 30000
-- assertVisible: "Casey Shares"
-- assertVisible: "Morgan Friend"
+- extendedWaitUntil:
+    visible:
+      id: "social-friend-row-e2e_social_b"
+    timeout: 30000
 
 - tapOn:
     id: "social-friend-row-e2e_social_a"
@@ -96,7 +100,8 @@ tags:
 - tapOn:
     id: "social-friend-feed-row-0"
 - extendedWaitUntil:
-    visible: "Dumbbell Bench Press"
+    visible:
+      id: "social-friend-feed-row-0-exercise-0"
     timeout: 15000
 
 # Sharing-off friends should show the privacy branch instead of feed rows.

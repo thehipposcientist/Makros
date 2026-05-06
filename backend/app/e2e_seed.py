@@ -747,6 +747,8 @@ def _seed_plans(session: Session, user: User, spec: PersonaSpec, today: date) ->
         training_day_pattern = [today.weekday()]
     elif spec.key == "activity_nutrition":
         training_day_pattern = [(today + timedelta(days=offset)).weekday() for offset in (1, 3, 5)]
+    elif spec.key == "returning":
+        training_day_pattern = [(today + timedelta(days=offset)).weekday() for offset in (0, 1, 3, 4)]
     else:
         training_day_pattern = default_training_pattern(spec.days_per_week)
     plan_week = create_plan_week(

@@ -20,22 +20,7 @@ tags:
 # Dev-client builds open the Expo launcher first. Release/TestFlight builds skip
 # this screen and land directly in Thallo.
 - runFlow:
-    when:
-      visible: "http://localhost:8081"
-    commands:
-      - tapOn: "http://localhost:8081"
-
-- runFlow:
-    when:
-      visible: "Continue"
-    commands:
-      - tapOn: "Continue"
-
-- runFlow:
-    when:
-      visible: "Close"
-    commands:
-      - tapOn: "Close"
+    file: dismiss-dev-client.yaml
 
 - runFlow:
     file: login.yaml
@@ -142,16 +127,15 @@ tags:
       id: "progress-tab-screen"
     timeout: 30000
 - extendedWaitUntil:
-    visible: "PLAN WEEK"
-    timeout: 30000
-- extendedWaitUntil:
     visible:
+      id: "progress-today-status-card"
+    timeout: 30000
+- scrollUntilVisible:
+    element:
       id: "progress-overview-week-meals"
+    direction: DOWN
     timeout: 30000
-- extendedWaitUntil:
-    visible:
-      id: "progress-overview-week-weight"
-    timeout: 30000
+    visibilityPercentage: 50
 - tapOn: "Body"
 - extendedWaitUntil:
     visible:
@@ -172,11 +156,29 @@ tags:
 # Social should load the seeded friend graph and privacy copy.
 - tapOn:
     id: "bottom-tab-social"
+- waitForAnimationToEnd:
+    timeout: 1000
+- runFlow:
+    when:
+      notVisible:
+        id: "social-feed-list"
+    commands:
+      - tapOn:
+          id: "bottom-tab-workouts"
+      - waitForAnimationToEnd:
+          timeout: 1000
+      - tapOn:
+          id: "bottom-tab-social"
+      - waitForAnimationToEnd:
+          timeout: 1000
 - extendedWaitUntil:
-    visible: "Activity"
+    visible:
+      id: "social-feed-list"
     timeout: 30000
+- tapOn:
+    id: "social-feed-privacy-toggle"
 - assertVisible:
-    text: ".*Friends only see workouts.*"
+    text: ".*Calories, macros, meals, body weight, and measurements stay private.*"
 
 # Start Workout still needs to hydrate from the seeded PlanWeek.
 - tapOn:

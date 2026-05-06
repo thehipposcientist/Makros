@@ -167,6 +167,29 @@ def test_cardio_steady_prescription_type():
     print(f"  ✓ Zone2 → prescription_type=cardio_steady, reps='{p.reps}'")
 
 
+def test_bike_zone2_prescription_uses_bike_capabilities():
+    """Bike Zone 2 must use stationary-bike guidance, not generic cardio text."""
+    from app.services.workout.archetypes import DayArchetype
+    from app.services.workout.cardio import CAP_RESISTANCE, CAP_RPM, MODALITY_BIKE
+    from app.services.workout.prescriptions import prescribe_for_slot
+    ex   = _make_exercise("Bike Zone 2", cardio_modality="bike")
+    slot = FakeSlot(role="primary", label="Zone 2")
+    p    = prescribe_for_slot(
+        DayArchetype.COND_ZONE2,
+        slot,
+        ex,
+        FakeInputs(
+            session_minutes=45,
+            user_equipment_capabilities={MODALITY_BIKE: [CAP_RESISTANCE, CAP_RPM]},
+        ),
+    )
+    assert p.cardio_guidance is not None, "cardio_guidance should be present"
+    assert p.cardio_guidance.get("modality") == MODALITY_BIKE
+    assert "resistance" in p.reps.lower(), f"expected bike resistance cue in '{p.reps}'"
+    assert "RPM" in p.reps, f"expected bike RPM cue in '{p.reps}'"
+    print(f"  ✓ Bike Zone 2 uses bike caps: reps='{p.reps}'")
+
+
 def test_cardio_intervals_prescription_type():
     """Short intervals archetype → prescription_type='cardio_intervals'."""
     from app.services.workout.archetypes import DayArchetype
@@ -311,6 +334,7 @@ def test_modality_detection():
         ("Treadmill Run",                 MODALITY_TREADMILL),
         ("Stationary Bike",               MODALITY_BIKE),
         ("Stationary Bike Intervals",     MODALITY_BIKE),
+        ("Bike Zone 2",                   MODALITY_BIKE),
         ("Rowing Machine",                MODALITY_ROWER),
         ("Rowing Machine Intervals",      MODALITY_ROWER),
         ("Elliptical",                    MODALITY_ELLIPTICAL),
@@ -335,6 +359,7 @@ TESTS = [
     test_rower_with_pace_caps,
     test_rower_no_caps,
     test_cardio_steady_prescription_type,
+    test_bike_zone2_prescription_uses_bike_capabilities,
     test_cardio_intervals_prescription_type,
     test_incline_walk_not_strength_type,
     test_yoga_prescription_type,

@@ -211,6 +211,7 @@ _MODALITY_KEYWORDS: list[tuple[str, str]] = [
     (MODALITY_OUTDOOR_BIKE,  "cycling (outdoor)"),
     (MODALITY_OUTDOOR_BIKE,  "cycling outdoor"),
     (MODALITY_OUTDOOR_BIKE,  "bike ride"),
+    (MODALITY_BIKE,          "bike zone"),
     (MODALITY_BIKE,          "cycling"),
     (MODALITY_BIKE,          "cycle"),
     (MODALITY_ROWER,         "rowing machine"),

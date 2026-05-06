@@ -23,22 +23,7 @@ tags:
     clearKeychain: true
 
 - runFlow:
-    when:
-      visible: "http://localhost:8081"
-    commands:
-      - tapOn: "http://localhost:8081"
-
-- runFlow:
-    when:
-      visible: "Continue"
-    commands:
-      - tapOn: "Continue"
-
-- runFlow:
-    when:
-      visible: "Close"
-    commands:
-      - tapOn: "Close"
+    file: dismiss-dev-client.yaml
 
 - runFlow:
     file: login.yaml

@@ -412,6 +412,18 @@ const SPLIT_FOCUS_KEYWORDS: Record<string, string[]> = {
   ppl: ['push', 'pull'],
 };
 
+const CARDIO_DOMINANT_GOALS = new Set([
+  'endurance',
+  'cardio_endurance',
+  ...PRIMARY_GOALS.filter(g => g.category === 'cardio_endurance').map(g => g.id),
+]);
+
+function isCardioDominantGoal(goal: string | null | undefined): boolean {
+  const g = String(goal || '').toLowerCase().trim();
+  return CARDIO_DOMINANT_GOALS.has(g)
+    || /cardio|endurance|aerobic|vo2|stamina|running|cycling|rowing|swimming|hiking|5k|10k|marathon/.test(g);
+}
+
 const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
 const EMAIL_BANNER_DISMISS_KEY = 'emailBannerDismissedAt';
 
@@ -7498,7 +7510,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const UPPER_BROAD_KEYWORDS = ['upper', 'push', 'chest', 'tricep', 'press', 'pull', 'back', 'bicep', 'lat', 'shoulder', 'arm'];
               const UPPER_NARROW_KEYWORDS = ['upper', 'shoulder', 'arm'];
               const FULL_KEYWORDS = ['full body', 'full_body', 'total'];
-              const CARDIO_KEYWORDS = ['cardio', 'zone 2', 'zone2', 'interval', 'run', 'bike', 'swim', 'row'];
+              const CARDIO_KEYWORDS = ['cardio', 'zone 2', 'zone2', 'interval', 'run', 'bike', 'cycle', 'cycling', 'spin', 'swim', 'row', 'walk', 'hike', 'steady'];
               const EASY_KEYWORDS = ['recover', 'rest', 'mobil', 'stretch', 'yoga', 'flow'];
               const has = (s: string, kws: string[]) => kws.some(kw => s.includes(kw));
               const normFamily = (f?: string): string => {
@@ -7517,7 +7529,31 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 return s || 'unknown';
               };
 
+              const planDays = workoutPlan?.days ?? [];
+              const planHasLiftSignal = planDays.some(d => {
+                const f = (d?.focus || '').toLowerCase();
+                return has(f, [
+                  ...SPLIT_FOCUS_KEYWORDS.bro,
+                  ...SPLIT_FOCUS_KEYWORDS.upper_lower,
+                  ...SPLIT_FOCUS_KEYWORDS.full_body,
+                  ...SPLIT_FOCUS_KEYWORDS.ppl,
+                  'legs',
+                  'lower',
+                ]);
+              });
+              const cardioLikeDays = planDays.filter(d => {
+                const f = (d?.focus || '').toLowerCase();
+                const stimulus = String((d as any)?.stimulus || '').toLowerCase();
+                const category = String((d as any)?.category || '').toLowerCase();
+                return category === 'cond'
+                  || stimulus === 'conditioning'
+                  || has(f, CARDIO_KEYWORDS);
+              }).length;
+              const isCardioDominantPlan = isCardioDominantGoal(userProfile.goal)
+                || (planDays.length > 0 && cardioLikeDays >= Math.ceil(planDays.length / 2) && !planHasLiftSignal);
+
               const inferSplitFromPlan = (): string => {
+                if (isCardioDominantPlan) return 'cardio';
                 const focuses = (workoutPlan?.days ?? []).map(d => (d?.focus || '').toLowerCase()).filter(Boolean);
                 const hasKeyword = (keywords: string[]) => focuses.some(f => keywords.some(kw => f.includes(kw)));
                 if (hasKeyword(SPLIT_FOCUS_KEYWORDS.bro)) return 'bro';
@@ -7526,17 +7562,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 if (hasUpper && hasLower && hasKeyword(SPLIT_FOCUS_KEYWORDS.ppl)) return 'ppl_upper_lower';
                 if (hasUpper && hasLower) return 'upper_lower';
                 if (hasKeyword(SPLIT_FOCUS_KEYWORDS.full_body)) return 'full_body';
-                return 'ppl';
+                return planHasLiftSignal ? 'ppl' : 'cardio';
               };
-              const knownSplits = new Set(['ppl', 'upper_lower', 'full_body', 'ppl_upper_lower', 'bro']);
+              const knownSplits = new Set(['ppl', 'upper_lower', 'full_body', 'ppl_upper_lower', 'bro', 'cardio']);
               const rawSplit = userProfile.preferredSplit ?? '';
-              const split = knownSplits.has(rawSplit) ? rawSplit : inferSplitFromPlan();
+              const split = isCardioDominantPlan ? 'cardio' : (knownSplits.has(rawSplit) ? rawSplit : inferSplitFromPlan());
               const splitFocusOptions: Record<string, string[]> = {
                 ppl: ['Push', 'Pull', 'Legs'],
                 upper_lower: ['Upper', 'Lower'],
                 full_body: ['Full Body'],
                 ppl_upper_lower: ['Push', 'Pull', 'Legs', 'Upper', 'Lower'],
                 bro: ['Chest', 'Back', 'Shoulders', 'Arms', 'Legs'],
+                cardio: ['Cardio'],
               };
               // Lift + same-day cardio finisher variants. Only offered for
               // splits where the backend can produce the matching
@@ -7549,10 +7586,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 full_body: ['Full Body + Cardio'],
                 ppl_upper_lower: ['Push + Cardio', 'Pull + Cardio', 'Upper + Cardio'],
                 bro: ['Upper + Cardio'],
+                cardio: [],
               };
               const focusOptions = splitFocusOptions[split] ?? splitFocusOptions.ppl;
               const plusCardioOptions = splitPlusCardioOptions[split] ?? splitPlusCardioOptions.ppl;
-              const extraOptions = ['Cardio', 'Mobility', 'Recovery'];
+              const extraOptions = split === 'cardio'
+                ? ['Mobility', 'Recovery']
+                : ['Cardio', 'Mobility', 'Recovery'];
               // "Empty" lets the user start from a blank day and add their
               // own exercises — no generator is run. Always last so it reads
               // as an escape hatch, not a primary choice.
@@ -9415,12 +9455,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                 const setSummaries = compactSocialSetSummaries(ex.sets as any);
                                 return (
                                   <FadeInView key={ei} delay={Math.min(ei * 35, 160)} duration={220} slideDistance={6}>
-                                  <View style={{
-                                    flexDirection: 'row', gap: 10, alignItems: 'flex-start',
-                                    backgroundColor: themeColors.surfaceRaised,
-                                    borderWidth: 1, borderColor: themeColors.border,
-                                    borderRadius: 12, padding: 10,
-                                  }}>
+                                    <View
+                                      testID={`social-friend-feed-row-${index}-exercise-${ei}`}
+                                      accessibilityLabel={`social-friend-feed-row-${index}-exercise-${ei}`}
+                                      style={{
+                                        flexDirection: 'row', gap: 10, alignItems: 'flex-start',
+                                        backgroundColor: themeColors.surfaceRaised,
+                                        borderWidth: 1, borderColor: themeColors.border,
+                                        borderRadius: 12, padding: 10,
+                                      }}>
                                     <View style={{
                                       width: 22, height: 22, borderRadius: 7,
                                       alignItems: 'center', justifyContent: 'center',

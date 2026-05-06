@@ -919,6 +919,14 @@ def get_guardrails(
             warnings.append("Target weight is far from current weight. Consider a staged target.")
     if abs(coaching.calorie_adjustment) > 300:
         warnings.append("Calorie adjustment is high. Review recent check-ins for accuracy.")
+    if goal and prefs:
+        from app.services.workout.goals import effective_goal_id
+        from app.services.workout.goal_equipment_guardrails import goal_equipment_warnings
+
+        warnings.extend(goal_equipment_warnings(
+            effective_goal_id(goal),
+            getattr(prefs, "equipment", None),
+        ))
 
     if warnings:
         _write_memory(

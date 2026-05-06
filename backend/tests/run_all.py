@@ -211,6 +211,9 @@ _TEST_MODULES = (
     # Profile weight source of truth — measurement-only check-ins must
     # not promote cached/history weights into UserProfile.weight_lbs.
     "tests.test_profile_weight_sync",
+    # Goal/equipment compatibility warnings — planner may fall back, but
+    # the app must be honest about mismatched goals and gear.
+    "tests.test_goal_equipment_guardrails",
     # Health persistence: batch sleep + daily HealthKit snapshots keep
     # partial-field upsert semantics for login/device restores.
     "tests.test_health_sleep_persistence",

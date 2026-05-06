@@ -1,0 +1,61 @@
+# Shared Expo dev-client startup/dismissal helper.
+#
+# Dev-client launcher screens and the in-app dev menu both expose the Metro URL.
+# Check for the dev menu first so we close the sheet instead of tapping its URL
+# card and leaving the menu over the app.
+
+appId: com.thallo.app
+name: dismiss-dev-client
+tags:
+  - helper
+
+---
+- runFlow:
+    when:
+      visible: "Connected to:|Runtime version:.*"
+    commands:
+      - tapOn:
+          point: "90%,48%"
+          waitToSettleTimeoutMs: 0
+      - waitForAnimationToEnd:
+          timeout: 1000
+
+- runFlow:
+    when:
+      visible: "http://localhost:8081"
+    commands:
+      - tapOn: "http://localhost:8081"
+
+- waitForAnimationToEnd:
+    timeout: 1000
+
+- runFlow:
+    when:
+      visible: "Continue"
+    commands:
+      - tapOn: "Continue"
+
+- waitForAnimationToEnd:
+    timeout: 1000
+
+- runFlow:
+    when:
+      visible: "Connected to:|Runtime version:.*"
+    commands:
+      - tapOn:
+          point: "90%,48%"
+          waitToSettleTimeoutMs: 0
+      - waitForAnimationToEnd:
+          timeout: 1000
+
+- runFlow:
+    when:
+      visible: "Close"
+      notVisible: "Connected to:|Runtime version:.*"
+    commands:
+      - tapOn:
+          text: "Close"
+          waitToSettleTimeoutMs: 0
+
+- waitForAnimationToEnd:
+    timeout: 1000

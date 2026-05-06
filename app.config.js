@@ -3,7 +3,7 @@ const appJson = require('./app.json');
 function configured(...values) {
   for (const value of values) {
     const cleaned = (value ?? '').trim();
-    if (cleaned && !cleaned.includes('missing-google-client-id')) {
+    if (cleaned && !cleaned.startsWith('$') && !cleaned.includes('missing-google-client-id')) {
       return cleaned;
     }
   }

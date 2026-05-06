@@ -305,7 +305,7 @@ def _prescribe_conditioning(
                                 rir_target=rir, prescription_type=p_type)
         from .cardio import detect_cardio_modality
         ex_name = exercise.get("name", "")
-        modality = detect_cardio_modality(ex_name)
+        modality = detect_cardio_modality(ex_name) or exercise.get("cardio_modality")
         caps = list(user_caps.get(modality, [])) if modality else []
         guidance = build_cardio_guidance(
             exercise,
