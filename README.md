@@ -1,6 +1,6 @@
 # Thallo — Fitness & Nutrition App
 
-React Native + Expo fitness app with a deterministic workout planner, AI-assisted nutrition, and structured coaching.
+React Native + Expo fitness app with a deterministic workout planner, AI-assisted nutrition, native Apple Health / Watch integrations, and structured coaching.
 
 ## Quick Start
 
@@ -29,25 +29,25 @@ User → React Native (Expo) → FastAPI backend → PostgreSQL
                     ┌───────────────┼───────────────┐
                     |               |               |
              Workout Planner   Nutrition        AI Services
-             (deterministic)   (hybrid)         (gated)
+             (deterministic)   (hybrid)         (scoped)
                     |               |               |
-              weekly_recipe    meal_assembler   plan_review
-              slots/scoring    calorie_calc     chat/scanning
+              weekly_recipe    meal_assembler   chat/scanning
+              slots/scoring    calorie_calc     coach/apply
               prescriptions    context          progression
 ```
 
 **Workout planner is fully deterministic** — no AI. Structure, exercise selection, scoring, prescriptions, and validation are all rule-based.
 
-**Nutrition is hybrid** — AI picks meal skeletons, deterministic solver sizes portions and hits macro targets.
+**Nutrition is hybrid** — AI may create meal skeletons / parsing output, then deterministic services size portions, normalize macros, score meals, and apply allergen filters.
 
-**AI services are gated** — review, enrichment, and coaching only fire when enabled via env flags.
+**AI services are scoped** — chat, scans, enrichment, supplement recommendations, parsing, and selected recommendations can use OpenAI. Legacy workout and nutrition AI review flags are disabled no-ops; the active PlanWeek is not rewritten by AI.
 
 ## Tech Stack
 
-- **Frontend**: React Native 0.76 + Expo SDK 54 + TypeScript
-- **Backend**: FastAPI + SQLModel + PostgreSQL
-- **AI**: OpenAI gpt-4o-mini (gated, deterministic fallbacks everywhere)
-- **Storage**: AsyncStorage (client) + PostgreSQL (server)
+- **Frontend**: React Native 0.81.5 + Expo SDK 54 + expo-router 6 + TypeScript
+- **Backend**: FastAPI + SQLModel + PostgreSQL 16
+- **AI**: `gpt-4o-mini` for text flows and `gpt-5.4-mini` for dedicated image-analysis endpoints
+- **Storage**: PostgreSQL source of truth + AsyncStorage hot/offline cache
 
 ## License
 

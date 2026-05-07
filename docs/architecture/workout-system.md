@@ -1,6 +1,6 @@
 # Workout System — Architecture
 
-Last updated: 2026-05-03
+Last updated: 2026-05-07
 
 ## Pipeline
 
@@ -102,10 +102,14 @@ All entry points must pass the same shape of inputs. Audited Apr 2026:
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /plans/start-new-week` | Generates a fresh 7-day PlanWeek anchored on the most recent Monday. First-run setup. |
-| `POST /plans/week/auto-renew` | When the active PlanWeek's `end_date` has passed, generates the next 7 days immediately and snapshots the expired week for the one-day coach check-in/recap. Idempotent while still active. |
+| `POST /plans/start-new-week` | Generates a fresh 7-day PlanWeek anchored on **today** for first-run setup / explicit new-week creation. The user's sign-up-day cadence persists across auto-renew. |
+| `POST /plans/week/auto-renew` | When the active PlanWeek's `end_date` has passed, generates the next 7 days from `prev.end_date + 1` and snapshots the expired week for the one-day coach check-in/recap. Idempotent while still active. |
+| `POST /plans/week/pause` / `POST /plans/week/resume` | Pause/resume auto-renew, auto-skip, and reminder behavior for travel/illness windows without destroying the current week. |
 | `PATCH /plans/days/{day_date}/workout` | Per-day workout patch (Change Focus, manual edits, exercise swaps). |
 | `POST /plans/week/review-and-apply` | Applies user-selected weekly check-in recommendations to durable settings / coach state only. It does not rewrite the active PlanWeek or regenerate remaining days. |
+| `POST /plans/week/adapt-remaining` | Re-fills unlocked future workouts using current fatigue while keeping the same recipe. |
+| `POST /plans/week/repair-injury-conflicts` | Safety exception that rewrites unlocked current/future exercise lists after injury changes while preserving week structure. |
+| `POST /plans/week/regenerate-remaining` | New recipe for unlocked future days after explicit days/week or split changes. |
 | `POST /workouts/generate-day` | **Legacy** — used by the now-removed daily fresh-day regen. Still defined; no active caller on the front page. |
 | `POST /workouts/generate-week` | **Legacy** — used by the legacy Switch Day flow before the PlanWeek model. Active for the migration tail. |
 

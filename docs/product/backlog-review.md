@@ -44,7 +44,7 @@ Items where the old CLAUDE.md had conflicting or ambiguous information. Verify c
 
 **Why it's stale**: The test suite section is clearly describing implemented tests; the "tests to add" section wasn't pruned when those tests were written.
 
-**Recommended follow-up**: Remaining genuinely unwritten tests are `plan_review_v2._build_headline`, `carb_distribution`, AI estimator regression, plan review snapshot, and Watch payload schema. These are now in `docs/engineering/test-suite.md`.
+**Recommended follow-up**: Remaining genuinely unwritten tests are `plan_review_v2._build_headline`, AI estimator regression, plan review snapshot, and Watch payload schema. These are now in `docs/engineering/test-suite.md`.
 
 ---
 
@@ -69,7 +69,7 @@ Items where the old CLAUDE.md had conflicting or ambiguous information. Verify c
 **Conflicting notes**:
 - CLAUDE.md said: `"Model: MODEL_CHAT (gpt-4o-mini or gpt-5)"`.
 - `backend/.env` example only shows `MODEL_CHAT=gpt-4o-mini`.
-- `gpt-5` is not a real OpenAI model name as of the last knowledge cutoff.
+- The bare `gpt-5` string is not the runtime default used by current Thallo env docs.
 
 **Why it's suspect**: Looks like an aspirational placeholder (`gpt-5`) that was added speculatively. The actual runtime model is whatever `MODEL_CHAT` is set to in `.env`.
 
@@ -97,6 +97,5 @@ a fallback when no PlanWeek exists.
 
 **Recommended follow-up**: Once telemetry shows zero callers using the
 legacy fallback, retire `get7DaySchedule` and the
-`POST /workouts/generate-day` API client. Migrate Switch Day to call
-`PATCH /plans/days/{day_date}/workout` instead of the legacy week
-regen path.
+`POST /workouts/generate-day` API client. Ensure all Change Focus paths call
+`PATCH /plans/days/{day_date}/workout` instead of the legacy week regen path.

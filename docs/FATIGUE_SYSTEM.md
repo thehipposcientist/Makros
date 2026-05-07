@@ -1,6 +1,6 @@
 # Fatigue System v2.1 — Design & Implementation
 
-Last updated: 2026-04-18
+Last updated: 2026-05-07
 
 ## Overview
 
@@ -94,9 +94,10 @@ Key behaviors:
 The `compute_rolling_fatigue()` function uses a two-pass approach:
 
 ### Pass 1: Positive Fatigue Accumulation
-- Iterates through all completions within the 3-day decay window
+- Iterates through recent completions from the fatigue history query
 - Accumulates only positive fatigue values (workouts, cardio, sports, active activities)
 - Each value is multiplied by the time-decay factor
+- Adds a small next-day bump from `soreness_areas` feedback
 
 ### Pass 2: Recovery Application
 - Processes completions with negative values (recovery/mobility sessions)
@@ -110,6 +111,11 @@ This prevents the exploit where multiple recovery sessions could wipe out a heav
 
 ## Time Decay
 
+Primary decay is hour-based with a 48-hour half-life:
+`decay(hours) = 0.5 ^ (hours / 48)`. This prevents an evening workout from reading as half-recovered the next morning just because the calendar date changed.
+
+Legacy rows without `completed_at` fall back to the old daily curve:
+
 | Days Ago | Multiplier |
 |----------|-----------|
 | 0 (today) | 1.00 |
@@ -118,18 +124,18 @@ This prevents the exploit where multiple recovery sessions could wipe out a heav
 | 3 | 0.10 |
 | 4+ | 0.00 |
 
-**Known limitation**: Systemic (CNS) fatigue should decay over 5-6 days for heavy compound sessions. Currently uses the same 3-day window as all other muscles. See RECOMMENDATIONS.md #16.
+**Known limitation**: Systemic fatigue may still deserve a slower curve for very heavy compound sessions.
 
 ## Nutrition Recovery Integration (NEW)
 
-The fatigue endpoint returns a `nutrition_context` object based on rolling protein intake from the meal history system:
+The fatigue endpoint returns a `nutrition_context` object based on rolling protein intake from the meal history system. Thresholds are ratios of the user's protein target, not absolute grams:
 
-| Protein Avg (3-day) | Status | Fatigue Modifier | Message |
-|---------------------|--------|-----------------|---------|
-| >= 130g | excellent | -5% fatigue bonus | "Protein intake strong (Xg avg) — accelerating recovery" |
-| >= 100g | good | -3% fatigue bonus | "Protein adequate (Xg avg) — supporting recovery" |
-| 50-99g | low | +3% fatigue penalty | "Protein low (Xg avg) — recovery is slower. Aim for 130g+" |
-| < 50g | very_low | No change | "Protein very low (Xg avg) — significantly slowing recovery" |
+| Protein / target | Status | Fatigue Modifier | Message |
+|------------------|--------|-----------------|---------|
+| >= 95% | excellent | small fatigue bonus | "Protein on target..." |
+| >= 80% | good | no modifier | "Protein adequate..." |
+| 60-79% | low | small fatigue penalty | "Protein low..." |
+| >0 and <60% | very_low | larger penalty | "Protein very low..." |
 | No data | no_data | No change | "Log meals to unlock nutrition-powered recovery insights" |
 
 The recovery bonus/penalty adjusts muscle fatigue values directly, then recalculates readiness score and focus readiness. The UI shows the nutrition insight as a colored message with icon in the expanded recovery card.
@@ -199,6 +205,7 @@ class WorkoutCompletion(SQLModel, table=True):
     activity_source: str | None       # manual/peloton/apple_health
     cardio_style: str | None          # recovery/steady/intervals/class
     resolved_muscle_fatigue: dict | None  # {"chest": 0.6, "triceps": 0.18, ...}
+    soreness_areas: list | None            # feedback areas that add next-day fatigue signal
     completed_at: datetime
 ```
 
@@ -206,7 +213,7 @@ class WorkoutCompletion(SQLModel, table=True):
 1. Per-exercise data exists -> `resolve_exercise_fatigue()` maps each exercise's primary/secondary muscles
 2. Only focus_label exists -> `resolve_focus_fatigue()` estimates from static mapping (includes active/sport/recovery types)
 3. Result stored as `resolved_muscle_fatigue` JSON on the completion row
-4. `compute_rolling_fatigue()` reads these dicts with two-pass approach (positive first, then recovery)
+4. `compute_rolling_fatigue()` reads these dicts with two-pass approach (positive first, then recovery), then folds in `soreness_areas` as a body-part-specific bump
 
 ## UI
 
@@ -225,9 +232,9 @@ class WorkoutCompletion(SQLModel, table=True):
 
 | File | Purpose |
 |------|---------|
-| `activity_impact.py` | MuscleFatigue dataclass, resolve functions, two-pass rolling fatigue, derived readiness, negative recovery values, active/sport fatigue profiles, keyword fallbacks |
+| `activity_impact.py` | MuscleFatigue dataclass, resolve functions, two-pass rolling fatigue, soreness bump, derived readiness, negative recovery values, active/sport fatigue profiles, keyword fallbacks |
 | `history.py` | `get_recent_completions_for_fatigue` DB query |
-| `workouts.py` | Complete endpoint (resolve + store, upsert by user/date/focus), generate-day (graduated response), fatigue endpoint (with nutrition_context), focus auto-correction via `_infer_focus_from_muscles()` |
+| `workouts.py` | Complete endpoint (resolve + store, upsert by user/date/focus), legacy generate-day, fatigue endpoint (with nutrition_context), focus auto-correction via `_infer_focus_from_muscles()` |
 | `models.py` | `WorkoutCompletion.resolved_muscle_fatigue` JSON column |
 | `main.py` | Startup backfill for historical completions |
 | `meal_history.py` | `get_rolling_averages()` — provides protein data for nutrition recovery integration |
@@ -237,6 +244,6 @@ class WorkoutCompletion(SQLModel, table=True):
 1. **Per-slot adaptation** — when a Chest/Back day has low chest readiness but fresh back, reduce chest volume instead of swapping the whole day (Phase 2)
 2. **Within-day exercise substitution** — swap squat for hip thrust because quads > glutes fatigue (Phase 2)
 3. **Weekly recipe rotation from fatigue** — if lower body is still fatigued from Friday, Monday's recipe starts with Upper (day-of adaptation already handles this)
-4. **Extended CNS decay** — systemic fatigue should decay over 5-6 days for heavy compounds
-5. **Injury-based fatigue boost** — active injuries +0.5, recovering +0.25 to affected muscles (designed, not yet wired into rolling fatigue)
-6. **Apple Health auto-import** — wearable data feeding fatigue automatically
+4. **Extended CNS decay** — systemic fatigue may deserve a slower decay curve for very heavy compound sessions.
+5. **Soreness visualization** — soreness already feeds fatigue; the UI still needs a separate "reported sore" overlay so users can distinguish modeled fatigue from subjective feedback.
+6. **Apple Health auto-import QA** — detected workouts can import into Thallo history, but the fatigue effect should be verified across real-world Watch/import sessions.

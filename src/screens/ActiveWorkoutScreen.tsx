@@ -384,7 +384,8 @@ function isCoreCircuitExercise(ex: Partial<SessionExercise> | any): boolean {
   const role = exerciseSlotRole(ex);
   const prescription = String(ex?.prescriptionType ?? ex?.prescription_type ?? '').toLowerCase();
   const primary = String(ex?.primaryMuscle ?? ex?.primary_muscle ?? ex?._primary_muscle ?? '').toLowerCase();
-  return role === 'core' || prescription === 'core_circuit' || (primary === 'core' && prescription.includes('core'));
+  if (['warmup', 'mobility', 'recovery', 'stretch', 'cooldown'].includes(role)) return false;
+  return role === 'core' || prescription === 'core_circuit' || prescription.includes('core') || primary === 'core';
 }
 
 function coreCircuitRunAt(exercises: SessionExercise[], index: number): number[] {
@@ -395,6 +396,10 @@ function coreCircuitRunAt(exercises: SessionExercise[], index: number): number[]
   while (end + 1 < exercises.length && isCoreCircuitExercise(exercises[end + 1])) end += 1;
   if (end - start + 1 < 2) return [];
   return Array.from({ length: end - start + 1 }, (_, offset) => start + offset);
+}
+
+function hasCoreCircuit(exercises: SessionExercise[]): boolean {
+  return exercises.some(isCoreCircuitExercise);
 }
 
 function extractActiveInjuryTokens(profile: any): string[] {
@@ -640,6 +645,217 @@ function isLongCardioExercise(name: string, targetReps?: string | number, opts?:
     if (Number.isFinite(n) && n >= 3) return true;
   }
   return false;
+}
+
+type CoreCircuitCategory = 'anti_extension' | 'anti_rotation' | 'lateral_stability' | 'flexion';
+
+const CORE_CIRCUIT_FALLBACKS: ExerciseLibraryItem[] = [
+  {
+    id: 'core_fallback_dead_bug',
+    slug: 'dead_bug',
+    name: 'Dead Bug',
+    equipment: 'bodyweight',
+    primary_muscle: 'core',
+    secondary_muscles: [],
+    movement_pattern: 'anti_extension',
+    is_compound: false,
+  },
+  {
+    id: 'core_fallback_side_plank',
+    slug: 'side_plank',
+    name: 'Side Plank',
+    equipment: 'bodyweight',
+    primary_muscle: 'core',
+    secondary_muscles: [],
+    movement_pattern: 'anti_extension',
+    is_compound: false,
+  },
+  {
+    id: 'core_fallback_reverse_crunch',
+    slug: 'reverse_crunch',
+    name: 'Reverse Crunch',
+    equipment: 'bodyweight',
+    primary_muscle: 'core',
+    secondary_muscles: [],
+    movement_pattern: 'flexion',
+    is_compound: false,
+  },
+  {
+    id: 'core_fallback_bird_dog',
+    slug: 'bird_dog',
+    name: 'Bird Dog',
+    equipment: 'bodyweight',
+    primary_muscle: 'core',
+    secondary_muscles: ['back'],
+    movement_pattern: 'anti_extension',
+    is_compound: false,
+  },
+];
+
+function coreCircuitCategoryForItem(item: ExerciseLibraryItem): CoreCircuitCategory | null {
+  const name = normalizeSwapText(item.name);
+  const movement = normalizeSwapText(item.movement_pattern);
+  const primary = normalizeSwapText(item.primary_muscle);
+  if (primary !== 'core') return null;
+  if (/mountain climber|burpee|sprint|running|jogging/.test(name)) return null;
+  if (/side plank|copenhagen|suitcase/.test(name)) return 'lateral_stability';
+  if (/pallof|woodchop|wood chop|russian twist|anti rotation/.test(name) || movement === 'anti rotation') {
+    return 'anti_rotation';
+  }
+  if (/reverse crunch|crunch|leg raise|knee raise|toes to bar|sit up|v up/.test(name) || movement === 'flexion' || movement === 'isolation') {
+    return 'flexion';
+  }
+  if (/plank|dead bug|bird dog|hollow|rollout|body saw/.test(name) || movement === 'anti extension') {
+    return 'anti_extension';
+  }
+  return 'anti_extension';
+}
+
+function coreCategoryOrderForWorkout(workoutFocus?: string | null): CoreCircuitCategory[] {
+  const focus = normalizeSwapText(workoutFocus);
+  if (/legs?|lower|squat|hinge/.test(focus)) {
+    return ['anti_rotation', 'lateral_stability', 'anti_extension'];
+  }
+  if (/pull|back/.test(focus)) {
+    return ['anti_rotation', 'lateral_stability', 'anti_extension'];
+  }
+  if (/push|chest|shoulder/.test(focus)) {
+    return ['anti_extension', 'anti_rotation', 'flexion'];
+  }
+  return ['anti_extension', 'anti_rotation', 'lateral_stability'];
+}
+
+function coreCandidateScore(item: ExerciseLibraryItem, category: CoreCircuitCategory): number {
+  const name = normalizeSwapText(item.name);
+  const movement = normalizeSwapText(item.movement_pattern);
+  const equipment = normalizeSwapText(exerciseEquipmentLabel(item) ?? item.equipment);
+  let score = 0;
+  if (normalizeSwapText(item.primary_muscle) === 'core') score += 20;
+  if (
+    (category === 'anti_extension' && movement === 'anti extension') ||
+    (category === 'anti_rotation' && movement === 'anti rotation') ||
+    (category === 'flexion' && (movement === 'flexion' || movement === 'isolation'))
+  ) {
+    score += 10;
+  }
+  if (category === 'lateral_stability' && /side plank|copenhagen|suitcase/.test(name)) score += 12;
+  if (category === 'anti_extension' && /dead bug|plank|hollow|rollout/.test(name)) score += 8;
+  if (category === 'anti_rotation' && /pallof|woodchop|wood chop|russian twist/.test(name)) score += 8;
+  if (category === 'flexion' && /reverse crunch|knee raise|leg raise|crunch/.test(name)) score += 8;
+  if (/bodyweight|none/.test(equipment)) score += 2;
+  if (category === 'anti_rotation' && /cable/.test(equipment)) score += 2;
+  if (/weighted|toes to bar|ab wheel/.test(name)) score -= 3;
+  return score;
+}
+
+function coreCircuitTargetReps(item: ExerciseLibraryItem): string {
+  const name = normalizeSwapText(item.name);
+  const tracking = normalizeSwapText((item as any).default_tracking_mode);
+  if (/side plank|copenhagen/.test(name)) return '30s each side';
+  if (/plank|hollow|carry/.test(name) || tracking === 'time') return '30s';
+  if (/dead bug|bird dog|pallof/.test(name)) return '10/side';
+  if (/woodchop|wood chop|russian twist/.test(name)) return '12/side';
+  return '12';
+}
+
+function coreCircuitSlotLabel(category: CoreCircuitCategory): string {
+  switch (category) {
+    case 'anti_rotation':
+      return 'Core Circuit - Anti-Rotation';
+    case 'lateral_stability':
+      return 'Core Circuit - Lateral Stability';
+    case 'flexion':
+      return 'Core Circuit - Lower Ab';
+    case 'anti_extension':
+    default:
+      return 'Core Circuit - Anti-Extension';
+  }
+}
+
+function mergeCoreCircuitCandidates(library: ExerciseLibraryItem[]): ExerciseLibraryItem[] {
+  const byName = new Map<string, ExerciseLibraryItem>();
+  for (const item of CORE_CIRCUIT_FALLBACKS) {
+    byName.set(normalizeSwapText(item.name), item);
+  }
+  for (const item of library) {
+    const key = normalizeSwapText(item.name);
+    if (!key) continue;
+    byName.set(key, item);
+  }
+  return Array.from(byName.values());
+}
+
+function buildGeneratedCoreCircuit(
+  library: ExerciseLibraryItem[],
+  currentExercises: SessionExercise[],
+  opts: {
+    ownedEquipment: string[];
+    activeInjuryTokens: string[];
+    workoutFocus?: string | null;
+  },
+): SessionExercise[] {
+  const currentNames = new Set(currentExercises.map(ex => normalizeSwapText(ex.name)));
+  const categoryOrder = coreCategoryOrderForWorkout(opts.workoutFocus);
+  const candidates = mergeCoreCircuitCandidates(library)
+    .filter(item => !currentNames.has(normalizeSwapText(item.name)))
+    .filter(item => isExerciseUsableWithEquipment(item, opts.ownedEquipment))
+    .filter(item => !candidateConflictsWithActiveInjuries(item, opts.activeInjuryTokens))
+    .map(item => ({ item, category: coreCircuitCategoryForItem(item) }))
+    .filter((row): row is { item: ExerciseLibraryItem; category: CoreCircuitCategory } => row.category != null);
+
+  const selected: Array<{ item: ExerciseLibraryItem; category: CoreCircuitCategory }> = [];
+  for (const category of categoryOrder) {
+    const best = candidates
+      .filter(row => row.category === category)
+      .filter(row => !selected.some(sel => normalizeSwapText(sel.item.name) === normalizeSwapText(row.item.name)))
+      .sort((a, b) => {
+        const scoreDelta = coreCandidateScore(b.item, category) - coreCandidateScore(a.item, category);
+        if (scoreDelta !== 0) return scoreDelta;
+        return a.item.name.localeCompare(b.item.name);
+      })[0];
+    if (best) selected.push(best);
+    if (selected.length >= 3) break;
+  }
+
+  if (selected.length < 3) {
+    for (const row of candidates.sort((a, b) => {
+      const scoreDelta = coreCandidateScore(b.item, b.category) - coreCandidateScore(a.item, a.category);
+      if (scoreDelta !== 0) return scoreDelta;
+      return a.item.name.localeCompare(b.item.name);
+    })) {
+      if (selected.some(sel => normalizeSwapText(sel.item.name) === normalizeSwapText(row.item.name))) continue;
+      selected.push(row);
+      if (selected.length >= 3) break;
+    }
+  }
+
+  return selected.slice(0, 3).map(({ item, category }): SessionExercise => ({
+    name: item.name,
+    targetSets: 3,
+    targetReps: coreCircuitTargetReps(item),
+    targetRestSeconds: 30,
+    equipment: exerciseEquipmentLabel(item) ?? item.equipment ?? 'bodyweight',
+    sets: [],
+    aiRecommendation: undefined,
+    image_url: item.image_url ?? undefined,
+    video_id: item.video_id ?? null,
+    targetWeightLbs: null,
+    setScheme: null,
+    slug: item.slug ?? null,
+    primaryMuscle: item.primary_muscle ?? 'core',
+    primary_muscle: item.primary_muscle ?? 'core',
+    secondaryMuscles: item.secondary_muscles ?? [],
+    secondary_muscles: item.secondary_muscles ?? [],
+    muscles_targeted: [
+      item.primary_muscle ?? 'core',
+      ...(item.secondary_muscles ?? []),
+    ].filter(Boolean) as string[],
+    isCompound: item.is_compound ?? false,
+    slotRole: 'core',
+    slotLabel: coreCircuitSlotLabel(category),
+    prescriptionType: 'core_circuit',
+    weightRecommendationSource: null,
+  }));
 }
 
 function getTimedExerciseTip(name: string, targetReps?: string | number, loggedSets?: any[]): string | null {
@@ -3269,6 +3485,42 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     setAiExerciseResults([]);
   }, [swapTargetIdx]);
 
+  const handleAddCoreCircuit = useCallback(async () => {
+    const current = exercisesRef.current.length > 0 ? exercisesRef.current : exercises;
+    if (hasCoreCircuit(current)) {
+      Alert.alert('Core already added', 'This workout already has direct core work.');
+      return;
+    }
+
+    let library: ExerciseLibraryItem[] = [];
+    try {
+      library = await ensureExerciseLibrary();
+    } catch {
+      library = [];
+    }
+
+    const circuit = buildGeneratedCoreCircuit(library, current, {
+      ownedEquipment,
+      activeInjuryTokens,
+      workoutFocus: workout.focus,
+    });
+
+    if (circuit.length < 2) {
+      Alert.alert('No core circuit available', 'No equipment-ready core options are available for this workout.');
+      return;
+    }
+
+    setExercises(prev => {
+      if (hasCoreCircuit(prev)) return prev;
+      const updated = [...prev, ...circuit];
+      setActiveExIdx(prev.length);
+      return updated;
+    });
+    setPreSetHints({});
+    setAiErrorIdx(null);
+    import('../utils/feedback').then(f => f.hapticSuccess()).catch(() => {});
+  }, [activeInjuryTokens, ensureExerciseLibrary, exercises, ownedEquipment, setExercises, workout.focus]);
+
   /** Explicit fallback search for adding exercises that aren't in the local
    *  library. Swap stays local/ranked so it remains instant mid-workout. */
   const handleAiExerciseSearch = useCallback(async () => {
@@ -4543,6 +4795,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const setCompletionPct = totalPlannedSets > 0
     ? Math.min(100, Math.round((Math.min(totalLoggedSets, totalPlannedSets) / totalPlannedSets) * 100))
     : 0;
+  const coreCircuitExists = useMemo(() => hasCoreCircuit(exercises), [exercises]);
   const summaryDurationSeconds = finishedSession?.durationSeconds ?? elapsed;
   const summarySetCount = finishedSession
     ? finishedSession.exercises.reduce((total, ex) => total + ex.sets.length, 0)
@@ -6106,6 +6359,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         {/* Add Exercise — outside/below exercise cards */}
         {warmupDone && (
           <>
+            {!coreCircuitExists && (
+              <PressableScale
+                style={[
+                  styles.addCoreCircuitBtn,
+                  {
+                    backgroundColor: workoutPalette.soft,
+                    borderColor: workoutPalette.strong + '66',
+                  },
+                ]}
+                disabled={exerciseLibraryLoading}
+                accessibilityRole="button"
+                accessibilityLabel="Add core circuit"
+                onPress={handleAddCoreCircuit}>
+                <Ionicons name="repeat" size={15} color={workoutPalette.strong} />
+                <Text style={[styles.addCoreCircuitBtnText, { color: workoutPalette.strong }]}>
+                  Add Core Circuit
+                </Text>
+                {exerciseLibraryLoading && (
+                  <ActivityIndicator size="small" color={workoutPalette.strong} />
+                )}
+              </PressableScale>
+            )}
             <TouchableOpacity style={styles.addExerciseBtn} onPress={openAddExerciseModal}>
               <Text style={styles.addExerciseBtnText}>+ Add Exercise</Text>
             </TouchableOpacity>
@@ -7354,6 +7629,19 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   exerciseDetail: { marginTop: 12, gap: 10 },
 
   // Add Exercise button — below all cards
+  addCoreCircuitBtn: {
+    minHeight: 44,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 10,
+  },
+  addCoreCircuitBtnText: { fontSize: 13, fontWeight: '800' },
   addExerciseBtn: {
     borderWidth: 1,
     borderColor: tc.border,

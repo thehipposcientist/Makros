@@ -2,7 +2,7 @@
 
 ## Current State
 
-**Apple Health**: Code exists (`src/services/appleHealth.ts`), permissions configured in `app.json`, reads resting HR, steps, sleep, workouts, active energy. NOT auto-importing workouts into the fatigue system yet. Requires a development build (won't work in Expo Go).
+**Apple Health**: Implemented through the local `thallo-healthkit` module and `src/services/appleHealth.ts` / `healthDataSummary.ts`. Reads sleep, heart-rate signals, steps, workouts, active energy, weight, VO2, respiratory/O2/mindful/stand signals, and menstrual-flow samples when permissioned. Writes completed Thallo workouts. Detected Apple Health workouts can be imported into Thallo history and then feed progress/fatigue through the normal completion pipeline. Requires a development/native build; Expo Go cannot load this module.
 
 **WHOOP**: Not integrated. WHOOP exposes data through Apple Health on iOS — so Apple Health integration covers most WHOOP data automatically.
 
@@ -13,16 +13,18 @@
 ## Apple Health (iOS)
 
 ### What We Already Have
-- `react-native-health` installed (v1.19.0)
-- HealthKit entitlements in `app.json`
-- Permission request flow in onboarding
-- `readHealthSummary()` reads: resting HR, steps, sleep, workouts, active energy
-- `healthScore.ts` computes a fitness score from the health data
+- Local `modules/thallo-healthkit` Expo module
+- HealthKit entitlements and usage strings in `app.json`
+- Permission request flow in onboarding, Progress, and Settings
+- `readHealthSummary()` / `healthDataSummary.ts` read the categories listed above
+- `healthDataSummary.ts` pushes daily snapshots and sleep rows to the backend
+- `workoutAutoImport.ts` / `DetectedWorkoutsCard` import detected Health workouts
+- `saveWorkoutToHealth()` writes completed Thallo workouts back to Apple Health
 
 ### What's Missing
-1. **Auto-import workouts** — when the user finishes a workout on their Apple Watch or another app, import it as a completed session and feed the fatigue system
-2. **Write completed workouts** — save Thallo workouts back to Apple Health so they show in the Health app timeline
-3. **Background delivery** — get notified when new health data arrives (currently `background-delivery` is set to `false`)
+1. **Background delivery** — get notified when new health data arrives without the user opening Thallo.
+2. **Real-device QA** — verify denied/partial/granted permission states, workout write behavior, and detected-workout import on TestFlight builds.
+3. **Direct Garmin/WHOOP APIs** — still not implemented; Apple Health remains the bridge for those users on iOS.
 
 ### How to Test on Your Phone
 
@@ -57,9 +59,9 @@ eas build --platform ios --profile development --simulator
 # Open Health app in simulator > Browse > add sample data manually
 ```
 
-### Implementation: Auto-Import Workouts
+### Historical Implementation Sketch: Auto-Import Workouts
 
-To wire Apple Health workouts into the fatigue system, add to `appleHealth.ts`:
+The old sketch below is retained as context only. The current code path is `workoutAutoImport.ts` + `DetectedWorkoutsCard` + `saveWorkoutSession` / `logWorkoutDone`, not a fresh `importRecentWorkouts()` helper.
 
 ```typescript
 export async function importRecentWorkouts(): Promise<WorkoutSession[]> {
@@ -269,8 +271,8 @@ Build Apple Health well and you cover 90% of wearable users without any device-s
 - [ ] Create EAS development build (`eas build --platform ios --profile development`)
 - [ ] Install on physical iPhone
 - [ ] Grant HealthKit permissions during onboarding
-- [ ] Verify resting HR, steps, sleep populate in fitness score
-- [ ] Complete a workout in Thallo → verify it appears in Apple Health (after write is implemented)
-- [ ] Complete a workout on Apple Watch → verify it auto-imports into Thallo (after auto-import is implemented)
+- [ ] Verify resting HR, steps, sleep, HRV, active energy, workout minutes, weight, and cycle-aware signals populate where permissioned
+- [ ] Complete a workout in Thallo → verify it appears in Apple Health
+- [ ] Complete a workout in Apple Health / Watch / another app → verify Thallo detects and can import it
 - [ ] If WHOOP user: verify WHOOP data flows through Apple Health to Thallo
 - [ ] If Garmin user: verify Garmin → Health Sync → Apple Health → Thallo pipeline

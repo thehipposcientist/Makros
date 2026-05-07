@@ -1,12 +1,14 @@
 # UI Layout
 
-Last updated: 2026-05-06
+Last updated: 2026-05-07
 
 ## Tab Structure
 
+Bottom nav has five destinations: **Friends**, **Workouts**, **Meals**, **Progress**, and **You**.
+
 ### Workout Tab
-- **Plan** — fixed 7-day **PlanWeek** schedule (Mon-Sun, anchored on the
-  most recent Monday). Renders a compact weekly selector in chronological
+- **Plan** — fixed 7-day **PlanWeek** schedule anchored on the user's own
+  start-day cadence. Renders a compact weekly selector in chronological
   order, then one full selected-day card. Past days show as completed /
   skipped in the selector, today is selected by default and keeps a persistent
   top dot when another day is selected, and forward days remain queued. The 7
@@ -26,13 +28,19 @@ Last updated: 2026-05-06
 - **Foods** — search + targets + "YOUR FAVORITES" horizontal scroll of common meals.
 - **Supps** — supplements.
 
-### Progress Screen Tabs
+### Progress Tab
 - **Today** — goal-aware on-track check using the user's active goal, current week pace, strength trend, cardio trend, weight/body trend, and nutrition signal; also owns actionable current-week surfaces such as in-progress workout resume, the weekly check-in card, and Zone 2 plan-week progress.
-- **Trends** — goal trajectory, strength / cardio charts, and the top estimated 1RM.
-- **History** — workout calendar + chronological logged workout/session history only; trend summaries stay out of this tab.
-- **Body** — recovery, muscle balance, weight history, measurements, and body-scan history.
+- **Trends** — strength/cardio charts, top estimated 1RM, PRs, workout calendar, chronological session history, goal history, AI summaries, and scheduled change history.
+- **Body** — per-muscle recovery, muscle balance, weight history, measurements, and body-scan history.
 - **Health** — Apple Health vitals, detected Apple Health workout imports, stored Health/Sleep history, and Nutrition & Gut Facts (adaptive window up to 14 days).
 - Tab transitions: `FadeInView` keyed on tab + haptic selection.
+
+### Friends Tab
+- **Activity** — bounded friends-only workout activity feed for self + friends with sharing enabled.
+- **Friends** — THIS WEEK digest, requests/friends/sent rows, ADD FRIENDS search, and notification tray.
+
+### You Tab
+- Account/profile entry points, theme, Gear tracker, Settings, body/profile edits, and tutorial/legal/account actions.
 
 ## UI Helpers + Conventions
 
@@ -54,8 +62,8 @@ Last updated: 2026-05-06
 ## Day Card Behavior (PlanWeek)
 
 - `isToday` is **date-based** (`dateKey(item.date) === todayKey()`) — with
-  the dated PlanWeek, today may be at any index (e.g., index 1 if the
-  week started Monday and today is Tuesday).
+  the dated PlanWeek, today may be at any index after the first day of the
+  user's personal 7-day cadence.
 - `isCompleted` derives from `completedDates.has(key)` so any past day's
   completed workout shows as done (yesterday rendering as ✓ done is the
   user-visible signal that the schedule reflects history).

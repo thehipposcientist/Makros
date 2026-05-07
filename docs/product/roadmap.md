@@ -1,6 +1,6 @@
 # Roadmap + Next Improvements
 
-Last updated: 2026-05-03
+Last updated: 2026-05-07
 
 > See `docs/product/backlog-review.md` for items whose shipped status is ambiguous.
 
@@ -16,6 +16,8 @@ Last updated: 2026-05-03
   `docs/architecture/plan-persistence.md`.
 - **Active workout recommendation cleanup (Apr 29, 2026)** — rest-time recommendations now refresh without waiting on a bottom "How did it feel?" prompt, that prompt was removed, RIR is only asked on significant overshoots, and the refreshed recommendation is pushed to Apple Watch during the rest window.
 - **Watch complication + Smart Stack widget (May 3, 2026)** — Watch app now mirrors workout / readiness / hydration state into App Group SharedDefaults, embeds `ThalloWatchComplication`, and supports widget links for Start/Rejoin Workout and +8 oz hydration.
+- **Sign-up-day PlanWeek cadence (May 2026)** — first `PlanWeek` now starts on the user's start day and auto-renew uses `prev.end_date + 1`, preserving a personal 7-day cadence instead of snapping to Monday.
+- **Cycle-aware readiness/planning (May 2026)** — Apple Health menstrual-flow phase is now transiently passed into server readiness and PlanWeek generation/auto-renew for soft deterministic adjustments.
 
 ---
 
@@ -62,8 +64,8 @@ These fields are written to the DB on every session but are never queried or sho
 
 ### Soreness Tracking
 - `soreness_areas` is captured on WorkoutCompletion (e.g. `["lower_back", "quads"]`).
-- **Not surfaced**: not shown on history, not fed into the fatigue model.
-- **Unlock**: feed `soreness_areas` into `compute_rolling_fatigue` as a fatigue signal multiplier. A user reporting quad soreness should raise quad fatigue independently of volume-load decay. Also: show soreness history on the body heat map (overlay of "reported sore" vs "model says fatigued").
+- **Now wired**: shown in workout history / recent body insights and fed into `compute_rolling_fatigue` as a small next-day fatigue bump.
+- **Remaining unlock**: make soreness visually distinct on the body heat map so users can compare "reported sore" vs "model says fatigued" instead of seeing only one recovery layer.
 
 ### Comfort Rating (Mobility/Stretch)
 - `ExerciseSet.comfort_rating` field exists and is in the payload schema (`CompletedSetPayload`).
@@ -99,8 +101,8 @@ These are built on the backend or partially built on the frontend but not connec
 | **Quick-intent action auto-apply** | Coach returns structured action | Apply on confirm instead of showing "Got it" |
 | **Readiness-based auto-deload** | Readiness computed, deload logic exists | Trigger when readiness < threshold for 3+ consecutive days |
 | **Weekly check-in → planner** | Writes to `UserCoachingState` / `UserPreferences`; `auto_renew_week` reads `volume_adjustment_pct` and applies a -20 deload trigger when readiness < 40 | Verify the deload propagates into the next PlanWeek's prescribed sets (sanity-check on a real low-readiness account) |
-| **PlanWeek migration cleanup** | New PlanWeek path is live and the daily regen block removed | Retire the legacy `get7DaySchedule` fallback once telemetry shows zero callers; same for the legacy `generateWorkoutDay` API client. Migrate Switch Day to call `PATCH /plans/days/{day_date}/workout` instead of the old `generateWorkoutWeek`. |
-| **Social workout sharing** | `ShareWorkoutModal` component exists but disabled | Re-enable when social feed launches |
+| **PlanWeek migration cleanup** | New PlanWeek path is live and the daily regen block removed | Retire the legacy `get7DaySchedule` fallback once telemetry shows zero callers; same for the legacy `generateWorkoutDay` API client. Ensure all Change Focus paths call `PATCH /plans/days/{day_date}/workout` instead of the old `generateWorkoutWeek`. |
+| **Social workout share entrypoint** | Friends feed/posts endpoints and feed UI are live; `ShareWorkoutModal` exists but is not mounted from completed workouts | Add the share button/entrypoint and decide whether photos/captions ship for beta |
 
 ---
 
@@ -123,13 +125,13 @@ These are built on the backend or partially built on the frontend but not connec
 - **Cycle-phase-aware training** — auto-adjust volume/intensity by menstrual phase via `healthDataSummary` → planner.
 - **Cardio performance service** — pace trend, distance progression, output efficiency per cardio type. Data is being written; no analysis service or UI exists.
 - **HR zone analysis** — zone time-in-band history (Zone 2 / Zone 4 / Zone 5) from `hr_summary` on completions. More granular than Apple Health minutes.
-- **Soreness → fatigue feedback** — feed `soreness_areas` on WorkoutCompletion into `compute_rolling_fatigue` as a per-muscle fatigue signal. Reported soreness is a direct proxy for muscle damage that decay-only models miss.
+- **Soreness heat-map overlay** — soreness now feeds fatigue; remaining UX is a separate visual layer for reported soreness vs modeled fatigue.
 
 ---
 
 ## UI Polish
 
-- Migrate remaining direct `readHealthSummary` consumers (HomeScreen, ActiveWorkoutScreen) to `getHealthDataSummary`.
+- Migrate remaining one-off direct `readHealthSummary` consumers where they do not need raw HealthKit details; keep direct reads only for permission/connect flows and raw-detail refreshes.
 - **Quick-intent action wiring**: auto-apply on user confirm when chat returns structured action (e.g. `shorten_workout`).
 - **Cardio metric hints**: show contextual field labels in the MetricField list based on exercise type (e.g. hide "watts" for treadmill, show pace/incline).
 - **Body heat map dual overlay**: show both model-computed fatigue AND user-reported soreness as separate color layers so the user can see where the model and their body agree or diverge.

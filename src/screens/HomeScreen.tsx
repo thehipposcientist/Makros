@@ -13256,7 +13256,7 @@ function BottomTabButton({
         scaleDown={0.97}
         hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
         accessibilityRole="tab"
-        accessibilityLabel={`${label} tab`}
+        accessibilityLabel={`${label} tab${badge != null && badge > 0 ? ', updates available' : ''}`}
         accessibilityState={{ selected: active }}
         testID={testID}>
         <Animated.View style={[
@@ -13286,9 +13286,19 @@ function BottomTabButton({
               />
             </Animated.View>
             {badge != null && badge > 0 && (
-              <View style={{ position: 'absolute', top: -4, right: -8, backgroundColor: tint, borderRadius: 999, minWidth: 15, height: 15, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 3 }}>
-                <Text style={{ fontSize: 9, fontWeight: '800', color: getContrastingTextColor(tint) }}>{badge}</Text>
-              </View>
+              <View
+                style={{
+                  position: 'absolute',
+                  top: -2,
+                  right: -4,
+                  width: 9,
+                  height: 9,
+                  borderRadius: 5,
+                  backgroundColor: '#EF4444',
+                  borderWidth: 2,
+                  borderColor: active ? tint + '22' : 'transparent',
+                }}
+              />
             )}
           </View>
           <Animated.View style={[

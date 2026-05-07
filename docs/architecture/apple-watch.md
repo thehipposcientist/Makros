@@ -49,7 +49,7 @@ TabView: **Today** (workout) / **Meals** / **Hydration** / **Supps** / **Sleep**
 
 **Start behavior**: watch Start is local-first. It immediately mints a local `sessionId`, presents `ActiveWorkoutView`, clears stale watch set state, and sends `start_workout` with that `sessionId` to the phone in the background. The phone reuses the watch-provided id for its active echo, so sets logged before the echo lands still belong to the same workout session. The phone still owns persistence, but the watch no longer waits on the phone echo or on a HealthKit workout session before tracking sets.
 
-**HealthKit**: watch tracking does not save a HealthKit workout. Heart-rate/runtime support may start opportunistically, but end/cancel discards the builder so workout history remains Thallo-authoritative.
+**HealthKit**: watch tracking uses `HKWorkoutSession` + `HKLiveWorkoutBuilder` for live heart rate/runtime. Normal end calls `finishWorkout`, while cancel calls `discardWorkout`; Thallo's phone/backend session remains the workout source of truth for sets, recommendations, and plan completion.
 
 ## Active-State Persistence (#148) — IMPLEMENTED
 
@@ -74,9 +74,9 @@ TabView: **Today** (workout) / **Meals** / **Hydration** / **Supps** / **Sleep**
 
 ## Siri Intent Scaffold (#111 — NOT YET SHIPPED)
 
-`ios-extras/StartWorkoutAppIntent.swift` — stub `AppIntent` opening `thallo://start-workout`. File body is `#if false`.
+`ios-extras/StartWorkoutAppIntent.swift` — drop-in `AppIntent` source that opens `thallo://start-workout`. The JS deep-link handler is wired in `app/index.tsx`, but the native Intents extension target is not yet part of the build.
 
-**Blocked until:** Intents extension target added in Xcode + matching deep-link handler in `app/_layout.tsx`.
+**Blocked until:** Intents extension target added in Xcode / Expo targets, file assigned to that target, and intent metadata declared in the native app bundle.
 
 ## Payload Change Rules
 

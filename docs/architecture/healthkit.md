@@ -1,6 +1,6 @@
 # Apple Health / HealthKit — Architecture
 
-Last synced from CLAUDE.md: 2026-04-27
+Last synced from app state: 2026-05-07
 
 ## HealthDataSummary Aggregator (`src/services/healthDataSummary.ts`)
 
@@ -12,7 +12,7 @@ Single source of truth for all Apple Health reads in the client.
 - `getHealthDataSummary({age})` — cached with stale-refresh.
 
 **Flat shape:**
-`steps`, `sleepMinutes`, `restingHeartRate`, `hrv`, `workoutMinutes`, `cardioMinutes`, `zone2Minutes`, `activeEnergyKcal`, `weightLbs`, `vo2Max`, plus `weekly` rollup.
+`steps`, `sleepMinutes`, `restingHeartRate`, `hrv`, `workoutMinutes`, `cardioMinutes`, `zone2Minutes`, `activeEnergyKcal`, `weightLbs`, `vo2Max`, plus `weekly` rollup and `raw` for legacy callers.
 
 **Behavior:**
 - 30-min stale window, in-flight dedup.
@@ -21,11 +21,11 @@ Single source of truth for all Apple Health reads in the client.
 
 ## Backend Persistence
 
-- Daily HealthKit rollups are stored in `daily_health_snapshots` through `POST /health/snapshot` and `POST /health/snapshot/batch`; `GET /health/history` powers visible history and server-side trend logic.
-- Per-night sleep rows are stored in `sleep_logs` through `POST /sleep/nightly` and `POST /sleep/nightly/batch`; `GET /sleep/history` powers sleep baselines and the Health tab history card.
+- Daily HealthKit rollups are stored in `daily_health_snapshots` through `POST /health/snapshot` and `POST /health/snapshot/batch`; `GET /health/history` powers visible history and server-side trend logic. Every `healthDataSummary` refresh pushes today + yesterday, and permission grant can backfill up to 30 days.
+- Per-night sleep rows are stored in `sleep_logs` through `POST /sleep/nightly` and `POST /sleep/nightly/batch`; `GET /sleep/history` powers sleep baselines and the Health tab history card. App startup imports `app/_layout.tsx` so nightly sleep persistence can run even before Progress opens.
 - Both upsert paths are patch-style: later partial rows fill gaps without erasing earlier values.
 
-**Migration status:** ProgressScreen migrated to `getHealthDataSummary`. Remaining direct `readHealthSummary` callers (HomeScreen, ActiveWorkoutScreen) can migrate file-by-file — the aggregator wraps the same fn so callers keep working.
+**Migration status:** `healthDataSummary` is the shared cache and backend-push path. Some UI surfaces still call `readHealthSummary` directly for fresh one-off reads or `raw` details, but readiness/watch payloads converge through the server `/readiness/today` flow.
 
 ## HK Write (workouts)
 
@@ -34,16 +34,17 @@ Single source of truth for all Apple Health reads in the client.
 - Live-tracker sessions.
 - Log-activity sessions.
 
-Watch-started sessions write via `HKLiveWorkoutBuilder.finishWorkout` from the watch target.
+Watch-started sessions use `targets/thallo-watch/HeartRateStore.swift` with `HKWorkoutSession` + `HKLiveWorkoutBuilder`: normal end calls `finishWorkout`, while cancel/discard calls `discardWorkout` so cancelled sessions do not land in Apple Health.
 
-## In-App Dev Logs (#128)
+## Detected Workout Import
 
-Not strictly HealthKit but a debugging tool:
-- `src/utils/devLogs.ts` — ring-buffer of last 400 log entries.
-- `src/components/DevLogsViewer.tsx` — modal with filter + level + iOS share sheet.
-- Trigger: Account modal → "Developer logs" link.
-- Critical for TestFlight builds where Metro/Xcode console are inaccessible.
+`DetectedWorkoutsCard` / `workoutAutoImport.ts` can turn Apple Health workouts into local Thallo workout sessions. Imported workouts then sync through the normal workout-completion paths so fatigue, progress, and history can react to wearable/manual activity that was not started inside Thallo.
 
-## Cycle-Phase (Future — not yet wired to planner)
+## Cycle Phase
 
-`CyclePhaseCard` + `getCycleStatus` read Apple Health menstrual data and display phase/tip. The backend planner does not yet receive cycle phase — volume auto-adjustment (reduce 10-15% in luteal, push intensity in follicular/ovulation) is a planned enhancement via `healthDataSummary` → `readiness` → `fatigue` multiplier.
+`getCycleStatus` reads Apple Health menstrual-flow samples and returns `{phase, dayOfCycle, cycleLengthDays, nextExpectedMenses, currentFlow}`. The signal is transient and permission-aware: no raw menstrual-flow table is persisted.
+
+Current consumers:
+- `CyclePhaseCard` and `PeriodSupportCard` display cycle-aware guidance.
+- `POST /readiness/today` accepts `cycle_phase` / `day_of_cycle`; server readiness adds the optional cycle pillar when present.
+- `POST /plans/start-new-week` and `POST /plans/week/auto-renew` can pass cycle context into `planner_context`; `planner.py` softly adjusts muscle-volume targets by phase (`menses` / `luteal` lower, `follicular` / `ovulation` slightly higher).

@@ -1,6 +1,6 @@
 # Plan Persistence + Cache — Architecture
 
-Last updated: 2026-04-28
+Last updated: 2026-05-07
 
 ## Source of Truth: PlanWeek
 
@@ -10,8 +10,10 @@ active set per user. Each `PlanWeek` carries `start_date`, `end_date`,
 (`pending` / `in_progress` / `completed` / `skipped`), `is_rest`, `locked`,
 `workout_json`, and `nutrition_json`. The 7 days are generated once at week
 start and **never regenerated mid-week** — past days accumulate as done /
-skipped, today is highlighted, future days remain queued. A new `PlanWeek`
-is only generated when the previous one's `end_date < today` (auto-renew).
+skipped, today is highlighted, future days remain queued. The first week is
+anchored on the user's start day; later weeks renew from `prev.end_date + 1`.
+A new `PlanWeek` is only generated when the previous one's `end_date < today`
+(auto-renew).
 
 The legacy `WorkoutPlan` + `NutritionPlan` tables remain for the AI plan
 artifact / nutrition templates, but the front-page rendering no longer
@@ -24,29 +26,41 @@ indexes into them via a cycling array.
   `needs_new_week: bool` so the client can decide whether to call
   auto-renew.
 - `POST /plans/start-new-week` — generates a fresh 7-day plan anchored on
-  the most recent **Monday**. Used for first-run setup. Runs the
+  **today**. Used for first-run setup / explicit new-week creation. Runs the
   deterministic workout planner + nutrition assembler, then persists into
   `plan_weeks` + `plan_days`.
 - `POST /plans/week/auto-renew` — when the active week's `end_date` has
-  passed, generates the next 7 days immediately. It also snapshots the
+  passed, generates the next 7 days from `prev.end_date + 1`. It also snapshots the
   expired week into `plan_week_checkins` so the user has one day to review
   the coach summary and apply durable setting changes for future generated
   weeks. If the user ignores it, the generated week stays as-is and the
   recap remains readable.
   Idempotent: a no-op while the current week is still active.
+- `POST /plans/week/pause` / `POST /plans/week/resume` — pause/resume
+  auto-renew, auto-skip, and reminders for travel/illness windows. The active
+  week stays intact.
 - `POST /plans/week/review-and-apply` — applies user-selected
   recommendations from the weekly check-in to durable settings; it does not
   rewrite the active `PlanWeek`.
 - `PATCH /plans/days/{day_date}/workout` and `…/nutrition` — partial
   per-day patches (used by Change Focus, exercise swaps, and manual edits).
-- `POST /plans/days/{day_date}/lock` — pins a single day so subsequent
-  regens leave it untouched.
+- `POST /plans/days/{day_date}/start` — locks a day when the user begins it.
+- `POST /plans/days/{day_date}/complete` / `skip` / `unskip` — status changes
+  for the dated `PlanDay`.
+- `POST /plans/week/adapt-remaining` — re-fills unlocked future workouts from
+  current fatigue while keeping the same weekly recipe.
+- `POST /plans/week/repair-injury-conflicts` — safety exception after injury
+  changes; rewrites unlocked current/future exercise lists without changing the
+  dated week structure.
+- `POST /plans/week/regenerate-remaining` — explicit mid-week settings-change
+  path for unlocked future days after days/week or split changes.
 
 ## Frontend Loading Flow (`HomeScreen.loadPlans`)
 
 1. On mount + on `userProfile` change, call `getActivePlanWeek(token)`.
 2. If `null` → call `startNewPlanWeek(token, false)` to generate one.
-3. If `needs_new_week === true` → call `autoRenewPlanWeek(token)` and use
+3. If `end_date < today` / the returned week needs renewal → call
+   `autoRenewPlanWeek(token)` and use
    the returned `plan_week`. `WeeklyCheckinCard` reads
    `/plans/week/checkin-status` separately to show the prior week's review
    window or saved recap.
@@ -68,8 +82,8 @@ indexes into them via a cycling array.
   exists). The new `getScheduleFromPlanWeek` is the canonical path.
 - **`isToday = i === 0`** assumption — replaced with date-based
   comparison (`key === todayKey()`). With the dated PlanWeek model,
-  today may be at any index (e.g., index 1 if the week started Monday
-  and today is Tuesday).
+  today may be at any index after the first day of the user's own
+  7-day cadence.
 - **`isCompleted = isToday && todayDone`** — replaced with
   `completedDates.has(key) || (isToday && todayDone)` so any past day's
   completed workout shows as done.
@@ -135,11 +149,10 @@ per-day Change Focus / Swap flows, which patch only unlocked current/future
 - The day-of-week label resolves to "Yesterday" / "Today" / "Tomorrow"
   for adjacent days, falling back to weekday name otherwise.
 
-## Saturday-Signup Edge Case
+## Sign-Up-Day Cadence
 
-`POST /plans/start-new-week` anchors on the most recent **Monday**.
-A user who signs up Saturday gets a Mon-Sun week where Mon-Fri render
-as past dates with no plan / no history (informational empty cells),
-Sat = today (highlighted), Sun = tomorrow. On Monday a fresh full
-week generates via auto-renew. This is the trade-off for keeping past
-completions visible inside the active week.
+`POST /plans/start-new-week` anchors the first PlanWeek on the user's start
+date. A user who signs up Saturday gets a Saturday-Friday PlanWeek, with
+Saturday highlighted as today and the next renewal scheduled for the following
+Saturday. Auto-renew uses `prev.end_date + 1`, so the personal cadence persists
+instead of snapping to a calendar Monday.

@@ -404,6 +404,8 @@ export default function FriendsModal({
   const incoming = list?.pending.filter((p) => p.direction === 'incoming') ?? [];
   const outgoing = list?.pending.filter((p) => p.direction === 'outgoing') ?? [];
   const friends = list?.friends ?? [];
+  const hasUnreadSocial = unreadNotifications > 0;
+  const hasIncomingRequests = incoming.length > 0;
 
   const updateLocalUnread = useCallback(
     (nextUnread: number, nextNotifications?: SocialNotification[]) => {
@@ -498,41 +500,6 @@ export default function FriendsModal({
         </View>
       )}
 
-      <View style={styles.socialToolbar}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.toolbarLabel}>SOCIAL</Text>
-          <Text style={styles.toolbarMeta}>
-            {unreadNotifications > 0
-              ? `${unreadNotifications} new update${unreadNotifications === 1 ? '' : 's'}`
-              : incoming.length > 0
-                ? `${incoming.length} request${incoming.length === 1 ? '' : 's'} waiting`
-                : 'Activity, friends, and requests'}
-          </Text>
-        </View>
-        <TouchableOpacity
-          testID="social-notifications-toggle"
-          accessibilityLabel="Social notifications"
-          accessibilityRole="button"
-          accessibilityState={{ expanded: notificationTrayOpen }}
-          onPress={() => setNotificationTrayOpen(v => !v)}
-          style={[styles.notificationButton, notificationTrayOpen && styles.notificationButtonActive]}
-          activeOpacity={0.75}
-        >
-          <Ionicons
-            name={unreadNotifications > 0 ? 'notifications' : 'notifications-outline'}
-            size={18}
-            color={notificationTrayOpen ? colors.primary : colors.textSecondary}
-          />
-          {unreadNotifications > 0 ? (
-            <View style={styles.notificationBadge}>
-              <Text style={styles.notificationBadgeText}>
-                {unreadNotifications > 9 ? '9+' : unreadNotifications}
-              </Text>
-            </View>
-          ) : null}
-        </TouchableOpacity>
-      </View>
-
       {notificationTrayOpen ? (
         <View testID="social-notifications-panel" style={styles.notificationPanel}>
           <View style={styles.notificationPanelHeader}>
@@ -588,33 +555,61 @@ export default function FriendsModal({
         </View>
       ) : null}
 
-      {/* Friends / Activity tab strip. "Activity" is a bounded digest
-          (latest 10 shares from friends), not an open scrolling feed —
-          the friend detail surface is where users go to dig into a
-          specific person's training. */}
+      {/* Friends / Activity switch. "Activity" is a bounded digest
+          (latest 10 shares from friends), not an open scrolling feed. */}
       <View style={styles.tabStrip}>
-        {SOCIAL_ACTIVITY_FEED_ENABLED ? (
+        <View style={styles.tabGroup}>
+          {SOCIAL_ACTIVITY_FEED_ENABLED ? (
+            <TouchableOpacity
+              testID="social-tab-activity"
+              accessibilityLabel={hasUnreadSocial ? 'Activity, new updates' : 'Activity'}
+              style={styles.tab}
+              onPress={() => {
+                setActiveTab('activity');
+                setNotificationTrayOpen(false);
+              }}
+            >
+              <View style={styles.tabLabelRow}>
+                <Text style={[styles.tabText, activeTab === 'activity' && styles.tabTextActive]}>
+                  Activity
+                </Text>
+                {hasUnreadSocial ? <View style={styles.tabDot} /> : null}
+              </View>
+              <View style={[styles.tabIndicator, activeTab === 'activity' && styles.tabIndicatorActive]} />
+            </TouchableOpacity>
+          ) : null}
           <TouchableOpacity
-            testID="social-tab-activity"
-            accessibilityLabel="Activity"
-            style={[styles.tab, activeTab === 'activity' && styles.tabActive]}
-            onPress={() => setActiveTab('activity')}
+            testID="social-tab-friends"
+            accessibilityLabel={hasIncomingRequests ? 'Friends, requests waiting' : 'Friends'}
+            style={styles.tab}
+            onPress={() => {
+              setActiveTab('friends');
+              setNotificationTrayOpen(false);
+            }}
           >
-            <Text style={[styles.tabText, activeTab === 'activity' && styles.tabTextActive]}>
-              Activity
-            </Text>
+            <View style={styles.tabLabelRow}>
+              <Text style={[styles.tabText, activeTab === 'friends' && styles.tabTextActive]}>
+                Friends
+              </Text>
+              {hasIncomingRequests ? <View style={styles.tabDot} /> : null}
+            </View>
+            <View style={[styles.tabIndicator, activeTab === 'friends' && styles.tabIndicatorActive]} />
+          </TouchableOpacity>
+        </View>
+        {hasUnreadSocial || notificationTrayOpen ? (
+          <TouchableOpacity
+            testID="social-notifications-toggle"
+            accessibilityLabel={`${unreadNotifications} unread social notification${unreadNotifications === 1 ? '' : 's'}`}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: notificationTrayOpen }}
+            onPress={() => setNotificationTrayOpen(v => !v)}
+            style={[styles.notificationDotButton, notificationTrayOpen && styles.notificationDotButtonActive]}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            activeOpacity={0.75}
+          >
+            <View style={[styles.notificationStatusDot, !hasUnreadSocial && styles.notificationStatusDotMuted]} />
           </TouchableOpacity>
         ) : null}
-        <TouchableOpacity
-          testID="social-tab-friends"
-          accessibilityLabel="Friends"
-          style={[styles.tab, activeTab === 'friends' && styles.tabActive]}
-          onPress={() => setActiveTab('friends')}
-        >
-          <Text style={[styles.tabText, activeTab === 'friends' && styles.tabTextActive]}>
-            Friends{friends.length > 0 ? `  ·  ${friends.length}` : ''}
-          </Text>
-        </TouchableOpacity>
       </View>
 
       <FadeInView key={activeTab} duration={240} slideDistance={8} style={{ flex: 1 }}>
@@ -966,56 +961,72 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       marginBottom: spacing.md,
     },
     title: { fontSize: 20, fontWeight: '800', color: colors.textPrimary },
-    socialToolbar: {
+    tabStrip: {
       flexDirection: 'row',
       alignItems: 'center',
+      justifyContent: 'space-between',
       gap: spacing.sm,
-      marginBottom: spacing.sm,
+      marginBottom: spacing.md,
     },
-    toolbarLabel: {
-      fontSize: 10,
-      fontWeight: '800',
+    tabGroup: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.lg,
+      flex: 1,
+    },
+    tab: {
+      paddingVertical: 4,
+      minWidth: 72,
+      alignItems: 'flex-start',
+      gap: 6,
+    },
+    tabLabelRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    tabText: {
+      fontSize: 13,
+      fontWeight: '700',
       color: colors.textMuted,
-      letterSpacing: 0.7,
     },
-    toolbarMeta: {
-      fontSize: 12,
-      color: colors.textSecondary,
-      marginTop: 2,
-      fontWeight: '600',
+    tabTextActive: {
+      color: colors.textPrimary,
+      fontWeight: '800',
     },
-    notificationButton: {
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      alignItems: 'center',
-      justifyContent: 'center',
-      borderWidth: 1,
-      borderColor: colors.border,
-      backgroundColor: colors.surface,
+    tabIndicator: {
+      width: 22,
+      height: 2,
+      borderRadius: 1,
+      backgroundColor: 'transparent',
     },
-    notificationButtonActive: {
-      borderColor: colors.primary + '55',
-      backgroundColor: colors.primary + '12',
+    tabIndicatorActive: {
+      backgroundColor: colors.primary,
     },
-    notificationBadge: {
-      position: 'absolute',
-      top: -3,
-      right: -2,
-      minWidth: 16,
-      height: 16,
-      borderRadius: 8,
-      alignItems: 'center',
-      justifyContent: 'center',
-      paddingHorizontal: 4,
+    tabDot: {
+      width: 7,
+      height: 7,
+      borderRadius: 4,
       backgroundColor: colors.error,
-      borderWidth: 1,
-      borderColor: colors.surface,
     },
-    notificationBadgeText: {
-      fontSize: 9,
-      fontWeight: '900',
-      color: '#fff',
+    notificationDotButton: {
+      width: 26,
+      height: 26,
+      borderRadius: 13,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    notificationDotButtonActive: {
+      backgroundColor: colors.error + '12',
+    },
+    notificationStatusDot: {
+      width: 9,
+      height: 9,
+      borderRadius: 5,
+      backgroundColor: colors.error,
+    },
+    notificationStatusDotMuted: {
+      backgroundColor: colors.textMuted,
     },
     notificationPanel: {
       backgroundColor: colors.surface,
@@ -1111,28 +1122,8 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       width: 7,
       height: 7,
       borderRadius: 4,
-      backgroundColor: colors.primary,
+      backgroundColor: colors.error,
     },
-    tabStrip: {
-      flexDirection: 'row',
-      gap: 2,
-      marginBottom: spacing.md,
-      backgroundColor: colors.background,
-      borderRadius: 999,
-      padding: 3,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: colors.border,
-    },
-    tab: {
-      flex: 1,
-      paddingVertical: 6,
-      paddingHorizontal: 8,
-      borderRadius: 999,
-      alignItems: 'center',
-    },
-    tabActive: { backgroundColor: colors.primary + '22' },
-    tabText: { fontSize: 10, fontWeight: '500', color: colors.textMuted, letterSpacing: 0.7, textTransform: 'uppercase', opacity: 0.55 },
-    tabTextActive: { color: colors.primary, fontWeight: '700', opacity: 1 },
     card: {
       backgroundColor: colors.surface,
       borderColor: colors.border,

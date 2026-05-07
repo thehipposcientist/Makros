@@ -4,7 +4,8 @@
 
 - Node.js 18+ (`brew install node`)
 - Docker Desktop (for backend)
-- Expo Go app on phone (for mobile testing)
+- Expo Go for JS-only smoke testing
+- EAS development build for Apple Health, Watch bridge, Live Activity, Apple Sign In, and the local `thallo-*` native modules
 
 ## Quick Start
 
@@ -16,6 +17,7 @@ docker compose up -d          # Starts PostgreSQL + FastAPI backend on :8000
 npm install
 npx expo start                # Starts Metro dev server
 npx expo start --tunnel       # If phone can't connect over WiFi
+npx expo run:ios              # Local native dev build when testing native modules
 ```
 
 ## Backend Commands
@@ -52,6 +54,10 @@ Run `make maintenance` for explicit backend data backfills/seed refreshes, and
 `make maintenance-food-micros` when you intentionally want food micronutrient
 enrichment to call OpenAI. Startup should stay schema-only by default; enable
 the startup enrichment/backfill flags only for a deliberate maintenance deploy.
+
+## Expo Go / Native Build Notes
+
+Expo Go is useful for quick UI iteration, but it does not include Thallo's custom native modules (`modules/thallo-healthkit`, `modules/thallo-watch-bridge`, `modules/thallo-live-activity`) or the Apple Watch targets. Use a development build for HealthKit reads/writes, Watch sync, Live Activity rest timers, Apple Sign In, and any flow that depends on native iOS entitlements.
 
 ## Expo Go Troubleshooting
 

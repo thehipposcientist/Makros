@@ -36,20 +36,22 @@
 | expo-notifications | Push notifications | Yes | No |
 | expo-image-picker | Food photo scanning | Yes | No |
 | expo-secure-store | Token storage | Yes | No |
-| react-native-health | Apple Health | **No** | **Yes — requires dev build** |
 | react-native-gesture-handler | Swipe gestures | Yes | No |
 | react-native-reanimated | Animations | Yes | No |
 | react-native-svg | SVG rendering | Yes | No |
+| thallo-healthkit | Apple Health bridge | **No** | **Yes — local native module** |
+| thallo-watch-bridge | WCSession phone/watch bridge | **No** | **Yes — local native module + Watch target** |
+| thallo-live-activity | ActivityKit rest timer Live Activity | **No** | **Yes — local native module + widget target** |
 
 ## Will Expo Work for Production?
 
 **Yes.** Expo is used by major apps (Discord, Shopify, Coinbase). Here's what matters:
 
 ### What Works in Expo Go (Development)
-Everything except Apple Health. You can develop, test, and iterate on all features using Expo Go on your phone.
+JS-only UI iteration and backend-connected flows that do not touch custom native modules. Expo Go cannot load the local `thallo-*` modules, Watch targets, ActivityKit Live Activity, Apple Health bridge, or entitlement-dependent native flows.
 
 ### What Requires a Development Build
-`react-native-health` (Apple Health) requires native iOS code that Expo Go doesn't include. To test Apple Health, you need an **EAS Development Build** — a custom Expo Go with your native modules compiled in.
+Apple Health, Watch sync, Live Activity rest timers, Apple Sign In, and the local `thallo-healthkit` / `thallo-watch-bridge` / `thallo-live-activity` modules require an **EAS Development Build** or `npx expo run:ios` so the native code and targets are compiled into the app.
 
 ### What Requires a Production Build
 App Store submission requires a production IPA/APK built through **EAS Build**. This is Expo's build service — you push code, they build the native binary in the cloud and give you the file to submit.
@@ -110,7 +112,7 @@ eas build --platform android --profile production
 eas submit --platform android
 ```
 
-**Note:** `react-native-health` is iOS only. Android equivalent would need `react-native-health-connect` — add later.
+**Note:** Thallo's current Health integration is iOS-only through `thallo-healthkit`. Android would need a Health Connect module/path later.
 
 ## Backend Deployment
 

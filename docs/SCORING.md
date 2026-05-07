@@ -91,45 +91,41 @@ Certain red-flag nights cap the final score after pillar summing so one good sig
 ## 2. Preparedness / Readiness Score
 
 **Question:** "How ready am I to train hard *today*?"
-**File:** `src/services/preparedness.ts`
-**Range:** 0–100, returned as `{ score, label, pillars, insights, missing, signalsPresent, signalsTotal, raw, maxPossible }`.
+**File:** `backend/app/services/readiness/compute.py`, exposed through `POST /readiness/today`. `src/services/preparedness.ts` remains a legacy/client helper for local fallback-shaped displays.
+**Range:** 0–100, returned as `{ score, label, summary, factors, missing, signals_present, signals_total, computed_at_ms }`.
 
-### Data-quality reweighting (Apr 2026)
-Earlier versions used neutral fallback points (~60% of pillar max) when an input was missing, which anchored the score at ~60 even when nothing was readable. Now: **missing pillars contribute 0 AND their max is excluded from the divisor**. Score = `raw / maxPossible × 100` where `maxPossible` = sum of pillar maxes for pillars whose input was real (yesterday strain always counts; cycle is a modifier).
+### Data-quality reweighting
+Earlier versions used neutral fallback points (~60% of pillar max) when an input was missing, which anchored the score at ~60 even when nothing was readable. Now: **missing pillars contribute 0 AND their max is excluded from the divisor**. Score = `raw / maxPossible × 100` where `maxPossible` = sum of pillar maxes for pillars whose input was real.
 
-If `signalsPresent === 0` the function returns score 0 and the UI shows a "Connect Apple Health" empty-state instead of a misleading "0 Fatigued" dial.
+Server readiness publishes a numeric score only when at least two real health pillars are present. Yesterday strain is always available and does not count toward that gate. If fewer than two health pillars are present, the response is `score=0`, `label="-"`, and a data-needed summary instead of a misleading perfect/rested dial.
 
-### Pillars (sum to 100 when all 5 user-driven signals are present)
+### Pillars
 
 | Pillar | Max | Logic | When missing |
 |---|---:|---|---|
-| Sleep | 30 | `(sleepScore.score / 100) × 30` | 0 pts, dropped from divisor |
-| HRV vs baseline | 20 | If `hrvHistory.length ≥ 7`: ratio = hrvMs / median. ≥1.10 → 20 · ≥0.98 → 17 · ≥0.90 → 13 · ≥0.80 → 8 · else → 3. No baseline → age-adjusted absolute | 0 pts, dropped from divisor |
-| Muscle fatigue | 20 | Prefers backend `readinessFromBackend` (0-100): `(value/100) × 20`. Else `(1 - muscleFatigueAvg) × 20` | 0 pts, dropped from divisor |
-| Nutrition (protein 8 + calories 7) | 15 | Protein: ≥95% target → 8 · ≥85% → 6 · ≥70% → 3 · else → 1. Calories: within ±10% → 7 · ±20% → 5 · ±30% → 3 · else → 1 | 0 pts, dropped from divisor |
-| Resting HR vs baseline | 10 | If `rhrHistory.length ≥ 7`: delta = todayRHR − median. ≤−3 → 10 · ≤+2 → 9 · ≤+5 → 6 · ≤+8 → 3 · else → 1. No baseline → absolute | 0 pts, dropped from divisor |
-| Yesterday strain (inverse) | 5 | <30min → 5 · <60 → 4 · <90 → 3 · <120 → 2 · ≥120 → 1 | Always 5 (assume rested) — never dropped |
+| Sleep | 30 | Last `SleepLog.score`; falls back to average sleep-hours bands when supplied | 0 pts, dropped from divisor |
+| HRV | 20 | Client-passed or stored HRV vs available baseline/absolute bands | 0 pts, dropped from divisor |
+| Muscle fatigue | 20 | `compute_rolling_fatigue` focus readiness when planned focus is known, else overall fatigue readiness | 0 pts, dropped from divisor |
+| Nutrition | 15 | Meal adherence/protein context from daily nutrition metrics / day state | 0 pts, dropped from divisor |
+| Resting HR | 10 | Client-passed or stored RHR vs baseline/absolute bands | 0 pts, dropped from divisor |
+| Yesterday strain | 5 | Inverse of most recent workout strain | Always available but excluded from the "enough data" gate |
+| Wellness from skip reasons | 10 | Recent skip reasons for illness, pain, low energy, etc. | Optional; dropped if not present |
+| Cycle phase | 10 | Optional cycle-context pillar when `cycle_phase` is present | Optional; never appended to `missing` |
 
 ### UI display
-- `PreparednessCard` / `TrainingReadinessCard` show "X/5 signals" badge so users see what's powering the score.
-- Pillars where `result.missing.includes(key)` render "—" instead of a fake bar.
-- Zero signals → empty-state CTA card.
-
-### Optional cycle modifier (±3)
-Pulled from Apple Health (see [Cycle Phase](#9-cycle-phase-not-scored)):
-- ovulation: +3
-- follicular: +1
-- menses: −2
-- luteal: 0
+- `TrainingReadinessCard` fetches the canonical server payload and pushes that same payload to the Watch; the Watch is a pure consumer.
+- `computed_at_ms` lets WCSession reject stale readiness pushes.
+- Missing pillars render as absent/unknown instead of fake bars.
+- Fewer than two health pillars → data-needed empty state.
 
 ### Rating bands (`label`)
 ≥85 Primed · ≥70 Ready · ≥50 Moderate · <50 Fatigued
 
 ### Design rules
-- Missing inputs collapse to ~60% of pillar weight (never punish for un-readable signals)
-- HRV pillar gracefully degrades from "vs personal baseline" to "vs age-adjusted absolute" to "neutral"
-- Backend muscle fatigue (12-muscle model) preferred over flat `muscleFatigueAvg` when available
-- Yesterday strain caps total — a heavy session is not double-counted (once via fatigue, again here)
+- Missing inputs are dropped from the divisor; they do not receive neutral points.
+- HRV/RHR gracefully degrade from personal or stored context to absolute bands when available.
+- Server muscle fatigue (12-muscle model) is the canonical fatigue input.
+- Yesterday strain can lower the score but cannot publish a score by itself.
 
 ---
 
@@ -429,13 +425,14 @@ Why no number: flags are tri-state because the underlying signals don't trade of
 | unknown | beyond cycleLength + 2 (overdue) or no data |
 
 ### Consumed by
-- **Preparedness Score** — applies `±3 pt` modifier (ovulation +3, follicular +1, menses −2, luteal 0)
+- **Readiness Score** — optional server-side cycle pillar when `cycle_phase` is sent (`follicular` 1.00, `ovulation` 0.95, `menses` 0.85, `luteal` 0.70 of the cycle pillar)
+- **PlanWeek creation / auto-renew** — planner context passes cycle phase into deterministic volume targets (`menses` / `luteal` softer, `follicular` / `ovulation` slightly higher)
 - **CyclePhaseCard** UI — auto-hides if `getCycleStatus()` returns null (men, opted-out users, no data)
 
 ### Design rules
 - Permission-aware — if HealthKit `menstrualFlow` permission not granted, returns `null` silently
 - Card auto-hides when phase is `unknown` or null — never empty-state
-- Modifier capped at ±3 of preparedness's 100 — won't dominate the score
+- Cycle context is transient and optional; no raw menstrual-flow rows are stored in the backend.
 
 ---
 
@@ -443,8 +440,8 @@ Why no number: flags are tri-state because the underlying signals don't trade of
 
 These principles apply to every score above:
 
-1. **Missing data ≠ bad data.** Default to a neutral subscore (~60% of pillar weight) rather than 0. Show a "connect Apple Health" hint instead of punishing.
-2. **Server-authoritative for shared scores.** Anything users compare across devices (Nutrition Score, Weekly Volume) is computed backend. Anything local-only (Sleep Score, Preparedness) can be client-side.
+1. **Missing data ≠ bad data.** Drop missing pillars from the divisor or show a data-needed state instead of inventing fake neutral bars.
+2. **Server-authoritative for shared scores.** Anything users compare across devices (Nutrition Score, Readiness, Weekly Volume) is computed backend. Local-only helpers such as Sleep Score can still run on device.
 3. **Versioning.** Bump `*_VERSION` constants when formula changes; force re-classification / cache invalidation on next write.
 4. **Explainability over precision.** Simple weighted averages beat geometric means; deterministic thresholds beat ML for these scores. The UI must be able to show *why* a number is low.
 5. **Pillar bands are deliberately broad.** Wellness scores aren't medical scores — over-precise thresholds make the number jitter.
@@ -461,14 +458,14 @@ These principles apply to every score above:
 | Score | Where the user sees it |
 |---|---|
 | Sleep Score | HomeScreen sleep card · Watch Sleep tab · Progress→Health |
-| Preparedness | Progress→Health (`PreparednessCard`, `TrainingReadinessCard`) · Watch Readiness tab |
+| Preparedness | Workout tab readiness card/badge · Progress→Health · Watch Readiness tab |
 | Nutrition Score | Meals→Plan (`NutritionCard`) · `/meals/score` API |
 | Fitness Score | Progress→Charts |
 | Fatigue / Recovery | Progress→Body (`RecoveryCard`) · planner downgrade decisions |
-| Rolling e1RM | (internal) — drives daily set recommendations |
+| Rolling e1RM | Progress→Trends top lift/history · drives daily set recommendations |
 | Weekly Volume | Progress→Health (`WeeklyCoachingCard` volume bars) · weekly review |
 | Recovery Flags | Meals→Plan (`FuelingRecoveryCard`, hidden when all green) |
-| Cycle Phase | HomeScreen `CyclePhaseCard` (auto-hides if no data) · ±3 pt nudge to Preparedness |
+| Cycle Phase | HomeScreen `CyclePhaseCard` / period support · optional readiness/planner context |
 
 ---
 
