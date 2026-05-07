@@ -9678,7 +9678,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       </ErrorBoundary>
       )}
 
-      {/* ── Social tab — Friends + Weekly Digest ──────── */}
+      {/* ── Social tab — Friends ──────── */}
       {activeTab === 'friends' && (
         <ErrorBoundary>
           <View key={viewingFriend ? `friend-${viewingFriend.user_id}` : 'social-home'} style={{ flex: 1 }}>
@@ -12003,7 +12003,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         themeName={userProfile.themePreference}
       />
 
-      {/* Friends — friend list, requests, weekly digest. */}
+      {/* Friends — activity, search, friend circles, and profile controls. */}
       <FriendsModal
         visible={showFriends}
         authToken={authToken}

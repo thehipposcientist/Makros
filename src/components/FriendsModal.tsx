@@ -166,7 +166,7 @@ export default function FriendsModal({
         setList(l.value);
         const incomingCount = l.value.pending.filter(p => p.direction === 'incoming').length;
         if (incomingCount > 0 && !initialRequestsFocused) {
-          setActiveTab('friends');
+          setActiveTab('profile');
           setInitialRequestsFocused(true);
         } else if (incomingCount === 0 && initialRequestsFocused) {
           setInitialRequestsFocused(false);
@@ -469,7 +469,7 @@ export default function FriendsModal({
         setNotificationActionPending(null);
       }
       if (n.notification_type === 'friend_request') {
-        setActiveTab('friends');
+        setActiveTab('profile');
         setNotificationTrayOpen(false);
         return;
       }
@@ -492,34 +492,6 @@ export default function FriendsModal({
     }
   }, [authToken, notifications, updateLocalUnread]);
 
-  const summary = digest?.summary;
-  const headlineLines: string[] = [];
-  if (summary && summary.friend_count > 0) {
-    if (summary.friends_trained_this_week > 0) {
-      headlineLines.push(
-        `${summary.friends_trained_this_week} of your ${summary.friend_count} friend${
-          summary.friend_count === 1 ? '' : 's'
-        } trained this week.`,
-      );
-    } else {
-      headlineLines.push("None of your friends have logged a workout this week yet.");
-    }
-    if (summary.top_user_id && digest) {
-      const top = digest.friends.find((f) => f.user_id === summary.top_user_id);
-      if (top && summary.top_sessions > 0) {
-        headlineLines.push(
-          `${top.display_name} hit ${summary.top_sessions} session${
-            summary.top_sessions === 1 ? '' : 's'
-          } — most in your circle.`,
-        );
-      }
-    }
-    if (summary.long_streak_count > 0) {
-      headlineLines.push(
-        `${summary.long_streak_count} friend${summary.long_streak_count === 1 ? ' is' : 's are'} on a 14+ day streak.`,
-      );
-    }
-  }
   const myProfileFriend = me
     ? {
         user_id: me.user_id,
@@ -591,36 +563,6 @@ export default function FriendsModal({
           </View>
         );
       })}
-    </View>
-  );
-
-  const thisWeekCard = (
-    <View style={styles.card}>
-      <Text style={styles.cardLabel}>THIS WEEK</Text>
-      {headlineLines.length === 0 ? (
-        <Text style={styles.cardBody}>
-          Add a friend to see how their week stacks up against yours.
-        </Text>
-      ) : (
-        headlineLines.map((line, i) => (
-          <Text key={i} style={styles.cardBody}>
-            {line}
-          </Text>
-        ))
-      )}
-      <View style={styles.youRow}>
-        <Text style={styles.youLabel}>YOU</Text>
-        <Text style={styles.youValue}>
-          {digest?.you.sessions ?? 0} session{(digest?.you.sessions ?? 0) === 1 ? '' : 's'}
-          {digest && digest.you.streak >= 2 ? ` · ${digest.you.streak}-day streak` : ''}
-        </Text>
-      </View>
-      <View style={styles.privacyRow}>
-        <Ionicons name="lock-closed-outline" size={13} color={colors.primary} />
-        <Text style={styles.privacyText}>
-          Private by design: friends never see calories, macros, meals, body weight, body photos, or measurements.
-        </Text>
-      </View>
     </View>
   );
 
@@ -922,7 +864,7 @@ export default function FriendsModal({
           ) : null}
           <TouchableOpacity
             testID="social-tab-friends"
-            accessibilityLabel={hasFriendUpdates ? 'Friends, friend requests waiting' : 'Friends'}
+            accessibilityLabel="Friends"
             accessibilityRole="tab"
             accessibilityState={{ selected: activeTab === 'friends' }}
             style={[styles.tab, activeTab === 'friends' && styles.tabActive]}
@@ -944,18 +886,11 @@ export default function FriendsModal({
               >
                 Friends
               </Text>
-              {incoming.length > 0 ? (
-                <View style={styles.tabCountBadge}>
-                  <Text style={styles.tabCountText}>{incoming.length > 9 ? '9+' : incoming.length}</Text>
-                </View>
-              ) : hasUnreadFriendRequests ? (
-                <View style={styles.tabDot} />
-              ) : null}
             </View>
           </TouchableOpacity>
           <TouchableOpacity
             testID="social-tab-profile"
-            accessibilityLabel="Profile"
+            accessibilityLabel={hasFriendUpdates ? 'Profile, friend requests waiting' : 'Profile'}
             accessibilityRole="tab"
             accessibilityState={{ selected: activeTab === 'profile' }}
             style={[styles.tab, activeTab === 'profile' && styles.tabActive]}
@@ -977,6 +912,13 @@ export default function FriendsModal({
               >
                 Profile
               </Text>
+              {incoming.length > 0 ? (
+                <View style={styles.tabCountBadge}>
+                  <Text style={styles.tabCountText}>{incoming.length > 9 ? '9+' : incoming.length}</Text>
+                </View>
+              ) : hasUnreadFriendRequests ? (
+                <View style={styles.tabDot} />
+              ) : null}
             </View>
           </TouchableOpacity>
         </View>
@@ -1039,10 +981,7 @@ export default function FriendsModal({
               inline && styles.inlineScrollContent,
               { paddingBottom: inline ? 128 : 24 },
             ]}>
-            {thisWeekCard}
             {friendSearchSection}
-            {incoming.length > 0 ? incomingRequestsSection : null}
-            {outgoingPendingSection}
             {friendsListSection}
           </ScrollView>
         ) : (
@@ -1054,6 +993,8 @@ export default function FriendsModal({
               inline && styles.inlineScrollContent,
               { paddingBottom: inline ? 128 : 24 },
             ]}>
+            {incoming.length > 0 ? incomingRequestsSection : null}
+            {outgoingPendingSection}
             {myProfileSection}
             {profileInviteSection}
             {sharingReminder}
@@ -1346,27 +1287,6 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       marginBottom: 4,
     },
     cardBody: { fontSize: 13, color: colors.textPrimary, lineHeight: 18 },
-    youRow: {
-      marginTop: spacing.md,
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      paddingTop: spacing.sm,
-      borderTopColor: colors.border,
-      borderTopWidth: 1,
-    },
-    youLabel: { fontSize: 11, fontWeight: '700', color: colors.textMuted, letterSpacing: 0.5 },
-    youValue: { fontSize: 13, fontWeight: '700', color: colors.textPrimary },
-    privacyRow: {
-      flexDirection: 'row',
-      alignItems: 'flex-start',
-      gap: 7,
-      marginTop: spacing.sm,
-      paddingTop: spacing.sm,
-      borderTopWidth: 1,
-      borderTopColor: colors.border,
-    },
-    privacyText: { flex: 1, fontSize: 11, color: colors.textSecondary, lineHeight: 15, fontWeight: '600' },
     selfProfileCard: {
       flexDirection: 'row',
       alignItems: 'center',

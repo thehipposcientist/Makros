@@ -37,7 +37,8 @@ Bottom nav has five destinations: **Friends**, **Workouts**, **Meals**, **Progre
 
 ### Friends Tab
 - **Activity** — bounded friends-only workout activity feed for self + friends with sharing enabled.
-- **Friends** — THIS WEEK digest, requests/friends/sent rows, ADD FRIENDS search, and notification tray.
+- **Friends** — ADD FRIENDS search and accepted friend circles only.
+- **Profile** — own social profile, incoming friend invites, sent requests, sharing controls, invite handle, and notification tray.
 
 ### You Tab
 - Account/profile entry points, theme, Gear tracker, Settings, body/profile edits, and tutorial/legal/account actions.
@@ -103,4 +104,4 @@ Bottom nav has five destinations: **Friends**, **Workouts**, **Meals**, **Progre
 - Activity log includes: Yard Work, Chopping Wood, Moving/Lifting, Gardening, House Cleaning, Construction, Shoveling, Playing w/ Kids, Dancing.
 - Sports: Pickleball, Surfing, Skiing, Spin Class.
 - Smart weekly check-in modal leads with a date-stamped "TRAINER'S READ" block + inline Apply pills.
-- Friends modal: Activity feed tab + Friends tab with THIS WEEK digest, REQUESTS/FRIENDS/SENT sections, and ADD FRIENDS search. Expanded workout cards use spring animation and show recorded workout-only load/time/distance details.
+- Friends modal: Activity feed tab + Friends tab with ADD FRIENDS search and accepted friend circles. Request/sent rows live in Profile. Expanded workout cards use spring animation and show recorded workout-only load/time/distance details.
