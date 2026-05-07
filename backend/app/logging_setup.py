@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from contextvars import ContextVar
@@ -24,6 +25,34 @@ from typing import Any
 
 _request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 _user_id_var: ContextVar[int | str | None] = ContextVar("user_id", default=None)
+
+_SENSITIVE_KEY_RE = re.compile(
+    r"(token|authorization|password|secret|email|name|question|answer|message|prompt|raw|"
+    r"context|profile|health|sleep|hrv|heart|weight|calorie|macro|meal|food|body|photo|"
+    r"image|period|cycle|injury|symptom|note|transcript|stack|trace|exception)",
+    re.IGNORECASE,
+)
+_MAX_LOG_STRING = 300
+_MAX_LOG_LIST_ITEMS = 20
+
+
+def redact_for_logs(value: Any, *, _key: str | None = None, _depth: int = 0) -> Any:
+    if _key and _SENSITIVE_KEY_RE.search(_key):
+        return "[redacted]"
+    if _depth >= 4:
+        return "[truncated]"
+    if isinstance(value, dict):
+        return {
+            str(k)[:80]: redact_for_logs(v, _key=str(k), _depth=_depth + 1)
+            for k, v in list(value.items())[:_MAX_LOG_LIST_ITEMS]
+        }
+    if isinstance(value, (list, tuple)):
+        return [redact_for_logs(item, _depth=_depth + 1) for item in value[:_MAX_LOG_LIST_ITEMS]]
+    if isinstance(value, str):
+        if len(value) > _MAX_LOG_STRING:
+            return value[:_MAX_LOG_STRING] + "...[truncated]"
+        return value
+    return value
 
 
 def set_request_context(request_id: str | None = None, user_id: int | str | None = None) -> None:
@@ -69,10 +98,11 @@ class _JsonFormatter(logging.Formatter):
             if k in payload:
                 continue
             try:
-                json.dumps(v)  # only include JSON-serializable values
-                payload[k] = v
+                redacted = redact_for_logs(v, _key=k)
+                json.dumps(redacted)  # only include JSON-serializable values
+                payload[k] = redacted
             except TypeError:
-                payload[k] = repr(v)
+                payload[k] = redact_for_logs(repr(v), _key=k)
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
         return json.dumps(payload, ensure_ascii=False)

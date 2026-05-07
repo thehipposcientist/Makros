@@ -320,7 +320,7 @@ smoke-mobile-preflight-fast:
 	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
 	  exit 1; }
 	@$(MAKE) seed-e2e
-	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/ppl-history-ordering.yaml
+	@$(MAESTRO) test .maestro/flows/ppl-history-ordering.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/account-settings-state.yaml
 	@$(MAKE) seed-e2e

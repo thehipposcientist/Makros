@@ -123,6 +123,21 @@ class FakeSession:
         return _R()
 
 
+class SinglePlanDaySession(FakeSession):
+    def __init__(self, plan_day):
+        super().__init__()
+        self.plan_day = plan_day
+
+    def exec(self, *_args, **_kwargs):
+        plan_day = self.plan_day
+        class _R:
+            def all(self_inner):
+                return [plan_day]
+            def first(self_inner):
+                return plan_day
+        return _R()
+
+
 class QueueSession(FakeSession):
     def __init__(self, responses: list[list[Any]]):
         super().__init__()
@@ -425,6 +440,7 @@ def test_patch_unlocked_day_succeeds():
                      workout_json={"focus": "Push", "exercises": []})
     week_manager.patch_day_workout(FakeSession(), pd, {"focus": "Pull", "exercises": []})
     assert pd.workout_json["focus"] == "Pull"
+    assert pd.workout_json["plan_day_id"] == pd.id
     assert pd.locked is True
     assert pd.lock_reason == "manual_edit"
     assert pd.status == "edited"
@@ -1211,6 +1227,54 @@ def test_completion_match_allows_cardio_day_import():
         workout_json={"focus": "Cardio", "exercises": []},
     )
     assert week_manager._completion_matches_plan_day(pd, "Running") is True
+
+
+def test_completion_marks_manual_edit_day_completed_by_plan_day_id():
+    today = date.today()
+    pd = FakePlanDay(
+        id=123,
+        day_date=today,
+        status="edited",
+        locked=True,
+        lock_reason="manual_edit",
+        workout_json={"focus": "User Template", "exercises": []},
+    )
+    db = SinglePlanDaySession(pd)
+    with patch.object(week_manager, "get_active_week", return_value=FakePlanWeek()):
+        out = week_manager.lock_day_on_complete(
+            db,
+            1,
+            today,
+            "Push",
+            plan_day_id=123,
+        )
+    assert out is pd
+    assert pd.status == "completed"
+    assert pd.locked is True
+    assert pd.lock_reason == "completed"
+
+
+def test_completion_does_not_overwrite_skipped_day_by_plan_day_id():
+    today = date.today()
+    pd = FakePlanDay(
+        id=123,
+        day_date=today,
+        status="skipped",
+        locked=True,
+        lock_reason="skipped",
+        workout_json={"focus": "Push", "exercises": []},
+    )
+    with patch.object(week_manager, "get_active_week", return_value=FakePlanWeek()):
+        out = week_manager.lock_day_on_complete(
+            SinglePlanDaySession(pd),
+            1,
+            today,
+            "Push",
+            plan_day_id=123,
+        )
+    assert out is pd
+    assert pd.status == "skipped"
+    assert pd.lock_reason == "skipped"
 
 
 # ─── Section 10: Edge cases ──────────────────────────────────────────────────

@@ -61,6 +61,7 @@ open" regen is **removed**.
 - 60-minute sessions do not receive extended-session filler accessories; filler starts at 75+.
 - Direct-core circuits treat 60 minutes as medium, not long, and are skipped on already-dense 60-minute days.
 - Lower/legs templates include direct calf work. Calf isolation slots are protected during density trimming, so duplicate lower accessories drop before the only direct calf slot.
+- Manual switch-to-Cardio days use explicit blocks: warm-up + main work + cooldown. At 60 minutes steady cardio becomes 5 min warm-up + 25 min + 25 min + 5 min cooldown when two owned modalities are available, or one 50 min main block when only one modality is owned. Interval goals use one interval block plus an easy flush instead of multiple full-length primary blocks.
 
 ## Weekly Recipe Repair + Rotation
 

@@ -29,8 +29,11 @@ import the planner or DB — the caller builds the brief, calls
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ── Types ────────────────────────────────────────────────────────────
@@ -492,7 +495,7 @@ def review_plan(brief: dict) -> PlanReview:
         raw = response.choices[0].message.content or ""
         parsed = _extract_json(raw)
     except Exception as exc:
-        print(f"[plan_review] AI call failed: {exc}")
+        logger.warning("[plan_review] AI call failed error_type=%s", type(exc).__name__)
         return PlanReview(status="ok", notes="review call failed", error=str(exc))
 
     status = parsed.get("status")
@@ -552,8 +555,7 @@ def review_plan(brief: dict) -> PlanReview:
         hits = [t for t in problem_terms if t in low]
         if hits:
             error_msg = f"ok-with-complaints: notes mention {hits[:5]}"
-            print(f"[plan_review] CONTRADICTION: AI returned ok but notes describe problems → {error_msg}")
-            print(f"[plan_review] full notes: {notes}")
+            logger.warning("[plan_review] contradiction status=ok problem_terms=%s", hits[:5])
             return PlanReview(status=status, notes=notes, patches=patches, error=error_msg)
     return PlanReview(status=status, notes=notes, patches=patches)
 

@@ -81,31 +81,45 @@ function generateWorkoutHTML(history: any[]): string {
 }
 
 async function shareFile(filename: string, content: string, mimeType: string): Promise<void> {
+  let path: string | null = null;
   try {
     const FS = require('expo-file-system');
     const Sharing = require('expo-sharing');
     const dir = FS.cacheDirectory || FS.documentDirectory;
     if (dir) {
-      const path = dir + filename;
+      path = dir + filename;
       await FS.writeAsStringAsync(path, content, { encoding: FS.EncodingType.UTF8 });
       if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(path, { mimeType, dialogTitle: `Share ${filename}` });
+        try {
+          await Sharing.shareAsync(path, { mimeType, dialogTitle: `Share ${filename}` });
+        } finally {
+          await FS.deleteAsync(path, { idempotent: true }).catch(() => {});
+        }
         return;
       }
+      await FS.deleteAsync(path, { idempotent: true }).catch(() => {});
     }
   } catch {}
   await Share.share({ message: content, title: filename });
 }
 
 async function sharePDF(filename: string, html: string): Promise<void> {
+  let uri: string | null = null;
   try {
     const Print = require('expo-print');
     const Sharing = require('expo-sharing');
-    const { uri } = await Print.printToFileAsync({ html, base64: false });
+    const FS = require('expo-file-system');
+    const result = await Print.printToFileAsync({ html, base64: false });
+    uri = result.uri;
     if (await Sharing.isAvailableAsync()) {
-      await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `Share ${filename}` });
+      try {
+        await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `Share ${filename}` });
+      } finally {
+        await FS.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      }
       return;
     }
+    await FS.deleteAsync(uri, { idempotent: true }).catch(() => {});
   } catch (e) {
     console.log('[export] PDF generation failed, falling back to HTML:', e);
   }

@@ -112,9 +112,8 @@ const LAST_USER_ID_KEY = 'last_user_id';
 const TUTORIAL_COMPLETED_KEY = 'tutorial_v1_completed';
 /** Every AsyncStorage key that holds user-scoped state. When a different
  *  user signs in we remove all of these in one shot. This list also doubles
- *  as the set of keys synced to the backend via `pushUserState` —
- *  transient / device-only keys (pending plan job, metaData cache) are
- *  excluded from sync via SYNCED_STATE_KEYS below. */
+ *  as the base set considered for backend sync. Transient, device-only, and
+ *  high-sensitivity caches are excluded via SYNCED_STATE_KEYS below. */
 const USER_SCOPED_KEYS = [
   'userProfile', 'aiWorkoutPlan',
   'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC', 'aiNutritionPlans',
@@ -212,8 +211,9 @@ async function clearUserScopedStorage(options: { preserveKeys?: string[] } = {})
 }
 
 /** Keys that get pushed to the backend for cross-device sync. Subset of
- *  USER_SCOPED_KEYS that excludes device-only / transient state (meta
- *  cache, in-flight plan job id, device-specific health toggles). */
+ *  USER_SCOPED_KEYS that excludes device-only / transient state and local
+ *  health caches. Health and hydration restore through server-authoritative
+ *  endpoints instead of the opaque state blob. */
 const SYNCED_STATE_KEYS = [
   'userProfile',
   // aiWorkoutPlan included — without this, sign-out → sign-in (or cross-device)
@@ -230,8 +230,6 @@ const SYNCED_STATE_KEYS = [
   'mealRoutines', 'workoutTemplates', 'planChangeHistory', 'goalHistory',
   // workoutSummaries excluded — local-only derivative of workoutHistory
   'preservedCompletedWorkouts', 'preservedCheckedMeals',
-  'healthSummary', 'healthScoreResult',
-  'hydrationByDate_v1',
 ];
 
 function workoutCompletionKey(dateISO?: string | null, focus?: string | null): string | null {
@@ -2988,22 +2986,22 @@ function AccountInfoModal({
 
   return (
     <Modal visible animationType="slide" transparent onRequestClose={onClose}>
-      <TouchableOpacity
-        style={am.backdrop}
-        activeOpacity={1}
-        onPress={onClose}
-        accessible={false}>
+      <View style={am.backdrop}>
         <TouchableOpacity
+          style={StyleSheet.absoluteFill}
           activeOpacity={1}
-          onPress={() => {}}
+          onPress={onClose}
+          accessible={false}
+        />
+        <View
           testID="account-modal"
           accessibilityLabel="account-modal"
           accessible={false}
-          style={[am.sheet, { maxHeight: '85%' }]}>
+          style={[am.sheet, { height: '85%', maxHeight: '85%' }]}>
           <View style={am.handle} />
           <Text style={am.title}>Account</Text>
 
-          <ScrollView style={{ flexShrink: 1 }} contentContainerStyle={{ gap: 16 }} showsVerticalScrollIndicator={false} bounces={false}>
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ gap: 16 }} showsVerticalScrollIndicator={false} bounces={false}>
           {/* Static profile data renders immediately. Only the rows that
               depend on the /me network call (email, username, verified,
               legal version) show a placeholder until getMe resolves —
@@ -3387,8 +3385,8 @@ function AccountInfoModal({
             <Text style={am.closeText}>Close</Text>
           </TouchableOpacity>
           </ScrollView>
-        </TouchableOpacity>
-      </TouchableOpacity>
+        </View>
+      </View>
     </Modal>
   );
 }

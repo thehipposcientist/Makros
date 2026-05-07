@@ -420,7 +420,14 @@ def patch_day_workout(
     if plan_day.locked:
         raise ValueError(f"Cannot edit locked day {plan_day.day_date} (reason={plan_day.lock_reason})")
     now = datetime.now(timezone.utc)
-    plan_day.workout_json = workout_json
+    if isinstance(workout_json, dict):
+        plan_day.workout_json = {
+            **workout_json,
+            "plan_day_id": plan_day.id,
+            "planDayId": plan_day.id,
+        }
+    else:
+        plan_day.workout_json = workout_json
     plan_day.is_rest = False
     plan_day.status = "edited"
     plan_day.locked = True
@@ -735,6 +742,8 @@ def lock_day_on_complete(
     user_id: int,
     workout_date: date,
     focus_label: str,
+    *,
+    plan_day_id: int | None = None,
 ) -> PlanDay | None:
     """Called from workout completion flow. Locks the matching PlanDay."""
     active_week = get_active_week(db, user_id)
@@ -746,9 +755,14 @@ def lock_day_on_complete(
             PlanDay.day_date == workout_date,
         )
     ).first()
-    if not plan_day or plan_day.locked:
+    if not plan_day:
         return plan_day
-    if not _completion_matches_plan_day(plan_day, focus_label):
+    if plan_day.lock_reason == "completed":
+        return plan_day
+    matched_by_id = plan_day_id is not None and plan_day.id == plan_day_id
+    if plan_day.locked and plan_day.lock_reason not in {"manual_edit", "started"}:
+        return plan_day
+    if not matched_by_id and not _completion_matches_plan_day(plan_day, focus_label):
         return plan_day
     return complete_day(db, plan_day)
 

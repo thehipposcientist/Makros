@@ -53,13 +53,9 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         if let storedTheme = Self.loadStored(WatchPalette.self, key: Self.storedThemeKey) {
             self.theme = storedTheme
         }
-        if let storedSleep = Self.loadStored(WatchSleepSnapshot.self, key: Self.storedSleepKey) {
-            self.sleep = storedSleep
-        }
-        if let storedHydration = Self.loadStored(WatchHydrationDay.self, key: Self.storedHydrationKey) {
-            self.hydration = storedHydration
-        }
-        self.latestProgress = UserDefaults.standard.dictionary(forKey: Self.storedProgressKey)
+        UserDefaults.standard.removeObject(forKey: Self.storedSleepKey)
+        UserDefaults.standard.removeObject(forKey: Self.storedHydrationKey)
+        UserDefaults.standard.removeObject(forKey: Self.storedProgressKey)
         session?.delegate = self
         session?.activate()
         syncComplicationSnapshot()
@@ -241,10 +237,9 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         }
         if let h = ctx["hydration"] as? [String: Any] {
             if let data = try? JSONSerialization.data(withJSONObject: h),
-               let decoded = try? JSONDecoder().decode(WatchHydrationDay.self, from: data) {
+                let decoded = try? JSONDecoder().decode(WatchHydrationDay.self, from: data) {
                 if hydration == nil || decoded.syncedAtMs >= (hydration?.syncedAtMs ?? 0) {
                     self.hydration = decoded
-                    Self.saveStored(decoded, key: Self.storedHydrationKey)
                 }
             }
         }
@@ -262,7 +257,6 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                let decoded = try? JSONDecoder().decode(WatchSleepSnapshot.self, from: data) {
                 if sleep == nil || decoded.syncedAtMs >= (sleep?.syncedAtMs ?? 0) {
                     self.sleep = decoded
-                    Self.saveStored(decoded, key: Self.storedSleepKey)
                 }
             }
         }
@@ -334,7 +328,6 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             return
         }
         latestProgress = msg
-        UserDefaults.standard.set(msg, forKey: Self.storedProgressKey)
         NotificationCenter.default.post(name: .watchProgressUpdate, object: nil, userInfo: msg)
     }
 
@@ -563,7 +556,6 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             syncedAtMs: Date().timeIntervalSince1970 * 1000,
         )
         hydration = updated
-        Self.saveStored(updated, key: Self.storedHydrationKey)
         syncComplicationSnapshot()
     }
 

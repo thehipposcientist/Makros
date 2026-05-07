@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 
 import openai
@@ -21,6 +22,17 @@ from .utils import (
     _is_gpt5, _build_chat_kwargs, _chat_create, _looks_truncated, _extract_json,
     SCHEMA_WORKOUT_QUESTION,
 )
+
+_PROD_ENV_NAMES = {"production", "prod"}
+
+
+def _ai_debug_logs_enabled() -> bool:
+    return os.getenv("AI_DEBUG_LOGS") == "1" and os.getenv("APP_ENV", "").lower() not in _PROD_ENV_NAMES
+
+
+def _debug_log(message: str, *args) -> None:
+    if _ai_debug_logs_enabled():
+        logger.debug(message, *args)
 
 _PLAN_CHANGE_FOCUS_KW = (
     r"(?:push|pull|legs?|upper|lower|chest|back|full[- ]body|"
@@ -270,7 +282,7 @@ async def smoke_test(model: str = "gpt-4o-mini", current_user: User = Depends(re
     if not api_key:
         return {"ok": False, "error": "OPENAI_API_KEY not configured"}
     client = OpenAI(api_key=api_key)
-    print(f"[smoke-test] model={model}")
+    logger.info("[smoke-test] model=%s", model)
     try:
         response = await asyncio.to_thread(
             lambda: _chat_create(client,
@@ -283,15 +295,15 @@ async def smoke_test(model: str = "gpt-4o-mini", current_user: User = Depends(re
             )
         )
         reply = response.choices[0].message.content
-        print(f"[smoke-test] OK — reply: {reply!r}")
+        _debug_log("[smoke-test] OK reply=%r", reply)
         return {"ok": True, "model": model, "reply": reply}
     except openai.APIStatusError as e:
         body = getattr(e, 'body', None)
         msg = str(e)
-        print(f"[smoke-test] FAIL {e.status_code} — body={body}  str={msg}")
+        _debug_log("[smoke-test] FAIL status=%s body=%r str=%r", e.status_code, body, msg)
         return {"ok": False, "model": model, "http_status": e.status_code, "error": msg, "body": body}
     except Exception as e:
-        print(f"[smoke-test] FAIL {type(e).__name__}: {e}")
+        logger.warning("[smoke-test] failed error_type=%s", type(e).__name__)
         return {"ok": False, "model": model, "error": f"{type(e).__name__}: {e}"}
 
 
@@ -435,7 +447,7 @@ def ask_trainer_question(
             if foods_available:
                 context_blob["foodsAvailable"] = foods_available[:50]
         except Exception as e:
-            print(f"[trainer-question] nutrition context enrichment failed: {e}")
+            logger.debug("[trainer-question] nutrition context enrichment failed error_type=%s", type(e).__name__)
 
     # Always include workout plan when provided
     wp = body.workoutPlan
@@ -484,7 +496,7 @@ def ask_trainer_question(
         elif any(k in _ql for k in ('logged', 'did a workout', 'completed', 'i did', 'just finished')):
             topic = 'log_activity'
     if topic:
-        print(f"[trainer-question] topic={topic} — trimming context")
+        logger.info("[trainer-question] topic=%s trimming_context=true", topic)
         if is_nutritionist:
             if topic == "change_meals":
                 # Keep nutritionPlan + profile, drop progress/activity
@@ -543,7 +555,7 @@ def ask_trainer_question(
         context_str = json.dumps(context_blob, ensure_ascii=True)
     if len(context_str) > 8000:
         context_str = context_str[:8000] + '...(truncated)}'
-    print(f"[trainer-question] context_str length: {len(context_str)} chars")
+    logger.info("[trainer-question] context_length=%s", len(context_str))
 
     trimmed_convo = (body.conversation or [])[-6:]
 
@@ -797,10 +809,15 @@ def ask_trainer_question(
     if topic and topic in _topic_context_hints:
         system_prompt += f"\n\nCONTEXT HINT: {_topic_context_hints[topic]}"
 
-    # Debug: log what we're sending
-    print(f"[trainer-question] mode={body.mode} topic={topic} question={repr(q[:120])}")
-    print(f"[trainer-question] convo_turns={len(trimmed_convo)} has_image={bool(body.image_base64)} has_userContext={bool(body.userContext)}")
-    print(f"[trainer-question] context keys: {list(context_blob.keys())}")
+    logger.info(
+        "[trainer-question] request mode=%s topic=%s convo_turns=%s has_image=%s has_user_context=%s",
+        body.mode,
+        topic,
+        len(trimmed_convo),
+        bool(body.image_base64),
+        bool(body.userContext),
+    )
+    _debug_log("[trainer-question] context keys=%s", list(context_blob.keys()))
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -810,7 +827,7 @@ def ask_trainer_question(
     client = OpenAI(api_key=api_key)
     try:
         _m_fast = model_chat()           # Phase 1: fast model for answer
-        print(f"[trainer-question] model={_m_fast}")
+        logger.info("[trainer-question] model=%s", _m_fast)
 
         # Phase 1: answer + optional plan in one call.
         # Don't pass json_schema for gpt-5 — the trainer schema has optional/typeless
@@ -828,22 +845,30 @@ def ask_trainer_question(
         choice = response.choices[0]
         raw = choice.message.content
 
-        # Debug: dump full response details
-        print(f"[trainer-question] phase-1 response: finish_reason={getattr(choice, 'finish_reason', '?')} content_is_none={raw is None} content_len={len(raw) if raw else 0}")
-        print(f"[trainer-question] phase-1 message attrs: {[a for a in dir(choice.message) if not a.startswith('_')]}")
+        logger.info(
+            "[trainer-question] phase-1 response finish_reason=%s content_is_none=%s content_len=%s",
+            getattr(choice, 'finish_reason', '?'),
+            raw is None,
+            len(raw) if raw else 0,
+        )
+        _debug_log("[trainer-question] phase-1 message attrs=%s", [a for a in dir(choice.message) if not a.startswith('_')])
         if hasattr(choice.message, 'refusal') and choice.message.refusal:
-            print(f"[trainer-question] phase-1 REFUSAL: {choice.message.refusal}")
+            _debug_log("[trainer-question] phase-1 refusal=%r", choice.message.refusal)
         if hasattr(choice.message, 'tool_calls') and choice.message.tool_calls:
-            print(f"[trainer-question] phase-1 TOOL_CALLS: {choice.message.tool_calls}")
+            _debug_log("[trainer-question] phase-1 tool_calls=%r", choice.message.tool_calls)
 
         # Handle None/empty content — can happen with gpt-5 + json_object format
         if not raw:
             refusal = getattr(choice.message, 'refusal', None)
             finish = getattr(choice, 'finish_reason', 'unknown')
-            print(f"[trainer-question] phase-1 returned empty! finish_reason={finish} refusal={refusal}")
+            logger.warning(
+                "[trainer-question] phase-1 returned empty finish_reason=%s has_refusal=%s",
+                finish,
+                bool(refusal),
+            )
 
             # Retry 1: same model, NO response_format (prompt-enforced JSON)
-            print(f"[trainer-question] retry-1: {_m_fast} without response_format")
+            logger.info("[trainer-question] retry-1 model=%s without_response_format=true", _m_fast)
             kwargs_r1 = _build_chat_kwargs(
                 _m_fast, messages,
                 json_schema=None, max_tokens=2500, timeout_secs=55,
@@ -854,20 +879,28 @@ def ask_trainer_question(
             )
             response = _chat_create(client, **kwargs_r1)
             raw = response.choices[0].message.content
-            print(f"[trainer-question] retry-1 result: len={len(raw) if raw else 0} finish={getattr(response.choices[0], 'finish_reason', '?')}")
+            logger.info(
+                "[trainer-question] retry-1 result len=%s finish=%s",
+                len(raw) if raw else 0,
+                getattr(response.choices[0], 'finish_reason', '?'),
+            )
 
         if not raw:
             # Retry 2: fall back to gpt-4o-mini which reliably supports json_object
             _m_fallback = "gpt-4o-mini"
-            print(f"[trainer-question] retry-2: falling back to {_m_fallback}")
+            logger.info("[trainer-question] retry-2 fallback_model=%s", _m_fallback)
             kwargs_r2 = _build_chat_kwargs(_m_fallback, messages, json_schema=None, max_tokens=2500, timeout_secs=55)
             response = _chat_create(client, **kwargs_r2)
             raw = response.choices[0].message.content
-            print(f"[trainer-question] retry-2 result: len={len(raw) if raw else 0} finish={getattr(response.choices[0], 'finish_reason', '?')}")
+            logger.info(
+                "[trainer-question] retry-2 result len=%s finish=%s",
+                len(raw) if raw else 0,
+                getattr(response.choices[0], 'finish_reason', '?'),
+            )
 
         # Still empty after retries — give up gracefully
         if not raw:
-            print(f"[trainer-question] still None after retry — returning fallback")
+            logger.warning("[trainer-question] empty after retries returning fallback")
             return {
                 "answer": "I received your message but couldn't generate a response. Please try rephrasing or asking again.",
                 "action_items": [],
@@ -881,7 +914,7 @@ def ask_trainer_question(
             }
 
         if _looks_truncated(raw):
-            print(f"[trainer-question] phase-1 truncated — retrying at 5000 tokens")
+            logger.info("[trainer-question] phase-1 truncated retrying=true max_tokens=5000")
             kwargs1b = _build_chat_kwargs(
                 _m_fast, messages,
                 json_schema=None, max_tokens=5000, timeout_secs=65,
@@ -894,7 +927,14 @@ def ask_trainer_question(
             raw = response.choices[0].message.content or raw
 
         result = _extract_json(raw)
-        logger.info(f"[trainer-question] phase-1: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')} logged_workouts={len(result.get('logged_workouts') or [])}")
+        logger.info(
+            "[trainer-question] phase-1 parsed needs_plan_update=%s has_workout=%s has_nutrition=%s injury_count=%s logged_workouts=%s",
+            result.get('needs_plan_update'),
+            bool(result.get('updated_workout_plan')),
+            bool(result.get('updated_nutrition_plan')),
+            len(result.get('updated_injuries') or []),
+            len(result.get('logged_workouts') or []),
+        )
 
         result = _enforce_trainer_plan_guardrails(result, is_nutritionist=is_nutritionist)
         result = _sanitize_trainer_setting_proposals(result, body.profile if isinstance(body.profile, dict) else None)
@@ -906,19 +946,24 @@ def ask_trainer_question(
             days = wp.get("days", [])
             empty_days = [d.get("day", f"Day {i+1}") for i, d in enumerate(days) if not d.get("exercises")]
             if empty_days:
-                print(f"[trainer-question] REJECTING plan: days with 0 exercises: {empty_days}")
+                logger.warning("[trainer-question] rejecting empty plan days count=%s", len(empty_days))
                 result["updated_workout_plan"] = None
                 result["needs_plan_update"] = False
                 result["answer"] = (result.get("answer", "") +
                     "\n\n(I tried to update the plan but some days came back empty. "
                     "Could you ask again with more detail about what you'd like changed?)")
 
-        print(f"[trainer-question] final: needs_plan_update={result.get('needs_plan_update')} has_workout={bool(result.get('updated_workout_plan'))} has_nutrition={bool(result.get('updated_nutrition_plan'))} injuries={result.get('updated_injuries')}")
-        print(f"[trainer-question] answer preview: {repr(result.get('answer', '')[:200])}")
+        logger.info(
+            "[trainer-question] final needs_plan_update=%s has_workout=%s has_nutrition=%s injury_count=%s",
+            result.get('needs_plan_update'),
+            bool(result.get('updated_workout_plan')),
+            bool(result.get('updated_nutrition_plan')),
+            len(result.get('updated_injuries') or []),
+        )
         return result
     except json.JSONDecodeError as e:
-        print(f"[trainer-question] JSON decode error: {e}")
-        print(f"[trainer-question] raw content: {repr(raw[:500]) if raw else 'None'}")
+        logger.warning("[trainer-question] JSON decode error error_type=%s", type(e).__name__)
+        _debug_log("[trainer-question] raw content=%r", raw[:500] if raw else None)
         # Return a graceful fallback so the chat doesn't break
         return {
             "answer": "I'm sorry, I had trouble processing that response. Could you try rephrasing your question?",
@@ -933,8 +978,8 @@ def ask_trainer_question(
             "injury_clarification_needed": False,
         }
     except Exception as e:
-        print(f"[trainer-question] Exception: {e}")
-        raise HTTPException(status_code=502, detail=f"Trainer question failed: {str(e)}")
+        logger.warning("[trainer-question] failed error_type=%s", type(e).__name__)
+        raise HTTPException(status_code=502, detail="Trainer question failed")
 
 
 

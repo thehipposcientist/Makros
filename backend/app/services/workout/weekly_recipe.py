@@ -53,7 +53,7 @@ from typing import Optional
 #   - Adjacency / rotation rules change
 #   - Injury-pattern block list or dislike filter changes
 # Cosmetic copy / logging tweaks don't need a bump.
-PLANNER_VERSION = "2026.05.06.01"
+PLANNER_VERSION = "2026.05.07.01"
 
 logger = logging.getLogger(__name__)
 

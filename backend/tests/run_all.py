@@ -91,6 +91,9 @@ _TEST_MODULES = (
     "tests.test_entitlements",
     # CORS: prod must fail closed instead of wildcard+credentials.
     "tests.test_cors_config",
+    # Field encryption: opaque client state stores encrypted-at-rest JSON and
+    # legacy plaintext rows remain readable during migration.
+    "tests.test_field_encryption",
     # Native account sign-in: Apple identity links and account creation.
     "tests.test_auth_apple",
     # Native account sign-in: Google identity links and account creation.

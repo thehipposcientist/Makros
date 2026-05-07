@@ -252,8 +252,8 @@ def ai_first_time_weight_recommendation(
         data = json_extractor(content)
     except Exception as exc:
         logger.exception(
-            "[ai_first_time_weight] JSON parse failed for %s: raw=%r err=%s",
-            exercise_name, content[:200], exc,
+            "[ai_first_time_weight] JSON parse failed for %s: content_len=%s err=%s",
+            exercise_name, len(content), exc,
         )
         return None
 

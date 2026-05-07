@@ -20,6 +20,7 @@ import { getTheme, radius } from '../constants/theme';
 import { AppThemeName, SavedWorkoutTemplate, WorkoutDay, Exercise } from '../types';
 import { upsertWorkoutTemplate } from '../utils/workoutHistory';
 import { parseWorkoutPhoto } from '../services/api';
+import { isTimeBasedReps, shouldHideReps } from '../utils/exerciseDisplay';
 
 interface LibraryItem {
   id?: number | string;
@@ -27,16 +28,56 @@ interface LibraryItem {
   slug?: string | null;
   primary_muscle?: string | null;
   equipment?: string | null;
+  movement_pattern?: string | null;
+  exercise_type?: string | null;
 }
+
+type TargetType = 'reps' | 'time';
 
 interface DraftExercise {
   name: string;
   slug?: string | null;
   primaryMuscle?: string | null;
+  movementPattern?: string | null;
+  exerciseType?: string | null;
   equipment: string;
+  targetType: TargetType;
   sets: number;
   reps: string;
   restSeconds: number;
+}
+
+const DEFAULT_REP_TARGET = '8-12';
+const DEFAULT_TIME_TARGET = '20 min';
+
+function isTimeKind(value: unknown): boolean {
+  return /cardio|conditioning|mobility|recovery|stretch|flow/i.test(String(value ?? ''));
+}
+
+function shouldUseTimeTarget(ex: Pick<DraftExercise, 'name' | 'equipment' | 'primaryMuscle' | 'movementPattern' | 'exerciseType' | 'reps'>): boolean {
+  if (isTimeBasedReps(ex.reps)) return true;
+  if (isTimeKind(ex.primaryMuscle) || isTimeKind(ex.movementPattern) || isTimeKind(ex.exerciseType)) return true;
+  return shouldHideReps({
+    name: ex.name,
+    equipment: ex.equipment,
+    reps: ex.reps,
+    targetReps: ex.reps,
+    primaryMuscle: ex.primaryMuscle,
+    primary_muscle: ex.primaryMuscle,
+  });
+}
+
+function targetForMode(targetType: TargetType, current: string): string {
+  const trimmed = String(current ?? '').trim();
+  if (targetType === 'time') return isTimeBasedReps(trimmed) ? trimmed : DEFAULT_TIME_TARGET;
+  return trimmed && !isTimeBasedReps(trimmed) ? trimmed : DEFAULT_REP_TARGET;
+}
+
+function durationTargetLabel(seconds: unknown): string | null {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  if (value < 180) return `${Math.round(value)}s`;
+  return `${Math.round(value / 60)} min`;
 }
 
 function e2eId(value: string | number | null | undefined): string {
@@ -74,15 +115,29 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
     if (!visible) return;
     if (editTarget) {
       setName(editTarget.name);
-      setDraftExercises((editTarget.workout?.exercises ?? []).map((ex: any) => ({
-        name: ex.name,
-        slug: ex.slug ?? null,
-        primaryMuscle: ex.primary_muscle ?? null,
-        equipment: ex.equipment || 'Bodyweight',
-        sets: Number(ex.sets) || 3,
-        reps: String(ex.reps ?? '8-12'),
-        restSeconds: Number(ex.restSeconds) || 60,
-      })));
+      setDraftExercises((editTarget.workout?.exercises ?? []).map((ex: any) => {
+        const base = {
+          name: ex.name,
+          equipment: ex.equipment || 'Bodyweight',
+          primaryMuscle: ex.primary_muscle ?? null,
+          movementPattern: (ex as any).movement_pattern ?? null,
+          exerciseType: (ex as any).exercise_type ?? null,
+          reps: String(ex.reps ?? DEFAULT_REP_TARGET),
+        };
+        const targetType: TargetType = shouldUseTimeTarget(base) ? 'time' : 'reps';
+        return {
+          name: ex.name,
+          slug: ex.slug ?? null,
+          primaryMuscle: base.primaryMuscle,
+          movementPattern: base.movementPattern,
+          exerciseType: base.exerciseType,
+          equipment: base.equipment,
+          targetType,
+          sets: Number(ex.sets) || (targetType === 'time' ? 1 : 3),
+          reps: targetForMode(targetType, base.reps),
+          restSeconds: Number(ex.restSeconds) || (targetType === 'time' ? 0 : 60),
+        };
+      }));
     } else {
       setName('');
       setDraftExercises([]);
@@ -103,6 +158,7 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
           const items: LibraryItem[] = (rows || []).map(r => ({
             id: r.id, name: r.name, slug: r.slug,
             primary_muscle: r.primary_muscle, equipment: r.equipment,
+            movement_pattern: r.movement_pattern, exercise_type: r.exercise_type,
           }));
           setLibrary(items);
         })
@@ -122,14 +178,26 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
   }, [library, search]);
 
   const handleAddExercise = (lib: LibraryItem) => {
+    const base = {
+      name: lib.name,
+      equipment: lib.equipment || 'Bodyweight',
+      primaryMuscle: lib.primary_muscle ?? null,
+      movementPattern: lib.movement_pattern ?? null,
+      exerciseType: lib.exercise_type ?? null,
+      reps: DEFAULT_REP_TARGET,
+    };
+    const targetType: TargetType = shouldUseTimeTarget(base) ? 'time' : 'reps';
     setDraftExercises(prev => [...prev, {
       name: lib.name,
       slug: lib.slug ?? null,
       primaryMuscle: lib.primary_muscle ?? null,
+      movementPattern: lib.movement_pattern ?? null,
+      exerciseType: lib.exercise_type ?? null,
       equipment: lib.equipment || 'Bodyweight',
-      sets: 3,
-      reps: '8-12',
-      restSeconds: 60,
+      targetType,
+      sets: targetType === 'time' ? 1 : 3,
+      reps: targetType === 'time' ? DEFAULT_TIME_TARGET : DEFAULT_REP_TARGET,
+      restSeconds: targetType === 'time' ? 0 : 60,
     }]);
     setPicker(false);
     setSearch('');
@@ -141,6 +209,19 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
 
   const updateExercise = (idx: number, patch: Partial<DraftExercise>) => {
     setDraftExercises(prev => prev.map((e, i) => i === idx ? { ...e, ...patch } : e));
+  };
+
+  const updateTargetType = (idx: number, targetType: TargetType) => {
+    setDraftExercises(prev => prev.map((ex, i) => {
+      if (i !== idx) return ex;
+      return {
+        ...ex,
+        targetType,
+        reps: targetForMode(targetType, ex.reps),
+        sets: targetType === 'time' && ex.sets > 3 ? 1 : ex.sets,
+        restSeconds: targetType === 'time' ? Math.max(0, ex.restSeconds) : ex.restSeconds,
+      };
+    }));
   };
 
   const handleImportPhoto = async () => {
@@ -177,17 +258,29 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
         ...prev,
         ...imported.map((ex: any): DraftExercise => {
           const sets = Array.isArray(ex.sets) ? ex.sets : [];
-          const reps = sets.length > 0
-            ? String(sets[0]?.reps ?? '8-12')
-            : '8-12';
+          const importedDuration = durationTargetLabel(sets[0]?.durationSeconds ?? sets[0]?.duration_seconds);
+          const rawTarget = sets.length > 0
+            ? String(importedDuration ?? sets[0]?.reps ?? DEFAULT_REP_TARGET)
+            : DEFAULT_REP_TARGET;
+          const targetType: TargetType = shouldUseTimeTarget({
+            name: String(ex.name).trim(),
+            equipment: String(ex.equipment || 'Bodyweight'),
+            primaryMuscle: null,
+            movementPattern: null,
+            exerciseType: null,
+            reps: rawTarget,
+          }) ? 'time' : 'reps';
           return {
             name: String(ex.name).trim(),
             slug: null,
             primaryMuscle: null,
+            movementPattern: null,
+            exerciseType: null,
             equipment: String(ex.equipment || 'Bodyweight'),
-            sets: Math.max(1, Number(ex.sets_count ?? sets.length) || 3),
-            reps,
-            restSeconds: Math.max(0, Number(ex.restSeconds) || 60),
+            targetType,
+            sets: Math.max(1, Number(ex.sets_count ?? sets.length) || (targetType === 'time' ? 1 : 3)),
+            reps: targetForMode(targetType, rawTarget),
+            restSeconds: Math.max(0, Number(ex.restSeconds) || (targetType === 'time' ? 0 : 60)),
           };
         }),
       ]);
@@ -222,6 +315,8 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
           equipment: ex.equipment as any,
           slug: ex.slug ?? undefined,
           primary_muscle: ex.primaryMuscle ?? undefined,
+          movement_pattern: ex.movementPattern ?? undefined,
+          exercise_type: ex.exerciseType ?? undefined,
         }) as Exercise),
         stimulus: null,
       } as any;
@@ -297,6 +392,29 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
                       <Ionicons name="close-circle" size={20} color={tc.error ?? '#EF4444'} />
                     </TouchableOpacity>
                   </View>
+                  <View style={[s.targetSwitch, { borderColor: tc.border, backgroundColor: tc.background }]}>
+                    {(['reps', 'time'] as const).map(mode => {
+                      const active = ex.targetType === mode;
+                      return (
+                        <TouchableOpacity
+                          key={mode}
+                          testID={`workout-template-target-${mode}-${idx}`}
+                          accessibilityLabel={`workout-template-target-${mode}-${idx}`}
+                          onPress={() => updateTargetType(idx, mode)}
+                          style={[s.targetSwitchOption, active && { backgroundColor: tc.primary }]}
+                          activeOpacity={0.75}>
+                          <Ionicons
+                            name={mode === 'time' ? 'timer-outline' : 'repeat-outline'}
+                            size={13}
+                            color={active ? '#fff' : tc.textMuted}
+                          />
+                          <Text style={[s.targetSwitchText, { color: active ? '#fff' : tc.textSecondary }]}>
+                            {mode === 'time' ? 'Time' : 'Reps'}
+                          </Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
                   <View style={{ flexDirection: 'row', gap: 8, marginTop: 10 }}>
                     <View style={s.fieldGroup}>
                       <Text style={[s.fieldLabel, { color: tc.textMuted }]}>SETS</Text>
@@ -308,11 +426,11 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
                       />
                     </View>
                     <View style={s.fieldGroup}>
-                      <Text style={[s.fieldLabel, { color: tc.textMuted }]}>REPS</Text>
+                      <Text style={[s.fieldLabel, { color: tc.textMuted }]}>{ex.targetType === 'time' ? 'TIME' : 'REPS'}</Text>
                       <TextInput
                         value={ex.reps}
                         onChangeText={t => updateExercise(idx, { reps: t })}
-                        placeholder="8-12"
+                        placeholder={ex.targetType === 'time' ? '20 min' : '8-12'}
                         placeholderTextColor={tc.textMuted}
                         style={[s.fieldInput, { color: tc.textPrimary, borderColor: tc.border, backgroundColor: tc.background }]}
                       />
@@ -434,6 +552,29 @@ const s = StyleSheet.create({
   },
   exCard: {
     borderRadius: radius.md, borderWidth: 1, padding: 12,
+  },
+  targetSwitch: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    borderWidth: 1,
+    borderRadius: 8,
+    marginTop: 10,
+    padding: 2,
+  },
+  targetSwitchOption: {
+    minWidth: 74,
+    height: 30,
+    borderRadius: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+  },
+  targetSwitchText: {
+    fontSize: 12,
+    fontWeight: '800',
   },
   fieldGroup: { flex: 1 },
   fieldLabel: { fontSize: 9, fontWeight: '700', letterSpacing: 0.5, marginBottom: 4 },

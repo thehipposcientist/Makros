@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 
 import openai
@@ -47,6 +48,8 @@ from app.services.workout.performance import (
 from app.workout_progression import UserTrainingProfile, WorkoutProgressionEngine
 from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
 
+logger = logging.getLogger(__name__)
+
 
 def _resolve_equipment_entry(raw: str, name_to_slug: dict[str, str], valid_slugs: set[str]) -> str | None:
     return resolve_equipment_entry(raw, name_to_slug, valid_slugs)
@@ -71,8 +74,7 @@ def _validate_plans_legacy(plans: dict, req: PlanRequest) -> None:
     if len(days) < req.daysPerWeek - 1:
         raise ValueError(
             f"workout_plan.days has only {len(days)} entries, expected {req.daysPerWeek}"
-        )
-
+)
     np_ = plans["nutrition_plan"]
     if "targets" not in np_:
         raise ValueError("nutrition_plan missing 'targets'")
@@ -1019,23 +1021,13 @@ def _build_deterministic_workout(
         # (e.g. user keeps skipping legs → flag or swap).
         if skipped_days:
             brief["skipped_days_7d"] = skipped_days
-        # Debug: full brief + AI verdict so we can iterate on the
-        # reviewer prompt and the plan's structural choices.
-        try:
-            import json as _json
-            print(
-                "[plan-review] brief →\n"
-                + _json.dumps(brief, indent=2, default=str)
-            )
-        except Exception:
-            print(f"[plan-review] brief (unprintable): {brief}")
-
         review = review_plan(brief)
-        print(
-            f"[plan-review] AI verdict: status={review.status} "
-            f"patches={len(review.patches)} error={review.error!r}"
+        logger.info(
+            "[plan-review] verdict status=%s patches=%s has_error=%s",
+            review.status,
+            len(review.patches),
+            bool(review.error),
         )
-        print(f"[plan-review] AI notes: {review.notes}")
         for i, p in enumerate(review.patches):
             print(
                 f"[plan-review] patch {i}: action={p.action} "
@@ -2422,11 +2414,13 @@ async def run_full_plan_generation(
                     nutrition_context=_review_ctx_str,
                 )
                 review = review_nutrition_plan(brief)
-                print(
-                    f"[nutrition-review] template {idx}: status={review.status} "
-                    f"patches={len(review.patches)} error={review.error!r}"
+                logger.info(
+                    "[nutrition-review] template=%s status=%s patches=%s has_error=%s",
+                    idx,
+                    review.status,
+                    len(review.patches),
+                    bool(review.error),
                 )
-                print(f"[nutrition-review] notes: {review.notes}")
                 if review.status == "modify" and review.patches:
                     _, applied = apply_nutrition_patches(np_, review.patches)
                     for msg in applied:

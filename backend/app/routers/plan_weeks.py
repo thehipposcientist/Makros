@@ -160,6 +160,13 @@ class RegenerateRemainingRequest(BaseModel):
 
 
 def _plan_day_to_response(pd: PlanDay) -> PlanDayResponse:
+    workout = pd.workout_json
+    if isinstance(workout, dict):
+        workout = {
+            **workout,
+            "plan_day_id": pd.id,
+            "planDayId": pd.id,
+        }
     return PlanDayResponse(
         day_date=pd.day_date.isoformat(),
         day_index=pd.day_index,
@@ -168,7 +175,7 @@ def _plan_day_to_response(pd: PlanDay) -> PlanDayResponse:
         locked=pd.locked,
         lock_reason=pd.lock_reason,
         skip_reason=getattr(pd, "skip_reason", None),
-        workout=pd.workout_json,
+        workout=workout,
         nutrition=pd.nutrition_json,
         generation_source=pd.generation_source,
     )

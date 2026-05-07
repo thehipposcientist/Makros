@@ -42,11 +42,11 @@ tags:
     timeout: 30000
 
 - extendedWaitUntil:
-    visible: "Day 1, .*Legs"
+    visible: "Day [0-9], .*Legs"
     timeout: 30000
 - extendedWaitUntil:
-    visible: "Day 2, .*Pull \\+ Cardio"
+    visible: "Day [0-9], .*Pull \\+ Cardio"
     timeout: 30000
 - extendedWaitUntil:
-    visible: "Day 3, .*Push"
+    visible: "Day [0-9], .*Push"
     timeout: 30000

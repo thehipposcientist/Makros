@@ -8138,6 +8138,55 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   }}
                   readinessBadge={isToday ? (readinessBadge ?? undefined) : undefined}
                   onReadinessTap={isToday ? () => setShowReadiness(true) : undefined}
+                  templateOptions={workoutTemplates}
+                  onUseTemplate={async (template) => {
+                    setSwitchDayIdx(-1);
+                    const dateISO = dateKey(item.date);
+                    const newDay = workoutFromTemplateForToday(template, item.date);
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
+                    setSelectedWorkoutDayKey(dateISO);
+
+                    if (workoutPlan) {
+                      const recipeIdx = item.workout
+                        ? workoutPlan.days.indexOf(item.workout as any)
+                        : -1;
+                      const updatedDays = [...workoutPlan.days];
+                      if (recipeIdx >= 0) {
+                        updatedDays[recipeIdx] = newDay;
+                      } else {
+                        updatedDays.push(newDay);
+                      }
+                      const updatedPlan = { ...workoutPlan, days: updatedDays };
+                      setWorkoutPlan(updatedPlan);
+                      AsyncStorage.setItem('aiWorkoutPlan', JSON.stringify(updatedPlan)).catch(() => {});
+                    } else {
+                      setManualWorkoutOverrides(prev => ({ ...prev, [dateISO]: newDay }));
+                      saveManualWorkoutOverride(dateISO, newDay).catch(() => {});
+                    }
+
+                    if (authToken && planWeek?.days?.length) {
+                      try {
+                        const { patchPlanDayWorkout } = await import('../services/api');
+                        const updatedPlanDay = await patchPlanDayWorkout(authToken, dateISO, newDay);
+                        setPlanWeek(prev => {
+                          if (!prev) return prev;
+                          return {
+                            ...prev,
+                            days: prev.days.map(pd =>
+                              pd.day_date === dateISO
+                                ? { ...pd, is_rest: updatedPlanDay.is_rest, workout: updatedPlanDay.workout, status: updatedPlanDay.status, locked: updatedPlanDay.locked }
+                                : pd,
+                            ),
+                          };
+                        });
+                      } catch (e) {
+                        console.warn('[switchDay] patchPlanDayWorkout template failed (legacy cache still updated):', e);
+                      }
+                    } else {
+                      saveManualWorkoutOverride(dateISO, newDay).catch(() => {});
+                    }
+                  }}
                 />
                 </FadeInView>
                 {isToday ? (
@@ -13590,7 +13639,7 @@ const TodayWorkoutPlanActivityCards = React.memo(function TodayWorkoutPlanActivi
 
 // ── DayCard ───────────────────────────────────────────────────────────────────
 
-function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, sessionMinutes, onSwapExercise, onViewExercise, onOpenExerciseVideo, readinessBadge, onReadinessTap }: {
+function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipReason, completedSummary, expanded, onPress, onStartWorkout, onSkip, onUnskip, onUndoComplete, onChangeFocus, splitOptions, optionWarnings, showSwitchOptions, onToggleSwitch, hasPlateauedExercises, isRegenerating, sessionMinutes, onSwapExercise, onViewExercise, onOpenExerciseVideo, readinessBadge, onReadinessTap, templateOptions, onUseTemplate }: {
   item: ScheduleItem;
   themeName?: import('../types').AppThemeName;
   isToday: boolean;
@@ -13611,6 +13660,8 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
   optionWarnings?: Record<string, { conflict: boolean; readiness: number | null }>;
   showSwitchOptions?: boolean;
   onToggleSwitch?: () => void;
+  templateOptions?: SavedWorkoutTemplate[];
+  onUseTemplate?: (template: SavedWorkoutTemplate) => void;
   hasPlateauedExercises?: boolean;
   /** Local "this card is regenerating" flag set by the parent when a
    *  Switch-Day tap fires generateWorkoutDay. Drives a shimmer overlay. */
@@ -14205,7 +14256,9 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                       </View>
                       <View style={styles.secondaryActionCopy}>
                         <Text style={[styles.secondaryActionTitle, { color: workoutPalette.strong }]}>Change Focus</Text>
-                        <Text style={[styles.secondaryActionSub, { color: cardMetaColor }]} numberOfLines={1}>Compare readiness by muscle group</Text>
+                        <Text style={[styles.secondaryActionSub, { color: cardMetaColor }]} numberOfLines={1}>
+                          {templateOptions && templateOptions.length > 0 ? 'Pick a focus or saved template' : 'Compare readiness by muscle group'}
+                        </Text>
                       </View>
                       <Ionicons name="chevron-down" size={16} color={workoutPalette.strong} />
                     </TouchableOpacity>
@@ -14360,6 +14413,53 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
                           );
                         })}
                       </View>
+                      {templateOptions && templateOptions.length > 0 ? (
+                        <View style={{ marginTop: 14, paddingTop: 12, borderTopWidth: quietBorderWidth, borderTopColor: quietBorderColor }}>
+                          <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textPrimary, marginBottom: 8 }}>Saved templates</Text>
+                          <View style={{ gap: 8 }}>
+                            {templateOptions.map((template, idx) => (
+                              <TouchableOpacity
+                                key={template.id || `${template.name}-${idx}`}
+                                testID={`change-focus-template-${e2eId(template.name || String(idx))}`}
+                                accessibilityLabel={`change-focus-template-${e2eId(template.name || String(idx))}`}
+                                activeOpacity={0.75}
+                                onPress={() => onUseTemplate?.(template)}
+                                style={{
+                                  minHeight: 48,
+                                  flexDirection: 'row',
+                                  alignItems: 'center',
+                                  gap: 10,
+                                  paddingHorizontal: 10,
+                                  paddingVertical: 8,
+                                  borderRadius: 8,
+                                  borderWidth: quietBorderWidth,
+                                  borderColor: workoutPalette.strong + '33',
+                                  backgroundColor: workoutPalette.strong + '0A',
+                                }}>
+                                <View style={{
+                                  width: 30,
+                                  height: 30,
+                                  borderRadius: 15,
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  backgroundColor: workoutPalette.strong + '18',
+                                }}>
+                                  <Ionicons name="bookmark-outline" size={15} color={workoutPalette.strong} />
+                                </View>
+                                <View style={{ flex: 1, minWidth: 0 }}>
+                                  <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary }} numberOfLines={1}>
+                                    {template.name || 'Saved template'}
+                                  </Text>
+                                  <Text style={{ fontSize: 11, color: cardMetaColor, marginTop: 1 }} numberOfLines={1}>
+                                    {template.workout?.focus || `${template.workout?.exercises?.length ?? 0} exercises`}
+                                  </Text>
+                                </View>
+                                <Ionicons name="chevron-forward" size={16} color={workoutPalette.strong} />
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        </View>
+                      ) : null}
                     </View>
                   )}
                 </View>
@@ -14406,6 +14506,7 @@ const DayCard = React.memo(DayCardImpl, (prev, next) => {
     && prev.splitOptions === next.splitOptions
     && prev.optionWarnings === next.optionWarnings
     && prev.showSwitchOptions === next.showSwitchOptions
+    && prev.templateOptions === next.templateOptions
     && prev.hasPlateauedExercises === next.hasPlateauedExercises
     && prev.isRegenerating === next.isRegenerating
     && prev.sessionMinutes === next.sessionMinutes

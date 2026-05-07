@@ -3,12 +3,15 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import re
 
 import openai
 from openai import OpenAI
 from fastapi import HTTPException, Depends, Request
 from pydantic import BaseModel as _PydanticBaseModel
+
+logger = logging.getLogger(__name__)
 
 
 def _attach_food_classification(item: dict) -> dict:
@@ -683,14 +686,14 @@ def food_nutrition_search(
         from app.services.usda_fdc import search_foods as usda_search
         usda_results = usda_search(body.query.strip(), max_results=5)
         if usda_results:
-            print(f"[food-search] USDA hit: {len(usda_results)} results for '{body.query}'")
+            logger.info("[food-search] USDA hit count=%s", len(usda_results))
             for r in usda_results:
                 if isinstance(r, dict):
                     _attach_food_classification(r)
             return {"results": usda_results}
-        print(f"[food-search] USDA miss for '{body.query}', falling back to AI")
+        logger.info("[food-search] USDA miss fallback=ai")
     else:
-        print(f"[food-search] force_ai=true, skipping USDA for '{body.query}'")
+        logger.info("[food-search] force_ai=true skipping_usda=true")
 
     # 2. Fallback to AI (or forced AI)
     ensure_pro(current_user, "AI food lookup")
@@ -1016,13 +1019,13 @@ def exercise_ai_search(
                     "movement_pattern": _movement_pattern_from_import(w["name"], primary_muscle),
                     "source": "wger",
                 })
-            print(f"[exercise-search] wger hit: {len(mapped)} results for '{body.query}'")
+            logger.info("[exercise-search] wger hit count=%s", len(mapped))
             return {"results": mapped}
     except Exception as e:
-        print(f"[exercise-search] wger search failed: {e}")
+        logger.warning("[exercise-search] wger search failed error_type=%s", type(e).__name__)
 
     # 2. Fallback to AI
-    print(f"[exercise-search] wger miss for '{body.query}', falling back to AI")
+    logger.info("[exercise-search] wger miss fallback=ai")
     ensure_pro(current_user, "AI exercise search")
     api_key = get_openai_api_key()
     if not api_key:
@@ -1226,7 +1229,7 @@ def exercise_suggest(
             if not eq or eq in {"none", "no equipment", "bodyweight"}:
                 r["equipment"] = "bodyweight"
             r.setdefault("source", "ai")
-        print(f"[exercise-suggest] {len(results)} suggestions for '{body.workout_focus}'")
+        logger.info("[exercise-suggest] suggestions count=%s", len(results))
         return {"results": results[:10]}
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Exercise suggest failed: {str(e)}")
@@ -1321,7 +1324,7 @@ def generate_meal_instructions(
         text = (resp.choices[0].message.content or "").strip()
         if not text:
             raise ValueError("empty response")
-        print(f"[meal-instructions] generated for '{body.meal_name}' ({len(text)} chars)")
+        logger.info("[meal-instructions] generated chars=%s", len(text))
         return {"instructions": text}
     except Exception as e:
         diag = _log_openai_error("meal-instructions", 1, model_meal_parsing(), e) if isinstance(e, (openai.APIStatusError, openai.APIConnectionError, openai.APITimeoutError)) else str(e)
@@ -2075,7 +2078,7 @@ def match_goal(
             reason = fallback["reason"]
         return {"goal_id": goal_id, "reason": reason}
     except Exception as e:
-        print(f"[match-goal] failed: {e}")
+        logger.warning("[match-goal] failed error_type=%s", type(e).__name__)
         return _deterministic_goal_match(body.description, allowed_goal_ids)
 
 

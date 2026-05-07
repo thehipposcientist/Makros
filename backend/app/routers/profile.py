@@ -25,6 +25,7 @@ from app.models import (
     PlanWeek, PlanDay, PlanWeekCheckin, AIDecision, GearItem,
 )
 from app.auth import get_current_user, hash_password
+from app.field_encryption import FieldEncryptionError, decrypt_json, encrypt_json
 
 
 class NutritionScoreResponse(BaseModel):
@@ -67,6 +68,18 @@ def _dump_model(row):
 
 def _dump_rows(rows):
     return [_dump_model(row) for row in rows]
+
+
+def _dump_user_state_rows(rows):
+    dumped = []
+    for row in rows:
+        item = _dump_model(row)
+        try:
+            item["state_json"] = decrypt_json(row.state_json)
+        except FieldEncryptionError as exc:
+            raise HTTPException(status_code=500, detail="Stored state could not be decrypted") from exc
+        dumped.append(item)
+    return dumped
 
 
 def _ids(rows) -> list[int]:
@@ -692,7 +705,7 @@ def export_account_data(
         "profile": _dump_rows(session.exec(select(UserProfile).where(UserProfile.user_id == uid)).all()),
         "goals": _dump_rows(session.exec(select(UserGoal).where(UserGoal.user_id == uid)).all()),
         "preferences": _dump_rows(session.exec(select(UserPreferences).where(UserPreferences.user_id == uid)).all()),
-        "state": _dump_rows(session.exec(select(UserState).where(UserState.user_id == uid)).all()),
+        "state": _dump_user_state_rows(session.exec(select(UserState).where(UserState.user_id == uid)).all()),
         "plan_weeks": _dump_rows(session.exec(select(PlanWeek).where(PlanWeek.user_id == uid)).all()),
         "plan_days": _dump_rows(session.exec(select(PlanDay).where(PlanDay.user_id == uid)).all()),
         "day_states": _dump_rows(session.exec(select(UserDayState).where(UserDayState.user_id == uid)).all()),
@@ -1127,8 +1140,12 @@ def get_user_state(
     row = session.exec(
         select(UserState).where(UserState.user_id == current_user.id)
     ).first()
+    try:
+        state = decrypt_json(row.state_json) if row else {}
+    except FieldEncryptionError as exc:
+        raise HTTPException(status_code=500, detail="Stored state could not be decrypted") from exc
     return {
-        "state": (row.state_json if row else {}),
+        "state": state,
         "updated_at": (row.updated_at.isoformat() if row and row.updated_at else None),
     }
 
@@ -1143,11 +1160,15 @@ def put_user_state(
         select(UserState).where(UserState.user_id == current_user.id)
     ).first()
     now = datetime.now(timezone.utc)
+    try:
+        encrypted_state = encrypt_json(body.state)
+    except FieldEncryptionError as exc:
+        raise HTTPException(status_code=503, detail="State encryption is not configured") from exc
     if row:
-        row.state_json = body.state
+        row.state_json = encrypted_state
         row.updated_at = now
     else:
-        row = UserState(user_id=current_user.id, state_json=body.state, updated_at=now)
+        row = UserState(user_id=current_user.id, state_json=encrypted_state, updated_at=now)
     session.add(row)
     _backfill_preferred_split_from_state(session, current_user.id, body.state)
     session.commit()

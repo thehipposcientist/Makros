@@ -28,8 +28,11 @@ final scale-to-target pass.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
+
+logger = logging.getLogger(__name__)
 
 
 ReviewStatus = Literal["ok", "modify"]
@@ -390,7 +393,7 @@ def review_nutrition_plan(brief: dict) -> NutritionReview:
         raw = response.choices[0].message.content or ""
         parsed = _extract_json(raw)
     except Exception as exc:
-        print(f"[nutrition_plan_review] AI call failed: {exc}")
+        logger.warning("[nutrition_plan_review] AI call failed error_type=%s", type(exc).__name__)
         return NutritionReview(status="ok", notes="review call failed", error=str(exc))
 
     status = parsed.get("status")

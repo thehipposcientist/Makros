@@ -79,6 +79,10 @@ const STALE_AFTER_MS = 30 * 60 * 1000;   // 30 min
 
 let _inflight: Promise<HealthDataSummary | null> | null = null;
 
+function cacheableSummary(summary: HealthDataSummary): HealthDataSummary {
+  return { ...summary, raw: null };
+}
+
 function localDateISO(date: Date = new Date()): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
@@ -107,6 +111,11 @@ export async function getCachedHealthDataSummary(): Promise<HealthDataSummary | 
     const raw = await AsyncStorage.getItem(CACHE_KEY);
     if (!raw) return null;
     const parsed: HealthDataSummary = JSON.parse(raw);
+    if (parsed?.raw) {
+      const minimized = cacheableSummary(parsed);
+      AsyncStorage.setItem(CACHE_KEY, JSON.stringify(minimized)).catch(() => {});
+      return minimized;
+    }
     return parsed;
   } catch { return null; }
 }
@@ -121,7 +130,7 @@ export async function refreshHealthDataSummary(
     try {
       const summary = await compute(opts);
       if (summary) {
-        AsyncStorage.setItem(CACHE_KEY, JSON.stringify(summary)).catch(() => {});
+        AsyncStorage.setItem(CACHE_KEY, JSON.stringify(cacheableSummary(summary))).catch(() => {});
         // Fire-and-forget per-day persistence to backend. Keeps the
         // server's daily_health_snapshots row current so weekly_review
         // + recovery_flags can read history without re-querying HK.

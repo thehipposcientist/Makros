@@ -1,12 +1,14 @@
-// Watch complications for the Thallo app. Renders today's workout,
-// readiness, sleep, and hydration in three accessory styles:
+// Watch complications for the Thallo app. Renders today's workout in
+// three accessory styles:
 //   • accessoryCircular     — corner of the watch face
 //   • accessoryRectangular  — Smart Stack / modular face
 //   • accessoryInline       — single-line text complication
 //
 // Data source: SharedDefaults — the main watch app writes a JSON blob
-// into UserDefaults on every WCSession update so the complication
-// timeline can read it without its own WCSession (extensions can't
+// into UserDefaults on every WCSession update. The payload intentionally
+// omits health-adjacent sleep, readiness, and hydration values so the
+// complication extension only persists workout-facing display state.
+// The complication timeline can read it without its own WCSession (extensions can't
 // reliably keep WCSession alive). Provider refreshes on a 30-min
 // timeline + on every workout / meal push from the phone (the
 // watch app calls WidgetCenter.shared.reloadAllTimelines()).

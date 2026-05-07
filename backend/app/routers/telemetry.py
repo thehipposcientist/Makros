@@ -8,7 +8,7 @@ from sqlmodel import Session
 
 from app.auth import ALGORITHM, SECRET_KEY
 from app.database import get_session
-from app.logging_setup import get_logger, set_request_context
+from app.logging_setup import get_logger, redact_for_logs, set_request_context
 from app.models import ClientTelemetryEvent, User
 
 router = APIRouter(prefix="/telemetry", tags=["telemetry"])
@@ -58,7 +58,7 @@ def create_telemetry_event(
     user = _optional_user(credentials, db)
     if user and user.id is not None:
         set_request_context(user_id=user.id)
-    payload = body.payload or {}
+    payload = redact_for_logs(body.payload or {})
     event = ClientTelemetryEvent(
         user_id=user.id if user else None,
         anonymous_id=body.anonymous_id,

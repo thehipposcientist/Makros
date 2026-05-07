@@ -11,6 +11,7 @@ Run directly:  python3 -m tests.test_exercise_seed_equipment
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -127,6 +128,165 @@ def test_generate_cardio_day_uses_seeded_names() -> None:
     assert not missing, f"generated non-seeded cardio names: {missing}"
     assert "Stationary Bike Intervals" in names, names
     _ok(f"generated names are canonical: {names}")
+
+
+def _planned_cardio_minutes(day: dict) -> int:
+    total = 0
+    for ex in day["exercises"]:
+        reps = str(ex.get("reps") or "")
+        minute_match = re.search(r"(\d+)\s*min", reps)
+        if minute_match:
+            total += int(minute_match.group(1))
+            continue
+        seconds_match = re.search(r"(\d+)\s*s", reps)
+        if seconds_match:
+            sets = int(ex.get("sets") or 1)
+            rest = int(ex.get("restSeconds") or ex.get("rest_seconds") or 0)
+            total += round((sets * int(seconds_match.group(1)) + max(0, sets - 1) * rest) / 60)
+    return total
+
+
+def test_generate_cardio_day_60_min_uses_explicit_blocks() -> None:
+    print("\n[test] generated 60-min cardio day uses explicit session blocks")
+    from app.services.workout.planner import generate_cardio_day
+
+    day = generate_cardio_day(
+        60,
+        "body_recomp",
+        equipment_owned=["Stationary bike", "Treadmill"],
+    )
+    roles = [ex.get("slot_role") for ex in day["exercises"]]
+    reps = [ex.get("reps") for ex in day["exercises"]]
+
+    assert roles == ["warmup", "primary", "secondary", "cooldown"], roles
+    assert reps == ["5 min warm-up", "25 min", "25 min", "5 min cooldown"], reps
+    assert _planned_cardio_minutes(day) == 60, day["exercises"]
+    assert all("rest_seconds" not in ex for ex in day["exercises"]), day["exercises"]
+    assert all("restSeconds" in ex for ex in day["exercises"]), day["exercises"]
+    _ok(f"60-min cardio blocks: {list(zip(roles, reps))}")
+
+
+def test_generate_cardio_day_bike_only_stays_on_bike() -> None:
+    print("\n[test] generated bike-only cardio day does not split onto outdoor fallback")
+    from app.services.workout.planner import generate_cardio_day
+
+    day = generate_cardio_day(
+        60,
+        "body_recomp",
+        equipment_owned=["Stationary bike"],
+    )
+    names = [ex["name"] for ex in day["exercises"]]
+    equipment = [ex["equipment"] for ex in day["exercises"]]
+    reps = [ex["reps"] for ex in day["exercises"]]
+
+    assert names == ["Stationary Bike", "Bike Zone 2", "Stationary Bike"], names
+    assert all(eq == "stationary_bike" for eq in equipment), day["exercises"]
+    assert reps == ["5 min warm-up", "50 min", "5 min cooldown"], reps
+    _ok(f"bike-only blocks: {list(zip(names, reps))}")
+
+
+def test_generate_cardio_day_steady_contract_across_time_slots() -> None:
+    print("\n[test] generated steady cardio day matches every session time slot")
+    from app.services.workout.planner import generate_cardio_day
+
+    checked = []
+    for minutes in (20, 30, 45, 60, 75, 90, 120):
+        day = generate_cardio_day(
+            minutes,
+            "body_recomp",
+            equipment_owned=["Stationary bike", "Treadmill"],
+        )
+        roles = [ex.get("slot_role") for ex in day["exercises"]]
+        primary_rows = [ex for ex in day["exercises"] if ex.get("slot_role") == "primary"]
+        secondary_rows = [ex for ex in day["exercises"] if ex.get("slot_role") == "secondary"]
+
+        assert roles[0] == "warmup", (minutes, roles)
+        assert roles[-1] == "cooldown", (minutes, roles)
+        assert len(primary_rows) == 1, (minutes, day["exercises"])
+        assert _planned_cardio_minutes(day) == minutes, (minutes, day["exercises"])
+        assert all("rest_seconds" not in ex for ex in day["exercises"]), (minutes, day["exercises"])
+        assert all("restSeconds" in ex for ex in day["exercises"]), (minutes, day["exercises"])
+        if minutes < 60:
+            assert not secondary_rows, (minutes, day["exercises"])
+        else:
+            assert len(secondary_rows) == 1, (minutes, day["exercises"])
+            assert primary_rows[0]["equipment"] != secondary_rows[0]["equipment"], (minutes, day["exercises"])
+        checked.append((minutes, roles))
+
+    _ok(f"steady slots checked: {checked}")
+
+
+def test_generate_cardio_day_single_modality_contract_across_time_slots() -> None:
+    print("\n[test] generated single-modality cardio day fills time without fallback split")
+    from app.services.workout.planner import generate_cardio_day
+
+    checked = []
+    for minutes in (20, 30, 45, 60, 75, 90, 120):
+        day = generate_cardio_day(
+            minutes,
+            "body_recomp",
+            equipment_owned=["Stationary bike"],
+        )
+        roles = [ex.get("slot_role") for ex in day["exercises"]]
+        equipment = [ex.get("equipment") for ex in day["exercises"]]
+
+        assert roles == ["warmup", "primary", "cooldown"], (minutes, roles, day["exercises"])
+        assert all(eq == "stationary_bike" for eq in equipment), (minutes, equipment, day["exercises"])
+        assert _planned_cardio_minutes(day) == minutes, (minutes, day["exercises"])
+        checked.append((minutes, [ex["reps"] for ex in day["exercises"]]))
+
+    _ok(f"single-modality slots checked: {checked}")
+
+
+def test_generate_cardio_day_interval_contract_across_time_slots() -> None:
+    print("\n[test] generated interval cardio day matches every session time slot")
+    from app.services.workout.planner import generate_cardio_day
+
+    checked = []
+    for minutes in (20, 30, 45, 60, 75, 90, 120):
+        day = generate_cardio_day(
+            minutes,
+            "fat_loss",
+            equipment_owned=["Stationary bike", "Treadmill", "Jump rope"],
+        )
+        roles = [ex.get("slot_role") for ex in day["exercises"]]
+        primary_rows = [ex for ex in day["exercises"] if ex.get("slot_role") == "primary"]
+        secondary_rows = [ex for ex in day["exercises"] if ex.get("slot_role") == "secondary"]
+
+        assert roles[0] == "warmup", (minutes, roles)
+        assert roles[-1] == "cooldown", (minutes, roles)
+        assert len(primary_rows) == 1, (minutes, day["exercises"])
+        assert primary_rows[0].get("prescriptionType") == "cardio_intervals", (minutes, primary_rows)
+        assert primary_rows[0].get("sets", 0) > 1, (minutes, primary_rows)
+        assert len(secondary_rows) <= 1, (minutes, day["exercises"])
+        assert abs(_planned_cardio_minutes(day) - minutes) <= 1, (minutes, day["exercises"])
+        if minutes >= 30:
+            assert secondary_rows and "min easy" in secondary_rows[0]["reps"], (minutes, day["exercises"])
+        checked.append((minutes, [(ex["slot_role"], ex["sets"], ex["reps"]) for ex in day["exercises"]]))
+
+    _ok(f"interval slots checked: {checked}")
+
+
+def test_generate_cardio_day_interval_goal_adds_flush_not_three_primaries() -> None:
+    print("\n[test] generated interval cardio day uses intervals + easy flush")
+    from app.services.workout.planner import generate_cardio_day
+
+    day = generate_cardio_day(
+        60,
+        "fat_loss",
+        equipment_owned=["Stationary bike", "Jump rope"],
+    )
+    primary_rows = [ex for ex in day["exercises"] if ex.get("slot_role") == "primary"]
+    secondary_rows = [ex for ex in day["exercises"] if ex.get("slot_role") == "secondary"]
+    names = [ex["name"] for ex in day["exercises"]]
+
+    assert len(primary_rows) == 1, day["exercises"]
+    assert primary_rows[0]["sets"] > 1, primary_rows[0]
+    assert primary_rows[0].get("prescriptionType") == "cardio_intervals", primary_rows[0]
+    assert secondary_rows and "min easy" in secondary_rows[0]["reps"], day["exercises"]
+    assert "Stationary Bike Intervals" in names, names
+    assert not all(ex.get("sets") == 1 and "30 min" in str(ex.get("reps")) for ex in day["exercises"]), day["exercises"]
+    _ok(f"interval day blocks: {[(ex['name'], ex['sets'], ex['reps']) for ex in day['exercises']]}")
 
 
 def test_adjustable_dumbbells_unlock_dumbbell_library() -> None:
@@ -348,6 +508,12 @@ cases = [
     test_required_equipment_preserves_multi_gear_requirements,
     test_cardio_backfill_equipment_is_concrete,
     test_generate_cardio_day_uses_seeded_names,
+    test_generate_cardio_day_60_min_uses_explicit_blocks,
+    test_generate_cardio_day_bike_only_stays_on_bike,
+    test_generate_cardio_day_steady_contract_across_time_slots,
+    test_generate_cardio_day_single_modality_contract_across_time_slots,
+    test_generate_cardio_day_interval_contract_across_time_slots,
+    test_generate_cardio_day_interval_goal_adds_flush_not_three_primaries,
     test_adjustable_dumbbells_unlock_dumbbell_library,
     test_planner_reachable_movement_patterns_are_enforced,
     test_support_dependent_moves_require_support_equipment,

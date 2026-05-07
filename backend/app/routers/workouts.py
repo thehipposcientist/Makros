@@ -1923,7 +1923,13 @@ def mark_workout_complete(
     # Auto-lock the corresponding PlanDay if the weekly model is active.
     try:
         from app.services.workout.week_manager import lock_day_on_complete
-        lock_day_on_complete(db, current_user.id, body.workout_date, plan_lock_focus_label)
+        lock_day_on_complete(
+            db,
+            current_user.id,
+            body.workout_date,
+            plan_lock_focus_label,
+            plan_day_id=body.plan_day_id,
+        )
     except Exception as e:
         logger.debug(f"[workouts/complete] plan_day lock failed (non-fatal): {e}")
 

@@ -2911,40 +2911,190 @@ def generate_cardio_day(
         """True iff user has at least one of the required equipment slugs."""
         return any(r.lower() in owned for r in required)
 
-    # Candidate pool — each carries its real equipment requirement so the
-    # equipment filter actually works. "bodyweight" entries always survive.
-    pool_intense = [
-        {"name": "Jump Rope",              "sets": 1, "reps": "5 min warm-up",                     "rest_seconds": 60, "equipment": "jump_rope",         "slot_role": "warmup",  "muscles_targeted": ["cardio", "calves"],       "_req": ["jump_rope"]},
-        {"name": "Rowing Machine",         "sets": 1, "reps": f"{min(25, session_minutes - 15)} min steady", "rest_seconds": 0, "equipment": "rower",      "slot_role": "primary", "muscles_targeted": ["cardio", "back", "core"], "_req": ["rowing_machine", "rower"]},
-        {"name": "Assault Bike",           "sets": 6, "reps": "30s on / 60s off",                  "rest_seconds": 60, "equipment": "assault_bike",      "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["assault_bike"]},
-        {"name": "Treadmill Intervals",    "sets": 6, "reps": "60s on / 60s off",                  "rest_seconds": 60, "equipment": "treadmill",         "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["treadmill"]},
-        {"name": "Stationary Bike Intervals","sets": 8, "reps": "20s on / 40s off",                "rest_seconds": 40, "equipment": "stationary_bike",   "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["stationary_bike", "bike"]},
-        {"name": "Sprint Intervals",       "sets": 5, "reps": "2 min hard / 2 min easy",           "rest_seconds": 0,  "equipment": "bodyweight",        "slot_role": "primary", "muscles_targeted": ["cardio", "quads"],         "_req": ["bodyweight"]},
+    sm = max(20, min(120, int(session_minutes or 45)))
+
+    def _base(
+        name: str,
+        equipment: str,
+        req: list[str],
+        *,
+        muscles: list[str] | None = None,
+        primary_muscle: str = "cardio",
+    ) -> dict:
+        return {
+            "name": name,
+            "equipment": equipment,
+            "muscles_targeted": muscles or ["cardio"],
+            "primary_muscle": primary_muscle,
+            "_req": req,
+        }
+
+    warmup_pool = [
+        _base("Stationary Bike", "stationary_bike", ["stationary_bike", "bike"], muscles=["cardio", "quads"]),
+        _base("Treadmill Walk", "treadmill", ["treadmill"]),
+        _base("Rowing Machine", "rower", ["rowing_machine", "rower"], muscles=["cardio", "back", "core"], primary_muscle="full_body"),
+        _base("Elliptical", "elliptical", ["elliptical"], muscles=["cardio", "full_body"]),
+        _base("Jump Rope", "jump_rope", ["jump_rope"], muscles=["cardio", "calves"]),
+        _base("Outdoor Walk", "bodyweight", ["bodyweight"], muscles=["cardio", "glutes"]),
     ]
-    pool_easy = [
-        {"name": "Incline Walk",           "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "treadmill",     "slot_role": "primary", "muscles_targeted": ["cardio", "glutes", "calves"], "_req": ["treadmill"]},
-        {"name": "Stair Climber",          "sets": 1, "reps": "10 min",                                "rest_seconds": 0, "equipment": "stair_climber", "slot_role": "primary", "muscles_targeted": ["cardio", "quads", "glutes"],  "_req": ["stair_climber"]},
-        {"name": "Bike Zone 2",            "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "stationary_bike","slot_role": "primary","muscles_targeted": ["cardio", "quads"],          "_req": ["stationary_bike", "bike"]},
-        {"name": "Outdoor Walk",           "sets": 1, "reps": f"{min(30, session_minutes - 5)} min",   "rest_seconds": 0, "equipment": "bodyweight",   "slot_role": "primary", "muscles_targeted": ["cardio", "glutes"],           "_req": ["bodyweight"]},
-        {"name": "Elliptical",             "sets": 1, "reps": f"{min(30, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "elliptical",    "slot_role": "primary", "muscles_targeted": ["cardio", "full_body"],        "_req": ["elliptical"]},
-        {"name": "Rowing Zone 2",          "sets": 1, "reps": f"{min(25, session_minutes - 10)} min", "rest_seconds": 0, "equipment": "rower",         "slot_role": "primary", "muscles_targeted": ["cardio", "back"],             "_req": ["rowing_machine", "rower"]},
+    cooldown_pool = [
+        _base("Stationary Bike", "stationary_bike", ["stationary_bike", "bike"], muscles=["cardio", "quads"]),
+        _base("Treadmill Walk", "treadmill", ["treadmill"]),
+        _base("Rowing Machine", "rower", ["rowing_machine", "rower"], muscles=["cardio", "back", "core"], primary_muscle="full_body"),
+        _base("Elliptical", "elliptical", ["elliptical"], muscles=["cardio", "full_body"]),
+        _base("Outdoor Walk", "bodyweight", ["bodyweight"], muscles=["cardio", "glutes"]),
+    ]
+    steady_pool = [
+        _base("Bike Zone 2", "stationary_bike", ["stationary_bike", "bike"], muscles=["cardio", "quads"]),
+        _base("Stationary Bike", "stationary_bike", ["stationary_bike", "bike"], muscles=["cardio", "quads"]),
+        _base("Incline Walk", "treadmill", ["treadmill"], muscles=["cardio", "glutes", "calves"]),
+        _base("Treadmill Run", "treadmill", ["treadmill"]),
+        _base("Rowing Zone 2", "rower", ["rowing_machine", "rower"], muscles=["cardio", "back"], primary_muscle="full_body"),
+        _base("Rowing Machine", "rower", ["rowing_machine", "rower"], muscles=["cardio", "back", "core"], primary_muscle="full_body"),
+        _base("Elliptical", "elliptical", ["elliptical"], muscles=["cardio", "full_body"]),
+        _base("Stair Climber", "stair_climber", ["stair_climber"], muscles=["cardio", "quads", "glutes"]),
+        _base("Brisk Walk", "bodyweight", ["bodyweight"]),
+        _base("Outdoor Walk", "bodyweight", ["bodyweight"], muscles=["cardio", "glutes"]),
+        _base("Jogging", "bodyweight", ["bodyweight"]),
+    ]
+    interval_pool = [
+        _base("Stationary Bike Intervals", "stationary_bike", ["stationary_bike", "bike"], muscles=["cardio", "quads"]),
+        _base("Treadmill Intervals", "treadmill", ["treadmill"], muscles=["cardio", "quads"]),
+        _base("Rowing Machine Intervals", "rower", ["rowing_machine", "rower"], muscles=["cardio", "back", "core"], primary_muscle="full_body"),
+        _base("Assault Bike", "assault_bike", ["assault_bike"], muscles=["cardio", "quads"]),
+        _base("Jump Rope HIIT", "jump_rope", ["jump_rope"], muscles=["cardio", "calves", "shoulders"]),
+        _base("Sprint Intervals", "bodyweight", ["bodyweight"], muscles=["cardio", "quads", "glutes"]),
     ]
 
-    pool = pool_intense if goal in ("fat_loss", "endurance", "hyrox", "athletic_performance") else pool_easy
+    def _available(pool: list[dict]) -> list[dict]:
+        return [ex for ex in pool if _matches(ex["_req"])]
 
-    # Keep only candidates the user can actually do. Always include at
-    # least the bodyweight fallback so an equipment-poor user still gets
-    # a cardio day they can perform.
-    filtered = [ex for ex in pool if _matches(ex["_req"])]
-    if not filtered:
-        filtered = [
-            {"name": "Outdoor Walk", "sets": 1, "reps": f"{min(30, session_minutes - 5)} min",
-             "rest_seconds": 0, "equipment": "bodyweight", "slot_role": "primary",
-             "muscles_targeted": ["cardio", "glutes"]},
-        ]
+    def _without_used(candidates: list[dict], used_names: set[str]) -> list[dict]:
+        return [ex for ex in candidates if ex["name"] not in used_names]
 
-    # Strip the internal `_req` hint before returning.
-    exercises = [{k: v for k, v in ex.items() if k != "_req"} for ex in filtered[:3]]
+    def _non_bodyweight(candidates: list[dict]) -> list[dict]:
+        return [ex for ex in candidates if ex.get("equipment") != "bodyweight"]
+
+    def _block(
+        template: dict,
+        *,
+        sets: int,
+        reps: str,
+        role: str,
+        rest_seconds: int = 0,
+        prescription_type: str = "cardio_steady",
+    ) -> dict:
+        out = {k: v for k, v in template.items() if k != "_req"}
+        out.update({
+            "sets": sets,
+            "reps": reps,
+            "restSeconds": rest_seconds,
+            "slot_role": role,
+            "_role": role,
+            "_training_type": "conditioning",
+            "prescriptionType": prescription_type,
+        })
+        return out
+
+    warmup_min = 3 if sm < 35 else 5 if sm <= 60 else 8
+    cooldown_min = 3 if sm < 35 else 5 if sm <= 60 else 7
+    main_total = max(10, sm - warmup_min - cooldown_min)
+
+    intense_goal = (goal or "").lower() in {
+        "fat_loss", "endurance", "improve_cardio", "cardio_endurance",
+        "hyrox", "athletic_performance",
+    }
+
+    warmups = _available(warmup_pool) or [_base("Outdoor Walk", "bodyweight", ["bodyweight"])]
+    cooldowns = _available(cooldown_pool) or [_base("Outdoor Walk", "bodyweight", ["bodyweight"])]
+    steady = _available(steady_pool) or [_base("Outdoor Walk", "bodyweight", ["bodyweight"])]
+    intervals = _available(interval_pool) or [_base("Sprint Intervals", "bodyweight", ["bodyweight"])]
+
+    exercises: list[dict] = []
+    used_names: set[str] = set()
+
+    warmup = warmups[0]
+    exercises.append(_block(
+        warmup,
+        sets=1,
+        reps=f"{warmup_min} min warm-up",
+        role="warmup",
+    ))
+    used_names.add(warmup["name"])
+
+    if intense_goal:
+        interval_template = intervals[0]
+        interval_target = min(24, max(12, round(main_total * 0.45)))
+        interval_sets = max(6, min(14, round(((interval_target * 60) + 75) / 120)))
+        exercises.append(_block(
+            interval_template,
+            sets=interval_sets,
+            reps="45s hard / 75s easy",
+            role="primary",
+            rest_seconds=75,
+            prescription_type="cardio_intervals",
+        ))
+        used_names.add(interval_template["name"])
+
+        interval_minutes_est = (interval_sets * 45 + max(0, interval_sets - 1) * 75) / 60.0
+        flush_min = int(round(main_total - interval_minutes_est))
+        if flush_min >= 10:
+            flush_candidates = _without_used(steady, used_names) or steady
+            flush = flush_candidates[0]
+            exercises.append(_block(
+                flush,
+                sets=1,
+                reps=f"{flush_min} min easy",
+                role="secondary",
+            ))
+            used_names.add(flush["name"])
+    else:
+        main_candidates = _without_used(steady, used_names) or steady
+        non_bodyweight_main = _non_bodyweight(main_candidates)
+        bodyweight_main = [ex for ex in main_candidates if ex.get("equipment") == "bodyweight"]
+        split_candidates: list[dict] = []
+        if len(non_bodyweight_main) >= 2:
+            split_candidates = non_bodyweight_main
+        elif not non_bodyweight_main and len(bodyweight_main) >= 2:
+            split_candidates = bodyweight_main
+
+        if main_total >= 40 and len(split_candidates) >= 2:
+            first_min = main_total // 2
+            second_min = main_total - first_min
+            for idx, minutes in enumerate((first_min, second_min)):
+                template = split_candidates[idx]
+                exercises.append(_block(
+                    template,
+                    sets=1,
+                    reps=f"{minutes} min",
+                    role="primary" if idx == 0 else "secondary",
+                ))
+                used_names.add(template["name"])
+        else:
+            main = main_candidates[0]
+            exercises.append(_block(
+                main,
+                sets=1,
+                reps=f"{main_total} min",
+                role="primary",
+            ))
+            used_names.add(main["name"])
+
+    unused_cooldowns = _without_used(cooldowns, used_names)
+    cooldown_candidates = (
+        _non_bodyweight(unused_cooldowns)
+        or _non_bodyweight(cooldowns)
+        or unused_cooldowns
+        or _without_used(steady, used_names)
+        or cooldowns
+    )
+    cooldown = cooldown_candidates[0]
+    exercises.append(_block(
+        cooldown,
+        sets=1,
+        reps=f"{cooldown_min} min cooldown",
+        role="cooldown",
+    ))
     return {
         "day": "Cardio Day",
         "focus": "Cardio",
