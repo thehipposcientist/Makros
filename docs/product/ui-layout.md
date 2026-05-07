@@ -53,9 +53,19 @@ Bottom nav has five destinations: **Friends**, **Workouts**, **Meals**, **Progre
 
 ## Onboarding / Goal Flow
 
+- First step is a setup path picker:
+  - **Quick Start** — goal → templates → body stats. Users pick training,
+    equipment, and optional food-style templates, then fine-tune later from
+    profile/settings. Copy frames this as best for newer users or anyone who
+    wants the fastest setup.
+  - **Advanced Setup** — preserves the detailed flow for users with fitness-app
+    experience or known schedule, split, equipment, food, baseline, and
+    restriction preferences.
 - ACID-style finalize: auth token, username, last user ID, profile writes all deferred to end of flow.
 - Pace picker: conservative / moderate / aggressive — haptic selection.
-- Target weight required for weight-change goals (fat_loss / muscle_gain / body_recomp / toning).
+- Target weight is required for weight-change goals in the detailed path, but
+  optional in Quick Start so users can see value before choosing an exact
+  endpoint.
 - `FadeInView` keyed on `currentStepKey` for step transitions (220ms).
 - Horizontal template scrollers use `decelerationRate="fast"`.
 

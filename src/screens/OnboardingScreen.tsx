@@ -81,16 +81,17 @@ const logo = require('../../assets/images/thallo-logo-white-transparent-New.png'
 
 // ─── Step logic ───────────────────────────────────────────────────────────────
 
-type StepKey = 'goal' | 'goalRefine' | 'physicalStats' | 'trainingDays' | 'equipment' | 'baseline' | 'foods' | 'supplements' | 'mealRoutine' | 'appleHealth' | 'context';
+type SetupMode = 'quick' | 'custom';
+type StepKey = 'setupPath' | 'goal' | 'quickSetup' | 'goalRefine' | 'physicalStats' | 'trainingDays' | 'equipment' | 'baseline' | 'foods' | 'supplements' | 'mealRoutine' | 'appleHealth' | 'context';
 
-function getSteps(): StepKey[] {
+function getSteps(setupMode: SetupMode): StepKey[] {
   // Meal routine moved out of onboarding — users can pin meals as routines
   // from the Home screen, which gives a much better UX than typing prose
   // at signup time.
-  // Compressed onboarding: 5 core free steps. Apple Health is Pro-only,
-  // so it is offered after upgrade instead of during first-run setup.
-  const base: StepKey[] = ['goal', 'physicalStats', 'trainingDays', 'equipment', 'baseline', 'foods'];
-  return base;
+  if (setupMode === 'quick') {
+    return ['setupPath', 'goal', 'quickSetup', 'physicalStats'];
+  }
+  return ['setupPath', 'goal', 'physicalStats', 'trainingDays', 'equipment', 'baseline', 'foods'];
 }
 
 // ─── Supplement categories ────────────────────────────────────────────────────
@@ -272,6 +273,44 @@ const FOOD_PRESETS: FoodPreset[] = [
   },
 ];
 
+const ALLERGY_OPTIONS = [
+  { key: 'dairy',     label: 'Dairy' },
+  { key: 'gluten',    label: 'Gluten' },
+  { key: 'nuts',      label: 'Nuts' },
+  { key: 'peanuts',   label: 'Peanuts' },
+  { key: 'shellfish', label: 'Shellfish' },
+  { key: 'fish',      label: 'Fish' },
+  { key: 'eggs',      label: 'Eggs' },
+  { key: 'soy',       label: 'Soy' },
+  { key: 'sesame',    label: 'Sesame' },
+  { key: 'pork',      label: 'Pork' },
+  { key: 'beef',      label: 'Beef' },
+  { key: 'alcohol',   label: 'Alcohol' },
+];
+
+function resolveFoodPresetItems(preset: FoodPreset, allFoods: Array<{ name: string }> | undefined): string[] {
+  const lib = allFoods ?? [];
+  const normalize = (s: string) => s.toLowerCase()
+    .replace(/\([^)]*\)/g, '')
+    .replace(/[^a-z0-9\s]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const libIndex = new Map<string, string>();
+  for (const f of lib) {
+    const k = normalize(f.name);
+    if (k && !libIndex.has(k)) libIndex.set(k, f.name);
+    const first = k.split(' ', 1)[0];
+    if (first && !libIndex.has(first)) libIndex.set(first, f.name);
+  }
+  const resolved: string[] = [];
+  for (const raw of preset.items) {
+    const k = normalize(raw);
+    const hit = libIndex.get(k) ?? libIndex.get(k.split(' ', 1)[0]);
+    resolved.push(hit ?? raw);
+  }
+  return Array.from(new Set(resolved));
+}
+
 // Muscle groups moved to goalConfig target focuses
 
 // ─── Equipment templates ──────────────────────────────────────────────────────
@@ -349,6 +388,45 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
       'Pull-up bar', 'Dip bars', 'Plyo box (24"+)', 'Jump rope',
       'Rowing machine', 'Assault bike', 'Battle ropes', 'Medicine ball', 'Sandbag', 'Sled', 'Ab wheel',
     ],
+  },
+];
+
+interface TrainingTemplate {
+  id: string;
+  label: string;
+  description: string;
+  daysPerWeek: string;
+  workoutDuration: number;
+}
+
+const TRAINING_TEMPLATES: TrainingTemplate[] = [
+  {
+    id: 'starter',
+    label: 'Starter',
+    description: '3 days · 45-60 min',
+    daysPerWeek: '3',
+    workoutDuration: 60,
+  },
+  {
+    id: 'busy',
+    label: 'Busy Week',
+    description: '3 days · 20-30 min',
+    daysPerWeek: '3',
+    workoutDuration: 30,
+  },
+  {
+    id: 'balanced',
+    label: 'Balanced',
+    description: '4 days · 45-60 min',
+    daysPerWeek: '4',
+    workoutDuration: 60,
+  },
+  {
+    id: 'committed',
+    label: 'Committed',
+    description: '5 days · 45-60 min',
+    daysPerWeek: '5',
+    workoutDuration: 60,
   },
 ];
 
@@ -493,6 +571,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   // meta.goalConfig still available for legacy pace lookups
 
   // Step tracking
+  const [setupMode, setSetupMode] = useState<SetupMode>('quick');
   const [currentStep, setCurrentStep] = useState(0);
   const [stepError, setStepError] = useState('');
 
@@ -522,6 +601,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const [gender, setGender] = useState<Gender | ''>('');
   // Step 4 — Training days
   const [daysPerWeek, setDaysPerWeekRaw] = useState('3');
+  const [selectedTrainingTemplate, setSelectedTrainingTemplate] = useState<string>('starter');
   // Preferred split (auto lets the planner pick based on goal + daysPerWeek).
   // Stored in the profile only when user explicitly overrides.
   const [preferredSplit, setPreferredSplit] = useState<string>('auto');
@@ -591,9 +671,12 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const [experienceLevel, setExperienceLevel] = useState<'beginner' | 'intermediate' | 'advanced' | ''>('');
   const [lastWorkoutContext, setLastWorkoutContext] = useState('');
 
-  const steps = getSteps();
+  const steps = getSteps(setupMode);
   const totalSteps = steps.length;
   const currentStepKey = steps[currentStep];
+  useEffect(() => {
+    setCurrentStep(s => Math.min(s, Math.max(0, totalSteps - 1)));
+  }, [totalSteps]);
   useEffect(() => { setStepError(''); }, [currentStepKey]);
   const equipmentGoalWarnings = goalEquipmentWarnings(selectedGoal, selectedEquipment);
 
@@ -617,6 +700,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     if (!draftRestored) return; // wait until mount-time restore finishes
     const hasMeaningfulProgress =
       currentStep > 0
+      || setupMode !== 'quick'
       || weightLbs !== ''
       || heightFeet !== ''
       || selectedEquipment.length > 0
@@ -626,13 +710,14 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       v: 1,
       savedAt: Date.now(),
       currentStep,
+      setupMode,
       selectedGoal, selectedModifiers, selectedRegion, pace, targetWeight, targetEvent,
       weightLbs, heightFeet, heightInches, birthdate, gender,
-      daysPerWeek, selectedTrainingDays, preferredSplit, workoutDuration,
-      selectedEquipment, equipmentSettings,
+      daysPerWeek, selectedTrainingDays, selectedTrainingTemplate, preferredSplit, workoutDuration,
+      selectedEquipment, equipmentSettings, selectedEquipTemplate,
       strengthBaselineInputs,
       cardioCanJog10, cardioComfortableDuration, cardioMileTime, cardioFiveKTime, cardioPreferredModes,
-      foodsAvailable, allergies,
+      foodsAvailable, allergies, selectedFoodPreset,
       supplementsAvailable, mealRoutine,
       appleHealthEnabled,
       injuries, experienceLevel, lastWorkoutContext,
@@ -640,14 +725,14 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     AsyncStorage.setItem(ONBOARDING_DRAFT_KEY, JSON.stringify(snapshot)).catch(() => {});
   }, [
     draftRestored,
-    currentStep,
+    currentStep, setupMode,
     selectedGoal, selectedModifiers, selectedRegion, pace, targetWeight, targetEvent,
     weightLbs, heightFeet, heightInches, birthdate, gender,
-    daysPerWeek, selectedTrainingDays, preferredSplit, workoutDuration,
-    selectedEquipment, equipmentSettings,
+    daysPerWeek, selectedTrainingDays, selectedTrainingTemplate, preferredSplit, workoutDuration,
+    selectedEquipment, equipmentSettings, selectedEquipTemplate,
     strengthBaselineInputs,
     cardioCanJog10, cardioComfortableDuration, cardioMileTime, cardioFiveKTime, cardioPreferredModes,
-    foodsAvailable, allergies,
+    foodsAvailable, allergies, selectedFoodPreset,
     supplementsAvailable, mealRoutine,
     appleHealthEnabled,
     injuries, experienceLevel, lastWorkoutContext,
@@ -692,8 +777,10 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 if (cancelled) return;
                 // Apply each saved field, defaulting on missing keys so
                 // an older draft shape doesn't crash with undefineds.
+                const restoredSetupMode: SetupMode = draft.setupMode === 'custom' ? 'custom' : 'quick';
+                setSetupMode(restoredSetupMode);
                 if (typeof draft.currentStep === 'number') {
-                  const maxStep = Math.max(0, getSteps().length - 1);
+                  const maxStep = Math.max(0, getSteps(restoredSetupMode).length - 1);
                   setCurrentStep(Math.min(Math.max(0, draft.currentStep), maxStep));
                 }
                 if (typeof draft.selectedGoal === 'string') setSelectedGoal(draft.selectedGoal);
@@ -709,10 +796,12 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 if (draft.gender !== undefined) setGender(draft.gender);
                 if (typeof draft.daysPerWeek === 'string') setDaysPerWeekRaw(draft.daysPerWeek);
                 if (Array.isArray(draft.selectedTrainingDays)) setSelectedTrainingDays(draft.selectedTrainingDays);
+                if (typeof draft.selectedTrainingTemplate === 'string') setSelectedTrainingTemplate(draft.selectedTrainingTemplate);
                 if (typeof draft.preferredSplit === 'string') setPreferredSplit(draft.preferredSplit);
                 if (typeof draft.workoutDuration === 'number') setWorkoutDuration(draft.workoutDuration);
                 if (Array.isArray(draft.selectedEquipment)) setSelectedEquipment(draft.selectedEquipment);
                 if (draft.equipmentSettings !== undefined) setEquipmentSettings(draft.equipmentSettings);
+                if (typeof draft.selectedEquipTemplate === 'string' || draft.selectedEquipTemplate === null) setSelectedEquipTemplate(draft.selectedEquipTemplate);
                 if (draft.strengthBaselineInputs && typeof draft.strengthBaselineInputs === 'object') {
                   setStrengthBaselineInputs({ ...emptyStrengthBaselineInputs(), ...draft.strengthBaselineInputs });
                 }
@@ -723,6 +812,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 if (Array.isArray(draft.cardioPreferredModes)) setCardioPreferredModes(draft.cardioPreferredModes);
                 if (Array.isArray(draft.foodsAvailable)) setFoodsAvailable(draft.foodsAvailable);
                 if (Array.isArray(draft.allergies)) setAllergies(draft.allergies);
+                if (typeof draft.selectedFoodPreset === 'string' || draft.selectedFoodPreset === null) setSelectedFoodPreset(draft.selectedFoodPreset);
                 if (Array.isArray(draft.supplementsAvailable)) setSupplementsAvailable(draft.supplementsAvailable);
                 if (typeof draft.mealRoutine === 'string') setMealRoutine(draft.mealRoutine);
                 if (typeof draft.appleHealthEnabled === 'boolean') setAppleHealthEnabled(draft.appleHealthEnabled);
@@ -804,6 +894,27 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     setSelectedEquipTemplate(template.id);
   };
 
+  const applyTrainingTemplate = (template: TrainingTemplate) => {
+    setSelectedTrainingTemplate(template.id);
+    setDaysPerWeek(template.daysPerWeek);
+    setWorkoutDuration(template.workoutDuration);
+    setPreferredSplit('auto');
+  };
+
+  const applyFoodPreset = (preset: FoodPreset) => {
+    if (selectedFoodPreset === preset.id) {
+      setSelectedFoodPreset(null);
+      setFoodsAvailable([]);
+      return;
+    }
+    setSelectedFoodPreset(preset.id);
+    setFoodsAvailable(resolveFoodPresetItems(preset, meta?.allFoods as Array<{ name: string }> | undefined));
+  };
+
+  const toggleAllergy = (key: string) => {
+    setAllergies(prev => prev.includes(key) ? prev.filter(x => x !== key) : [...prev, key]);
+  };
+
   const validate = (goalOverride?: string | null): string | null => {
     const activeGoal = goalOverride || selectedGoal;
     switch (currentStepKey) {
@@ -814,11 +925,20 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           'lose_fat', 'get_lean', 'cut', 'preserve_muscle_cutting',
           'build_muscle', 'lean_bulk', 'gain_weight',
         ]);
-        if (weightChange.has(activeGoal)) {
+        if (weightChange.has(activeGoal) && setupMode === 'custom') {
           if (!targetWeight?.trim()) return 'Set a target weight — needed for your calorie target and ETA.';
           const tw = parseFloat(targetWeight);
           if (isNaN(tw) || tw < 50 || tw > 500) return 'Enter a valid target weight (50–500 lbs)';
         }
+        if (targetWeight?.trim()) {
+          const tw = parseFloat(targetWeight);
+          if (isNaN(tw) || tw < 50 || tw > 500) return 'Enter a valid target weight (50–500 lbs)';
+        }
+        return null;
+      }
+      case 'quickSetup': {
+        if (!selectedTrainingTemplate) return 'Pick a training template';
+        if (selectedEquipment.length === 0) return 'Pick the equipment preset closest to your setup';
         return null;
       }
       case 'goalRefine': {
@@ -1107,6 +1227,195 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   };
 
   // ─── Step renderers ─────────────────────────────────────────────────────────
+
+  const renderAllergyChips = () => (
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+      {ALLERGY_OPTIONS.map((a) => {
+        const active = allergies.includes(a.key);
+        return (
+          <TouchableOpacity
+            key={a.key}
+            onPress={() => toggleAllergy(a.key)}
+            style={{
+              paddingHorizontal: 12,
+              paddingVertical: 7,
+              borderRadius: 16,
+              borderWidth: 1,
+              borderColor: active ? (colors.warning ?? '#F59E0B') : colors.border,
+              backgroundColor: active ? (colors.warning ?? '#F59E0B') + '22' : colors.surface,
+            }}
+          >
+            <Text
+              style={{
+                fontSize: 12,
+                fontWeight: '700',
+                color: active ? (colors.warning ?? '#F59E0B') : colors.textSecondary,
+              }}
+            >
+              {a.label}
+            </Text>
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+
+  const renderSetupPathStep = () => (
+    <View style={styles.stepContainer}>
+      <Text style={styles.stepTitle}>Choose Your Setup</Text>
+      <Text style={styles.stepDescription}>
+        New to fitness apps, or just want the fastest setup? Use Quick Start. If you already know your schedule, equipment, and training preferences, use Advanced Setup.
+      </Text>
+
+      <View style={{ gap: 12 }}>
+        {([
+          {
+            value: 'quick',
+            icon: 'flash-outline',
+            label: 'Quick Start',
+            desc: 'Best for most people. Pick simple templates now and adjust anything later.',
+          },
+          {
+            value: 'custom',
+            icon: 'options-outline',
+            label: 'Advanced Setup',
+            desc: 'Best if you have fitness-app experience or already know your exact training days, split, gear, and food preferences.',
+          },
+        ] as const).map(opt => {
+          const active = setupMode === opt.value;
+          return (
+            <PressableScale
+              key={opt.value}
+              accessibilityRole="button"
+              style={[
+                styles.chipWide,
+                active && styles.chipWideSelected,
+                { alignItems: 'flex-start' },
+              ]}
+              onPress={() => {
+                import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                setSetupMode(opt.value);
+              }}
+              scaleDown={0.98}
+            >
+              <View style={{
+                width: 38,
+                height: 38,
+                borderRadius: 10,
+                backgroundColor: active ? colors.primary + '22' : colors.surfaceRaised,
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}>
+                <Ionicons name={opt.icon as any} size={20} color={active ? colors.primary : colors.textMuted} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.chipWideLabel, active && styles.chipWideLabelSelected]}>{opt.label}</Text>
+                <Text style={styles.chipWideDesc}>{opt.desc}</Text>
+              </View>
+              {active && <Ionicons name="checkmark-circle" size={20} color={colors.primary} />}
+            </PressableScale>
+          );
+        })}
+      </View>
+    </View>
+  );
+
+  const renderQuickSetupStep = () => (
+    <View style={styles.stepContainer}>
+      <Text style={styles.stepTitle}>Pick Your Templates</Text>
+      <Text style={styles.stepDescription}>
+        These defaults create your first week. Every choice can be changed later from your profile.
+      </Text>
+
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <Ionicons name="calendar-outline" size={14} color={colors.primary} />
+        <Text style={[styles.sectionHeading, { marginBottom: 0, marginTop: 0, color: colors.primary }]}>
+          Training
+        </Text>
+      </View>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
+        {TRAINING_TEMPLATES.map(t => {
+          const active = selectedTrainingTemplate === t.id;
+          return (
+            <TouchableOpacity
+              key={t.id}
+              style={[styles.templateChip, active && styles.templateChipActive]}
+              onPress={() => applyTrainingTemplate(t)}
+              activeOpacity={0.75}
+            >
+              <Text style={[styles.templateChipLabel, active && styles.templateChipLabelActive]}>{t.label}</Text>
+              <Text style={[styles.templateChipDesc, active && styles.templateChipDescActive]}>{t.description}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <Ionicons name="barbell-outline" size={14} color={colors.primary} />
+        <Text style={[styles.sectionHeading, { marginBottom: 0, marginTop: 0, color: colors.primary }]}>
+          Equipment
+        </Text>
+      </View>
+      <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 10 }}>
+        Pick the closest setup. You can add or remove individual items later.
+      </Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
+        {EQUIPMENT_TEMPLATES.map(t => {
+          const active = selectedEquipTemplate === t.id;
+          return (
+            <TouchableOpacity
+              key={t.id}
+              testID={`quick-equipment-template-${t.id}`}
+              accessibilityLabel={`quick-equipment-template-${t.id}`}
+              style={[styles.templateChip, active && styles.templateChipActive]}
+              onPress={() => applyTemplate(t)}
+              activeOpacity={0.75}>
+              <Text style={[styles.templateChipLabel, active && styles.templateChipLabelActive]}>{t.label}</Text>
+              <Text style={[styles.templateChipDesc, active && styles.templateChipDescActive]}>{t.description}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+        <Ionicons name="nutrition-outline" size={14} color={colors.primary} />
+        <Text style={[styles.sectionHeading, { marginBottom: 0, marginTop: 0, color: colors.primary }]}>
+          Food Style
+        </Text>
+      </View>
+      <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 10 }}>
+        Optional. Skip this and Thallo will use default meal suggestions.
+      </Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} decelerationRate="fast" style={styles.templateScroll} contentContainerStyle={styles.templateScrollContent}>
+        {FOOD_PRESETS.map(p => {
+          const active = selectedFoodPreset === p.id;
+          return (
+            <TouchableOpacity
+              key={p.id}
+              style={[styles.templateChip, active && styles.templateChipActive]}
+              onPress={() => applyFoodPreset(p)}
+              activeOpacity={0.75}>
+              <Text style={[styles.templateChipLabel, active && styles.templateChipLabelActive]}>{p.label}</Text>
+              <Text style={[styles.templateChipDesc, active && styles.templateChipDescActive]}>{p.description}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+
+      <View style={{ marginBottom: 18 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <Ionicons name="warning-outline" size={14} color={colors.warning ?? '#F59E0B'} />
+          <Text style={[styles.sectionHeading, { marginBottom: 0, marginTop: 0 }]}>
+            Anything to avoid?
+          </Text>
+        </View>
+        <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 10 }}>
+          Optional, but useful for meal suggestions.
+        </Text>
+        {renderAllergyChips()}
+      </View>
+    </View>
+  );
 
   const renderGoalStep = () => {
     const visibleSelectedGoal = launchGoalIdFor(selectedGoal);
@@ -1399,10 +1708,11 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           ]);
           if (!weightChange.has(selectedGoal)) return null;
           const hasValue = !!targetWeight?.trim();
+          const required = setupMode === 'custom';
           return (
             <View style={{ marginTop: 16 }}>
               <Text style={styles.fieldLabel}>
-                Target weight <Text style={{ color: colors.warning ?? '#DC2626' }}>*</Text>
+                Target weight {required ? <Text style={{ color: colors.warning ?? '#DC2626' }}>*</Text> : <Text style={styles.optional}>(optional)</Text>}
               </Text>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <TextInput
@@ -1414,7 +1724,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                     paddingHorizontal: 14, paddingVertical: 12, fontSize: 15,
                     color: colors.textPrimary,
                     borderWidth: 1.5,
-                    borderColor: hasValue ? colors.border : (colors.warning ?? '#DC2626') + '88',
+                    borderColor: hasValue || !required ? colors.border : (colors.warning ?? '#DC2626') + '88',
                   }}
                   placeholder="e.g. 175"
                   placeholderTextColor={colors.textMuted}
@@ -1425,11 +1735,15 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                 />
                 <Text style={{ color: colors.textMuted, fontSize: 14 }}>lbs</Text>
               </View>
-              {!hasValue && (
+              {!hasValue && required ? (
                 <Text style={{ fontSize: 11, color: colors.warning ?? '#DC2626', marginTop: 4 }}>
                   Required — we need this to build your calorie target and ETA.
                 </Text>
-              )}
+              ) : !hasValue ? (
+                <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 4 }}>
+                  Skip for now and add this later from Progress.
+                </Text>
+              ) : null}
             </View>
           );
         })()}
@@ -2340,52 +2654,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         <Text style={{ fontSize: 11, color: colors.textMuted, marginBottom: 10 }}>
           Tap any that apply. Meal suggestions and food scans will avoid these.
         </Text>
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-          {[
-            { key: 'dairy',     label: 'Dairy' },
-            { key: 'gluten',    label: 'Gluten' },
-            { key: 'nuts',      label: 'Nuts' },
-            { key: 'peanuts',   label: 'Peanuts' },
-            { key: 'shellfish', label: 'Shellfish' },
-            { key: 'fish',      label: 'Fish' },
-            { key: 'eggs',      label: 'Eggs' },
-            { key: 'soy',       label: 'Soy' },
-            { key: 'sesame',    label: 'Sesame' },
-            { key: 'pork',      label: 'Pork' },
-            { key: 'beef',      label: 'Beef' },
-            { key: 'alcohol',   label: 'Alcohol' },
-          ].map((a) => {
-            const active = allergies.includes(a.key);
-            return (
-              <TouchableOpacity
-                key={a.key}
-                onPress={() => {
-                  setAllergies((prev) =>
-                    prev.includes(a.key) ? prev.filter((x) => x !== a.key) : [...prev, a.key],
-                  );
-                }}
-                style={{
-                  paddingHorizontal: 12,
-                  paddingVertical: 7,
-                  borderRadius: 16,
-                  borderWidth: 1,
-                  borderColor: active ? (colors.warning ?? '#F59E0B') : colors.border,
-                  backgroundColor: active ? (colors.warning ?? '#F59E0B') + '22' : colors.surface,
-                }}
-              >
-                <Text
-                  style={{
-                    fontSize: 12,
-                    fontWeight: '700',
-                    color: active ? (colors.warning ?? '#F59E0B') : colors.textSecondary,
-                  }}
-                >
-                  {a.label}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+        {renderAllergyChips()}
       </View>
 
       {/* Photo scan — top, prominent */}
@@ -2427,39 +2696,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             <TouchableOpacity
               key={p.id}
               style={[styles.templateChip, active && styles.templateChipActive]}
-              onPress={() => {
-                if (selectedFoodPreset === p.id) {
-                  setSelectedFoodPreset(null);
-                  setFoodsAvailable([]);
-                } else {
-                  setSelectedFoodPreset(p.id);
-                  // Match template strings against the canonical food
-                  // library so items like "Ground Beef (80/20)" or
-                  // "Berries (small amount)" resolve to the real
-                  // library entry instead of creating a custom-food chip.
-                  const lib = (meta?.allFoods ?? []) as Array<{ name: string }>;
-                  const normalize = (s: string) => s.toLowerCase()
-                    .replace(/\([^)]*\)/g, '')
-                    .replace(/[^a-z0-9\s]+/g, ' ')
-                    .replace(/\s+/g, ' ')
-                    .trim();
-                  const libIndex = new Map<string, string>();
-                  for (const f of lib) {
-                    const k = normalize(f.name);
-                    if (k && !libIndex.has(k)) libIndex.set(k, f.name);
-                    // Also index first-word prefix so "berries" hits "Berries"
-                    const first = k.split(' ', 1)[0];
-                    if (first && !libIndex.has(first)) libIndex.set(first, f.name);
-                  }
-                  const resolved: string[] = [];
-                  for (const raw of p.items) {
-                    const k = normalize(raw);
-                    const hit = libIndex.get(k) ?? libIndex.get(k.split(' ', 1)[0]);
-                    resolved.push(hit ?? raw);
-                  }
-                  setFoodsAvailable(Array.from(new Set(resolved)));
-                }
-              }}
+              onPress={() => applyFoodPreset(p)}
               activeOpacity={0.75}>
               <Text style={[styles.templateChipLabel, active && styles.templateChipLabelActive]}>{p.label}</Text>
               <Text style={[styles.templateChipDesc, active && styles.templateChipDescActive]}>{p.description}</Text>
@@ -2895,7 +3132,9 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const renderStep = () => {
     switch (currentStepKey) {
+      case 'setupPath':     return renderSetupPathStep();
       case 'goal':          return renderGoalStep();
+      case 'quickSetup':    return renderQuickSetupStep();
       case 'goalRefine':    return renderGoalRefineStep();
       case 'physicalStats': return renderPhysicalStatsStep();
       case 'trainingDays':  return renderTrainingDaysStep();
@@ -2942,7 +3181,9 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           <Image source={logo} style={styles.logo} resizeMode="contain" />
           <Text style={styles.stepCounter}>Step {currentStep + 1} of {totalSteps}  ·  {
             ({
+              setupPath: 'Setup',
               goal: 'Goal',
+              quickSetup: 'Templates',
               goalRefine: 'Refine',
               physicalStats: 'About You',
               trainingDays: 'Schedule',
