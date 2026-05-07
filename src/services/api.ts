@@ -4799,18 +4799,30 @@ export interface FeedItem {
   liked_by_me: boolean;
 }
 
-export async function getSocialFeed(token: string, beforeId?: number): Promise<{ items: FeedItem[] }> {
-  const qs = beforeId ? `?before_id=${beforeId}` : '';
+type FeedWindowOptions = {
+  beforeId?: number;
+  limit?: number;
+};
+
+function feedWindowQuery(input?: number | FeedWindowOptions): string {
+  const opts = typeof input === 'number' ? { beforeId: input } : (input ?? {});
+  const params = new URLSearchParams();
+  if (opts.beforeId) params.set('before_id', String(opts.beforeId));
+  if (opts.limit) params.set('limit', String(opts.limit));
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
+}
+
+export async function getSocialFeed(token: string, options?: number | FeedWindowOptions): Promise<{ items: FeedItem[] }> {
+  const qs = feedWindowQuery(options);
   return request<{ items: FeedItem[] }>(`/social/feed${qs}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }
 
-export async function getUserFeed(token: string, userId: number, beforeId?: number): Promise<{ items: FeedItem[] }> {
-  const params = new URLSearchParams();
-  if (beforeId) params.set('before_id', String(beforeId));
-  const qs = params.toString();
-  return request<{ items: FeedItem[] }>(`/social/feed/${userId}${qs ? '?' + qs : ''}`, {
+export async function getUserFeed(token: string, userId: number, options?: number | FeedWindowOptions): Promise<{ items: FeedItem[] }> {
+  const qs = feedWindowQuery(options);
+  return request<{ items: FeedItem[] }>(`/social/feed/${userId}${qs}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 }

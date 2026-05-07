@@ -71,6 +71,7 @@ _TEST_MODULES = (
     "tests.test_live_workout_recommendations",
     "tests.test_social_digest",
     "tests.test_social_notifications",
+    "tests.test_social_perf_and_privacy",
     # Cardio prescription — modality detection, capability hierarchy, prescription_type tagging.
     "tests.test_cardio_prescription",
     # Weekly calorie budget smoothing — formula, caps, macro redistribution.

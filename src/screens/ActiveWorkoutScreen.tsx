@@ -2,7 +2,7 @@ import React, { Fragment, useState, useEffect, useRef, useCallback, useMemo, use
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   TextInput, Modal, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Vibration, Linking, Image, Keyboard,
-  LayoutAnimation, UIManager, AppState, Animated, FlatList,
+  LayoutAnimation, UIManager, AppState, Animated, FlatList, InteractionManager,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import FadeInView from '../components/FadeInView';
@@ -513,7 +513,10 @@ const ActiveExercisePickerRow = React.memo(function ActiveExercisePickerRow({
         <TouchableOpacity
           activeOpacity={0.85}
           style={stylesRef.addExercisePreview}
-          onPress={() => onPreview?.(item)}
+          onPress={(e) => {
+            e.stopPropagation();
+            onPreview?.(item);
+          }}
           accessibilityRole="button"
           accessibilityLabel={`Preview ${item.name} form video`}>
           {thumbUri ? (
@@ -3784,7 +3787,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const previewExerciseFromPicker = useCallback((item: ExerciseLibraryItem) => {
     setReturnToExercisePickerAfterVideo(addExerciseModalVisible);
     setAddExerciseModalVisible(false);
-    setTimeout(() => openFormVideoForExercise(item), 260);
+    setTimeout(() => {
+      InteractionManager.runAfterInteractions(() => openFormVideoForExercise(item));
+    }, 360);
   }, [addExerciseModalVisible, openFormVideoForExercise]);
 
   const handleAddExercise = useCallback((item: ExerciseLibraryItem) => {
@@ -7864,7 +7869,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           setFormVideoContext({});
           setReturnToExercisePickerAfterVideo(false);
           if (shouldReturnToPicker) {
-            setTimeout(() => setAddExerciseModalVisible(true), 260);
+            setTimeout(() => {
+              InteractionManager.runAfterInteractions(() => setAddExerciseModalVisible(true));
+            }, 360);
           }
         }}
       />

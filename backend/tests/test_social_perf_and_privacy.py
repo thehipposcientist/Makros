@@ -15,11 +15,11 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, create_engine
 
 from app.models import (
-    Friendship, User, UserGoal, UserSocialProfile, WorkoutCompletion,
+    ActivityFeedItem, Friendship, User, UserGoal, UserSocialProfile, WorkoutCompletion,
 )
 from app.enums import GoalType
 from app.services.social.digest import compute_digest
-from app.routers.social import _sanitize_feed_payload_for_read
+from app.routers.social import _sanitize_feed_payload_for_read, get_feed
 
 
 def _ok(label: str) -> None:
@@ -163,6 +163,52 @@ def test_digest_query_count_is_constant():
     assert len(digest["friends"]) == 20
     assert digest["summary"]["friends_trained_this_week"] == 20
     _ok(f"digest with 20 friends runs in {select_count} SELECTs")
+
+
+def test_feed_query_count_is_constant():
+    """The feed should batch visibility/profile hydration instead of
+    querying one profile per friend before loading activity rows."""
+    print("\n[test] feed: query count is constant (not O(F))")
+    eng = _make_engine()
+    with Session(eng) as s:
+        _user(s, 1)
+        _seed_share_profile(s, 1)
+        base_time = datetime(2026, 5, 6, 18, 0, tzinfo=timezone.utc)
+        for fid in range(2, 22):
+            _user(s, fid, username=f"friend{fid}")
+            _seed_share_profile(s, fid)
+            _friendship(s, 1, fid)
+            s.add(ActivityFeedItem(
+                user_id=fid,
+                event_type="workout_completed",
+                payload={
+                    "focus": "Push",
+                    "duration_seconds": 2400,
+                    "date": "2026-05-06",
+                    "exercises": [],
+                },
+                created_at=base_time + timedelta(minutes=fid),
+            ))
+        s.commit()
+        viewer = s.get(User, 1)
+        assert viewer is not None
+
+        select_count = 0
+
+        @event.listens_for(eng, "before_cursor_execute")
+        def _count_selects(conn, cursor, statement, params, context, executemany):
+            nonlocal select_count
+            if statement.lstrip().lower().startswith("select"):
+                select_count += 1
+
+        feed = get_feed(limit=10, current_user=viewer, db=s)
+
+    assert select_count <= 10, (
+        f"get_feed ran in {select_count} SELECTs — expected ≤ 10. "
+        f"The feed visibility/profile path may have regressed to N+1."
+    )
+    assert len(feed["items"]) == 10
+    _ok(f"feed with 20 friends runs in {select_count} SELECTs")
 
 
 def test_digest_with_zero_friends_doesnt_crash():
@@ -329,6 +375,7 @@ def test_feed_sanitizer_keeps_post_metrics_and_removes_sensitive_fields():
 cases = [
     test_digest_drops_soft_deleted_friends,
     test_digest_query_count_is_constant,
+    test_feed_query_count_is_constant,
     test_digest_with_zero_friends_doesnt_crash,
     test_digest_respects_share_toggle,
     test_digest_includes_avatar_url_without_sensitive_data,

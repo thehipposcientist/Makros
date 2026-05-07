@@ -1058,6 +1058,20 @@ def _bounded_feed_rows(db: Session, query, limit: int) -> list[ActivityFeedItem]
     return [row for row in candidates if _feed_group_key(row) in selected]
 
 
+def _visible_feed_author_ids(db: Session, viewer_id: int) -> list[int]:
+    friend_ids = _accepted_friend_ids(db, viewer_id)
+    if not friend_ids:
+        return [viewer_id]
+    from sqlmodel import col
+    sharing_friend_ids = db.exec(
+        select(UserSocialProfile.user_id).where(
+            col(UserSocialProfile.user_id).in_(friend_ids),
+            UserSocialProfile.share_activity_enabled == True,  # noqa: E712
+        )
+    ).all()
+    return [viewer_id, *sharing_friend_ids]
+
+
 @router.get("/feed")
 def get_feed(
     limit: int = 30,
@@ -1067,14 +1081,7 @@ def get_feed(
 ):
     if not SOCIAL_FEED_ENABLED:
         raise HTTPException(404, "social feed disabled")
-    friend_ids = _accepted_friend_ids(db, current_user.id)
-    visible_ids = [current_user.id]
-    for fid in friend_ids:
-        prof = db.exec(
-            select(UserSocialProfile).where(UserSocialProfile.user_id == fid)
-        ).first()
-        if prof and prof.share_activity_enabled:
-            visible_ids.append(fid)
+    visible_ids = _visible_feed_author_ids(db, current_user.id)
 
     q = (
         select(ActivityFeedItem)

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Modal, View, Text, TouchableOpacity, ScrollView, Image, Linking,
-  StyleSheet, Dimensions, Animated, ActivityIndicator,
+  StyleSheet, Dimensions, Animated, ActivityIndicator, InteractionManager,
 } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { Ionicons } from '@expo/vector-icons';
@@ -48,9 +48,16 @@ export default function FormVideoModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [emptyReason, setEmptyReason] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const loadSeqRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!authToken || !exerciseName) return;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const seq = loadSeqRef.current + 1;
+    loadSeqRef.current = seq;
     setLoading(true);
     setError(null);
     setEmptyReason(null);
@@ -61,6 +68,7 @@ export default function FormVideoModal({
       const baseUrl = getApiBaseUrl();
       const res = await fetch(`${baseUrl}/ai/exercise-video`, {
         method: 'POST',
+        signal: controller.signal,
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${authToken}`,
@@ -72,21 +80,43 @@ export default function FormVideoModal({
           movement_pattern: movementPattern ?? undefined,
         }),
       });
+      if (controller.signal.aborted || seq !== loadSeqRef.current) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
+      if (controller.signal.aborted || seq !== loadSeqRef.current) return;
       const opts: VideoOption[] = Array.isArray(data?.options) ? data.options : [];
       setOptions(opts);
       if (opts.length === 0) setEmptyReason(data?.empty_reason || 'no_results');
     } catch (e: any) {
+      if (controller.signal.aborted || seq !== loadSeqRef.current) return;
       setError(String(e?.message ?? e));
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current && !controller.signal.aborted) {
+        setLoading(false);
+      }
+      if (abortRef.current === controller) abortRef.current = null;
     }
   }, [authToken, exerciseName, equipment, primaryMuscle, movementPattern]);
 
   useEffect(() => {
-    if (visible) load();
-    if (!visible) setActiveVideo(null);
+    if (!visible) {
+      abortRef.current?.abort();
+      abortRef.current = null;
+      loadSeqRef.current += 1;
+      setActiveVideo(null);
+      setOptions([]);
+      setLoading(false);
+      setError(null);
+      setEmptyReason(null);
+      return;
+    }
+    const task = InteractionManager.runAfterInteractions(() => {
+      load();
+    });
+    return () => {
+      task.cancel?.();
+      abortRef.current?.abort();
+    };
   }, [visible, load]);
 
   const scale = useRef(new Animated.Value(0.9)).current;
@@ -115,7 +145,21 @@ export default function FormVideoModal({
   const searchUrl = `https://m.youtube.com/results?search_query=${encodeURIComponent(exerciseName + ' proper form')}`;
 
   const handleBack = () => setActiveVideo(null);
-  const handleClose = () => { setActiveVideo(null); onClose(); };
+  const handleClose = () => {
+    abortRef.current?.abort();
+    abortRef.current = null;
+    loadSeqRef.current += 1;
+    setActiveVideo(null);
+    setOptions([]);
+    setLoading(false);
+    setError(null);
+    setEmptyReason(null);
+    onClose();
+  };
+
+  if (!visible && !loading && !activeVideo && options.length === 0 && !error) {
+    return null;
+  }
 
   return (
     <Modal visible={visible} animationType="fade" transparent onRequestClose={handleClose}>

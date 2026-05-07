@@ -45,7 +45,6 @@ import { computePlantDiversity, computeFiberToday, recommendedFiberTarget } from
 import { proteinTimingInsights } from '../utils/nutritionInsights';
 import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
 import { buildGoalForecast } from '../utils/goalForecast';
-import { buildGoalTrajectory } from '../utils/goalTrajectory';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { estimate1RM } from '../utils/oneRepMax';
@@ -2428,21 +2427,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory, weightUnit, distanceUnit, progressWeekWindow, { showWorkoutProgress, showMealProgress }),
     [distanceUnit, history, mealHistory, paceHistory, progressWeekWindow, prs, showMealProgress, showWorkoutProgress, summaries, weightEntries, weightUnit],
   );
-  const goalTrajectory = useMemo(
-    () => showMixedGoalProgress ? buildGoalTrajectory({
-      profile: userProfile,
-      weightEntries,
-      history,
-      summaries,
-      mealAverages,
-      mealHistory,
-      paceHistory,
-      oneRepMaxLifts: displayedOneRepMaxLifts,
-      weightUnit,
-      distanceUnit,
-    }) : null,
-    [displayedOneRepMaxLifts, distanceUnit, history, mealAverages, mealHistory, paceHistory, showMixedGoalProgress, summaries, userProfile, weightEntries, weightUnit],
-  );
   const goalForecast = useMemo(
     () => showMixedGoalProgress ? buildGoalForecast({
       profile: userProfile,
@@ -2479,16 +2463,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     }),
     [distanceUnit, history, mealAverages, mealHistory, paceHistory, progressWeekWindow, showMealProgress, showWorkoutProgress, summaries, tc, userProfile, weightEntries, weightUnit],
   );
-  const goalTrajectoryColor = goalTrajectory?.tone === 'success'
-    ? tc.success
-    : goalTrajectory?.tone === 'warning'
-      ? tc.warning
-      : tc.primary;
-  const goalTrajectoryConfidenceColor = goalTrajectory?.confidence === 'high'
-    ? tc.success
-    : goalTrajectory?.confidence === 'medium'
-      ? tc.warning
-      : tc.textMuted;
   const goalForecastColor = goalForecast?.tone === 'success'
     ? tc.success
     : goalForecast?.tone === 'warning'
@@ -3398,62 +3372,45 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         </ScrollView>
       ) : tab === 'trends' && showWorkoutProgress ? (
         <ScrollView contentContainerStyle={styles.content}>
-          {goalTrajectory && (
-          <View testID="progress-goal-trajectory-card" style={styles.goalTrajectoryCard}>
-            <View style={styles.goalTrajectoryHeader}>
-              <View style={[styles.goalTrajectoryIcon, { backgroundColor: goalTrajectoryColor + '22' }]}>
-                <Ionicons name="speedometer-outline" size={18} color={goalTrajectoryColor} />
+          {displayedOneRepMaxLifts.length > 0 && (() => {
+            const topLift = displayedOneRepMaxLifts[0];
+            return (
+              <View testID="progress-1rm-showcase" style={{ marginBottom: 16 }}>
+                <Text style={styles.sectionLabel}>Top strength marker</Text>
+                <View style={{
+                  backgroundColor: tc.surfaceRaised,
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: tc.border,
+                  padding: 14,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }} numberOfLines={1}>
+                      {topLift.name}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 4 }}>
+                      Top set: {formatWeight(topLift.topWeightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} x {topLift.topReps}
+                    </Text>
+                  </View>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text
+                      style={{ fontSize: 28, fontWeight: '900', color: tc.primary, fontVariant: ['tabular-nums'] as any }}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.72}
+                    >
+                      {formatWeight(topLift.oneRepMaxLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })}
+                    </Text>
+                    <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '700' }}>estimated 1RM</Text>
+                  </View>
+                </View>
               </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.goalTrajectoryEyebrow}>PERFORMANCE OUTLOOK</Text>
-                <Text style={styles.goalTrajectoryTitle}>6-week trajectory</Text>
-              </View>
-              <View style={[styles.goalConfidencePill, { borderColor: goalTrajectoryConfidenceColor + '88', backgroundColor: goalTrajectoryConfidenceColor + '16' }]}>
-                <Text style={[styles.goalConfidenceText, { color: goalTrajectoryConfidenceColor }]}>{goalTrajectory.confidence}</Text>
-              </View>
-            </View>
-            <Text testID="progress-goal-trajectory-headline" style={styles.goalTrajectoryHeadline} numberOfLines={2}>
-              {goalTrajectory.headline}
-            </Text>
-            <Text style={styles.goalTrajectorySubheadline} numberOfLines={2}>
-              {goalTrajectory.subheadline}
-            </Text>
-            <View style={styles.goalProgressTrack}>
-              <AnimatedProgressFill
-                pct={Math.round(goalTrajectory.progressPct * 100)}
-                minPct={4}
-                color={goalTrajectoryColor}
-                delay={120}
-                style={styles.goalProgressFill}
-              />
-            </View>
-            <View style={styles.goalProgressMeta}>
-              <Text style={styles.goalProgressLabel}>{goalTrajectory.progressLabel}</Text>
-              <Text style={styles.goalProgressConfidence}>{goalTrajectory.confidenceDetail}</Text>
-            </View>
-            <View style={styles.goalTrajectoryStats}>
-              {goalTrajectory.stats.map((stat, index) => (
-                <FadeInView
-                  key={stat.label}
-                  delay={staggerDelay(index, 40)}
-                  duration={TIMING_STANDARD.duration}
-                  slideDistance={5}
-                  style={styles.goalTrajectoryStat}
-                >
-                  <Text style={styles.goalTrajectoryStatLabel} numberOfLines={1}>{stat.label}</Text>
-                  <PulseOnChange trigger={`${stat.label}-${stat.value}`}>
-                    <Text style={styles.goalTrajectoryStatValue} numberOfLines={1}>{stat.value}</Text>
-                  </PulseOnChange>
-                  <Text style={styles.goalTrajectoryStatDetail} numberOfLines={2}>{stat.detail}</Text>
-                </FadeInView>
-              ))}
-            </View>
-            <View style={styles.goalTrajectoryLever}>
-              <Ionicons name="arrow-forward-circle-outline" size={16} color={goalTrajectoryColor} />
-              <Text style={styles.goalTrajectoryLeverText} numberOfLines={2}>{goalTrajectory.lever}</Text>
-            </View>
-          </View>
-          )}
+            );
+          })()}
 
           {progressAnalytics.length > 0 && (
             <View style={styles.performanceGaugeCard}>
@@ -3499,40 +3456,6 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           )}
 
-          {displayedOneRepMaxLifts.length > 0 && (() => {
-            const topLift = displayedOneRepMaxLifts[0];
-            return (
-              <View testID="progress-1rm-showcase" style={{ marginBottom: 16 }}>
-                <Text style={styles.sectionLabel}>Estimated 1 Rep Max</Text>
-                <View style={{
-                  backgroundColor: tc.surfaceRaised,
-                  borderRadius: 12,
-                  borderWidth: 1,
-                  borderColor: tc.border,
-                  padding: 14,
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 12,
-                }}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }} numberOfLines={1}>
-                      {topLift.name}
-                    </Text>
-                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 4 }}>
-                      Top set: {topLift.topWeightLbs} lb × {topLift.topReps}
-                    </Text>
-                  </View>
-                  <View style={{ alignItems: 'flex-end' }}>
-                    <Text style={{ fontSize: 28, fontWeight: '900', color: tc.primary, fontVariant: ['tabular-nums'] as any }}>
-                      {Math.round(topLift.oneRepMaxLbs)}
-                    </Text>
-                    <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '700' }}>lb 1RM</Text>
-                  </View>
-                </View>
-              </View>
-            );
-          })()}
           {chartExerciseOptions.length === 0 && paceHistory.length < 2 ? (
             <View style={styles.emptyBox}>
               <Ionicons name="analytics-outline" size={40} color={tc.textMuted} style={{ marginBottom: 8 }} />
@@ -7368,144 +7291,6 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     color: colors.textSecondary,
     lineHeight: 15,
     marginTop: 7,
-  },
-  goalTrajectoryCard: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 14,
-    marginBottom: 16,
-    ...elevations.subtle,
-  },
-  goalTrajectoryHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 12,
-  },
-  goalTrajectoryIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 11,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  goalTrajectoryEyebrow: {
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 0.6,
-    color: colors.textMuted,
-  },
-  goalTrajectoryTitle: {
-    fontSize: 16,
-    fontWeight: '900',
-    color: colors.textPrimary,
-    marginTop: 1,
-  },
-  goalConfidencePill: {
-    borderWidth: 1,
-    borderRadius: radius.full,
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-  },
-  goalConfidenceText: {
-    fontSize: 10,
-    fontWeight: '900',
-    textTransform: 'uppercase',
-  },
-  goalTrajectoryHeadline: {
-    fontSize: 20,
-    fontWeight: '900',
-    color: colors.textPrimary,
-    lineHeight: 25,
-  },
-  goalTrajectorySubheadline: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    lineHeight: 17,
-    marginTop: 5,
-  },
-  goalProgressTrack: {
-    height: 8,
-    borderRadius: radius.full,
-    backgroundColor: colors.border,
-    overflow: 'hidden',
-    marginTop: 12,
-  },
-  goalProgressFill: {
-    height: '100%',
-    borderRadius: radius.full,
-  },
-  goalProgressMeta: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-    gap: 10,
-    marginTop: 7,
-  },
-  goalProgressLabel: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: colors.textPrimary,
-  },
-  goalProgressConfidence: {
-    flex: 1,
-    fontSize: 11,
-    color: colors.textMuted,
-    textAlign: 'right',
-    lineHeight: 15,
-  },
-  goalTrajectoryStats: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 12,
-  },
-  goalTrajectoryStat: {
-    flex: 1,
-    minHeight: 72,
-    borderRadius: radius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surfaceRaised,
-    padding: 9,
-  },
-  goalTrajectoryStatLabel: {
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 0.3,
-    textTransform: 'uppercase',
-    color: colors.textMuted,
-  },
-  goalTrajectoryStatValue: {
-    fontSize: 17,
-    fontWeight: '900',
-    color: colors.textPrimary,
-    marginTop: 3,
-  },
-  goalTrajectoryStatDetail: {
-    fontSize: 10,
-    color: colors.textSecondary,
-    lineHeight: 14,
-    marginTop: 2,
-  },
-  goalTrajectoryLever: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 7,
-    marginTop: 12,
-    padding: 10,
-    borderRadius: radius.md,
-    backgroundColor: colors.surfaceRaised,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  goalTrajectoryLeverText: {
-    flex: 1,
-    fontSize: 12,
-    fontWeight: '700',
-    color: colors.textSecondary,
-    lineHeight: 17,
   },
   performanceGaugeCard: {
     backgroundColor: colors.surface,

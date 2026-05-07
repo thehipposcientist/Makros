@@ -1101,6 +1101,10 @@ def _ensure_social_tables() -> None:
                 "ON feed_likes (user_id, feed_item_id)"
             ))
             conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_activity_feed_user_created "
+                "ON activity_feed(user_id, created_at)"
+            ))
+            conn.execute(text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_social_notification_actor_subject "
                 "ON social_notifications (user_id, actor_user_id, notification_type, subject_type, subject_id)"
             ))

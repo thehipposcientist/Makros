@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager, Easing, FlatList, AppState } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager, Easing, FlatList, AppState, InteractionManager } from 'react-native';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -143,11 +143,11 @@ function calorieAdjustmentExplanation(target: import('../services/api').Adjusted
 }
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
-import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
+import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, StoredWorkoutSummary, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
 import { buildExerciseGuide, humanizeToken } from '../utils/exerciseGuide';
 import { generateWorkoutPlan, generateDailyNutritionForDate } from '../utils/planGenerator';
-import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, logHydrationDelta, getMealHistory, getNutritionScore, updateMeal, deleteLoggedMeal, syncInProgressWorkout } from '../services/api';
-import type { ApplyActionResult, HydrationStatus, MealHistoryEntry } from '../services/api';
+import { getWorkoutStatus, getDayState, upsertDayState, getExercises, askTrainerQuestion, lookupSupplement, lookupSupplementFromPhoto, logWorkoutDone, enrichFoodItems, logMealChecked, unlogMealChecked, getMe, updateEmail, classifyFoods, getHydration, logHydration, logHydrationDelta, getMealHistory, getNutritionScore, updateMeal, deleteLoggedMeal, syncInProgressWorkout, listWorkoutCompletions, listWorkoutSessions } from '../services/api';
+import type { ApplyActionResult, HydrationStatus, MealHistoryEntry, WorkoutCompletionRecord, WorkoutSessionRecord } from '../services/api';
 import { useMetaData } from '../hooks/useMetaData';
 import {
   isTodayWorkoutDone, todayKey, dateKey, loadWorkoutHistory, saveWorkoutSession, saveSkipToHistory, loadWorkoutSummaries, loadHealthScore,
@@ -168,7 +168,7 @@ import { buildUserFoodCategories } from '../utils/customFoodSearch';
 import { enqueueActiveWatchCommand, hasActiveWatchCommandConsumer, isActiveWorkoutWatchCommand } from '../utils/watchCommandBacklog';
 import { applyWatchLogSetToActiveWorkoutStorage } from '../utils/watchWorkoutMirror';
 import { coachApplyNeedsDayStatusRefresh, skippedDayBadgeLabel, skippedDayTitle, skippedDayUndoLabel } from '../utils/coachApplyState';
-import { isExtraWorkoutActivitySession } from '../utils/workoutCompletion';
+import { isExtraWorkoutActivitySession, manualActivityFromCompletion, mergeCompletionIntoWorkoutSession } from '../utils/workoutCompletion';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
 import { inferMealCheckKeyFromHistoryEntry, mergeMealHistoryIntoChecksByDate, setMealCheckedInChecksByDate, upsertMealInPlansByDate } from '../utils/mealPlanState';
@@ -1779,6 +1779,239 @@ function buildAvailability(
   return { items };
 }
 
+function externalSourceIdFromLocalId(id?: string | null): string | undefined {
+  const value = String(id ?? '').trim();
+  if (!value || /^server(?:-summary|-session)?-\d+$/.test(value)) return undefined;
+  return value;
+}
+
+function workoutDateFocusKey(dateISO?: string | null, focus?: string | null): string | null {
+  const date = typeof dateISO === 'string' ? dateISO.slice(0, 10) : '';
+  const focusKey = typeof focus === 'string' ? focus.trim().toLowerCase() : '';
+  return date && focusKey ? `${date}|${focusKey}` : null;
+}
+
+function workoutExactKey(dateISO?: string | null, focus?: string | null, externalSourceId?: string | null): string | null {
+  const sourceKey = typeof externalSourceId === 'string' ? externalSourceId.trim() : '';
+  if (sourceKey) return `source|${sourceKey}`;
+  return workoutDateFocusKey(dateISO, focus);
+}
+
+function sessionExactKey(session: WorkoutSession): string | null {
+  return workoutExactKey(session.date, session.focus, externalSourceIdFromLocalId(session.id));
+}
+
+function summaryExactKey(summary: StoredWorkoutSummary): string | null {
+  return workoutExactKey(summary.date, summary.focus, externalSourceIdFromLocalId(summary.id));
+}
+
+function completionExactKey(completion: WorkoutCompletionRecord): string | null {
+  return workoutExactKey(completion.workout_date, completion.focus_label, completion.external_source_id);
+}
+
+function completionDateFocusKey(completion: WorkoutCompletionRecord): string | null {
+  return workoutDateFocusKey(completion.workout_date, completion.focus_label);
+}
+
+function normalizeHrZoneMinutes(raw?: number[] | null): [number, number, number, number, number] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const zones = raw.slice(0, 5).map(v => Number.isFinite(Number(v)) ? Number(v) : 0);
+  while (zones.length < 5) zones.push(0);
+  return zones as [number, number, number, number, number];
+}
+
+function mergeCompletionMetrics(summary: StoredWorkoutSummary, completion: WorkoutCompletionRecord): StoredWorkoutSummary {
+  const hr = completion.hr_summary;
+  const zones = normalizeHrZoneMinutes(hr?.zoneMinutes);
+  return {
+    ...summary,
+    caloriesBurned: summary.caloriesBurned || completion.calories_burned || 0,
+    hrAvg: summary.hrAvg ?? (hr?.avgBpm != null ? Math.round(Number(hr.avgBpm)) : undefined),
+    hrMax: summary.hrMax ?? (hr?.maxBpm != null ? Math.round(Number(hr.maxBpm)) : undefined),
+    hrZoneMinutes: summary.hrZoneMinutes ?? zones,
+  };
+}
+
+function summaryFromCompletion(completion: WorkoutCompletionRecord): StoredWorkoutSummary | null {
+  const hasMetrics = Boolean(
+    completion.calories_burned
+    || completion.hr_summary?.avgBpm
+    || completion.hr_summary?.maxBpm
+    || completion.hr_summary?.zoneMinutes?.some(m => Number(m) > 0),
+  );
+  if (!hasMetrics) return null;
+  return mergeCompletionMetrics({
+    id: `server-summary-${completion.id}`,
+    date: completion.started_at ?? completion.ended_at ?? completion.completed_at ?? `${completion.workout_date}T12:00:00.000Z`,
+    focus: completion.focus_label,
+    durationSeconds: completion.duration_seconds,
+    startedAt: completion.started_at ?? undefined,
+    endedAt: completion.ended_at ?? completion.completed_at ?? undefined,
+    totalSets: 0,
+    totalReps: 0,
+    caloriesBurned: completion.calories_burned ?? 0,
+    motivationMessage: 'Workout logged.',
+    achievements: [],
+    recommendations: [],
+    headline: 'Workout logged',
+    coachingPoint: '',
+    motivation: '',
+  }, completion);
+}
+
+function targetRepsFromServerExercise(exercise: NonNullable<WorkoutSessionRecord['exercises']>[number]): string {
+  if (exercise.target_reps_text) return exercise.target_reps_text;
+  const first = exercise.sets?.[0];
+  const min = first?.target_reps_min;
+  const max = first?.target_reps_max;
+  if (min != null && max != null && min !== max) return `${min}-${max}`;
+  if (max != null) return String(max);
+  if (min != null) return String(min);
+  return '';
+}
+
+function workoutSessionFromServer(row: WorkoutSessionRecord): WorkoutSession {
+  const exercises = (row.exercises ?? []).map(exercise => {
+    const sets = (exercise.sets ?? [])
+      .filter(set => set.completed !== false)
+      .map((set, index) => ({
+        setNumber: Number(set.set_number ?? index + 1),
+        reps: Number(set.actual_reps ?? set.target_reps_max ?? set.target_reps_min ?? 0),
+        weightLbs: Number(set.actual_weight_lbs ?? set.target_weight_lbs ?? 0),
+        durationSeconds: set.duration_seconds ?? undefined,
+        comfortRating: set.comfort_rating ?? undefined,
+        rir: set.actual_rir ?? undefined,
+        actualDistance: set.actual_distance ?? undefined,
+        actualPace: set.actual_pace ?? undefined,
+        heartRateAvg: set.heart_rate_avg ?? undefined,
+        cardioMetrics: set.cardio_metrics ?? undefined,
+      }));
+    return {
+      name: exercise.name,
+      targetSets: sets.length,
+      targetReps: targetRepsFromServerExercise(exercise),
+      targetRestSeconds: exercise.rest_seconds ?? 60,
+      equipment: exercise.equipment ?? 'other',
+      sets,
+      slug: exercise.exercise_slug_snapshot ?? undefined,
+      primaryMuscle: exercise.primary_muscle_snapshot ?? undefined,
+      primary_muscle: exercise.primary_muscle_snapshot ?? undefined,
+      secondaryMuscles: exercise.secondary_muscles_snapshot ?? undefined,
+      secondary_muscles: exercise.secondary_muscles_snapshot ?? undefined,
+      isCompound: exercise.is_compound_snapshot ?? undefined,
+    };
+  });
+  return {
+    id: `server-session-${row.id}`,
+    date: row.completed_at ?? `${row.workout_date}T12:00:00.000Z`,
+    focus: row.focus,
+    durationSeconds: 0,
+    startedAt: row.created_at ?? undefined,
+    endedAt: row.completed_at ?? undefined,
+    exercises,
+    completed: Boolean(row.completed_at),
+  };
+}
+
+function sessionSetCount(session: WorkoutSession): number {
+  return (session.exercises ?? []).reduce((sum, ex) => sum + (ex.sets?.length ?? 0), 0);
+}
+
+function mergeWorkoutSessionSources(localHistory: WorkoutSession[], serverRows: WorkoutSessionRecord[] | null): WorkoutSession[] {
+  const merged = [...localHistory];
+  if (!serverRows) return merged;
+  for (const row of serverRows) {
+    const serverSession = workoutSessionFromServer(row);
+    const exact = sessionExactKey(serverSession);
+    const dateFocus = workoutDateFocusKey(serverSession.date, serverSession.focus);
+    const existingIndex = merged.findIndex(session =>
+      (exact && sessionExactKey(session) === exact)
+      || (dateFocus && workoutDateFocusKey(session.date, session.focus) === dateFocus),
+    );
+    if (existingIndex < 0) {
+      merged.push(serverSession);
+      continue;
+    }
+    if (sessionSetCount(merged[existingIndex]) === 0 && sessionSetCount(serverSession) > 0) {
+      merged[existingIndex] = serverSession;
+    }
+  }
+  return merged;
+}
+
+function reconcileWorkoutHistoryData(
+  history: WorkoutSession[],
+  summaries: StoredWorkoutSummary[],
+  completions: WorkoutCompletionRecord[] | null,
+): { history: WorkoutSession[]; summaries: StoredWorkoutSummary[] } {
+  if (!completions) {
+    return {
+      history: [...history].sort((a, b) => (b.date ?? '').localeCompare(a.date ?? '')),
+      summaries: [...summaries].sort((a, b) => (b.date ?? '').localeCompare(a.date ?? '')),
+    };
+  }
+
+  const completionsByExact = new Map(
+    completions
+      .map(c => [completionExactKey(c), c] as const)
+      .filter((entry): entry is [string, WorkoutCompletionRecord] => !!entry[0]),
+  );
+  const completionsByDateFocus = new Map(
+    completions
+      .map(c => [completionDateFocusKey(c), c] as const)
+      .filter((entry): entry is [string, WorkoutCompletionRecord] => !!entry[0]),
+  );
+
+  const rows = history.map(session => {
+    const completion = (sessionExactKey(session) ? completionsByExact.get(sessionExactKey(session)!) : undefined)
+      ?? (workoutDateFocusKey(session.date, session.focus) ? completionsByDateFocus.get(workoutDateFocusKey(session.date, session.focus)!) : undefined);
+    return completion ? mergeCompletionIntoWorkoutSession(session, completion) : session;
+  });
+
+  for (const completion of completions) {
+    const exact = completionExactKey(completion);
+    const dateFocus = completionDateFocusKey(completion);
+    const exists = rows.some(session =>
+      (exact && sessionExactKey(session) === exact)
+      || (dateFocus && workoutDateFocusKey(session.date, session.focus) === dateFocus),
+    );
+    if (exists) continue;
+    const manualActivity = manualActivityFromCompletion(completion);
+    rows.push({
+      id: `server-${completion.id}`,
+      date: completion.started_at ?? completion.ended_at ?? completion.completed_at ?? `${completion.workout_date}T12:00:00.000Z`,
+      focus: completion.focus_label,
+      durationSeconds: completion.duration_seconds,
+      startedAt: completion.started_at ?? undefined,
+      endedAt: completion.ended_at ?? completion.completed_at ?? undefined,
+      exercises: [],
+      completed: true,
+      ...(manualActivity ? { manualActivity } : {}),
+    });
+  }
+
+  const summaryRows = [...summaries];
+  for (const completion of completions) {
+    const exact = completionExactKey(completion);
+    const dateFocus = completionDateFocusKey(completion);
+    const existingIndex = summaryRows.findIndex(summary =>
+      (exact && summaryExactKey(summary) === exact)
+      || (dateFocus && workoutDateFocusKey(summary.date, summary.focus) === dateFocus),
+    );
+    if (existingIndex >= 0) {
+      summaryRows[existingIndex] = mergeCompletionMetrics(summaryRows[existingIndex], completion);
+      continue;
+    }
+    const fromServer = summaryFromCompletion(completion);
+    if (fromServer) summaryRows.push(fromServer);
+  }
+
+  return {
+    history: rows.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? '')),
+    summaries: summaryRows.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? '')),
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, usernameRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onOpenSettings, onHomeTabNavigate, onProfileUpdate, onUpdateWeight, onBackendSync, onSaveProfile, onCancelScheduledPlanChange, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
@@ -1969,7 +2202,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [workoutTemplates, setWorkoutTemplates] = useState<SavedWorkoutTemplate[]>([]);
   const workoutHistoryBundlePromiseRef = useRef<Promise<{
     history: WorkoutSession[];
-    summaries: any[];
+    summaries: StoredWorkoutSummary[];
     preserved: Awaited<ReturnType<typeof loadPreservedCompletedWorkouts>>;
     manualOverrides: Awaited<ReturnType<typeof loadManualWorkoutOverrides>>;
   }> | null>(null);
@@ -1980,14 +2213,25 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       loadWorkoutSummaries(),
       loadPreservedCompletedWorkouts(),
       loadManualWorkoutOverrides(),
+      authToken ? listWorkoutSessions(authToken, { limit: 100, skip: 0 }).catch(() => null) : Promise.resolve(null),
+      authToken ? listWorkoutCompletions(authToken, { limit: 100, skip: 0 }).catch(() => null) : Promise.resolve(null),
     ])
-      .then(([history, summaries, preserved, manualOverrides]) => ({ history, summaries, preserved, manualOverrides }))
+      .then(([history, summaries, preserved, manualOverrides, serverSessions, completions]) => {
+        const historyWithServerSessions = mergeWorkoutSessionSources(history, serverSessions);
+        const reconciled = reconcileWorkoutHistoryData(historyWithServerSessions, summaries, completions);
+        return {
+          history: reconciled.history,
+          summaries: reconciled.summaries,
+          preserved,
+          manualOverrides,
+        };
+      })
       .finally(() => {
         workoutHistoryBundlePromiseRef.current = null;
       });
     workoutHistoryBundlePromiseRef.current = promise;
     return promise;
-  }, []);
+  }, [authToken]);
   const [expandedWorkoutHistoryId, setExpandedWorkoutHistoryId] = useState<string | null>(null);
   const [mealsSubTab,   setMealsSubTab]   = useState<'plan' | 'foods' | 'supplements' | 'macros' | 'history'>('plan');
   const [viewingFriend, setViewingFriend] = useState<import('../services/api').SocialDigestFriend | null>(null);
@@ -2201,6 +2445,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     exerciseName: string;
     dayKey: string;
   } | null>(null);
+  const [returnToPlanSwapAfterVideo, setReturnToPlanSwapAfterVideo] = useState(false);
   const [showSupplementLibrary, setShowSupplementLibrary] = useState(false);
   const [selectedSupplement, setSelectedSupplement] = useState<SupplementEntry | null>(null);
   const [suppLibSearch, setSuppLibSearch] = useState('');
@@ -6671,6 +6916,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     primary_muscle?: string | null;
     movement_pattern?: string | null;
   } | null>(null);
+  const videoModalHandoffTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const videoModalHandoffInteractionRef = useRef<{ cancel?: () => void } | null>(null);
+  const cancelVideoModalHandoff = useCallback(() => {
+    if (videoModalHandoffTimeoutRef.current) {
+      clearTimeout(videoModalHandoffTimeoutRef.current);
+      videoModalHandoffTimeoutRef.current = null;
+    }
+    videoModalHandoffInteractionRef.current?.cancel?.();
+    videoModalHandoffInteractionRef.current = null;
+  }, []);
+  const scheduleVideoModalHandoff = useCallback((fn: () => void) => {
+    cancelVideoModalHandoff();
+    videoModalHandoffTimeoutRef.current = setTimeout(() => {
+      videoModalHandoffTimeoutRef.current = null;
+      videoModalHandoffInteractionRef.current = InteractionManager.runAfterInteractions(() => {
+        videoModalHandoffInteractionRef.current = null;
+        fn();
+      });
+    }, 360);
+  }, [cancelVideoModalHandoff]);
+  useEffect(() => cancelVideoModalHandoff, [cancelVideoModalHandoff]);
   const openExerciseVideo = useCallback(
     (exerciseName: string, ctx?: { equipment?: string | null; primary_muscle?: string | null; movement_pattern?: string | null }) => {
       setVideoModalTarget({ name: exerciseName, ...ctx });
@@ -7208,7 +7474,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             <SubTabBtn testID="workout-subtab-plan" label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
             <SubTabBtn testID="workout-subtab-library" label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setSelectedExercise(null); setShowExerciseLibrary(true); ensureExerciseLibrary().catch(() => {}); }} />
             <SubTabBtn testID="workout-subtab-settings" label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
-            <SubTabBtn testID="workout-subtab-history" label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); requestAnimationFrame(() => { loadWorkoutHistory().then(setWorkoutHistoryList).catch(() => {}); }); }} />
+            <SubTabBtn testID="workout-subtab-history" label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); requestAnimationFrame(() => { loadWorkoutHistoryBundle().then(({ history, summaries }) => { setWorkoutHistoryList(history); setWorkoutHistorySummaries(summaries); }).catch(() => {}); }); }} />
           </View>
         </LinearGradient>
       )}
@@ -9461,10 +9727,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           <TouchableOpacity
                             accessibilityRole="button"
                             accessibilityLabel="Explain calorie adjustment"
-                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                             onPress={() => Alert.alert('Why calories changed', calorieAdjustmentExplanation(adjustedDailyTarget))}
                           >
-                            <Ionicons name="information-circle-outline" size={13} color={themeColors.textMuted} />
+                            <Ionicons name="information-circle-outline" size={18} color={themeColors.textMuted} />
                           </TouchableOpacity>
                         </View>
                       )}
@@ -10258,17 +10524,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       {/* Plan-view exercise swap picker. Reuses the same overlap scoring
           as the live Switch Exercise feature so rankings are consistent. */}
       <PlanSwapExerciseModal
-        visible={!!swapExerciseState}
+        visible={!!swapExerciseState && !returnToPlanSwapAfterVideo}
         baseExerciseName={swapExerciseState?.exerciseName ?? null}
         library={exerciseLibrary}
         ownedEquipment={(userProfile as any)?.equipmentOwned ?? (userProfile as any)?.equipment ?? []}
         themeName={userProfile.themePreference}
-        onClose={() => setSwapExerciseState(null)}
-        onPreview={(next) => openExerciseVideo(next.name, {
-          equipment: exerciseEquipmentLabel(next) ?? next.equipment ?? null,
-          primary_muscle: next.primary_muscle ?? null,
-          movement_pattern: next.movement_pattern ?? null,
-        })}
+        onClose={() => {
+          cancelVideoModalHandoff();
+          setReturnToPlanSwapAfterVideo(false);
+          setSwapExerciseState(null);
+        }}
+        onPreview={(next) => {
+          setReturnToPlanSwapAfterVideo(true);
+          scheduleVideoModalHandoff(() => openExerciseVideo(next.name, {
+            equipment: exerciseEquipmentLabel(next) ?? next.equipment ?? null,
+            primary_muscle: next.primary_muscle ?? null,
+            movement_pattern: next.movement_pattern ?? null,
+          }));
+        }}
         onSelect={async (next) => {
           const target = swapExerciseState;
           if (!target) return;
@@ -10794,7 +11067,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         movementPattern={videoModalTarget?.movement_pattern ?? null}
         authToken={authToken}
         themeName={userProfile.themePreference}
-        onClose={() => setVideoModalTarget(null)}
+        onClose={() => {
+          const shouldReturnToPlanSwap = returnToPlanSwapAfterVideo && !!swapExerciseState;
+          setVideoModalTarget(null);
+          if (shouldReturnToPlanSwap) {
+            scheduleVideoModalHandoff(() => setReturnToPlanSwapAfterVideo(false));
+          } else {
+            cancelVideoModalHandoff();
+            setReturnToPlanSwapAfterVideo(false);
+          }
+        }}
       />
 
       {/* Recipe modal — on-demand prep instructions + variations */}

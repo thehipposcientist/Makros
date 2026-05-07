@@ -1502,6 +1502,9 @@ class WeeklyDigestCache(SQLModel, table=True):
 
 class ActivityFeedItem(SQLModel, table=True):
     __tablename__ = "activity_feed"
+    __table_args__ = (
+        Index("ix_activity_feed_user_created", "user_id", "created_at"),
+    )
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     event_type: str = Field(default="workout_completed")

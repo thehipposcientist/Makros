@@ -222,25 +222,25 @@ export default function SocialFeedView({
   const loadInitial = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await getSocialFeed(authToken);
+      const r = await getSocialFeed(authToken, { limit: cap });
       setItems(r.items); // store all; deduplication happens in displayItems memo
     } catch {
       // Silent — empty-state handles "couldn't load" via UI signal.
     } finally {
       setLoading(false);
     }
-  }, [authToken]);
+  }, [authToken, cap]);
 
   useEffect(() => { loadInitial(); }, [loadInitial, refreshKey]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const r = await getSocialFeed(authToken);
+      const r = await getSocialFeed(authToken, { limit: cap });
       setItems(r.items);
     } catch { /* keep current items on transient failure */ }
     finally { setRefreshing(false); }
-  }, [authToken]);
+  }, [authToken, cap]);
 
   // Group into one card per (user_id, workout_date).
   // Two passes so PR items (written after workout_completed, thus
