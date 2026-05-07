@@ -1861,6 +1861,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   dateISO: saved.date,
                   ounces: saved.ounces,
                   targetOunces: saved.target_ounces,
+                  force: true,
                 });
               } catch { /* hydration sync should not interrupt the workout */ }
             })();

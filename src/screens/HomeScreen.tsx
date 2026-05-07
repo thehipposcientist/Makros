@@ -2047,6 +2047,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 	  const distanceUnit = resolveDistanceUnit(userProfile);
   const showWorkoutsSurface = shouldShowWorkouts(userProfile);
   const showMealsSurface = shouldShowMeals(userProfile);
+  const authTokenRef = useRef(authToken);
+  useEffect(() => {
+    authTokenRef.current = authToken;
+  }, [authToken]);
   const onUpdateWeightRef = useRef(onUpdateWeight);
   useEffect(() => {
     onUpdateWeightRef.current = onUpdateWeight;
@@ -3965,9 +3969,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     { force: forceSnapshot },
                   ).catch(() => {});
                 }
+                const currentAuthToken = authTokenRef.current;
                 let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
-                if (!hydrationSnapshot && authToken) {
-                  hydrationSnapshot = await getHydration(authToken, todayISO).catch(() => null);
+                if (!hydrationSnapshot && currentAuthToken) {
+                  hydrationSnapshot = await getHydration(currentAuthToken, todayISO).catch(() => null);
                 }
                 await pushHydrationToWatch({
                   dateISO: hydrationSnapshot?.date ?? todayISO,
@@ -3977,8 +3982,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 }).catch(() => {});
                 (async () => {
                   try {
+                    const currentAuthToken = authTokenRef.current;
                     await pushWatchRecoverySignals({
-                      authToken,
+                      authToken: currentAuthToken,
                       age: s.profileAge ?? null,
                       plannedFocus: todayItem?.workout?.focus ?? todayWorkout?.focus ?? null,
                       force: forceSnapshot,
@@ -3988,9 +3994,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 })();
                 (async () => {
                   try {
-                    if (!authToken) return;
+                    const currentAuthToken = authTokenRef.current;
+                    if (!currentAuthToken) return;
                     const { getTodaySupplements } = await import('../services/api');
-                    const stack = await getTodaySupplements(authToken).catch(() => null);
+                    const stack = await getTodaySupplements(currentAuthToken).catch(() => null);
                     if (stack) {
                       await pushSupplementsToWatch(stack.map((sup: any) => ({
                         id: sup.id, name: sup.custom_name || 'Supplement',
@@ -4092,8 +4099,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const processHydrationCommand = async () => {
               let rollbackDateISO = todayKey();
               let rollbackRow: HydrationSummary | null = null;
+              const currentAuthToken = authTokenRef.current;
               try {
-                if (!authToken) return;
+                if (!currentAuthToken) return;
                 const commandUserId = typeof payload?.userId === 'string' && payload.userId.trim()
                   ? payload.userId.trim()
                   : null;
@@ -4141,9 +4149,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 if (dateISO === todayKey()) setHydration(optimistic);
                 await saveCachedHydration(optimistic, { pending: true }).catch(() => null);
                 const result = hasDelta
-                  ? await logHydrationDelta(authToken, rawDelta, dateISO)
-                  : await logHydration(authToken, next, dateISO);
-                const fresh = await getHydration(authToken, result.date).catch(() => null);
+                  ? await logHydrationDelta(currentAuthToken, rawDelta, dateISO)
+                  : await logHydration(currentAuthToken, next, dateISO);
+                const fresh = await getHydration(currentAuthToken, result.date).catch(() => null);
                 const saved: HydrationSummary = fresh
                   ? fresh
                   : {
@@ -4165,9 +4173,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   dateISO: saved.date,
                   ounces: saved.ounces,
                   targetOunces: saved.target_ounces,
+                  force: true,
                 });
               } catch {
-                const restored = rollbackRow ?? await getHydration(authToken, rollbackDateISO)
+                const restored = rollbackRow ?? await getHydration(currentAuthToken, rollbackDateISO)
                   .then(row => row)
                   .catch(() => null);
                 if (restored) {
@@ -4188,6 +4197,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   dateISO: restored?.date ?? rollbackDateISO,
                   ounces: restored?.ounces ?? 0,
                   targetOunces: restored?.target_ounces ?? 64,
+                  force: true,
                 }).catch(() => {});
               }
             };
@@ -4204,9 +4214,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 if (!id) return;
                 const taken = !!payload?.taken;
                 const { logDose, getTodaySupplements } = await import('../services/api');
-                if (!authToken) return;
-                await logDose(authToken, id, { skipped: !taken }).catch(() => null);
-                const fresh = await getTodaySupplements(authToken).catch(() => null);
+                const currentAuthToken = authTokenRef.current;
+                if (!currentAuthToken) return;
+                await logDose(currentAuthToken, id, { skipped: !taken }).catch(() => null);
+                const fresh = await getTodaySupplements(currentAuthToken).catch(() => null);
                 if (fresh) {
                   const { pushSupplementsToWatch } = await import('../utils/watchSync');
                   await pushSupplementsToWatch(
@@ -4228,17 +4239,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             // don't collide + round-trip order is predictable.
             (async () => {
               try {
-                if (!authToken) return;
+                const currentAuthToken = authTokenRef.current;
+                if (!currentAuthToken) return;
                 const { logDose, getTodaySupplements } = await import('../services/api');
-                const current = await getTodaySupplements(authToken).catch(() => null);
+                const current = await getTodaySupplements(currentAuthToken).catch(() => null);
                 if (!current) return;
                 for (const s of current) {
                   const logs = s.logs_today || [];
                   if (logs.find(l => !l.skipped)) continue; // already taken
                   if (logs.find(l => l.skipped))  continue; // explicitly skipped
-                  await logDose(authToken, s.id, { skipped: false }).catch(() => null);
+                  await logDose(currentAuthToken, s.id, { skipped: false }).catch(() => null);
                 }
-                const fresh = await getTodaySupplements(authToken).catch(() => null);
+                const fresh = await getTodaySupplements(currentAuthToken).catch(() => null);
                 if (fresh) {
                   const { pushSupplementsToWatch } = await import('../utils/watchSync');
                   await pushSupplementsToWatch(
@@ -4290,10 +4302,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             (async () => {
               try {
                 const text = String(payload?.text || '').trim();
-                if (!text || !authToken) return;
+                const currentAuthToken = authTokenRef.current;
+                if (!text || !currentAuthToken) return;
                 const { parseMealText } = await import('../services/api');
                 const { WatchBridge } = await import('../../modules/thallo-watch-bridge');
-                const result = await parseMealText(authToken, text).catch(() => null);
+                const result = await parseMealText(currentAuthToken, text).catch(() => null);
                 if (!result?.items?.length) return;
                 await WatchBridge.syncMealParsePreview(result.items);
               } catch { /* non-fatal */ }
@@ -4304,7 +4317,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             // meal to the backend and re-push meals so the watch tally updates.
             (async () => {
               try {
-                if (!authToken) return;
+                const currentAuthToken = authTokenRef.current;
+                if (!currentAuthToken) return;
                 const items = (payload?.items as any[]) ?? [];
                 if (!items.length) return;
                 const todayISO = todayKey();
@@ -4338,7 +4352,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   fat: totalFat,
                 };
                 const { logMealChecked } = await import('../services/api');
-                await logMealChecked(authToken, {
+                await logMealChecked(currentAuthToken, {
                   meal_date: todayISO,
                   meal_type: 'extra',
                   meal: mealObj,
@@ -4380,9 +4394,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     setsLogged: mirrored.totalSets,
                     startedAt: mirrored.startedAt,
                   });
-                  if (authToken && today?.focus && mirrored.loggedPayload.length > 0) {
+                  const currentAuthToken = authTokenRef.current;
+                  if (currentAuthToken && today?.focus && mirrored.loggedPayload.length > 0) {
                     syncInProgressWorkout(
-                      authToken,
+                      currentAuthToken,
                       todayKey(),
                       today.focus,
                       mirrored.loggedPayload,

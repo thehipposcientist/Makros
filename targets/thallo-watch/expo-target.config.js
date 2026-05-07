@@ -10,9 +10,9 @@ module.exports = {
   // active-workout view relies on. Any older would force API rewrites.
   deploymentTarget: '10.0',
   colors: {
-    // Startup accent before the phone's theme sync lands. Midnight
-    // theme's teal — same default as the iOS app.
-    $accent: '#15C7B8',
+    // Startup accent before the phone's theme sync lands. Slate is the
+    // same default palette as the iOS app.
+    $accent: '#F07848',
   },
   entitlements: {
     // HealthKit for live heart rate during workouts. WatchConnectivity

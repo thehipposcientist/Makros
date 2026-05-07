@@ -2282,6 +2282,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [plateauModalVisible, setPlateauModalVisible] = useState(false);
   const [plateauDismissed, setPlateauDismissed] = useState(true);
   const [quickDetailSheet, setQuickDetailSheet] = useState<'today' | 'forecast' | null>(null);
+  // Bottom-sheet explainer for the Health Score card. Opened by the
+  // `info` icon next to the title — testers kept asking what the
+  // number meant and where it came from, and the locked-state copy
+  // alone wasn't enough.
+  const [healthScoreExplainOpen, setHealthScoreExplainOpen] = useState(false);
   const [weightEntries, setWeightEntries] = useState<import('../types').WeightEntry[]>([]);
   const [weightInputVisible, setWeightInputVisible] = useState(false);
   const [weightInputValue, setWeightInputValue] = useState('');
@@ -4964,6 +4969,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             if (daysOfData < DAYS_REQUIRED || !nutritionReady) {
               return (
                 <View style={{ backgroundColor: tc.surface, borderRadius: radius.lg, padding: 20, marginBottom: 14, borderWidth: 1, borderColor: tc.border, alignItems: 'center' }}>
+                  <TouchableOpacity
+                    accessibilityLabel="What is the Health Score?"
+                    onPress={() => setHealthScoreExplainOpen(true)}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    style={{ position: 'absolute', top: 12, right: 12, padding: 4 }}>
+                    <Ionicons name="information-circle-outline" size={18} color={tc.textMuted} />
+                  </TouchableOpacity>
                   <Ionicons name="heart-circle-outline" size={32} color={tc.textMuted} />
                   <Text style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary, marginTop: 8 }}>Health Score</Text>
                   <Text style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', marginTop: 4, lineHeight: 18 }}>
@@ -5007,6 +5019,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 12 }}>
                   <Ionicons name="heart-circle-outline" size={22} color={tc.primary} />
                   <Text style={{ fontSize: 17, fontWeight: '700', color: tc.textPrimary, flex: 1 }}>Health Score</Text>
+                  <TouchableOpacity
+                    accessibilityLabel="What is the Health Score?"
+                    onPress={() => setHealthScoreExplainOpen(true)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    style={{ padding: 2, marginRight: 4 }}>
+                    <Ionicons name="information-circle-outline" size={18} color={tc.textMuted} />
+                  </TouchableOpacity>
                   <View style={{ alignItems: 'flex-end' }}>
                     <Text style={{ fontSize: 28, fontWeight: '900', color: scoreColor }}>{combined}</Text>
                     <Text style={{ fontSize: 10, color: tc.textMuted }}>{rating} · {daysOfData}d data</Text>
@@ -6719,6 +6738,102 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   </View>
                 </>
               )}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+      {/* Health Score explainer — bottom sheet patterned on
+          quickDetailSheet so the look stays consistent. Triggered by
+          the info icon in the Health Score card header. */}
+      <Modal
+        visible={healthScoreExplainOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setHealthScoreExplainOpen(false)}>
+        <View style={styles.quickDetailBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setHealthScoreExplainOpen(false)}
+          />
+          <View style={styles.quickDetailSheet}>
+            <View style={styles.quickDetailHandle} />
+            <View style={styles.quickDetailHeader}>
+              <View style={[styles.quickDetailIcon, { backgroundColor: tc.primary + '20' }]}>
+                <Ionicons name="heart-circle-outline" size={18} color={tc.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.quickDetailEyebrow}>HEALTH SCORE</Text>
+                <Text style={styles.quickDetailTitle} numberOfLines={2}>How it's calculated</Text>
+              </View>
+              <TouchableOpacity onPress={() => setHealthScoreExplainOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={20} color={tc.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
+              <Text style={styles.quickDetailBody}>
+                A 0–100 read on how your last two weeks of training and eating
+                line up with your goal. It's a backward-looking summary, not
+                a real-time signal — for "how ready am I right now?" use
+                Training Readiness on the Plan tab.
+              </Text>
+              <View style={styles.quickDetailSection}>
+                <Text style={styles.quickDetailSectionTitle}>What goes in</Text>
+                <View style={styles.quickDetailRow}>
+                  <Text style={styles.quickDetailRowLabel}>Activity (50%)</Text>
+                  <Text style={styles.quickDetailRowValue}>completed ÷ expected</Text>
+                </View>
+                <Text style={styles.quickDetailMuted}>
+                  Workouts you finished over the last 14 days vs. how many
+                  your plan called for at your weekly target. Skipped or
+                  partial sessions don't count.
+                </Text>
+                <View style={[styles.quickDetailRow, { marginTop: 10 }]}>
+                  <Text style={styles.quickDetailRowLabel}>Nutrition (50%)</Text>
+                  <Text style={styles.quickDetailRowValue}>weekly meal score</Text>
+                </View>
+                <Text style={styles.quickDetailMuted}>
+                  Server-computed average of your daily nutrition score over
+                  days you logged meals. Hits calorie + protein targets,
+                  fiber, food quality, and gut-health markers.
+                </Text>
+              </View>
+              <View style={styles.quickDetailSection}>
+                <Text style={styles.quickDetailSectionTitle}>Why 14 days?</Text>
+                <Text style={styles.quickDetailBody}>
+                  One bad week happens to everyone. Two weeks is the shortest
+                  window where the average actually reflects the habit, not
+                  a single missed gym day or a holiday weekend.
+                </Text>
+              </View>
+              <View style={styles.quickDetailSection}>
+                <Text style={styles.quickDetailSectionTitle}>How to move it</Text>
+                <Text style={styles.quickDetailBody}>
+                  Hit your scheduled workouts and log your meals consistently.
+                  Both pillars weight equally — a 90 in one and a 50 in the
+                  other lands at 70 overall. Progress shows up after a few
+                  days; don't chase a 100, aim for steady ≥70.
+                </Text>
+              </View>
+              <View style={styles.quickDetailSection}>
+                <Text style={styles.quickDetailSectionTitle}>Rating bands</Text>
+                <View style={styles.quickDetailRow}>
+                  <Text style={styles.quickDetailRowLabel}>80+</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: '#22C55E' }]}>Excellent</Text>
+                </View>
+                <View style={styles.quickDetailRow}>
+                  <Text style={styles.quickDetailRowLabel}>65–79</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: '#22C55E' }]}>Good</Text>
+                </View>
+                <View style={styles.quickDetailRow}>
+                  <Text style={styles.quickDetailRowLabel}>45–64</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: '#F59E0B' }]}>Fair</Text>
+                </View>
+                <View style={styles.quickDetailRow}>
+                  <Text style={styles.quickDetailRowLabel}>Below 45</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: '#EF4444' }]}>Needs work</Text>
+                </View>
+              </View>
             </ScrollView>
           </View>
         </View>
