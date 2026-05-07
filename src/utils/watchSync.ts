@@ -62,6 +62,7 @@ function normalizeForSignature(value: unknown): unknown {
       || key === 'eventId'
       || key === 'revision'
       || key === 'progressRevision'
+      || key === 'reason'
     ) {
       continue;
     }
@@ -554,6 +555,16 @@ export async function pushWorkoutToWatch(
     return false;
   }
   const envelope = buildWatchWorkoutEnvelope(payload, { reason: opts.reason, userId });
+  const force = !!opts.force
+    || envelope.reason === 'start_echo'
+    || envelope.reason === 'complete'
+    || envelope.reason === 'skip'
+    || envelope.reason === 'clear';
+  if (shouldSkipUnchanged('workout', envelope, force)) {
+    wsLog('pushWorkoutToWatch skipped unchanged', { status: opts.status, reason: envelope.reason });
+    await recordWatchSyncUnchanged('workout');
+    return true;
+  }
   // Surface payload shape + size so we can spot the case where the
   // merged WCSession applicationContext gets too large to enqueue
   // (256KB hard cap). When updateApplicationContext throws on iOS, the
@@ -572,18 +583,6 @@ export async function pushWorkoutToWatch(
     bytes: payloadBytes,
     userId: userId?.slice(0, 4),
   });
-  const force = !!opts.force
-    || envelope.reason === 'reachability'
-    || envelope.reason === 'pull_state'
-    || envelope.reason === 'start_echo'
-    || envelope.reason === 'complete'
-    || envelope.reason === 'skip'
-    || envelope.reason === 'clear';
-  if (shouldSkipUnchanged('workout', envelope, force)) {
-    wsLog('pushWorkoutToWatch skipped unchanged', { status: opts.status, reason: envelope.reason });
-    await recordWatchSyncUnchanged('workout');
-    return true;
-  }
   const ok = await WatchBridge.syncWorkout(envelope);
   if (!ok) lastPayloadSignatures.delete('workout');
   await recordWatchSync('workout', !!ok, `${envelope.reason}/${opts.status} ex=${payload.exercises?.length ?? 0} b=${payloadBytes}`);
@@ -595,11 +594,11 @@ export async function pushThemeToWatch(themeName: AppThemeName | undefined, opts
   const palette = buildWatchPalette(latestThemeName);
   if (!canPush()) { await recordWatchSync('theme', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
-  wsLog('pushThemeToWatch', { theme: palette.themeName });
   if (shouldSkipUnchanged('theme', palette, opts.force)) {
     await recordWatchSyncUnchanged('theme');
     return true;
   }
+  wsLog('pushThemeToWatch', { theme: palette.themeName });
   const ok = await WatchBridge.syncTheme(palette);
   if (!ok) lastPayloadSignatures.delete('theme');
   await recordWatchSync('theme', !!ok, palette.themeName);
@@ -616,6 +615,10 @@ export async function pushProgressToWatch(progress: WatchProgress) {
     sentAtMs: progress.sentAtMs ?? nowMs,
     progressRevision: progress.progressRevision ?? nextProgressRevision(nowMs),
   };
+  if (shouldSkipUnchanged('progress', stamped, false)) {
+    await recordWatchSyncUnchanged('progress');
+    return true;
+  }
   wsLog('pushProgressToWatch', stamped);
   const ok = await WatchBridge.updateProgress(stamped);
   await recordWatchSync('progress', !!ok);
@@ -709,11 +712,11 @@ export async function pushHydrationToWatch(opts: {
     targetOunces: Math.max(0, Math.round(target)),
     syncedAtMs: Date.now(),
   };
-  wsLog('pushHydrationToWatch', { ounces: payload.ounces, target: payload.targetOunces });
   if (shouldSkipUnchanged('hydration', payload, opts.force)) {
     await recordWatchSyncUnchanged('hydration');
     return true;
   }
+  wsLog('pushHydrationToWatch', { ounces: payload.ounces, target: payload.targetOunces });
   const ok = await WatchBridge.syncHydration(payload);
   if (!ok) lastPayloadSignatures.delete('hydration');
   await recordWatchSync('hydration', !!ok, `${payload.ounces}/${payload.targetOunces} oz`);
@@ -739,11 +742,11 @@ export async function pushSleepToWatch(opts: WatchSleepInput & { force?: boolean
     summary: opts.summary ?? null,
     syncedAtMs: Date.now(),
   };
-  wsLog('pushSleepToWatch', { score: payload.score, hours: payload.hoursLastNight });
   if (shouldSkipUnchanged('sleep', payload, opts.force)) {
     await recordWatchSyncUnchanged('sleep');
     return true;
   }
+  wsLog('pushSleepToWatch', { score: payload.score, hours: payload.hoursLastNight });
   const ok = await WatchBridge.syncSleep(payload);
   if (!ok) lastPayloadSignatures.delete('sleep');
   await recordWatchSync('sleep', !!ok);
@@ -777,11 +780,11 @@ export async function pushReadinessToWatch(opts: {
     factors: opts.factors ?? [],
     syncedAtMs: opts.syncedAtMs ?? Date.now(),
   };
-  wsLog('pushReadinessToWatch', { score: payload.score });
   if (shouldSkipUnchanged('readiness', payload, opts.force)) {
     await recordWatchSyncUnchanged('readiness');
     return true;
   }
+  wsLog('pushReadinessToWatch', { score: payload.score });
   const ok = await WatchBridge.syncReadiness(payload);
   if (!ok) lastPayloadSignatures.delete('readiness');
   await recordWatchSync('readiness', !!ok);
@@ -807,11 +810,11 @@ export async function pushWeightToWatch(opts: {
     slopeLbsPerWeek: opts.slopeLbsPerWeek ?? null,
     syncedAtMs: Date.now(),
   };
-  wsLog('pushWeightToWatch', { latest: payload.latestLbs });
   if (shouldSkipUnchanged('weight', payload, opts.force)) {
     await recordWatchSyncUnchanged('weight');
     return true;
   }
+  wsLog('pushWeightToWatch', { latest: payload.latestLbs });
   const ok = await WatchBridge.syncWeight(payload);
   if (!ok) lastPayloadSignatures.delete('weight');
   await recordWatchSync('weight', !!ok);
@@ -906,11 +909,11 @@ export async function pushSupplementsToWatch(
     })),
     syncedAtMs: Date.now(),
   };
-  wsLog('pushSupplementsToWatch', { count: items.length });
   if (shouldSkipUnchanged('supplements', payload, opts.force)) {
     await recordWatchSyncUnchanged('supplements');
     return true;
   }
+  wsLog('pushSupplementsToWatch', { count: items.length });
   const ok = await WatchBridge.syncSupplements(payload);
   if (!ok) lastPayloadSignatures.delete('supplements');
   await recordWatchSync('supplements', !!ok, `${items.length} items`);

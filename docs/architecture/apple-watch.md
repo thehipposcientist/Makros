@@ -33,6 +33,7 @@ Rest timers are synced as live progress with an absolute `restEndsAtMs`. The nat
 **Pull-on-wake handshake:**
 Watch fires `pull_state` on `WCSession.activate` + `sessionReachabilityDidChange(reachable=true)` + SwiftUI `scenePhase == .active`. Phone responds with fresh full snapshot.
 If a phone rest timer is currently active, the phone also sends a fresh `pushProgressToWatch` after the snapshot so the watch receives an absolute `restEndsAtMs` even when it joins mid-rest.
+Wake-triggered pulls are cooldown-coalesced on both sides: the watch drops automatic pulls while the phone is unreachable and will not queue `pull_state` through `transferUserInfo`; the phone also ignores duplicate non-manual `pull_state` commands that arrive within a few seconds. Manual watch sync buttons send `force=true`, bypassing the cooldown when the user explicitly asks for a refresh.
 
 **Phone-start behavior:** phone Start pre-stamps `activeWatchSessionId` / `activeWorkoutStartTime`, pushes an `active_snapshot` immediately, then calls the native bridge's `HKHealthStore.startWatchApp(with:)` path. The watch app handles that launch via `WKApplicationDelegate.handle(_:)`, requests a pull, and opens `ActiveWorkoutView` as soon as the active snapshot arrives. If watchOS declines the launch or reachability does not come up shortly after, the phone shows a nudge telling the user to open Thallo on the watch; the workout is already queued, so no second Start tap should be needed.
 

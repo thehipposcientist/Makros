@@ -346,7 +346,7 @@ private struct TodayView: View {
     private var logoHeader: some View {
         Button {
             WKInterfaceDevice.current().play(.click)
-            conn.requestPull()
+            conn.requestPull(force: true)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "sparkles")
@@ -385,7 +385,7 @@ private struct TodayView: View {
             Button {
                 WKInterfaceDevice.current().play(.click)
                 syncRequestedAt = Date()
-                conn.requestPull()
+                conn.requestPull(force: true)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.clockwise")
@@ -623,7 +623,7 @@ private struct TodayView: View {
             if workout.exercises.isEmpty && workout.status == .scheduled {
                 Button {
                     WKInterfaceDevice.current().play(.click)
-                    conn.requestPull()
+                    conn.requestPull(force: true)
                 } label: {
                     HStack {
                         Image(systemName: "arrow.clockwise")
@@ -748,7 +748,7 @@ private struct WatchSyncStrip: View {
     var body: some View {
         Button {
             WKInterfaceDevice.current().play(.click)
-            conn.requestPull()
+            conn.requestPull(force: true)
         } label: {
             HStack(spacing: 6) {
                 Circle()

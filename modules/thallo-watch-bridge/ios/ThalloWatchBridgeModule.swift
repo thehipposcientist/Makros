@@ -12,6 +12,7 @@ import os.log
 private let wcLog = OSLog(subsystem: "com.thallo.app.watchbridge", category: "WC")
 private let staleWorkoutCommandWindowMs: Double = 4 * 60 * 60 * 1000
 private let staleQueuedCommandWindowMs: Double = 24 * 60 * 60 * 1000
+private let pullStateDispatchCooldownMs: Double = 3 * 1000
 private let maxQueuedCommandEvents = 50
 
 public class ThalloWatchBridgeModule: Module {
@@ -163,6 +164,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     private var recentCommandIds: [String] = []
     private var recentCommandIdSet: Set<String> = []
     private var recentCommandIdsLoaded = false
+    private var lastPullStateDispatchedAtMs: Double = 0
 
     func setUserId(_ id: String?) {
         withOutboundLock { self.userId = id }
@@ -562,6 +564,9 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         if shouldDropStaleCommand(cmd, msg) {
             return
         }
+        if shouldDropDuplicatePullState(cmd, msg) {
+            return
+        }
         if let commandId = msg["commandId"] as? String, !commandId.isEmpty {
             ensureRecentCommandIdsLoaded()
             if recentCommandIdSet.contains(commandId) {
@@ -685,6 +690,22 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             "ageMs": ageMs,
         ])
         return true
+    }
+
+    private func shouldDropDuplicatePullState(_ command: String, _ msg: [String: Any]) -> Bool {
+        guard command == "pull_state" else { return false }
+        if (msg["force"] as? Bool) == true {
+            lastPullStateDispatchedAtMs = Date().timeIntervalSince1970 * 1000
+            return false
+        }
+        let nowMs = Date().timeIntervalSince1970 * 1000
+        if nowMs - lastPullStateDispatchedAtMs < pullStateDispatchCooldownMs {
+            os_log("[wc-bridge] duplicate pull_state ignored", log: wcLog, type: .default)
+            logDiag("dispatchCommand.pullStateCooldown")
+            return true
+        }
+        lastPullStateDispatchedAtMs = nowMs
+        return false
     }
 
     private func isWorkoutCommand(_ command: String) -> Bool {

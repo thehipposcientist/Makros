@@ -36,6 +36,7 @@ import SocialAvatar from '../components/SocialAvatar';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const WATCH_WORKOUT_COMMAND_TTL_MS = 4 * 60 * 60_000;
+const WATCH_FULL_SYNC_COOLDOWN_MS = 5_000;
 type WatchSyncUiSnapshot = {
   surface: string;
   ok: boolean;
@@ -95,7 +96,7 @@ import { coachApplyNeedsDayStatusRefresh, skippedDayBadgeLabel, skippedDayTitle,
 import { isExtraWorkoutActivitySession } from '../utils/workoutCompletion';
 import { PRIMARY_GOALS } from '../constants/goalConfig';
 import { getMealChecks, saveMealChecks, MealChecks, getSavedNutritionPlan, saveNutritionPlan, getPreservedMeals, savePreservedMeal, clearPreservedMeal, clearPreservedMealBySignature, getAllSavedNutritionPlans, getAllMealChecks } from '../utils/mealTracker';
-import { setMealCheckedInChecksByDate, upsertMealInPlansByDate } from '../utils/mealPlanState';
+import { inferMealCheckKeyFromHistoryEntry, mergeMealHistoryIntoChecksByDate, setMealCheckedInChecksByDate, upsertMealInPlansByDate } from '../utils/mealPlanState';
 import { ensureItems, migrateNutritionPlanShape, normalizeServingUnitsInPlan } from '../utils/mealItems';
 import { cleanAiText } from '../utils/aiText';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -1717,6 +1718,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // and never disappears no matter which tab is active.
   const [activeTab, setActiveTabRaw]      = useState<'friends' | 'workout' | 'meals' | 'progress' | 'you'>('workout');
   const [watchSyncStatus, setWatchSyncStatus] = useState<WatchSyncUiSnapshot | null>(null);
+  const lastHomeFullWatchSyncAtRef = useRef(0);
+  const claimHomeFullWatchSync = useCallback((reason: string, force = false) => {
+    const now = Date.now();
+    if (!force && now - lastHomeFullWatchSyncAtRef.current < WATCH_FULL_SYNC_COOLDOWN_MS) {
+      console.log(`[watch] ${reason} full sync skipped — recently synced`);
+      return false;
+    }
+    lastHomeFullWatchSyncAtRef.current = now;
+    return true;
+  }, []);
   const [progressTabMounted, setProgressTabMounted] = useState(false);
   const progressFade = useRef(new Animated.Value(0)).current;
   const bottomNavFloat = useRef(new Animated.Value(1)).current;
@@ -2749,6 +2760,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [authToken]);
 
   useEffect(() => {
+    if (!backendMealHistory?.length) return;
+    const { checksByDate: merged, changedDates } = mergeMealHistoryIntoChecksByDate(
+      checkedMealsByDateRef.current,
+      nutritionPlansByDateRef.current,
+      backendMealHistory,
+      { maxDate: todayKey() },
+    );
+    if (changedDates.length === 0) return;
+
+    checkedMealsByDateRef.current = merged as Record<string, MealChecks>;
+    setCheckedMealsByDate(merged as Record<string, MealChecks>);
+    changedDates.forEach((date) => {
+      const dateChecks = merged[date] as MealChecks;
+      saveMealChecks(date, dateChecks).catch(() => {});
+      if (authToken) {
+        persistDayState(date, { meal_checks: dateChecks }).catch(() => {});
+      }
+    });
+  }, [authToken, backendMealHistory, nutritionPlansByDate, persistDayState]);
+
+  useEffect(() => {
     AsyncStorage.getItem('user_username').then(v => { if (v) setUsername(v); }).catch(() => {});
     import('../utils/workoutReminders').then(({ loadReminderSettings }) =>
       loadReminderSettings().then(s => setWorkoutReminder(s)).catch(() => {})
@@ -3267,6 +3299,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         } = watchSync;
         const unsub = onWatchReachabilityChange((info) => {
           if (!info.reachable) return;
+          if (!claimHomeFullWatchSync('reachability')) return;
           const s = rePushStateRef.current;
           const todayISO = todayKey();
           // Find today by date — with the dated PlanWeek the today card
@@ -3318,10 +3351,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 readiness: s.readinessScore?.score ?? null,
                 readinessLabel: s.readinessScore?.label ?? null,
                 reason: 'reachability',
-                force: true,
               }).catch(() => {});
             }
-            await pushThemeToWatch(s.themePreference, { force: true }).catch(() => {});
+            await pushThemeToWatch(s.themePreference).catch(() => {});
             const todayPlan = s.nutritionPlansByDate[todayISO]
               ?? (Object.values(s.nutritionPlansByDate)[0] as any);
             await pushMealsToWatch(
@@ -3329,7 +3361,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               s.checkedMealsByDate[todayISO],
               todayISO,
               s.nutritionScoreData?.score ?? null,
-              { force: true },
             ).catch(() => {});
             let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
             if (!hydrationSnapshot && authToken) {
@@ -3339,7 +3370,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               dateISO: hydrationSnapshot?.date ?? todayISO,
               ounces: hydrationSnapshot?.ounces ?? 0,
               targetOunces: hydrationSnapshot?.target_ounces ?? 64,
-              force: true,
             }).catch(() => {});
           })();
 
@@ -3351,7 +3381,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             try {
               const { getHealthDataSummary } = await import('../services/healthDataSummary');
               const cached = await getHealthDataSummary({ age: s.profileAge ?? null });
-              await pushSleepToWatch({ ...buildWatchSleepPayloadFromSummary(cached), force: true });
+              await pushSleepToWatch(buildWatchSleepPayloadFromSummary(cached));
             } catch { /* non-fatal */ }
           })();
           // Readiness push: always go through the server's
@@ -3390,7 +3420,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 summary: serverResp.summary,
                 factors: serverResp.factors as any,
                 syncedAtMs: serverResp.computed_at_ms,
-                force: true,
               } as any);
             } catch { /* non-fatal */ }
           })();
@@ -3410,7 +3439,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     skipped: !!(sup.logs_today || []).find(l => l.skipped),
                   })),
                   undefined,
-                  { force: true },
                 );
               }
             } catch { /* non-fatal */ }
@@ -3440,7 +3468,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   slope = (ema - oldEma);
                 }
               }
-              await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope, force: true });
+              await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope });
             } catch { /* non-fatal */ }
           })();
         });
@@ -3454,7 +3482,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       token.cancelled = true;
       if (token.unsub) { try { token.unsub(); } catch {} }
     };
-  }, [authToken]);
+  }, [authToken, claimHomeFullWatchSync]);
 
   // Listen for commands the user taps on the watch. Routes each to
   // the existing phone-side action — watch is purely a remote control
@@ -3580,6 +3608,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             return;
           }
           if (command === 'pull_state') {
+            const forcePull = payload?.force === true;
+            if (!claimHomeFullWatchSync('pull_state', forcePull)) return;
             // Watch explicitly asked for a fresh snapshot — push
             // workout + meals + theme via the same path the
             // reachability listener uses. Bypasses stale
@@ -3635,10 +3665,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     readiness: s.readinessScore?.score ?? null,
                     readinessLabel: s.readinessScore?.label ?? null,
                     reason: 'pull_state',
-                    force: true,
+                    force: forcePull,
                   }).catch(() => {});
                 }
-                await pushThemeToWatch(s.themePreference, { force: true }).catch(() => {});
+                await pushThemeToWatch(s.themePreference, { force: forcePull }).catch(() => {});
                 const todayPlan = s.nutritionPlansByDate[todayISO]
                   ?? (Object.values(s.nutritionPlansByDate)[0] as any);
                 await pushMealsToWatch(
@@ -3646,7 +3676,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   s.checkedMealsByDate[todayISO],
                   todayISO,
                   s.nutritionScoreData?.score ?? null,
-                  { force: true },
+                  { force: forcePull },
                 ).catch(() => {});
                 let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
                 if (!hydrationSnapshot && authToken) {
@@ -3656,7 +3686,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   dateISO: hydrationSnapshot?.date ?? todayISO,
                   ounces: hydrationSnapshot?.ounces ?? 0,
                   targetOunces: hydrationSnapshot?.target_ounces ?? 64,
-                  force: true,
+                  force: forcePull,
                 }).catch(() => {});
                 // push_state also sends the full data set that the
                 // reachability listener sends, so a manual sync is
@@ -3665,7 +3695,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   try {
                     const { getHealthDataSummary } = await import('../services/healthDataSummary');
                     const cached = await getHealthDataSummary({ age: s.profileAge ?? null }).catch(() => null);
-                    await pushSleepToWatch({ ...buildWatchSleepPayloadFromSummary(cached), force: true });
+                    await pushSleepToWatch({ ...buildWatchSleepPayloadFromSummary(cached), force: forcePull });
                   } catch { /* non-fatal */ }
                 })();
                 (async () => {
@@ -3680,7 +3710,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         timing: sup.timing ?? null,
                         taken: !!(sup.logs_today || []).find((l: any) => !l.skipped),
                         skipped: !!(sup.logs_today || []).find((l: any) => l.skipped),
-                      })), undefined, { force: true });
+                      })), undefined, { force: forcePull });
                     }
                   } catch { /* non-fatal */ }
                 })();
@@ -3700,7 +3730,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       const old = entries.slice(-14, -7);
                       if (old.length > 0) slope = ema - old.reduce((acc: number, e: any) => acc + Number(e.weight_lbs), 0) / old.length;
                     }
-                    await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope, force: true });
+                    await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope, force: forcePull });
                   } catch { /* non-fatal */ }
                 })();
               } catch { /* bridge optional */ }
@@ -9068,12 +9098,28 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                             onPress: async () => {
                                               if (hasBackendMeals && historyMealId && authToken) {
                                                 try {
+                                                  const deletedEntry = backendMealHistory?.find(e => e.id === historyMealId) ?? null;
+                                                  const deletedCheckKey = deletedEntry
+                                                    ? inferMealCheckKeyFromHistoryEntry(deletedEntry, nutritionPlansByDateRef.current[d])
+                                                    : null;
                                                   await deleteLoggedMeal(authToken, historyMealId);
                                                   // Optimistic local strip + bump the
                                                   // refresh key so getMealHistory
                                                   // re-fires and any cards / score
                                                   // tiles re-render.
                                                   setBackendMealHistory(prev => prev?.filter(e => e.id !== historyMealId) ?? null);
+                                                  if (deletedCheckKey) {
+                                                    const current = checkedMealsByDateRef.current[d] ?? {};
+                                                    if (current[deletedCheckKey]) {
+                                                      const next = { ...current };
+                                                      delete next[deletedCheckKey];
+                                                      checkedMealsByDateRef.current = { ...checkedMealsByDateRef.current, [d]: next };
+                                                      setCheckedMealsByDate(prev => ({ ...prev, [d]: next }));
+                                                      await saveMealChecks(d, next);
+                                                      await persistDayState(d, { meal_checks: next });
+                                                      await clearPreservedMealBySignature(d, m.meal, m.calories ?? 0).catch(() => {});
+                                                    }
+                                                  }
                                                   setMealLogRefreshKey(k => k + 1);
                                                 } catch (err: any) {
                                                   Alert.alert('Could not delete', err?.message ?? 'Try again.');

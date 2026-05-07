@@ -45,6 +45,7 @@ const ImagePicker: typeof import('expo-image-picker') = (() => {
 const SOCIAL_WORKOUT_POSTS_ENABLED = true;
 const SHARE_WORKOUT_MODAL_OPEN_DELAY_MS = 360;
 const WATCH_COMMAND_START_GRACE_MS = 5000;
+const WATCH_FULL_SYNC_COOLDOWN_MS = 5_000;
 const REST_RECOMMENDATION_TUTORIAL_KEY = 'tutorial_live_rest_recommendation_v1_seen';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import * as FileSystem from 'expo-file-system';
@@ -1505,6 +1506,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [watchSessionHydrated, setWatchSessionHydrated] = useState(false);
   const [activeWorkoutStateRestored, setActiveWorkoutStateRestored] = useState(false);
   const watchWorkoutEndedRef = useRef(false);
+  const lastActiveWatchReachabilityPushAtRef = useRef(0);
+  const activeSnapshotAutoKeyRef = useRef<string>('');
+  const lastActiveSnapshotAutoKeyPushedRef = useRef<string | null>(null);
   const cancelingWorkoutRef = useRef(false);
   const [cancelingWorkout, setCancelingWorkout] = useState(false);
   const buildWatchWorkoutSnapshotRef = useRef<() => any>(() => workout as any);
@@ -1642,6 +1646,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         // replaced when the AI warmup resolves a beat after mount).
         const pushActive = () => {
           if (!token.cancelled) setWatchSyncing(true);
+          const snapshotKey = activeSnapshotAutoKeyRef.current;
           return pushWorkoutToWatch(buildWatchWorkoutSnapshotRef.current(), {
             dateISO: dateKey(new Date()),
             status: 'active',
@@ -1649,7 +1654,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             warmupSteps: warmupStepsRef.current,
             reason: 'active_snapshot',
           })
-            .then(async () => {
+            .then(async (ok) => {
+              if (ok && snapshotKey) {
+                lastActiveSnapshotAutoKeyPushedRef.current = snapshotKey;
+              }
               await pushRestProgressToWatchRef.current();
               reassertRestProgressToWatchRef.current();
             })
@@ -1679,6 +1687,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         const unsub = onWatchReachabilityChange((info) => {
           setWatchStatus({ paired: info.paired, reachable: info.reachable });
           if (info.reachable) {
+            const now = Date.now();
+            if (now - lastActiveWatchReachabilityPushAtRef.current < WATCH_FULL_SYNC_COOLDOWN_MS) {
+              console.log('[watch] reachable active push skipped — recently synced');
+              return;
+            }
+            lastActiveWatchReachabilityPushAtRef.current = now;
             console.log('[watch] reachable — re-pushing active workout');
             pushActive();
           }
@@ -1691,7 +1705,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       token.cancelled = true;
       if (token.unsub) { try { token.unsub(); } catch {} }
     };
-  }, [activeWorkoutStateRestored, watchSessionHydrated, workout, showStartCountdown]);
+  // Snapshot builders and warmup state are read through refs so this effect
+  // owns the session lifecycle instead of re-running on every set/recommendation.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeWorkoutStateRestored, watchSessionHydrated, showStartCountdown]);
 
   // Watch→phone command handler. The watch is a remote control for the
   // phone's workout state — log_set commits weight/reps into the same
@@ -1791,6 +1808,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         };
         const handleWatchCommand = (command: string, payload: Record<string, any>) => {
           if (command === 'pull_state') {
+            const forcePull = payload?.force === true;
+            const now = Date.now();
+            if (!forcePull && now - lastActiveWatchReachabilityPushAtRef.current < WATCH_FULL_SYNC_COOLDOWN_MS) {
+              console.log('[watch] pull_state active push skipped — recently synced');
+              return;
+            }
+            lastActiveWatchReachabilityPushAtRef.current = now;
             // Watch asked for a refresh while we're mid-workout —
             // push `status: 'active'` + current warmup steps so the
             // wrist flips to the active view with fresh content.
@@ -1803,6 +1827,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   sessionId: watchSessionId.current,
                   warmupSteps: warmupStepsRef.current,
                   reason: 'pull_state',
+                  force: forcePull,
                 });
                 await pushRestProgressToWatchRef.current();
                 reassertRestProgressToWatchRef.current();
@@ -3162,6 +3187,40 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 
   buildWatchWorkoutSnapshotRef.current = buildWatchWorkoutSnapshot;
 
+  const activeSnapshotAutoKey = useMemo(() => {
+    const rows = exercises.map((ex) => {
+      const guide = isGuideExercise(ex, workout);
+      return {
+        name: ex.name,
+        sets: getTargetSetCount(ex.targetSets),
+        reps: ex.targetReps,
+        restSeconds: guide ? 0 : ex.targetRestSeconds,
+        equipment: ex.equipment,
+        primaryMuscle: ex.primaryMuscle ?? ex.primary_muscle ?? null,
+        cardioGuidance: (ex as any).cardioGuidance ?? null,
+        targetWeightLbs: guide ? null : ex.targetWeightLbs ?? null,
+        slotRole: (ex as any).slotRole ?? (ex as any).slot_role ?? null,
+        prescriptionType: (ex as any).prescriptionType ?? (ex as any).prescription_type ?? null,
+        swapOptions: swapCandidatesForExercise(ex).map(option => ({
+          name: option.name,
+          equipment: exerciseEquipmentLabel(option) ?? option.equipment ?? null,
+          primaryMuscle: option.primary_muscle ?? null,
+          overlap: option._overlap ?? null,
+        })),
+      };
+    });
+    return JSON.stringify({
+      focus: workout.focus,
+      day: workout.day,
+      stimulus: workout.stimulus ?? null,
+      hrZones,
+      warmupSteps,
+      exercises: rows,
+    });
+  }, [exerciseLibrary, exercises, hrZones, swapCandidatesForExercise, warmupSteps, workout]);
+
+  activeSnapshotAutoKeyRef.current = activeSnapshotAutoKey;
+
   const performWatchExerciseSwap = useCallback(async (
     exerciseIndex: number,
     toExerciseName?: string | null,
@@ -3234,9 +3293,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   watchSwapExerciseRef.current = performWatchExerciseSwap;
 
   useEffect(() => {
-    if (showStartCountdown) return;
+    if (!watchSessionHydrated || !activeWorkoutStateRestored || showStartCountdown) return;
+    if (!lastActiveSnapshotAutoKeyPushedRef.current) return;
+    if (lastActiveSnapshotAutoKeyPushedRef.current === activeSnapshotAutoKey) return;
     const timer = setTimeout(() => {
       if (watchWorkoutEndedRef.current) return;
+      const snapshotKey = activeSnapshotAutoKey;
       import('../utils/watchSync')
         .then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(buildWatchWorkoutSnapshot(), {
           dateISO: dateKey(new Date()),
@@ -3244,11 +3306,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           sessionId: watchSessionId.current,
           warmupSteps: warmupStepsRef.current,
           reason: 'active_snapshot',
-        }).catch(() => {}))
+        })
+          .then((ok) => {
+            if (ok) lastActiveSnapshotAutoKeyPushedRef.current = snapshotKey;
+          })
+          .catch(() => {}))
         .catch(() => {});
     }, 250);
     return () => clearTimeout(timer);
-  }, [buildWatchWorkoutSnapshot, exercises, showStartCountdown, warmupSteps]);
+  }, [activeSnapshotAutoKey, activeWorkoutStateRestored, buildWatchWorkoutSnapshot, showStartCountdown, watchSessionHydrated]);
 
   // Elapsed workout timer
   useManagedInterval(() => {

@@ -56,13 +56,12 @@ Digest `summary`: `friend_count`, `friends_trained_this_week`, `total_friend_ses
 
 ## Client (`src/components/FriendsModal.tsx`, `src/components/SocialFeedView.tsx`)
 
-Full-screen modal in `HomeScreen`. Two tabs:
+Full-screen modal in `HomeScreen`. Three tabs:
 1. **Activity** — latest workout shares from self + friends with sharing enabled.
-2. **Friends** — THIS WEEK digest, requests/friends/sent rows, and ADD FRIENDS username search with 250ms debounce.
+2. **Friends** — username search with 250ms debounce and the accepted friends list only.
+3. **Profile** — own social profile, incoming friend invites, sent requests, sharing controls, invite handle, and THIS WEEK digest.
 
-Both tabs share the Social toolbar. The bell opens the in-app notification tray; friend-request taps switch to Friends, like/accept taps switch to Activity. Bottom-tab badge uses unread social notifications, falling back to incoming request count.
-
-Profile tab: "Friends · N" row with pending-request badge. Count refreshes on Profile-tab activation + FriendsModal close.
+All tabs share the Social toolbar. The bell opens the in-app notification tray; friend-request taps switch to Profile, like/accept taps switch to Activity. Bottom-tab badge uses unread social notifications, falling back to incoming request count.
 
 ## Key Design Decisions
 

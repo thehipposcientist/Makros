@@ -44,6 +44,7 @@ import {
 import SocialFeedView from './SocialFeedView';
 
 const SOCIAL_ACTIVITY_FEED_ENABLED = true;
+type SocialTab = 'friends' | 'activity' | 'profile';
 
 interface Props {
   visible: boolean;
@@ -143,9 +144,10 @@ export default function FriendsModal({
   const [showOptIn, setShowOptIn] = useState(false);
   // Feed is the default tab so users land on activity immediately.
   // Friends tab lazy-renders on first switch (no extra cost on open).
-  const [activeTab, setActiveTab] = useState<'friends' | 'activity'>(
+  const [activeTab, setActiveTab] = useState<SocialTab>(
     SOCIAL_ACTIVITY_FEED_ENABLED ? 'activity' : 'friends',
   );
+  const [initialRequestsFocused, setInitialRequestsFocused] = useState(false);
   // Bumped to force the activity view to re-fetch (e.g., after share).
   const [feedRefreshKey, setFeedRefreshKey] = useState(0);
   void setFeedRefreshKey;
@@ -162,6 +164,13 @@ export default function FriendsModal({
       if (m.status === 'fulfilled') setMe(m.value);
       if (l.status === 'fulfilled') {
         setList(l.value);
+        const incomingCount = l.value.pending.filter(p => p.direction === 'incoming').length;
+        if (incomingCount > 0 && !initialRequestsFocused) {
+          setActiveTab('profile');
+          setInitialRequestsFocused(true);
+        } else if (incomingCount === 0 && initialRequestsFocused) {
+          setInitialRequestsFocused(false);
+        }
       }
       if (d.status === 'fulfilled') setDigest(d.value);
       if (n.status === 'fulfilled') {
@@ -180,7 +189,7 @@ export default function FriendsModal({
     } finally {
       setLoading(false);
     }
-  }, [authToken, onSocialCountsChange]);
+  }, [authToken, initialRequestsFocused, onSocialCountsChange]);
 
   useEffect(() => {
     if (!visible && !inline) return;
@@ -421,7 +430,14 @@ export default function FriendsModal({
   const outgoing = list?.pending.filter((p) => p.direction === 'outgoing') ?? [];
   const friends = list?.friends ?? [];
   const hasUnreadSocial = unreadNotifications > 0;
+  const hasUnreadFriendRequests = notifications.some(
+    (n) => !n.read_at && n.notification_type === 'friend_request',
+  );
+  const hasUnreadActivity = notifications.some(
+    (n) => !n.read_at && n.notification_type !== 'friend_request',
+  );
   const hasIncomingRequests = incoming.length > 0;
+  const hasProfileUpdates = hasIncomingRequests || hasUnreadFriendRequests;
 
   const updateLocalUnread = useCallback(
     (nextUnread: number, nextNotifications?: SocialNotification[]) => {
@@ -453,7 +469,7 @@ export default function FriendsModal({
         setNotificationActionPending(null);
       }
       if (n.notification_type === 'friend_request') {
-        setActiveTab('friends');
+        setActiveTab('profile');
         setNotificationTrayOpen(false);
         return;
       }
@@ -518,27 +534,9 @@ export default function FriendsModal({
       }
     : null;
 
-  const addFriendsSection = (
-    <View style={styles.section}>
-      <Text style={styles.sectionLabel}>ADD FRIENDS</Text>
-      {me?.username ? (
-        <View style={styles.inviteCard}>
-          <View style={styles.inviteIcon}>
-            <Ionicons name="person-add-outline" size={18} color={colors.primary} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.inviteTitle}>Invite by username</Text>
-            <Text style={styles.inviteHandle}>@{me.username}</Text>
-            <Text style={styles.inviteBody}>
-              Friends can search this handle, or you can share it directly.
-            </Text>
-          </View>
-          <TouchableOpacity style={styles.inviteButton} onPress={onShareInvite} activeOpacity={0.78}>
-            <Ionicons name="share-outline" size={15} color={getContrastingTextColor(colors.primary)} />
-            <Text style={styles.btnPrimaryText}>Share</Text>
-          </TouchableOpacity>
-        </View>
-      ) : null}
+  const friendSearchSection = (
+    <View style={styles.section} testID="social-friend-search">
+      <Text style={styles.sectionLabel}>SEARCH</Text>
       <View style={[styles.searchRow, searchFocused && { borderColor: colors.primary, borderWidth: 1.5 }]}>
         <Ionicons name="search" size={16} color={searchFocused ? colors.primary : colors.textMuted} />
         <TextInput
@@ -596,11 +594,238 @@ export default function FriendsModal({
     </View>
   );
 
+  const thisWeekCard = (
+    <View style={styles.card}>
+      <Text style={styles.cardLabel}>THIS WEEK</Text>
+      {headlineLines.length === 0 ? (
+        <Text style={styles.cardBody}>
+          Add a friend to see how their week stacks up against yours.
+        </Text>
+      ) : (
+        headlineLines.map((line, i) => (
+          <Text key={i} style={styles.cardBody}>
+            {line}
+          </Text>
+        ))
+      )}
+      <View style={styles.youRow}>
+        <Text style={styles.youLabel}>YOU</Text>
+        <Text style={styles.youValue}>
+          {digest?.you.sessions ?? 0} session{(digest?.you.sessions ?? 0) === 1 ? '' : 's'}
+          {digest && digest.you.streak >= 2 ? ` · ${digest.you.streak}-day streak` : ''}
+        </Text>
+      </View>
+      <View style={styles.privacyRow}>
+        <Ionicons name="lock-closed-outline" size={13} color={colors.primary} />
+        <Text style={styles.privacyText}>
+          Private by design: friends never see calories, macros, meals, body weight, body photos, or measurements.
+        </Text>
+      </View>
+    </View>
+  );
+
+  const myProfileSection = myProfileFriend ? (
+    <TouchableOpacity
+      testID="social-my-profile-card"
+      accessibilityLabel="social-my-profile-card"
+      style={styles.selfProfileCard}
+      activeOpacity={0.78}
+      onPress={() => onViewFriend?.(myProfileFriend.user_id, myProfileFriend.display_name, myProfileFriend)}
+    >
+      <SocialAvatar
+        avatarUrl={myProfileFriend.avatar_url}
+        name={myProfileFriend.display_name}
+        username={myProfileFriend.username}
+        size={44}
+        backgroundColor={colors.primary + '22'}
+        borderColor={colors.primary + '55'}
+        textColor={colors.primary}
+      />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.selfProfileTitle}>My profile</Text>
+        <Text style={styles.selfProfileMeta}>
+          @{myProfileFriend.username} · {myProfileFriend.sessions} session{myProfileFriend.sessions === 1 ? '' : 's'} this week
+        </Text>
+      </View>
+      <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+    </TouchableOpacity>
+  ) : null;
+
+  const profileInviteSection = me?.username ? (
+    <View style={styles.section}>
+      <Text style={styles.sectionLabel}>YOUR HANDLE</Text>
+      <View style={styles.inviteCard}>
+        <View style={styles.inviteIcon}>
+          <Ionicons name="person-add-outline" size={18} color={colors.primary} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.inviteTitle}>Invite by username</Text>
+          <Text style={styles.inviteHandle}>@{me.username}</Text>
+          <Text style={styles.inviteBody}>
+            Friends can search this handle, or you can share it directly.
+          </Text>
+        </View>
+        <TouchableOpacity style={styles.inviteButton} onPress={onShareInvite} activeOpacity={0.78}>
+          <Ionicons name="share-outline" size={15} color={getContrastingTextColor(colors.primary)} />
+          <Text style={styles.btnPrimaryText}>Share</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  ) : null;
+
+  const sharingReminder = me && !me.share_activity_enabled && friends.length > 0 ? (
+    <TouchableOpacity
+      style={[styles.card, { borderColor: colors.warning, borderWidth: 1 }]}
+      onPress={() => setShowOptIn(true)}
+      activeOpacity={0.85}
+    >
+      <Text style={[styles.cardLabel, { color: colors.warning }]}>SHARING IS OFF</Text>
+      <Text style={styles.cardBody}>
+        Friends can&apos;t see your training activity until you turn this on. Tap to enable.
+      </Text>
+    </TouchableOpacity>
+  ) : null;
+
+  const incomingRequestsSection = (
+    <View style={styles.section} testID="social-incoming-requests">
+      <Text style={styles.sectionLabel}>FRIEND INVITES{incoming.length > 0 ? `  ·  ${incoming.length}` : ''}</Text>
+      {incoming.length === 0 ? (
+        <View style={styles.emptyCard}>
+          <View style={styles.emptyIconBubble}>
+            <Ionicons name="mail-open-outline" size={24} color={colors.primary} />
+          </View>
+          <Text {...dynamicTextProps} style={styles.emptyTitle}>No friend invites</Text>
+          <Text {...dynamicTextProps} style={styles.emptyBody}>
+            New requests will show up here.
+          </Text>
+        </View>
+      ) : (
+        incoming.map((p, i) => (
+          <FadeInView key={p.friendship_id} delay={i * 50} duration={250} slideDistance={6}>
+            <View style={styles.friendRow}>
+              <SocialAvatar
+                avatarUrl={p.avatar_url}
+                name={p.display_name}
+                username={p.username}
+                size={36}
+                backgroundColor={colors.primary + '22'}
+                borderColor={colors.primary + '55'}
+                textColor={colors.primary}
+              />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.friendName}>{p.display_name ?? p.username}</Text>
+                <Text style={styles.friendMeta}>@{p.username}</Text>
+              </View>
+              <TouchableOpacity activeOpacity={0.75} style={styles.btnSecondary} onPress={() => onReject(p.friendship_id)}>
+                <Text style={styles.btnSecondaryText}>Decline</Text>
+              </TouchableOpacity>
+              <TouchableOpacity activeOpacity={0.75} style={styles.btnPrimary} onPress={() => onAccept(p.friendship_id)}>
+                <Text style={styles.btnPrimaryText}>Accept</Text>
+              </TouchableOpacity>
+            </View>
+          </FadeInView>
+        ))
+      )}
+    </View>
+  );
+
+  const friendsListSection = (
+    <View style={styles.section}>
+      <Text style={styles.sectionLabel}>FRIENDS{friends.length > 0 ? `  ·  ${friends.length}` : ''}</Text>
+      {friends.length === 0 ? (
+        <View style={styles.emptyCard}>
+          <View style={styles.emptyIconBubble}>
+            <Ionicons name="people-outline" size={24} color={colors.primary} />
+          </View>
+          <Text {...dynamicTextProps} style={styles.emptyTitle}>No friends yet</Text>
+          <Text {...dynamicTextProps} style={styles.emptyBody}>
+            Search by username to add friends.
+          </Text>
+        </View>
+      ) : (
+        <View style={styles.friendGrid}>
+          {friends.map((f) => (
+            <TouchableOpacity
+              key={f.user_id}
+              testID={`social-friend-row-${e2eId(f.username)}`}
+              accessibilityLabel={`social-friend-row-${e2eId(f.username)}`}
+              style={styles.friendCircleCard}
+              activeOpacity={0.72}
+              onPress={() => {
+                if (onViewFriend) {
+                  const df = digest?.friends.find((d) => d.user_id === f.user_id);
+                  const digestFriend = df ?? {
+                    user_id: f.user_id, username: f.username,
+                    display_name: f.display_name ?? f.username,
+                    avatar_url: f.avatar_url ?? null,
+                    goal: f.goal, share_enabled: true,
+                    sessions: 0, streak: f.streak,
+                    last_active_within_48h: f.last_active_within_48h,
+                  };
+                  onViewFriend(f.user_id, f.display_name ?? f.username, digestFriend);
+                }
+              }}
+              onLongPress={() => onFriendOptions(f)}
+            >
+              <SocialAvatar
+                avatarUrl={f.avatar_url}
+                name={f.display_name}
+                username={f.username}
+                size={58}
+                backgroundColor={colors.primary + '22'}
+                borderColor={colors.primary + '55'}
+                textColor={colors.primary}>
+                <View
+                  style={[
+                    styles.activeDot,
+                    { backgroundColor: f.last_active_within_48h ? colors.success : colors.border },
+                  ]}
+                />
+              </SocialAvatar>
+              <Text style={styles.friendCircleName} numberOfLines={1}>
+                {f.display_name ?? f.username}
+              </Text>
+              <Text style={styles.friendCircleHandle} numberOfLines={1}>
+                @{f.username}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+    </View>
+  );
+
+  const outgoingPendingSection = outgoing.length > 0 ? (
+    <View style={styles.section}>
+      <Text style={styles.sectionLabel}>SENT</Text>
+      {outgoing.map((p) => (
+        <View key={p.friendship_id} style={styles.friendRow}>
+          <SocialAvatar
+            avatarUrl={p.avatar_url}
+            name={p.display_name}
+            username={p.username}
+            size={36}
+            backgroundColor={colors.primary + '22'}
+            borderColor={colors.primary + '55'}
+            textColor={colors.primary}
+          />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.friendName}>{p.display_name ?? p.username}</Text>
+            <Text style={styles.friendMeta}>Pending…</Text>
+          </View>
+          <TouchableOpacity style={styles.btnSecondary} onPress={() => onReject(p.friendship_id)}>
+            <Text style={styles.btnSecondaryText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      ))}
+    </View>
+  ) : null;
+
   const content = (
     <>
       {!inline && (
         <View style={styles.header}>
-          <Text style={styles.title}>Friends</Text>
+          <Text style={styles.title}>Social</Text>
           <TouchableOpacity onPress={onClose} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Ionicons name="close" size={22} color={colors.textSecondary} />
           </TouchableOpacity>
@@ -662,14 +887,14 @@ export default function FriendsModal({
         </View>
       ) : null}
 
-      {/* Friends / Activity switch. "Activity" is a bounded digest
-          (latest 10 shares from friends), not an open scrolling feed. */}
+      {/* Social tabs. "Activity" is a bounded digest (latest 10 shares
+          from friends), not an open scrolling feed. */}
       <View style={styles.tabStrip}>
         <View style={styles.tabGroup}>
           {SOCIAL_ACTIVITY_FEED_ENABLED ? (
             <TouchableOpacity
               testID="social-tab-activity"
-              accessibilityLabel={hasUnreadSocial ? 'Activity, new updates' : 'Activity'}
+              accessibilityLabel={hasUnreadActivity ? 'Activity, new updates' : 'Activity'}
               style={styles.tab}
               onPress={() => {
                 setActiveTab('activity');
@@ -680,14 +905,14 @@ export default function FriendsModal({
                 <Text style={[styles.tabText, activeTab === 'activity' && styles.tabTextActive]}>
                   Activity
                 </Text>
-                {hasUnreadSocial ? <View style={styles.tabDot} /> : null}
+                {hasUnreadActivity ? <View style={styles.tabDot} /> : null}
               </View>
               <View style={[styles.tabIndicator, activeTab === 'activity' && styles.tabIndicatorActive]} />
             </TouchableOpacity>
           ) : null}
           <TouchableOpacity
             testID="social-tab-friends"
-            accessibilityLabel={hasIncomingRequests ? 'Friends, requests waiting' : 'Friends'}
+            accessibilityLabel="Friends"
             style={styles.tab}
             onPress={() => {
               setActiveTab('friends');
@@ -698,9 +923,25 @@ export default function FriendsModal({
               <Text style={[styles.tabText, activeTab === 'friends' && styles.tabTextActive]}>
                 Friends
               </Text>
-              {hasIncomingRequests ? <View style={styles.tabDot} /> : null}
             </View>
             <View style={[styles.tabIndicator, activeTab === 'friends' && styles.tabIndicatorActive]} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            testID="social-tab-profile"
+            accessibilityLabel={hasProfileUpdates ? 'Profile, friend invites waiting' : 'Profile'}
+            style={styles.tab}
+            onPress={() => {
+              setActiveTab('profile');
+              setNotificationTrayOpen(false);
+            }}
+          >
+            <View style={styles.tabLabelRow}>
+              <Text style={[styles.tabText, activeTab === 'profile' && styles.tabTextActive]}>
+                Profile
+              </Text>
+              {hasProfileUpdates ? <View style={styles.tabDot} /> : null}
+            </View>
+            <View style={[styles.tabIndicator, activeTab === 'profile' && styles.tabIndicatorActive]} />
           </TouchableOpacity>
         </View>
         <TouchableOpacity
@@ -723,239 +964,58 @@ export default function FriendsModal({
       </View>
 
       <FadeInView key={activeTab} duration={240} slideDistance={8} style={{ flex: 1 }}>
-      {SOCIAL_ACTIVITY_FEED_ENABLED && activeTab === 'activity' ? (
-        <SocialFeedView
-          authToken={authToken}
-          themeName={themeName}
-          bottomPadding={inline ? 116 : 8}
-          refreshKey={feedRefreshKey}
-          shareEnabled={me?.share_activity_enabled ?? false}
-          myActivity={digest?.you ?? null}
-          myDisplayName={me?.display_name ?? me?.username ?? ''}
-          myAvatarUrl={me?.avatar_url ?? null}
-          onViewAuthor={(uid, displayName) => {
-            // Reuse the existing friend-detail surface — find the
-            // matching digest entry so the parent can render their
-            // streak/sessions. If they're not in the digest (e.g.,
-            // not a friend yet) we still call onViewFriend so the
-            // parent can decide what to do.
-            const df = digest?.friends.find((d) => d.user_id === uid);
-            const digestFriend = df ?? {
-              user_id: uid, username: '', display_name: displayName,
-              avatar_url: null,
-              goal: null, share_enabled: true,
-              sessions: 0, streak: 0, last_active_within_48h: false,
-            };
-            onViewFriend?.(uid, displayName, digestFriend);
-          }}
-        />
-      ) : loading && !list ? (
-            <View style={{ padding: 24, alignItems: 'center' }}>
-              <ActivityIndicator color={colors.primary} />
-            </View>
-          ) : (
-            <ScrollView
-              testID="social-friends-list"
-              style={{ flex: 1 }}
-              contentContainerStyle={{ paddingTop: 8, paddingBottom: inline ? 128 : 24 }}>
-              {/* This week card */}
-              <View style={styles.card}>
-                <Text style={styles.cardLabel}>THIS WEEK</Text>
-                {headlineLines.length === 0 ? (
-                  <Text style={styles.cardBody}>
-                    Add a friend to see how their week stacks up against yours.
-                  </Text>
-                ) : (
-                  headlineLines.map((line, i) => (
-                    <Text key={i} style={styles.cardBody}>
-                      {line}
-                    </Text>
-                  ))
-                )}
-                <View style={styles.youRow}>
-                  <Text style={styles.youLabel}>YOU</Text>
-                  <Text style={styles.youValue}>
-                    {digest?.you.sessions ?? 0} session{(digest?.you.sessions ?? 0) === 1 ? '' : 's'}
-                    {digest && digest.you.streak >= 2 ? ` · ${digest.you.streak}-day streak` : ''}
-                  </Text>
-                </View>
-                <View style={styles.privacyRow}>
-                  <Ionicons name="lock-closed-outline" size={13} color={colors.primary} />
-                  <Text style={styles.privacyText}>
-                    Private by design: friends never see calories, macros, meals, body weight, body photos, or measurements.
-                  </Text>
-                </View>
-              </View>
-
-              {myProfileFriend ? (
-                <TouchableOpacity
-                  testID="social-my-profile-card"
-                  accessibilityLabel="social-my-profile-card"
-                  style={styles.selfProfileCard}
-                  activeOpacity={0.78}
-                  onPress={() => onViewFriend?.(myProfileFriend.user_id, myProfileFriend.display_name, myProfileFriend)}
-                >
-                  <SocialAvatar
-                    avatarUrl={myProfileFriend.avatar_url}
-                    name={myProfileFriend.display_name}
-                    username={myProfileFriend.username}
-                    size={44}
-                    backgroundColor={colors.primary + '22'}
-                    borderColor={colors.primary + '55'}
-                    textColor={colors.primary}
-                  />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.selfProfileTitle}>My profile</Text>
-                    <Text style={styles.selfProfileMeta}>
-                      @{myProfileFriend.username} · {myProfileFriend.sessions} session{myProfileFriend.sessions === 1 ? '' : 's'} this week
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
-                </TouchableOpacity>
-              ) : null}
-
-              {/* Sharing toggle reminder if disabled */}
-              {me && !me.share_activity_enabled && friends.length > 0 ? (
-                <TouchableOpacity
-                  style={[styles.card, { borderColor: colors.warning, borderWidth: 1 }]}
-                  onPress={() => setShowOptIn(true)}
-                  activeOpacity={0.85}
-                >
-                  <Text style={[styles.cardLabel, { color: colors.warning }]}>SHARING IS OFF</Text>
-                  <Text style={styles.cardBody}>
-                    Friends can&apos;t see your training activity until you turn this on. Tap to enable.
-                  </Text>
-                </TouchableOpacity>
-              ) : null}
-
-              {addFriendsSection}
-
-              {/* Incoming requests */}
-              {incoming.length > 0 ? (
-                <View style={styles.section}>
-                  <Text style={styles.sectionLabel}>REQUESTS</Text>
-                  {incoming.map((p, i) => (
-                    <FadeInView key={p.friendship_id} delay={i * 50} duration={250} slideDistance={6}>
-                    <View style={styles.friendRow}>
-                      <SocialAvatar
-                        avatarUrl={p.avatar_url}
-                        name={p.display_name}
-                        username={p.username}
-                        size={36}
-                        backgroundColor={colors.primary + '22'}
-                        borderColor={colors.primary + '55'}
-                        textColor={colors.primary}
-                      />
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.friendName}>{p.display_name ?? p.username}</Text>
-                        <Text style={styles.friendMeta}>@{p.username}</Text>
-                      </View>
-                      <TouchableOpacity activeOpacity={0.75} style={styles.btnSecondary} onPress={() => onReject(p.friendship_id)}>
-                        <Text style={styles.btnSecondaryText}>Decline</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity activeOpacity={0.75} style={styles.btnPrimary} onPress={() => onAccept(p.friendship_id)}>
-                        <Text style={styles.btnPrimaryText}>Accept</Text>
-                      </TouchableOpacity>
-                    </View>
-                    </FadeInView>
-                  ))}
-                </View>
-              ) : null}
-
-              {/* Friends list */}
-              <View style={styles.section}>
-                <Text style={styles.sectionLabel}>FRIENDS{friends.length > 0 ? `  ·  ${friends.length}` : ''}</Text>
-                {friends.length === 0 ? (
-                  <View style={styles.emptyCard}>
-                    <View style={styles.emptyIconBubble}>
-                      <Ionicons name="people-outline" size={24} color={colors.primary} />
-                    </View>
-                    <Text {...dynamicTextProps} style={styles.emptyTitle}>No friends yet</Text>
-                    <Text {...dynamicTextProps} style={styles.emptyBody}>
-                      Add a friend by username to see shared workout activity, streaks, and weekly training summaries here.
-                    </Text>
-                  </View>
-                ) : (
-                  <View style={styles.friendGrid}>
-                    {friends.map((f) => (
-                      <TouchableOpacity
-                        key={f.user_id}
-                        testID={`social-friend-row-${e2eId(f.username)}`}
-                        accessibilityLabel={`social-friend-row-${e2eId(f.username)}`}
-                        style={styles.friendCircleCard}
-                        activeOpacity={0.72}
-                        onPress={() => {
-                          if (onViewFriend) {
-                            const df = digest?.friends.find((d) => d.user_id === f.user_id);
-                            const digestFriend = df ?? {
-                              user_id: f.user_id, username: f.username,
-                              display_name: f.display_name ?? f.username,
-                              avatar_url: f.avatar_url ?? null,
-                              goal: f.goal, share_enabled: true,
-                              sessions: 0, streak: f.streak,
-                              last_active_within_48h: f.last_active_within_48h,
-                            };
-                            onViewFriend(f.user_id, f.display_name ?? f.username, digestFriend);
-                          }
-                        }}
-                        onLongPress={() => onFriendOptions(f)}
-                      >
-                        <SocialAvatar
-                          avatarUrl={f.avatar_url}
-                          name={f.display_name}
-                          username={f.username}
-                          size={58}
-                          backgroundColor={colors.primary + '22'}
-                          borderColor={colors.primary + '55'}
-                          textColor={colors.primary}>
-                          <View
-                            style={[
-                              styles.activeDot,
-                              { backgroundColor: f.last_active_within_48h ? colors.success : colors.border },
-                            ]}
-                          />
-                        </SocialAvatar>
-                        <Text style={styles.friendCircleName} numberOfLines={1}>
-                          {f.display_name ?? f.username}
-                        </Text>
-                        <Text style={styles.friendCircleHandle} numberOfLines={1}>
-                          @{f.username}
-                        </Text>
-                      </TouchableOpacity>
-                    ))}
-                  </View>
-                )}
-              </View>
-
-              {/* Outgoing pending */}
-              {outgoing.length > 0 ? (
-                <View style={styles.section}>
-                  <Text style={styles.sectionLabel}>SENT</Text>
-                  {outgoing.map((p) => (
-                    <View key={p.friendship_id} style={styles.friendRow}>
-                      <SocialAvatar
-                        avatarUrl={p.avatar_url}
-                        name={p.display_name}
-                        username={p.username}
-                        size={36}
-                        backgroundColor={colors.primary + '22'}
-                        borderColor={colors.primary + '55'}
-                        textColor={colors.primary}
-                      />
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.friendName}>{p.display_name ?? p.username}</Text>
-                        <Text style={styles.friendMeta}>Pending…</Text>
-                      </View>
-                      <TouchableOpacity style={styles.btnSecondary} onPress={() => onReject(p.friendship_id)}>
-                        <Text style={styles.btnSecondaryText}>Cancel</Text>
-                      </TouchableOpacity>
-                    </View>
-                  ))}
-                </View>
-              ) : null}
-
-            </ScrollView>
-          )}
+        {SOCIAL_ACTIVITY_FEED_ENABLED && activeTab === 'activity' ? (
+          <SocialFeedView
+            authToken={authToken}
+            themeName={themeName}
+            bottomPadding={inline ? 116 : 8}
+            refreshKey={feedRefreshKey}
+            shareEnabled={me?.share_activity_enabled ?? false}
+            myActivity={digest?.you ?? null}
+            myDisplayName={me?.display_name ?? me?.username ?? ''}
+            myAvatarUrl={me?.avatar_url ?? null}
+            onViewAuthor={(uid, displayName) => {
+              // Reuse the existing friend-detail surface — find the
+              // matching digest entry so the parent can render their
+              // streak/sessions. If they're not in the digest (e.g.,
+              // not a friend yet) we still call onViewFriend so the
+              // parent can decide what to do.
+              const df = digest?.friends.find((d) => d.user_id === uid);
+              const digestFriend = df ?? {
+                user_id: uid, username: '', display_name: displayName,
+                avatar_url: null,
+                goal: null, share_enabled: true,
+                sessions: 0, streak: 0, last_active_within_48h: false,
+              };
+              onViewFriend?.(uid, displayName, digestFriend);
+            }}
+          />
+        ) : loading && !list ? (
+          <View style={{ padding: 24, alignItems: 'center' }}>
+            <ActivityIndicator color={colors.primary} />
+          </View>
+        ) : activeTab === 'friends' ? (
+          <ScrollView
+            testID="social-friends-list"
+            style={{ flex: 1 }}
+            contentContainerStyle={{ paddingTop: 8, paddingBottom: inline ? 128 : 24 }}>
+            {friendSearchSection}
+            {friendsListSection}
+          </ScrollView>
+        ) : (
+          <ScrollView
+            testID="social-profile-tab"
+            style={{ flex: 1 }}
+            contentContainerStyle={{ paddingTop: 8, paddingBottom: inline ? 128 : 24 }}>
+            {incoming.length > 0 ? incomingRequestsSection : null}
+            {myProfileSection}
+            {incoming.length === 0 ? incomingRequestsSection : null}
+            {profileInviteSection}
+            {sharingReminder}
+            {thisWeekCard}
+            {outgoingPendingSection}
+          </ScrollView>
+        )}
       </FadeInView>
 
       {/* Opt-in nudge */}

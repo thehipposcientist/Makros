@@ -45,6 +45,7 @@ import {
   socialWorkoutDateKey,
   type SocialWorkoutSet,
 } from '../utils/socialWorkoutDetails';
+import { humanizeToken } from '../utils/exerciseGuide';
 
 interface Props {
   authToken: string;
@@ -172,6 +173,14 @@ function socialLabel(value?: string | null): string {
     .replace(/_/g, ' ')
     .trim()
     .replace(/\b\w/g, ch => ch.toUpperCase());
+}
+
+function equipmentLabel(value?: string | null): string {
+  return String(value ?? '')
+    .split(',')
+    .map(part => humanizeToken(part.trim()))
+    .filter(Boolean)
+    .join(', ');
 }
 
 function RotatingChevron({ expanded, color }: { expanded: boolean; color: string }) {
@@ -415,6 +424,7 @@ export default function SocialFeedView({
               <View style={styles.exerciseList}>
                 {exercises.map((ex, exerciseIndex) => {
                   const setSummaries = compactSocialSetSummaries(ex.sets);
+                  const equipment = equipmentLabel(ex.equipment);
                   return (
                     <FadeInView
                       key={`${item.id}-${exerciseIndex}-${ex.name ?? 'exercise'}`}
@@ -430,9 +440,9 @@ export default function SocialFeedView({
                       <View style={{ flex: 1, gap: 7 }}>
                         <View style={styles.exerciseTitleRow}>
                           <Text style={styles.exerciseName}>{ex.name || 'Exercise'}</Text>
-                          {ex.equipment ? (
+                          {equipment ? (
                             <View style={styles.exerciseEquipmentPill}>
-                              <Text style={styles.exerciseEquipment}>{ex.equipment}</Text>
+                              <Text style={styles.exerciseEquipment}>{equipment}</Text>
                             </View>
                           ) : null}
                         </View>

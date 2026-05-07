@@ -45,7 +45,9 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     private static let storedSleepKey = "thallo.storedSleep"
     private static let storedHydrationKey = "thallo.storedHydration"
     private static let storedProgressKey = "thallo.latestWorkoutProgress"
+    private let pullRequestCooldownSeconds: TimeInterval = 5
     private var queuedCommands: [[String: Any]] = []
+    private var lastPullRequestAt: Date = .distantPast
 
     private override init() {
         self.session = WCSession.isSupported() ? WCSession.default : nil
@@ -144,16 +146,14 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             if activationState == .activated {
                 self.flushQueuedCommands()
             }
-            // Hydrate whatever's already queued in applicationContext
-            // (survives cold start on both sides).
-            self.absorbContext(session.receivedApplicationContext)
-            // Pull-on-wake handshake: actively ask the phone for the
+            // Pull-on-wake handshake: hydrate queued applicationContext,
+            // then actively ask the phone for the
             // latest state. Without this, we're at the mercy of
             // whatever was last queued in applicationContext — which
             // may be stale by minutes or hours if the phone's state
             // has moved on since the last push. Phone responds by
             // re-pushing workout + meals + theme.
-            self.sendCommand("pull_state")
+            self.requestPull()
         }
     }
 
@@ -165,8 +165,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             // idempotent, closes the "wife's watch not pulling meals"
             // gap directly.
             if session.isReachable {
-                self.absorbContext(session.receivedApplicationContext)
-                self.sendCommand("pull_state")
+                self.requestPull()
             }
         }
     }
@@ -174,11 +173,24 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     /// Explicitly ask the phone to re-push all state. Called on
     /// WC activation, on reachability → true, and whenever the watch
     /// app becomes visible again (see `ThalloWatchApp` scene phase).
-    func requestPull() {
-        if let session = session {
-            absorbContext(session.receivedApplicationContext)
+    func requestPull(force: Bool = false) {
+        guard let session else {
+            HeartRateStore.saveDiag("pull_state skipped: unavailable")
+            return
         }
-        sendCommand("pull_state")
+        absorbContext(session.receivedApplicationContext)
+        guard session.isReachable else {
+            HeartRateStore.saveDiag("pull_state skipped: phone not reachable")
+            return
+        }
+        let now = Date()
+        if !force && now.timeIntervalSince(lastPullRequestAt) < pullRequestCooldownSeconds {
+            HeartRateStore.saveDiag("pull_state skipped: cooldown")
+            return
+        }
+        lastPullRequestAt = now
+        let payload: [String: Any] = force ? ["force": true] : [:]
+        sendCommand("pull_state", payload: payload)
     }
 
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
@@ -706,7 +718,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             }
             session.sendMessage(body, replyHandler: nil) { [weak self] err in
                 print("[watch] sendMessage(\(command)) error: \(err.localizedDescription)")
-                if command != "watch_log" {
+                if command != "watch_log" && command != "pull_state" {
                     session.transferUserInfo(body)
                     HeartRateStore.saveDiag("→ \(command) fallback transfer")
                 }
@@ -718,6 +730,11 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         } else {
             // Queue for later delivery via transferUserInfo when phone
             // isn't reachable (locked / app backgrounded).
+            if command == "pull_state" {
+                print("[watch] sendCommand(\(command)) — NOT reachable, dropping wake-only pull")
+                HeartRateStore.saveDiag("→ \(command) reach=N (dropped)")
+                return
+            }
             if command != "watch_log" {
                 print("[watch] sendCommand(\(command)) — NOT reachable, queuing via transferUserInfo")
                 HeartRateStore.saveDiag("→ \(command) reach=N (queued)")

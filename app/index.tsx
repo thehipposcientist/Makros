@@ -110,6 +110,14 @@ async function hardResetSession(): Promise<void> {
  *  alone so sign-out → sign-in is non-destructive. */
 const LAST_USER_ID_KEY = 'last_user_id';
 const TUTORIAL_COMPLETED_KEY = 'tutorial_v1_completed';
+/** Local cache of the last legal version this device accepted. Set on
+ *  any successful `acceptLegal` (or signup / OAuth login that bundled
+ *  legal acceptance). Preserved across sign-out so a same-user
+ *  re-sign-in does NOT re-prompt for terms when nothing has actually
+ *  changed — even if the backend `/me` returns a stale version due to
+ *  caching or a race. The legal-gate check uses this as a short-circuit
+ *  before falling back to the backend versions. */
+const LEGAL_LOCAL_ACCEPTED_KEY = 'legal_locally_accepted_version';
 /** Every AsyncStorage key that holds user-scoped state. When a different
  *  user signs in we remove all of these in one shot. This list also doubles
  *  as the base set considered for backend sync. Transient, device-only, and
@@ -165,6 +173,12 @@ const USER_SCOPED_KEYS = [
   'onboardingDraft_v1',
   'manualWorkoutOverrides',
   TUTORIAL_COMPLETED_KEY,
+  // Legal-acceptance cache is user-scoped so a user-switch on the same
+  // device wipes it (the new user's acceptance state must come from
+  // their own /auth/me, not inherited from the previous user). On a
+  // same-user sign-out → sign-in it's preserved via handleSignOut's
+  // preserveKeys list.
+  'legal_locally_accepted_version',
   'meal_reminder_settings',
   'meal_reminder_notification_id',
   'meal_reminder_ids',
@@ -872,8 +886,23 @@ export default function Index() {
         // Runs once at session restore — the post-fresh-login path
         // (handleAuthenticated below) does the same check.
         try {
-          const { needsLegalReAcceptance } = await import('../src/constants/legal');
-          if (needsLegalReAcceptance(meData as any)) setLegalReAcceptNeeded(true);
+          const { needsLegalReAcceptance, LEGAL_VERSION: currentLegalVersion } = await import('../src/constants/legal');
+          // Short-circuit: if the local cache says this device already
+          // accepted the current legal version, suppress the prompt
+          // regardless of what `/auth/me` returned. Prevents re-prompts
+          // when the backend version field lags or the user just
+          // re-signed-in after accepting on this same device.
+          const locallyAccepted = await AsyncStorage.getItem(LEGAL_LOCAL_ACCEPTED_KEY).catch(() => null);
+          if (locallyAccepted !== currentLegalVersion) {
+            if (needsLegalReAcceptance(meData as any)) {
+              setLegalReAcceptNeeded(true);
+            } else {
+              // Backend says we're current — backfill the local cache so
+              // subsequent gates short-circuit on every existing-user
+              // device, not just devices that accepted post-fix.
+              AsyncStorage.setItem(LEGAL_LOCAL_ACCEPTED_KEY, currentLegalVersion).catch(() => {});
+            }
+          }
         } catch { /* legal module optional in dev */ }
         await loadProfile(persistedToken);
         // Cold-start hydration: if local history / synced state are empty
@@ -1313,17 +1342,12 @@ export default function Index() {
     // should be non-destructive.
     let incomingUserId: string | number | null = null;
     let incomingUsername: string | null = null;
+    let meForLegalCheck: any = null;
     try {
       const me = await getMe(token);
+      meForLegalCheck = me;
       incomingUserId = (me as any)?.id ?? (me as any)?.user_id ?? null;
       incomingUsername = (me as any)?.username ?? null;
-      // Legal re-acceptance check on fresh login (mirror of the session-
-      // restore branch above). If the legal copy was bumped while the
-      // user was signed out, surface the modal as soon as they're in.
-      try {
-        const { needsLegalReAcceptance } = await import('../src/constants/legal');
-        if (needsLegalReAcceptance(me as any)) setLegalReAcceptNeeded(true);
-      } catch { /* legal module optional in dev */ }
     } catch {
       incomingUserId = null;
     }
@@ -1349,6 +1373,11 @@ export default function Index() {
       // Brand new account — wipe any leftover state, then fall into the
       // onboarding flow (userProfile stays null).
       await clearUserScopedStorage();
+      // Signup / OAuth-creation paths bundle legal acceptance into the
+      // auth request, so stamp the local cache too. Otherwise the very
+      // next sign-out → sign-in would surface the re-acceptance modal
+      // unnecessarily.
+      try { await AsyncStorage.setItem(LEGAL_LOCAL_ACCEPTED_KEY, LEGAL_VERSION); } catch {}
       setUserProfile(null);
       setTrainerNote(null);
       setNutritionistNote(null);
@@ -1381,6 +1410,25 @@ export default function Index() {
     if (incomingUsername) await AsyncStorage.setItem('user_username', incomingUsername);
     if (incomingUserId != null) {
       await AsyncStorage.setItem(LAST_USER_ID_KEY, String(incomingUserId));
+    }
+
+    // Legal re-acceptance check on fresh login (mirror of the session-
+    // restore branch above). Runs AFTER the userSwitched wipe so the
+    // local cache reflects THIS user's state, not the previous user's
+    // — otherwise a different account on the same device would inherit
+    // the prior user's "already accepted" stamp and skip the prompt.
+    if (meForLegalCheck) {
+      try {
+        const { needsLegalReAcceptance, LEGAL_VERSION: currentLegalVersion } = await import('../src/constants/legal');
+        const locallyAccepted = await AsyncStorage.getItem(LEGAL_LOCAL_ACCEPTED_KEY).catch(() => null);
+        if (locallyAccepted !== currentLegalVersion) {
+          if (needsLegalReAcceptance(meForLegalCheck as any)) {
+            setLegalReAcceptNeeded(true);
+          } else {
+            AsyncStorage.setItem(LEGAL_LOCAL_ACCEPTED_KEY, currentLegalVersion).catch(() => {});
+          }
+        }
+      } catch { /* legal module optional in dev */ }
     }
 
     // Same user (or user-switched) — pull from backend first, then load
@@ -1569,7 +1617,7 @@ export default function Index() {
         Notifications.cancelAllScheduledNotificationsAsync().catch(() => {}),
       ]), 1500);
     } catch { /* notification cleanup is best-effort */ }
-    await clearUserScopedStorage({ preserveKeys: [TUTORIAL_COMPLETED_KEY] });
+    await clearUserScopedStorage({ preserveKeys: [TUTORIAL_COMPLETED_KEY, LEGAL_LOCAL_ACCEPTED_KEY] });
     try { await AsyncStorage.removeItem('pending_plan_job'); } catch {}
     await clearAuthToken();
     setAuthToken(null);
@@ -2181,6 +2229,10 @@ export default function Index() {
                 import('../src/services/api'),
               ]);
               await acceptLegal(authToken, LEGAL_VERSION);
+              // Stamp the local cache so subsequent sign-outs / sign-ins
+              // don't re-prompt while we wait for `/auth/me` to reflect
+              // the new version.
+              try { await AsyncStorage.setItem(LEGAL_LOCAL_ACCEPTED_KEY, LEGAL_VERSION); } catch {}
               setLegalReAcceptNeeded(false);
               // Best-effort refresh — keeps the in-memory `me` shape
               // (legal_accepted, *_version) consistent with the server
