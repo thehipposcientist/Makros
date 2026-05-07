@@ -16,6 +16,7 @@
 // originate the action and the other side mirrors.
 
 import SwiftUI
+import WatchKit
 
 struct ContentView: View {
     @EnvironmentObject var conn: ConnectivityStore
@@ -327,6 +328,7 @@ private struct TodayView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 logoHeader
+                WatchSyncStrip(label: "workout", syncedAtMs: workout?.syncedAtMs ?? conn.hydration?.syncedAtMs)
                 if let workout = workout {
                     workoutBody(workout)
                 } else {
@@ -728,6 +730,70 @@ private struct TodayView: View {
     }
 }
 
+private struct WatchSyncStrip: View {
+    let label: String
+    let syncedAtMs: Double?
+
+    @EnvironmentObject var theme: ThemeStore
+    @EnvironmentObject var conn: ConnectivityStore
+
+    private var statusText: String {
+        conn.isReachable ? "Phone live" : "Queued"
+    }
+
+    private var statusColor: Color {
+        conn.isReachable ? theme.success : theme.warning
+    }
+
+    var body: some View {
+        Button {
+            WKInterfaceDevice.current().play(.click)
+            conn.requestPull()
+        } label: {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                Text(statusText)
+                    .font(.system(size: 10, weight: .heavy))
+                    .foregroundColor(statusColor)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if let age = ageLabel() {
+                    Text("\(label) \(age)")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(theme.textMuted)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(theme.textMuted)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(theme.surface)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(statusColor.opacity(0.35), lineWidth: 1)
+            )
+            .cornerRadius(8)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func ageLabel() -> String? {
+        guard let syncedAtMs, syncedAtMs > 0 else { return nil }
+        let ageSec = max(0, Int((Date().timeIntervalSince1970 * 1000 - syncedAtMs) / 1000))
+        if ageSec < 5 { return "now" }
+        if ageSec < 60 { return "\(ageSec)s" }
+        let ageMin = ageSec / 60
+        if ageMin < 60 { return "\(ageMin)m" }
+        return "\(ageMin / 60)h"
+    }
+}
+
 // ─── Meals ──────────────────────────────────────────────────────────
 
 private struct MealsView: View {
@@ -976,6 +1042,7 @@ private struct HydrationView: View {
                             .font(.system(size: 10, weight: .heavy))
                             .foregroundColor(percent >= 100 ? theme.success : theme.textMuted)
                     }
+                    WatchSyncStrip(label: "water", syncedAtMs: conn.hydration?.syncedAtMs)
 
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(alignment: .lastTextBaseline, spacing: 4) {

@@ -49,7 +49,7 @@ import {
 import { calculateHealthScore } from '../utils/healthScore';
 import { findMatchingGearForSession } from '../utils/gearSessionMatching';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, listWorkoutSessions, type WorkoutPostSummary, type WorkoutSessionRecord, type WorkoutSessionExerciseRecord, type WorkoutSessionSetRecord } from '../services/api';
+import { getWeightRecommendation, logWorkoutDone, logWorkoutStarted, askWorkoutQuestion, analyzeWorkoutFormPhoto, getExercises, getWorkoutSummary, searchExerciseAI, AIExerciseResult, getAiWarmup, getPreSetRecommendation, syncInProgressWorkout, PRAchievement, getHRZones, HRZone, listWorkoutSessions, getHydration, logHydration, logHydrationDelta, type WorkoutPostSummary, type WorkoutSessionRecord, type WorkoutSessionExerciseRecord, type WorkoutSessionSetRecord } from '../services/api';
 import { cleanAiText } from '../utils/aiText';
 import { getExerciseImage } from '../utils/exerciseImages';
 import { exerciseThumbSmall } from '../utils/exerciseThumb';
@@ -1751,6 +1751,40 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 await pushRestProgressToWatchRef.current();
                 reassertRestProgressToWatchRef.current();
               } catch { /* bridge optional */ }
+            })();
+            return;
+          }
+          if (command === 'log_hydration') {
+            (async () => {
+              try {
+                if (!authToken) return;
+                const commandUserId = typeof payload?.userId === 'string' && payload.userId.trim()
+                  ? payload.userId.trim()
+                  : null;
+                const currentUserId = await AsyncStorage.getItem('last_user_id').catch(() => null);
+                if (commandUserId && currentUserId && commandUserId !== currentUserId) return;
+                const rawDelta = Number(payload?.deltaOz ?? payload?.delta_oz);
+                const rawOunces = Number(payload?.ounces);
+                const hasDelta = Number.isFinite(rawDelta) && rawDelta !== 0;
+                if (hasDelta && (rawDelta < -400 || rawDelta > 400)) return;
+                if (!hasDelta && (!Number.isFinite(rawOunces) || rawOunces < 0 || rawOunces > 400)) return;
+                const dateISO = String(payload?.dateISO || dateKey(new Date())).slice(0, 10);
+                const result = hasDelta
+                  ? await logHydrationDelta(authToken, rawDelta, dateISO)
+                  : await logHydration(authToken, Math.max(0, Math.round(rawOunces * 10) / 10), dateISO);
+                const fresh = await getHydration(authToken, result.date).catch(() => null);
+                const saved = fresh ?? {
+                  date: result.date,
+                  ounces: result.ounces,
+                  target_ounces: 64,
+                };
+                const { pushHydrationToWatch } = await import('../utils/watchSync');
+                await pushHydrationToWatch({
+                  dateISO: saved.date,
+                  ounces: saved.ounces,
+                  targetOunces: saved.target_ounces,
+                });
+              } catch { /* hydration sync should not interrupt the workout */ }
             })();
             return;
           }

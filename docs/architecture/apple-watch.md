@@ -1,6 +1,6 @@
 # Apple Watch — Architecture
 
-Last synced from app state: 2026-05-05
+Last synced from app state: 2026-05-07
 
 ## Bidirectional Sync via WCSession
 
@@ -8,6 +8,8 @@ Last synced from app state: 2026-05-05
 
 **Outbound (phone → watch):**
 `pushWorkoutToWatch`, `pushMealsToWatch`, `pushHydrationToWatch`, `pushSupplementsToWatch`, `pushThemeToWatch`, `pushProgressToWatch` (per-set updates). `pushProgressToWatch` carries rest timer state (`restRemainingSec`, `restStartedAtMs`, `restDurationSec`, `restEndsAtMs`) and the latest live recommendation text so the watch can refresh next-set guidance during rest and recompute the countdown from wall clock after screen sleep. Full snapshots are dual-path: they update `applicationContext` for cold-start persistence and, when reachable, also send an immediate `sendMessage` mirror. `sendMessage` failures fall back to `transferUserInfo`.
+
+Phone-side `applicationContext` writes are serialized in the native bridge and merged from the bridge's last in-memory snapshot before `updateApplicationContext`, so overlapping workout/theme/meals/hydration/sleep/readiness pushes cannot drop keys written by another push.
 
 Workout snapshots use a v2 envelope:
 `{ schemaVersion: 2, channel: "workout", eventId, revision, reason, sentAtMs, userId, workout }`.
@@ -44,6 +46,8 @@ If a phone rest timer is currently active, the phone also sends a fresh `pushPro
 TabView: **Today** (workout) / **Meals** / **Hydration** / **Supps** / **Sleep** / **Readiness** / **Quick Start** / **Weight**. Page dots always visible.
 
 **Hydration**: quick-add 8 / 16 / 24 oz buttons, -8 oz correction, and a Digital Crown total setter. Watch quick-add/correction sends `log_hydration` deltas so queued taps compose after the phone wakes; Digital Crown set sends an absolute ounce total. Phone persists through `POST /meals/hydration` and re-pushes the server-computed target.
+
+Today and Hydration show a small phone-sync strip (`Phone live` / `Queued`, plus last workout/water age) that sends `pull_state` when tapped. The phone header mirrors the latest watch-sync result with a compact Watch pill.
 
 **Active workout**: Digital Crown + −/+ steppers, recommended-weight quick-use row, rest timer, HR persistent chip, live recommendation text, swipe-right HR zones tab, warm-up card before first set, end + cancel + skip/swap-exercise menu.
 

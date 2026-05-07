@@ -4,6 +4,7 @@
 // too — not just while reachable.
 
 import ExpoModulesCore
+import Foundation
 import WatchConnectivity
 import HealthKit
 import os.log
@@ -157,11 +158,15 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     private var pendingContext: [String: Any] = [:]
     private var pendingMessages: [[String: Any]] = []
     private var latestProgressContext: [String: Any]?
+    private var latestApplicationContext: [String: Any] = [:]
+    private let outboundLock = NSRecursiveLock()
     private var recentCommandIds: [String] = []
     private var recentCommandIdSet: Set<String> = []
     private var recentCommandIdsLoaded = false
 
-    func setUserId(_ id: String?) { self.userId = id }
+    func setUserId(_ id: String?) {
+        withOutboundLock { self.userId = id }
+    }
 
     func beginCommandListener() {
         commandListenerCount += 1
@@ -190,6 +195,9 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         }
         let s = WCSession.default
         s.delegate = self
+        withOutboundLock {
+            self.latestApplicationContext = s.applicationContext
+        }
         os_log("[wc-bridge] activate called, preState=%d, paired=%d, reachable=%d", log: wcLog, type: .default, s.activationState.rawValue, s.isPaired ? 1 : 0, s.isReachable ? 1 : 0)
         logDiag("activate.called", [
             "preState": s.activationState.rawValue,
@@ -245,66 +253,85 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         }
     }
 
+    private func withOutboundLock<T>(_ work: () -> T) -> T {
+        outboundLock.lock()
+        defer { outboundLock.unlock() }
+        return work()
+    }
+
+    private func mergedApplicationContext(for session: WCSession) -> [String: Any] {
+        var merged = session.applicationContext
+        for (key, value) in latestApplicationContext {
+            merged[key] = value
+        }
+        return merged
+    }
+
     @discardableResult
     func sendContext(_ dict: [String: Any], realtimeKind: String? = nil) -> Bool {
-        guard WCSession.isSupported() else { return false }
-        let s = WCSession.default
-        let cleaned = Self.stripNulls(dict)
-        guard s.activationState == .activated else {
-            for (k, v) in cleaned { pendingContext[k] = v }
-            logDiag("sendContext.pending", [
-                "keys": cleaned.keys.sorted().joined(separator: ","),
-            ])
-            s.activate()
-            return true
+        return withOutboundLock {
+            guard WCSession.isSupported() else { return false }
+            let s = WCSession.default
+            let cleaned = Self.stripNulls(dict)
+            guard s.activationState == .activated else {
+                for (k, v) in cleaned { pendingContext[k] = v }
+                logDiag("sendContext.pending", [
+                    "keys": cleaned.keys.sorted().joined(separator: ","),
+                ])
+                s.activate()
+                return true
+            }
+            flushPendingOutbound()
+            return sendContextActivated(cleaned, session: s, realtimeKind: realtimeKind)
         }
-        flushPendingOutbound()
-        return sendContextActivated(cleaned, session: s, realtimeKind: realtimeKind)
     }
 
     @discardableResult
     private func sendContextActivated(_ cleaned: [String: Any], session s: WCSession, realtimeKind: String? = nil) -> Bool {
-        do {
-            var merged = s.applicationContext
-            for (k, v) in cleaned { merged[k] = v }
-            if let progress = cleaned["progress"] as? [String: Any] {
-                rememberLatestProgress(progress)
-            } else {
-                preserveLatestProgress(in: &merged)
-            }
-            if let uid = userId, !uid.isEmpty {
-                merged["userId"] = uid
-            } else {
-                merged.removeValue(forKey: "userId")
-            }
-            try s.updateApplicationContext(merged)
-            logDiag("sendContext.updated", [
-                "keys": cleaned.keys.sorted().joined(separator: ","),
-                "bytes": approximateBytes(cleaned),
-            ])
-            if s.isReachable {
-                let realtime = realtimeMessage(for: cleaned, kind: realtimeKind)
-                logDiag("sendContext.realtime", [
+        return withOutboundLock {
+            do {
+                var merged = mergedApplicationContext(for: s)
+                for (k, v) in cleaned { merged[k] = v }
+                if let progress = cleaned["progress"] as? [String: Any] {
+                    rememberLatestProgress(progress)
+                } else {
+                    preserveLatestProgress(in: &merged)
+                }
+                if let uid = userId, !uid.isEmpty {
+                    merged["userId"] = uid
+                } else {
+                    merged.removeValue(forKey: "userId")
+                }
+                try s.updateApplicationContext(merged)
+                latestApplicationContext = merged
+                logDiag("sendContext.updated", [
                     "keys": cleaned.keys.sorted().joined(separator: ","),
-                    "kind": realtimeKind ?? "",
+                    "bytes": approximateBytes(cleaned),
                 ])
-                _ = sendMessageActivated(realtime, session: s)
-            }
-            return true
-        } catch {
-            os_log("[wc-bridge] updateApplicationContext failed: %{public}@", log: wcLog, type: .error, "\(error)")
-            logDiag("sendContext.failed", [
-                "keys": cleaned.keys.sorted().joined(separator: ","),
-                "error": error.localizedDescription,
-            ])
-            var fallback = cleaned
-            stampUserId(&fallback)
-            if s.isReachable {
-                _ = sendMessageActivated(fallback, session: s)
+                if s.isReachable {
+                    let realtime = realtimeMessage(for: cleaned, kind: realtimeKind)
+                    logDiag("sendContext.realtime", [
+                        "keys": cleaned.keys.sorted().joined(separator: ","),
+                        "kind": realtimeKind ?? "",
+                    ])
+                    _ = sendMessageActivated(realtime, session: s)
+                }
+                return true
+            } catch {
+                os_log("[wc-bridge] updateApplicationContext failed: %{public}@", log: wcLog, type: .error, "\(error)")
+                logDiag("sendContext.failed", [
+                    "keys": cleaned.keys.sorted().joined(separator: ","),
+                    "error": error.localizedDescription,
+                ])
+                var fallback = cleaned
+                stampUserId(&fallback)
+                if s.isReachable {
+                    _ = sendMessageActivated(fallback, session: s)
+                    return true
+                }
+                s.transferUserInfo(fallback)
                 return true
             }
-            s.transferUserInfo(fallback)
-            return true
         }
     }
 
@@ -331,55 +358,60 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
 
     @discardableResult
     func sendMessage(_ dict: [String: Any]) -> Bool {
-        guard WCSession.isSupported() else { return false }
-        let s = WCSession.default
-        let cleaned = Self.stripNulls(dict)
-        guard s.activationState == .activated else {
-            pendingMessages.append(cleaned)
-            s.activate()
-            return true
+        return withOutboundLock {
+            guard WCSession.isSupported() else { return false }
+            let s = WCSession.default
+            let cleaned = Self.stripNulls(dict)
+            guard s.activationState == .activated else {
+                pendingMessages.append(cleaned)
+                s.activate()
+                return true
+            }
+            var stamped = cleaned
+            stampUserId(&stamped)
+            flushPendingOutbound()
+            return sendMessageActivated(stamped, session: s)
         }
-        var stamped = cleaned
-        stampUserId(&stamped)
-        flushPendingOutbound()
-        return sendMessageActivated(stamped, session: s)
     }
 
     @discardableResult
     func sendProgress(_ dict: [String: Any]) -> Bool {
-        guard WCSession.isSupported() else { return false }
-        let s = WCSession.default
-        let cleaned = Self.stripNulls(dict)
-        guard s.activationState == .activated else {
-            pendingContext["progress"] = cleaned
-            pendingMessages.append(cleaned)
-            rememberLatestProgress(cleaned)
-            s.activate()
-            return true
-        }
-
-        var stamped = cleaned
-        stampUserId(&stamped)
-        rememberLatestProgress(stamped)
-        flushPendingOutbound()
-        do {
-            var merged = s.applicationContext
-            merged["progress"] = stamped
-            if let uid = userId, !uid.isEmpty {
-                merged["userId"] = uid
-            } else {
-                merged.removeValue(forKey: "userId")
+        return withOutboundLock {
+            guard WCSession.isSupported() else { return false }
+            let s = WCSession.default
+            let cleaned = Self.stripNulls(dict)
+            guard s.activationState == .activated else {
+                pendingContext["progress"] = cleaned
+                pendingMessages.append(cleaned)
+                rememberLatestProgress(cleaned)
+                s.activate()
+                return true
             }
-            try s.updateApplicationContext(merged)
-            logDiag("sendProgress.updated", [
-                "revision": stamped["progressRevision"] ?? "",
-                "sessionId": stamped["sessionId"] ?? "",
-            ])
-        } catch {
-            os_log("[wc-bridge] progress applicationContext failed: %{public}@", log: wcLog, type: .error, error.localizedDescription)
-            logDiag("sendProgress.contextFailed", ["error": error.localizedDescription])
+
+            var stamped = cleaned
+            stampUserId(&stamped)
+            rememberLatestProgress(stamped)
+            flushPendingOutbound()
+            do {
+                var merged = mergedApplicationContext(for: s)
+                merged["progress"] = stamped
+                if let uid = userId, !uid.isEmpty {
+                    merged["userId"] = uid
+                } else {
+                    merged.removeValue(forKey: "userId")
+                }
+                try s.updateApplicationContext(merged)
+                latestApplicationContext = merged
+                logDiag("sendProgress.updated", [
+                    "revision": stamped["progressRevision"] ?? "",
+                    "sessionId": stamped["sessionId"] ?? "",
+                ])
+            } catch {
+                os_log("[wc-bridge] progress applicationContext failed: %{public}@", log: wcLog, type: .error, error.localizedDescription)
+                logDiag("sendProgress.contextFailed", ["error": error.localizedDescription])
+            }
+            return sendMessageActivated(stamped, session: s)
         }
-        return sendMessageActivated(stamped, session: s)
     }
 
     private func rememberLatestProgress(_ progress: [String: Any]) {
@@ -415,21 +447,23 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     }
 
     private func flushPendingOutbound() {
-        guard WCSession.isSupported() else { return }
-        let s = WCSession.default
-        guard s.activationState == .activated else { return }
-        if !pendingContext.isEmpty {
-            let context = pendingContext
-            pendingContext.removeAll()
-            _ = sendContextActivated(context, session: s)
-        }
-        if !pendingMessages.isEmpty {
-            let messages = pendingMessages
-            pendingMessages.removeAll()
-            for message in messages {
-                var stamped = message
-                stampUserId(&stamped)
-                _ = sendMessageActivated(stamped, session: s)
+        withOutboundLock {
+            guard WCSession.isSupported() else { return }
+            let s = WCSession.default
+            guard s.activationState == .activated else { return }
+            if !pendingContext.isEmpty {
+                let context = pendingContext
+                pendingContext.removeAll()
+                _ = sendContextActivated(context, session: s)
+            }
+            if !pendingMessages.isEmpty {
+                let messages = pendingMessages
+                pendingMessages.removeAll()
+                for message in messages {
+                    var stamped = message
+                    stampUserId(&stamped)
+                    _ = sendMessageActivated(stamped, session: s)
+                }
             }
         }
     }

@@ -36,6 +36,15 @@ import SocialAvatar from '../components/SocialAvatar';
 
 const { width: SCREEN_W } = Dimensions.get('window');
 const WATCH_WORKOUT_COMMAND_TTL_MS = 4 * 60 * 60_000;
+type WatchSyncUiSnapshot = {
+  surface: string;
+  ok: boolean;
+  atMs: number;
+  reachable: boolean;
+  paired: boolean;
+  available?: boolean;
+  detail?: string;
+};
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
@@ -1687,6 +1696,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
   // and never disappears no matter which tab is active.
   const [activeTab, setActiveTabRaw]      = useState<'friends' | 'workout' | 'meals' | 'progress' | 'you'>('workout');
+  const [watchSyncStatus, setWatchSyncStatus] = useState<WatchSyncUiSnapshot | null>(null);
   const [progressTabMounted, setProgressTabMounted] = useState(false);
   const progressFade = useRef(new Animated.Value(0)).current;
   const bottomNavFloat = useRef(new Animated.Value(1)).current;
@@ -1708,6 +1718,68 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     AsyncStorage.setItem('lastActiveTab', tab).catch(() => {});
   }, [activeTab, bottomNavFloat, onHomeTabNavigate, progressFade]);
+
+  useEffect(() => {
+    if (Platform.OS !== 'ios') return;
+    let alive = true;
+    let unsub: (() => void) | null = null;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const refresh = async () => {
+      try {
+        const { getWatchSyncSnapshot, WatchBridge } = await import('../utils/watchSync');
+        const available = !!WatchBridge?.isAvailable?.();
+        if (!available) {
+          if (alive) setWatchSyncStatus(null);
+          return;
+        }
+        const stored = await getWatchSyncSnapshot();
+        const fallback: WatchSyncUiSnapshot = {
+          surface: 'watch',
+          ok: !!WatchBridge?.isReachable?.(),
+          atMs: Date.now(),
+          reachable: !!WatchBridge?.isReachable?.(),
+          paired: !!WatchBridge?.isPaired?.(),
+          available,
+          detail: 'waiting',
+        };
+        if (alive) setWatchSyncStatus({ ...(stored ?? fallback), available });
+      } catch {
+        if (alive) setWatchSyncStatus(null);
+      }
+    };
+
+    (async () => {
+      try {
+        const { onWatchReachabilityChange } = await import('../utils/watchSync');
+        if (!alive) return;
+        unsub = onWatchReachabilityChange((info) => {
+          setWatchSyncStatus(prev => ({
+            surface: prev?.surface ?? 'watch',
+            ok: info.reachable || !!prev?.ok,
+            atMs: Date.now(),
+            reachable: info.reachable,
+            paired: info.paired,
+            available: true,
+            detail: info.reachable ? 'reachable' : 'queued',
+          }));
+          refresh().catch(() => {});
+        });
+      } catch { /* bridge optional */ }
+      if (!alive) {
+        if (unsub) { try { unsub(); } catch {} }
+        return;
+      }
+      refresh().catch(() => {});
+      timer = setInterval(() => refresh().catch(() => {}), 10_000);
+    })();
+
+    return () => {
+      alive = false;
+      if (unsub) { try { unsub(); } catch {} }
+      if (timer) clearInterval(timer);
+    };
+  }, []);
   // Sub-tab inside each main tab.
   // Workouts: plan | library | equipment | history
   // Meals:    plan | foods     | supplements | macros
@@ -3637,10 +3709,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             const todayISO = todayKey();
             if (mealType) watchCmdHandlersRef.current.toggleMeal(todayISO, mealType);
           } else if (command === 'log_hydration') {
-            // Newer watch builds send quick-adds as deltas; older builds
-            // and Digital Crown "Set" still send absolute totals. Process
-            // one command at a time so queued wrist taps cannot complete
-            // out of order and overwrite a newer total.
+            // Newer watch builds send quick-adds as deltas; Digital Crown
+            // "Set" sends an absolute total. Deltas commute, so we allow
+            // older queued deltas to apply after newer deltas. Absolute
+            // totals still guard by timestamp so an old "Set" can't roll
+            // the day backward after a later command.
             const processHydrationCommand = async () => {
               let rollbackDateISO = todayKey();
               let rollbackRow: HydrationSummary | null = null;
@@ -3661,10 +3734,21 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const commandTsMs = Number(payload?.tsMs ?? 0);
                 const commandOwner = currentUserId ?? commandUserId ?? 'unknown';
                 const commandKey = `watch_hydration_command_ts_v1:${commandOwner}:${dateISO}`;
+                const absoluteCommandKey = `watch_hydration_absolute_command_ts_v1:${commandOwner}:${dateISO}`;
+                let lastTsMs = 0;
+                let lastAbsoluteTsMs = 0;
                 if (Number.isFinite(commandTsMs) && commandTsMs > 0) {
                   const lastRaw = await AsyncStorage.getItem(commandKey).catch(() => null);
-                  const lastTsMs = lastRaw ? Number(lastRaw) : 0;
-                  if (Number.isFinite(lastTsMs) && commandTsMs <= lastTsMs) return;
+                  const lastAbsoluteRaw = await AsyncStorage.getItem(absoluteCommandKey).catch(() => null);
+                  const parsedLast = lastRaw ? Number(lastRaw) : 0;
+                  const parsedAbsolute = lastAbsoluteRaw ? Number(lastAbsoluteRaw) : 0;
+                  lastTsMs = Number.isFinite(parsedLast) ? parsedLast : 0;
+                  lastAbsoluteTsMs = Number.isFinite(parsedAbsolute) ? parsedAbsolute : 0;
+                  if (hasDelta) {
+                    if (lastAbsoluteTsMs > 0 && commandTsMs <= lastAbsoluteTsMs) return;
+                  } else if (lastTsMs > 0 && commandTsMs <= lastTsMs) {
+                    return;
+                  }
                 }
                 const s = rePushStateRef.current;
                 const currentRow = s.hydrationByDate?.[dateISO]
@@ -3696,7 +3780,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 setHydrationByDate(prev => ({ ...prev, [saved.date]: saved }));
                 if (saved.date === todayKey()) setHydration(saved);
                 if (Number.isFinite(commandTsMs) && commandTsMs > 0) {
-                  await AsyncStorage.setItem(commandKey, String(commandTsMs)).catch(() => {});
+                  await AsyncStorage.setItem(commandKey, String(Math.max(lastTsMs, commandTsMs))).catch(() => {});
+                  if (!hasDelta) {
+                    await AsyncStorage.setItem(absoluteCommandKey, String(Math.max(lastAbsoluteTsMs, commandTsMs))).catch(() => {});
+                  }
                 }
                 const { pushHydrationToWatch } = await import('../utils/watchSync');
                 await pushHydrationToWatch({
@@ -6783,6 +6870,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const bottomBarGradientColors: [string, string] = isLightTheme
     ? [chromeColors.surface + 'F4', chromeColors.muted + 'E8']
     : [chromeColors.surface + 'F4', chromeColors.muted + 'E8'];
+  const watchSyncAgeMs = watchSyncStatus ? Date.now() - watchSyncStatus.atMs : null;
+  const watchSyncFresh = watchSyncAgeMs != null && watchSyncAgeMs < 2 * 60_000;
+  const watchSyncColor = watchSyncStatus?.reachable
+    ? themeColors.success
+    : watchSyncStatus?.paired && watchSyncStatus?.ok && watchSyncFresh
+      ? themeColors.primary
+      : watchSyncStatus?.paired
+        ? themeColors.warning
+        : themeColors.error;
+  const watchSyncPillLabel = watchSyncStatus?.reachable
+    ? 'Live'
+    : watchSyncStatus?.paired && watchSyncStatus?.ok && watchSyncFresh
+      ? 'Sent'
+      : watchSyncStatus?.paired
+        ? 'Queued'
+        : 'Setup';
+  const showWatchSyncPill = Platform.OS === 'ios' && !!watchSyncStatus?.available;
+  const compactWatchSyncPill = SCREEN_W < 370;
 
   return (
     <View style={[styles.container, { backgroundColor: themeColors.background }]}>
@@ -6796,23 +6901,50 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         style={[styles.header, { paddingTop: insets.top + 10, borderBottomColor: 'transparent' }]}>
         <Image
           source={bgIsDark(themeColors.background) ? LOGO_DARK : LOGO_LIGHT_HEADER}
-          style={{ height: 50, width: 160 }}
+          style={{ height: 50, width: compactWatchSyncPill ? 138 : 160 }}
           resizeMode="contain"
         />
-        <TouchableOpacity
-          testID="open-ai-coach"
-          style={[styles.askAiBtn, { backgroundColor: themeColors.surface, borderWidth: 1, borderColor: themeColors.border }]}
-          onPress={() => {
-            import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
-            setShowTrainerModal(true);
-          }}
-          activeOpacity={0.85}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          accessibilityRole="button"
-          accessibilityLabel="Open AI Coach">
-          <Ionicons name="chatbubble-ellipses-outline" size={15} color={themeColors.textSecondary} />
-          <Text style={[styles.askAiText, { color: themeColors.textSecondary }]}>Coach</Text>
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          {showWatchSyncPill && (
+            <TouchableOpacity
+              testID="watch-sync-pill"
+              style={[
+                styles.watchSyncPill,
+                {
+                  backgroundColor: watchSyncColor + (isLightTheme ? '14' : '22'),
+                  borderColor: watchSyncColor + '66',
+                },
+              ]}
+              onPress={() => {
+                import('../utils/feedback').then(f => f.hapticLight()).catch(() => {});
+                pushHydrationSnapshotToWatch(todayKey()).catch(() => {});
+              }}
+              activeOpacity={0.85}
+              accessibilityRole="button"
+              accessibilityLabel={`Apple Watch sync ${watchSyncPillLabel}`}>
+              <View style={[styles.watchSyncDot, { backgroundColor: watchSyncColor }]} />
+              {!compactWatchSyncPill && (
+                <Text style={[styles.watchSyncText, { color: watchSyncColor }]} numberOfLines={1}>
+                  {watchSyncPillLabel}
+                </Text>
+              )}
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity
+            testID="open-ai-coach"
+            style={[styles.askAiBtn, { backgroundColor: themeColors.surface, borderWidth: 1, borderColor: themeColors.border }]}
+            onPress={() => {
+              import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
+              setShowTrainerModal(true);
+            }}
+            activeOpacity={0.85}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityRole="button"
+            accessibilityLabel="Open AI Coach">
+            <Ionicons name="chatbubble-ellipses-outline" size={15} color={themeColors.textSecondary} />
+            <Text style={[styles.askAiText, { color: themeColors.textSecondary }]}>Coach</Text>
+          </TouchableOpacity>
+        </View>
       </LinearGradient>
 
       {/* Full-screen plan-generation overlay. Hides the old plan so users
@@ -14612,6 +14744,19 @@ const styles = StyleSheet.create({
   checkinCardChevron: { fontSize: 22, marginLeft: 8, fontWeight: '300' },
 
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingLeft: 12, paddingRight: 16, paddingBottom: 10, borderBottomWidth: 1, zIndex: 40 },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8, flexShrink: 0 },
+  watchSyncPill: {
+    minHeight: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    borderRadius: radius.full,
+    borderWidth: 1,
+  },
+  watchSyncDot: { width: 7, height: 7, borderRadius: 4 },
+  watchSyncText: { fontSize: 11, fontWeight: '900', letterSpacing: 0.2 },
   headerLogoWrap: { height: 70, justifyContent: 'center', alignItems: 'flex-start' },
   headerLogo: { width: 280, height: 70 },
   headerLogoDark: { width: 280, height: 70 },
