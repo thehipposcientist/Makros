@@ -19,6 +19,7 @@ const { width: SCREEN_W } = Dimensions.get('window');
 const logo = require('../../assets/images/thallo-logo-white-transparent-New.png');
 
 const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
+const USERNAME_RE = /^[a-z0-9_]{3,32}$/;
 const GOOGLE_CLIENT_ID_RE = /^\d+-[a-zA-Z0-9_-]+\.apps\.googleusercontent\.com$/;
 const GOOGLE_CLIENT_ID_PLACEHOLDER = 'missing-google-client-id.apps.googleusercontent.com';
 
@@ -282,6 +283,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
       if (!firstName.trim()) { setError('First name is required'); return; }
       if (!lastName.trim()) { setError('Last name is required'); return; }
       if (!username.trim()) { setError('Username is required'); return; }
+      if (!USERNAME_RE.test(username.trim().toLowerCase())) { setError('Username must be 3-32 characters and use only letters, numbers, or underscores'); return; }
       if (password !== confirmPassword) { setError('Passwords do not match'); return; }
       if (password.length < 8) { setError('Password must be at least 8 characters'); return; }
       if (!/\d/.test(password)) { setError('Password must include at least one number'); return; }
@@ -295,7 +297,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
     try {
       const isNewUser = mode === 'signup';
       if (isNewUser) {
-        await register(email.trim(), username.trim(), password, {
+        await register(email.trim(), username.trim().toLowerCase(), password, {
           firstName: firstName.trim(),
           lastName: lastName.trim(),
           acceptedTerms: acceptedLegal,
@@ -499,7 +501,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               placeholder="Username"
               placeholderTextColor={colors.textMuted}
               value={username}
-              onChangeText={setUsername}
+              onChangeText={(t) => setUsername(t.replace(/\s/g, '').toLowerCase())}
               autoCapitalize="none"
               autoCorrect={false}
               returnKeyType="next"

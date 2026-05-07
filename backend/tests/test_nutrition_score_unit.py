@@ -11,7 +11,7 @@ Covers:
   - calorie_calculator: macro_consistency_delta + reference ranges
   - allergen_filter: edge cases (plural matching, partial names)
 
-No DB, no AI. All pure functions.
+Mostly pure functions, plus one in-memory DB score-builder source test. No AI.
 """
 from __future__ import annotations
 
@@ -318,6 +318,131 @@ def test_score_zero_calories_no_crash():
     _ok(f"zero cals → {score.total}/100, no crash")
 
 
+def test_score_builder_prefers_projected_plan_over_logged_meals():
+    """/meals/score should score the projected day plan, not logged rows."""
+    print("\n[test] score builder: projected plan wins over logged meals")
+    from datetime import date
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel, Session, create_engine
+
+    from app.enums import MealSource, MealType
+    from app.models import Meal, MealItem, User, UserDayState  # noqa: F401
+    import app.models  # noqa: F401
+    from app.services.nutrition.score_builder import compute_today_score
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(engine)
+    today = date.today()
+    projected_plan = {
+        "targets": {"calories": 2000, "protein": 150, "carbs": 220, "fat": 60},
+        "meals": [
+            {
+                "meal": "Projected salmon bowl",
+                "foods": [],
+                "calories": 1000,
+                "protein": 75,
+                "carbs": 105,
+                "fat": 30,
+                "items": [
+                    {
+                        "name": "Salmon",
+                        "calories": 500,
+                        "protein": 45,
+                        "food_quality": "whole",
+                        "omega3_rich": True,
+                        "micronutrients": {
+                            "vitamin_d": 10,
+                            "vitamin_b12": 2.0,
+                            "potassium": 900,
+                            "magnesium": 90,
+                        },
+                    },
+                    {
+                        "name": "Greens",
+                        "calories": 250,
+                        "protein": 10,
+                        "food_quality": "whole",
+                        "plant_count": 3,
+                        "micronutrients": {
+                            "fiber": 14,
+                            "calcium": 350,
+                            "iron": 6,
+                            "potassium": 900,
+                            "magnesium": 120,
+                        },
+                    },
+                ],
+            },
+            {
+                "meal": "Projected yogurt oats",
+                "foods": [],
+                "calories": 1000,
+                "protein": 75,
+                "carbs": 115,
+                "fat": 30,
+                "items": [
+                    {
+                        "name": "Greek yogurt oats",
+                        "calories": 1000,
+                        "protein": 75,
+                        "food_quality": "whole",
+                        "plant_count": 2,
+                        "micronutrients": {
+                            "fiber": 16,
+                            "calcium": 750,
+                            "iron": 8,
+                            "potassium": 1100,
+                            "magnesium": 240,
+                            "vitamin_d": 12,
+                            "vitamin_b12": 1.0,
+                        },
+                    }
+                ],
+            },
+        ],
+    }
+
+    with Session(engine) as s:
+        user = User(email="projected-score@example.com", username="projectedscore", hashed_password="x")
+        s.add(user)
+        s.commit()
+        s.refresh(user)
+        s.add(UserDayState(user_id=user.id, day_key=today, nutrition_plan=projected_plan))
+
+        logged = Meal(
+            user_id=user.id,
+            meal_date=today,
+            meal_type=MealType.SNACK,
+            name="Tiny logged snack",
+            source=MealSource.LOGGED,
+        )
+        s.add(logged)
+        s.flush()
+        s.add(MealItem(
+            meal_id=logged.id,
+            food_name="Tiny logged snack",
+            quantity=1,
+            unit="serving",
+            calories=300,
+            protein_g=5,
+            carbs_g=40,
+            fat_g=5,
+        ))
+        s.commit()
+
+        payload = compute_today_score(s, user.id, today)
+        assert payload["source"] == "projected", payload
+        assert payload["totals"]["calories"] == 2000, payload["totals"]
+        assert payload["totals"]["protein_g"] == 150, payload["totals"]
+        assert payload["targets"]["calories"] == 2000, payload["targets"]
+        assert payload["score_version"] == 4, payload
+    _ok("projected totals are scored instead of logged meal rows")
+
+
 # ─── macro_consistency_delta ───────────────────────────────────────────────
 
 def test_macro_consistency_delta_correct():
@@ -454,6 +579,7 @@ cases = [
     test_score_sex_aware_iron_rda,
     test_score_low_confidence_reduces_total,
     test_score_zero_calories_no_crash,
+    test_score_builder_prefers_projected_plan_over_logged_meals,
     # Calorie calculator
     test_macro_consistency_delta_correct,
     test_reference_ranges_three_scenarios,

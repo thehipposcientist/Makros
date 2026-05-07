@@ -148,6 +148,7 @@ interface HomeScreenProps {
   authToken: string;
   userProfile: UserProfile | null;
   planRefreshKey?: number;
+  usernameRefreshKey?: number;
   isWorkoutUpdating?: boolean;
   isNutritionUpdating?: boolean;
   trainerNote?: string | null;
@@ -603,7 +604,7 @@ const SUPPLEMENT_LIBRARY: SupplementEntry[] = [
     dose: '2–4g EPA+DHA combined daily',
     timing: 'With meals to reduce fishy burps',
     goodFor: ['Recovery', 'General health', 'Endurance'],
-    cautions: 'High doses can thin blood — consult a doctor if on blood thinners.',
+    cautions: 'High doses can thin blood — check with a clinician if you use blood thinners.',
   },
   {
     name: 'Magnesium Glycinate',
@@ -1588,7 +1589,7 @@ function buildAvailability(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onOpenSettings, onHomeTabNavigate, onProfileUpdate, onUpdateWeight, onBackendSync, onSaveProfile, onCancelScheduledPlanChange, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
+export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0, usernameRefreshKey = 0, isWorkoutUpdating = false, isNutritionUpdating = false, trainerNote: trainerNoteProp = null, nutritionistNote: nutritionistNoteProp = null, supplementStack: supplementStackProp = [], onSignOut, onEditGoal: _onEditGoal, onEditWorkout: _onEditWorkout, onEditMealPlan: _onEditMealPlan, onEditThemes, onEditBody, onStartWorkout, onViewProgress: _onViewProgress, onViewAccount, onOpenSettings, onHomeTabNavigate, onProfileUpdate, onUpdateWeight, onBackendSync, onSaveProfile, onCancelScheduledPlanChange, onActivePlanWeekEndChange, onWeeklyRefresh, onCancelPlanGen, onSwitchDayRegen: _onSwitchDayRegen }: HomeScreenProps) {
   const insets = useSafeAreaInsets();
   const meta = useMetaData();
   // Merge user's custom foods into allFoods so lookups work everywhere
@@ -2170,10 +2171,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     }
     return byDate;
   }, [backendMealHistory]);
-  const loggedNutritionScoreByDate = useMemo(() => {
+  const projectedNutritionScoreByDate = useMemo(() => {
     const byDate = new Map<string, import('../services/api').NutritionScoreWeeklyDay>();
     for (const day of nutritionScoreWeekly?.daily ?? []) {
-      if (day.logged && typeof day.score === 'number') byDate.set(day.date, day);
+      if (typeof day.score === 'number') byDate.set(day.date, day);
     }
     return byDate;
   }, [nutritionScoreWeekly]);
@@ -2442,10 +2443,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   }, [authToken, hydration, hydrationByDate, pushHydrationSnapshotToWatch]);
 
   // Authoritative daily amounts from the server — collagen + probiotic
-  // CFUs. Fetched alongside the score so NutritionCard can show real
-  // numbers instead of the client-side plan estimate. Refresh piggy-
-  // backs on checkedMealsByDate so toggling a meal immediately
-  // re-queries.
+  // CFUs. These are logged-meal facts, separate from the projected
+  // Nutrition Score, so toggling a meal still re-queries them.
   const [todayCollagenG, setTodayCollagenG] = useState<number | null>(null);
   const [todayProbioticCfu, setTodayProbioticCfu] = useState<number | null>(null);
   const [proteinBreakdown, setProteinBreakdown] = useState<any | null>(null);
@@ -2626,6 +2625,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     authToken,
     planRefreshKey,
   ]);
+
+  useEffect(() => {
+    AsyncStorage.getItem('user_username').then(v => { if (v) setUsername(v); }).catch(() => {});
+  }, [usernameRefreshKey]);
 
   // Keep the Workout > History sub-tab in sync with workoutHistory writes.
   // Loads on mount and on each planRefreshKey bump (which fires after
@@ -4075,8 +4078,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         // Show fresh state so the badge always appears
         setReadinessScore({ score: 100, label: 'Fresh', topFatigued: [], focusReadiness: {} });
       }
-      // Nutrition score is fetched from /meals/score; plan-preview scoring
-      // is only the offline/free fallback.
+      // Nutrition score is fetched from /meals/score; local plan-preview
+      // scoring is only the offline/free fallback.
       import('../services/api').then(({ getPlateaus }) =>
         getPlateaus(authToken, 4)
           .then(r => {
@@ -8500,8 +8503,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               for (let i = 13; i >= 0; i--) {
                 const dt = new Date(Date.now() - i * 86400000);
                 const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
-                const loggedScore = loggedNutritionScoreByDate.get(key)?.score;
-                const sc = typeof loggedScore === 'number' ? loggedScore : null;
+                const projectedScore = projectedNutritionScoreByDate.get(key)?.score;
+                const sc = typeof projectedScore === 'number' ? projectedScore : null;
                 calendarDays.push({ date: key, score: sc });
               }
               const scoreColor = (s: number | null): string => {
@@ -8753,7 +8756,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                                       Alert.alert(
                                         'Delete meal?',
                                         hasBackendMeals && historyMealId
-                                          ? `Remove "${m.meal}" from this day's history? This recalculates calories, macros, and your nutrition score for ${label}.`
+                                          ? `Remove "${m.meal}" from this day's history? This recalculates calories and macros for ${label}.`
                                           : `Remove "${m.meal}" from this day's log? You can re-check it from the Plan tab anytime.`,
                                         [
                                           { text: 'Cancel', style: 'cancel' },
@@ -8872,7 +8875,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const checkedCount = Object.values(dayChecks).filter(Boolean).length;
               const isPastLogged = isPast && checkedCount > 0;
               const isPastSkipped = isPast && checkedCount === 0;
-              const authoritativeNutritionScore = loggedNutritionScoreByDate.get(d.key);
+              const authoritativeNutritionScore = projectedNutritionScoreByDate.get(d.key);
               const removedSet = new Set(plan.removedMealIds ?? []);
               const meals = (plan.meals ?? []).filter((_, i) => !removedSet.has(`meal_${i}`));
               // Single-pass macro totals — was 4 separate `.reduce` calls
@@ -14074,7 +14077,6 @@ function DayCardImpl({ item, themeName, isToday, isCompleted, isSkipped, skipRea
         <View style={{ flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingBottom: 14, paddingTop: 10 }}>
           <PulseView active intensity={0.02} duration={2000} style={{ flex: 2 }}>
             <TouchableOpacity
-              onPressIn={handleStartWorkoutPress}
               onPress={handleStartWorkoutPress}
               activeOpacity={0.88}
               style={{ width: '100%' }}

@@ -2,23 +2,27 @@ import json
 import secrets
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
-from sqlalchemy import or_
+from sqlalchemy import delete, or_
 from sqlmodel import Session, select
 from datetime import datetime, timezone, date, timedelta
 
 from app.database import get_session
 from app.entitlements import require_pro_feature
 from app.models import (
-    User, UserProfile, UserGoal, UserPreferences,
+    User, ClientTelemetryEvent, AIUsageEvent, UserProfile, UserGoal, UserPreferences,
     ProfileUpsert, GoalUpsert, PreferencesUpsert, OnboardingSync,
     UserDayState, DayStateUpsert, WeeklyCheckIn, WeeklyCheckInCreate,
-    CoachMemory, UserCoachingState, WorkoutCompletion, UserState,
+    SupplementAICache, CoachMemory, UserCoachingState, WorkoutCompletion, UserState,
+    RecoveryActivity, DailyRollup, UserRollup, UserFlag, PlanJob,
+    WorkoutPlan, NutritionPlan,
     WeightEntry, UserEquipmentProfile,
     UserEquipmentProfileCreate, UserEquipmentProfileRead,
     WorkoutSession, WorkoutExercise, ExerciseSet, Meal, MealItem, BodyScan,
     SavedMeal, SleepLog, DailyHealthSnapshot, UserSupplementStack,
-    SupplementLog, UserSocialProfile, Friendship, ActivityFeedItem,
-    FeedLike, PlanWeek, PlanDay, AIDecision, GearItem,
+    SupplementLog, DailyNutritionMetrics, Food, FoodNutrition, FoodServing,
+    FoodAlias, UserRecentFood, UserSocialProfile, Friendship, UserReport,
+    WeeklyDigestCache, ActivityFeedItem, FeedLike, SocialNotification,
+    PlanWeek, PlanDay, PlanWeekCheckin, AIDecision, GearItem,
 )
 from app.auth import get_current_user, hash_password
 
@@ -63,6 +67,87 @@ def _dump_model(row):
 
 def _dump_rows(rows):
     return [_dump_model(row) for row in rows]
+
+
+def _ids(rows) -> list[int]:
+    return [r.id for r in rows if getattr(r, "id", None) is not None]
+
+
+def _delete_account_owned_rows(session: Session, user_id: int) -> None:
+    workout_sessions = session.exec(select(WorkoutSession).where(WorkoutSession.user_id == user_id)).all()
+    workout_session_ids = _ids(workout_sessions)
+    workout_exercises = (
+        session.exec(select(WorkoutExercise).where(WorkoutExercise.session_id.in_(workout_session_ids))).all()
+        if workout_session_ids else []
+    )
+    workout_exercise_ids = _ids(workout_exercises)
+    if workout_exercise_ids:
+        session.exec(delete(ExerciseSet).where(ExerciseSet.workout_exercise_id.in_(workout_exercise_ids)))
+    if workout_session_ids:
+        session.exec(delete(WorkoutExercise).where(WorkoutExercise.session_id.in_(workout_session_ids)))
+    session.exec(delete(WorkoutSession).where(WorkoutSession.user_id == user_id))
+
+    meals = session.exec(select(Meal).where(Meal.user_id == user_id)).all()
+    meal_ids = _ids(meals)
+    if meal_ids:
+        session.exec(delete(MealItem).where(MealItem.meal_id.in_(meal_ids)))
+    session.exec(delete(Meal).where(Meal.user_id == user_id))
+
+    private_foods = session.exec(select(Food).where(Food.owner_user_id == user_id)).all()
+    private_food_ids = _ids(private_foods)
+    session.exec(delete(UserRecentFood).where(UserRecentFood.user_id == user_id))
+    if private_food_ids:
+        session.exec(delete(UserRecentFood).where(UserRecentFood.food_id.in_(private_food_ids)))
+        session.exec(delete(FoodAlias).where(FoodAlias.food_id.in_(private_food_ids)))
+        session.exec(delete(FoodServing).where(FoodServing.food_id.in_(private_food_ids)))
+        session.exec(delete(FoodNutrition).where(FoodNutrition.food_id.in_(private_food_ids)))
+        session.exec(delete(Food).where(Food.id.in_(private_food_ids)))
+
+    feed_items = session.exec(select(ActivityFeedItem).where(ActivityFeedItem.user_id == user_id)).all()
+    feed_item_ids = _ids(feed_items)
+    friendships = session.exec(
+        select(Friendship).where(or_(Friendship.user_a_id == user_id, Friendship.user_b_id == user_id))
+    ).all()
+    friendship_ids = _ids(friendships)
+    if feed_item_ids:
+        session.exec(delete(FeedLike).where(FeedLike.feed_item_id.in_(feed_item_ids)))
+        session.exec(
+            delete(SocialNotification)
+            .where(SocialNotification.subject_type == "feed_item")
+            .where(SocialNotification.subject_id.in_(feed_item_ids))
+        )
+    if friendship_ids:
+        session.exec(
+            delete(SocialNotification)
+            .where(SocialNotification.subject_type == "friendship")
+            .where(SocialNotification.subject_id.in_(friendship_ids))
+        )
+    session.exec(delete(FeedLike).where(FeedLike.user_id == user_id))
+    session.exec(delete(ActivityFeedItem).where(ActivityFeedItem.user_id == user_id))
+    session.exec(delete(SocialNotification).where(or_(SocialNotification.user_id == user_id, SocialNotification.actor_user_id == user_id)))
+    session.exec(delete(Friendship).where(or_(Friendship.user_a_id == user_id, Friendship.user_b_id == user_id)))
+    session.exec(delete(UserReport).where(UserReport.reporter_id == user_id))
+    session.exec(delete(UserSocialProfile).where(UserSocialProfile.user_id == user_id))
+    session.exec(delete(WeeklyDigestCache))
+
+    plan_weeks = session.exec(select(PlanWeek).where(PlanWeek.user_id == user_id)).all()
+    plan_week_ids = _ids(plan_weeks)
+    session.exec(delete(PlanWeekCheckin).where(PlanWeekCheckin.user_id == user_id))
+    if plan_week_ids:
+        session.exec(delete(PlanDay).where(PlanDay.plan_week_id.in_(plan_week_ids)))
+    session.exec(delete(PlanDay).where(PlanDay.user_id == user_id))
+    session.exec(delete(PlanWeek).where(PlanWeek.user_id == user_id))
+
+    for model in (
+        ClientTelemetryEvent, AIUsageEvent, UserProfile, UserGoal, UserPreferences,
+        UserCoachingState, UserDayState, SupplementAICache, SleepLog,
+        DailyHealthSnapshot, WeeklyCheckIn, CoachMemory, RecoveryActivity,
+        DailyRollup, UserRollup, UserFlag, UserState, PlanJob, WorkoutPlan,
+        NutritionPlan, BodyScan, WeightEntry, AIDecision, WorkoutCompletion,
+        SavedMeal, DailyNutritionMetrics, UserEquipmentProfile, GearItem,
+        UserSupplementStack, SupplementLog,
+    ):
+        session.exec(delete(model).where(model.user_id == user_id))
 
 def _merge_day_nutrition_plan(existing: dict | None, incoming: dict) -> dict:
     merged = dict(incoming)
@@ -656,13 +741,15 @@ def delete_account(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
-    """Soft-delete the signed-in account and anonymize login identifiers."""
+    """Delete user-created account data and anonymize login identifiers."""
     uid = current_user.id
     if uid is None:
         raise HTTPException(status_code=401, detail="Invalid user")
 
     now = datetime.now(timezone.utc)
     suffix = f"{uid}-{int(now.timestamp())}"
+    _delete_account_owned_rows(session, uid)
+
     current_user.is_active = False
     current_user.account_deleted_at = now
     current_user.email = f"deleted+{suffix}@deleted.thallo.local"
@@ -677,16 +764,9 @@ def delete_account(
     current_user.password_reset_token_hash = None
     current_user.password_reset_expires_at = None
 
-    social = session.exec(select(UserSocialProfile).where(UserSocialProfile.user_id == uid)).first()
-    if social:
-        social.display_name = "Deleted user"
-        social.share_activity_enabled = False
-        social.updated_at = now
-        session.add(social)
-
     session.add(current_user)
     session.commit()
-    return {"status": "deleted", "deleted_user_id": uid}
+    return {"status": "deleted", "deleted_user_id": uid, "data_deleted": True}
 
 
 @router.get("/day-state/{day_key}")

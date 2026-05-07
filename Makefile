@@ -320,25 +320,33 @@ smoke-mobile-preflight-fast:
 	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \
 	  exit 1; }
 	@$(MAKE) seed-e2e
-	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) \
-	  .maestro/flows/ppl-history-ordering.yaml \
-	  .maestro/flows/account-settings-state.yaml \
-	  .maestro/flows/meal-history-facts-alignment.yaml \
-	  .maestro/flows/social-digest.yaml \
-	  .maestro/flows/auth-recovery.yaml \
-	  .maestro/flows/seeded-returning-user.yaml
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/ppl-history-ordering.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/account-settings-state.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/meal-history-facts-alignment.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/social-digest.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/auth-recovery.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/seeded-returning-user.yaml
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/plan-settings-immutability.yaml
 	@$(MAKE) seed-e2e-recovery-apply
 	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/recovery-recommendation-apply.yaml
 	@$(MAKE) seed-e2e
-	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) \
-	  .maestro/flows/active-workout-swap-recommendations.yaml \
-	  .maestro/flows/activity-nutrition-hydration.yaml \
-	  .maestro/flows/meals-supplements-state.yaml \
-	  .maestro/flows/workout-templates.yaml \
-	  .maestro/flows/recovery-live-workouts.yaml \
-	  .maestro/flows/active-workout-completion.yaml
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/active-workout-swap-recommendations.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/activity-nutrition-hydration.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/meals-supplements-state.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/workout-templates.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/recovery-live-workouts.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
 
 # Parallel local preflight. Requires MAESTRO_PARALLEL_SHARDS booted devices.
 # Keep shared-user mutating flows sequential to avoid backend fixture races.
@@ -363,12 +371,15 @@ smoke-mobile-preflight-parallel:
 	  .maestro/flows/active-workout-swap-recommendations.yaml \
 	  .maestro/flows/activity-nutrition-hydration.yaml
 	@$(MAKE) seed-e2e
-	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) \
-	  .maestro/flows/auth-recovery.yaml \
-	  .maestro/flows/meals-supplements-state.yaml \
-	  .maestro/flows/workout-templates.yaml \
-	  .maestro/flows/recovery-live-workouts.yaml \
-	  .maestro/flows/active-workout-completion.yaml
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/auth-recovery.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/meals-supplements-state.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/workout-templates.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test $(MAESTRO_FAST_FLAGS) .maestro/flows/recovery-live-workouts.yaml
+	@$(MAKE) seed-e2e
+	@$(MAESTRO) test .maestro/flows/active-workout-completion.yaml
 
 # ── Smoke-test the prod backend ──────────────────────────────────────────────
 smoke-prod:

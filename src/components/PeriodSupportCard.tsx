@@ -88,6 +88,7 @@ export default function CycleGuidanceCard({
   const [saving, setSaving] = useState(false);
   const [pendingAction, setPendingAction] = useState<CycleTrainingAction | null>(null);
   const [savedTick, setSavedTick] = useState(0);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -246,7 +247,12 @@ export default function CycleGuidanceCard({
       borderWidth: 1,
       borderColor: tc.border,
     }}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+      <TouchableOpacity
+        accessibilityRole="button"
+        accessibilityLabel={expanded ? 'Collapse cycle guidance' : 'Expand cycle guidance'}
+        activeOpacity={0.82}
+        onPress={() => setExpanded(v => !v)}
+        style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
         <View style={{
           width: 40,
           height: 40,
@@ -269,140 +275,143 @@ export default function CycleGuidanceCard({
           </Text>
         </View>
         {saving ? <ActivityIndicator size="small" color={tc.primary} /> : null}
-      </View>
+        <Ionicons name={expanded ? 'chevron-up-outline' : 'chevron-down-outline'} size={18} color={tc.textMuted} />
+      </TouchableOpacity>
 
-      <View style={{ marginTop: 12, gap: 6 }}>
-        <Text style={{ fontSize: 13, fontWeight: '900', color: tc.textPrimary }}>
-          {guidance.phaseTitle}
-        </Text>
-        <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
-          {guidance.phaseDetail}
-        </Text>
-      </View>
+      {expanded && (
+        <>
+          <View style={{ marginTop: 12, gap: 6 }}>
+            <Text style={{ fontSize: 13, fontWeight: '900', color: tc.textPrimary }}>
+              {guidance.phaseTitle}
+            </Text>
+            <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17 }}>
+              {guidance.phaseDetail}
+            </Text>
+          </View>
 
-      {isMenses && (
-        <View style={{ gap: 8, marginTop: 12 }}>
-          {healthFlowLabel && (
-            <View style={{
-              alignSelf: 'flex-start',
-              paddingHorizontal: 9,
-              paddingVertical: 5,
-              borderRadius: 8,
-              borderWidth: 1,
-              borderColor: phaseInfo.color + '55',
-              backgroundColor: phaseInfo.color + '10',
-            }}>
-              <Text style={{ fontSize: 11, fontWeight: '800', color: phaseInfo.color }}>
-                Apple Health flow: {healthFlowLabel}
-              </Text>
+          {isMenses && (
+            <View style={{ gap: 8, marginTop: 12 }}>
+              {healthFlowLabel && (
+                <View style={{
+                  alignSelf: 'flex-start',
+                  paddingHorizontal: 9,
+                  paddingVertical: 5,
+                  borderRadius: 8,
+                  borderWidth: 1,
+                  borderColor: phaseInfo.color + '55',
+                  backgroundColor: phaseInfo.color + '10',
+                }}>
+                  <Text style={{ fontSize: 11, fontWeight: '800', color: phaseInfo.color }}>
+                    Apple Health flow: {healthFlowLabel}
+                  </Text>
+                </View>
+              )}
+              <View>
+                <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, marginBottom: 6 }}>FLOW</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                  {renderChoice('Light', 'light', flow, setFlow)}
+                  {renderChoice('Moderate', 'moderate', flow, setFlow)}
+                  {renderChoice('Heavy', 'heavy', flow, setFlow)}
+                </View>
+              </View>
+              <View>
+                <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, marginBottom: 6 }}>CRAMPS</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                  {renderChoice('None', 'none', cramps, setCramps)}
+                  {renderChoice('Mild', 'mild', cramps, setCramps)}
+                  {renderChoice('Moderate', 'moderate', cramps, setCramps)}
+                  {renderChoice('Severe', 'severe', cramps, setCramps)}
+                </View>
+              </View>
+              <View>
+                <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, marginBottom: 6 }}>ENERGY</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                  {renderChoice('Low', 'low', energy, setEnergy)}
+                  {renderChoice('Normal', 'normal', energy, setEnergy)}
+                  {renderChoice('High', 'high', energy, setEnergy)}
+                </View>
+              </View>
             </View>
           )}
-          <View>
-            <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, marginBottom: 6 }}>FLOW</Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {renderChoice('Light', 'light', flow, setFlow)}
-              {renderChoice('Moderate', 'moderate', flow, setFlow)}
-              {renderChoice('Heavy', 'heavy', flow, setFlow)}
-            </View>
-          </View>
-          <View>
-            <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, marginBottom: 6 }}>CRAMPS</Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {renderChoice('None', 'none', cramps, setCramps)}
-              {renderChoice('Mild', 'mild', cramps, setCramps)}
-              {renderChoice('Moderate', 'moderate', cramps, setCramps)}
-              {renderChoice('Severe', 'severe', cramps, setCramps)}
-            </View>
-          </View>
-          <View>
-            <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, marginBottom: 6 }}>ENERGY</Text>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {renderChoice('Low', 'low', energy, setEnergy)}
-              {renderChoice('Normal', 'normal', energy, setEnergy)}
-              {renderChoice('High', 'high', energy, setEnergy)}
-            </View>
-          </View>
-        </View>
-      )}
 
-      {isMenses && (
-        <TouchableOpacity
-          accessibilityRole="button"
-          onPress={() => saveCheckin().catch(() => {
-            Alert.alert('Could not save check-in', 'Please try again in a moment.');
-          })}
-          style={{
-            alignSelf: 'flex-start',
-            flexDirection: 'row',
-            alignItems: 'center',
-            gap: 6,
-            marginTop: 12,
-            paddingHorizontal: 12,
-            paddingVertical: 8,
-            borderRadius: 8,
-            backgroundColor: tc.primary,
-          }}>
-          <Ionicons name={savedTick ? 'checkmark-circle-outline' : 'save-outline'} size={15} color={primaryText} />
-          <Text style={{ fontSize: 12, fontWeight: '900', color: primaryText }}>
-            {savedTick ? 'Saved' : 'Save today'}
-          </Text>
-        </TouchableOpacity>
-      )}
+          {isMenses && (
+            <TouchableOpacity
+              accessibilityRole="button"
+              onPress={() => saveCheckin().catch(() => {
+                Alert.alert('Could not save check-in', 'Please try again in a moment.');
+              })}
+              style={{
+                alignSelf: 'flex-start',
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 6,
+                marginTop: 12,
+                paddingHorizontal: 12,
+                paddingVertical: 8,
+                borderRadius: 8,
+                backgroundColor: tc.primary,
+              }}>
+              <Ionicons name={savedTick ? 'checkmark-circle-outline' : 'save-outline'} size={15} color={primaryText} />
+              <Text style={{ fontSize: 12, fontWeight: '900', color: primaryText }}>
+                {savedTick ? 'Saved' : 'Save today'}
+              </Text>
+            </TouchableOpacity>
+          )}
 
-      <View style={{ marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: tc.border }}>
-        <Text style={{ fontSize: 13, fontWeight: '900', color: tc.textPrimary }}>
-          {guidance.trainingTitle}
-        </Text>
-        <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginTop: 3 }}>
-          {guidance.trainingDetail}
-        </Text>
-        {canAdjustWorkout && (
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
-            {onUseLighterWorkout && (
-              <TouchableOpacity
-                accessibilityRole="button"
-                disabled={pendingAction != null}
-                onPress={() => runAction('lighter', onUseLighterWorkout)}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 6,
-                  paddingHorizontal: 10,
-                  paddingVertical: 8,
-                  borderRadius: 8,
-                  borderWidth: 1,
-                  borderColor: tc.warning + '88',
-                  backgroundColor: tc.warning + '16',
-                }}>
-                <Ionicons name="remove-circle-outline" size={15} color={tc.warning} />
-                <Text style={{ fontSize: 12, fontWeight: '800', color: tc.warning }}>
-                  Lighten today{currentSets > 0 && estimatedLighterSets > 0 ? ` (${currentSets}->${estimatedLighterSets} sets)` : ''}
-                </Text>
-              </TouchableOpacity>
-            )}
-            {onUseRecoveryDay && (
-              <TouchableOpacity
-                accessibilityRole="button"
-                disabled={pendingAction != null}
-                onPress={() => runAction('recovery', onUseRecoveryDay)}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 6,
-                  paddingHorizontal: 10,
-                  paddingVertical: 8,
-                  borderRadius: 8,
-                  borderWidth: 1,
-                  borderColor: tc.primary + '88',
-                  backgroundColor: tc.primary + '16',
-                }}>
-                <Ionicons name="walk-outline" size={15} color={tc.primary} />
-                <Text style={{ fontSize: 12, fontWeight: '800', color: tc.primary }}>Use recovery</Text>
-              </TouchableOpacity>
+          <View style={{ marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: tc.border }}>
+            <Text style={{ fontSize: 13, fontWeight: '900', color: tc.textPrimary }}>
+              {guidance.trainingTitle}
+            </Text>
+            <Text style={{ fontSize: 12, color: tc.textSecondary, lineHeight: 17, marginTop: 3 }}>
+              {guidance.trainingDetail}
+            </Text>
+            {canAdjustWorkout && (
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+                {onUseLighterWorkout && (
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    disabled={pendingAction != null}
+                    onPress={() => runAction('lighter', onUseLighterWorkout)}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 6,
+                      paddingHorizontal: 10,
+                      paddingVertical: 8,
+                      borderRadius: 8,
+                      borderWidth: 1,
+                      borderColor: tc.warning + '88',
+                      backgroundColor: tc.warning + '16',
+                    }}>
+                    <Ionicons name="remove-circle-outline" size={15} color={tc.warning} />
+                    <Text style={{ fontSize: 12, fontWeight: '800', color: tc.warning }}>
+                      Lighten today{currentSets > 0 && estimatedLighterSets > 0 ? ` (${currentSets}->${estimatedLighterSets} sets)` : ''}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {onUseRecoveryDay && (
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    disabled={pendingAction != null}
+                    onPress={() => runAction('recovery', onUseRecoveryDay)}
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      gap: 6,
+                      paddingHorizontal: 10,
+                      paddingVertical: 8,
+                      borderRadius: 8,
+                      borderWidth: 1,
+                      borderColor: tc.primary + '88',
+                      backgroundColor: tc.primary + '16',
+                    }}>
+                    <Ionicons name="walk-outline" size={15} color={tc.primary} />
+                    <Text style={{ fontSize: 12, fontWeight: '800', color: tc.primary }}>Use recovery</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
             )}
           </View>
-        )}
-      </View>
 
       <View style={{ marginTop: 14, paddingTop: 12, borderTopWidth: 1, borderTopColor: tc.border }}>
         <Text style={{ fontSize: 13, fontWeight: '900', color: tc.textPrimary }}>Nutrition focus</Text>
@@ -472,6 +481,8 @@ export default function CycleGuidanceCard({
       <Text style={{ fontSize: 10, color: tc.textMuted, lineHeight: 14, marginTop: 10 }}>
         Wellness guidance, not a medical diagnosis. Cycle check-ins stay on this device.
       </Text>
+        </>
+      )}
     </View>
   );
 }

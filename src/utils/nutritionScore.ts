@@ -1,10 +1,10 @@
-// Client-side Nutrition Score — plan-preview ONLY.
+// Client-side Nutrition Score — offline/free plan-preview fallback.
 //
-// For logged meals, the authoritative score comes from the backend at
+// The authoritative projected-plan score comes from the backend at
 // /meals/score via `getNutritionScore(token)`. Use `computeNutritionScore`
-// here when you need a best-effort number BEFORE meals are logged (e.g. plan
-// generation preview). The shape mirrors the backend so the UI can render
-// either source without branching.
+// here when the backend is unavailable or for free/offline plan previews.
+// The shape mirrors the backend so the UI can render either source without
+// branching.
 //
 // Classification is NOT done here anymore — we read `food_quality` directly
 // from backend-enriched meal items. That ends the drift between the two

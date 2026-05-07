@@ -27,6 +27,9 @@ tags:
     clearState: false      # preserve any existing session first
     clearKeychain: false
 
+- waitForAnimationToEnd:
+    timeout: 1000
+
 - runFlow:
     file: dismiss-dev-client.yaml
 

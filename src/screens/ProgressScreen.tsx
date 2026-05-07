@@ -44,6 +44,7 @@ import { getMealChecks } from '../utils/mealTracker';
 import { computePlantDiversity, computeFiberToday, recommendedFiberTarget } from '../utils/gutHealth';
 import { proteinTimingInsights } from '../utils/nutritionInsights';
 import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
+import { buildGoalForecast } from '../utils/goalForecast';
 import { buildGoalTrajectory } from '../utils/goalTrajectory';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
@@ -2444,6 +2445,23 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     }),
     [displayedOneRepMaxLifts, distanceUnit, history, mealAverages, mealHistory, paceHistory, summaries, userProfile, weightEntries, weightUnit],
   );
+  const goalForecast = useMemo(
+    () => buildGoalForecast({
+      profile: userProfile,
+      weightEntries,
+      history,
+      summaries,
+      mealAverages,
+      mealHistory,
+      nutritionScoreWeekly,
+      paceHistory,
+      oneRepMaxLifts: displayedOneRepMaxLifts,
+      bodyScanHistory,
+      weightUnit,
+      distanceUnit,
+    }),
+    [bodyScanHistory, displayedOneRepMaxLifts, distanceUnit, history, mealAverages, mealHistory, nutritionScoreWeekly, paceHistory, summaries, userProfile, weightEntries, weightUnit],
+  );
   const todayTrack = useMemo(
     () => buildTodayTrackSummary({
       profile: userProfile,
@@ -2468,6 +2486,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const goalTrajectoryConfidenceColor = goalTrajectory.confidence === 'high'
     ? tc.success
     : goalTrajectory.confidence === 'medium'
+      ? tc.warning
+      : tc.textMuted;
+  const goalForecastColor = goalForecast.tone === 'success'
+    ? tc.success
+    : goalForecast.tone === 'warning'
+      ? tc.warning
+      : tc.primary;
+  const goalForecastConfidenceColor = goalForecast.confidence === 'high'
+    ? tc.success
+    : goalForecast.confidence === 'medium'
       ? tc.warning
       : tc.textMuted;
   const planWeekZone2 = useMemo(() => {
@@ -3159,6 +3187,70 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             <View style={styles.todayActionRow}>
               <Ionicons name="arrow-forward-circle-outline" size={17} color={todayTrack.color} />
               <Text style={styles.todayActionText} numberOfLines={2}>{todayTrack.action}</Text>
+            </View>
+          </View>
+
+          <View
+            testID="progress-goal-forecast-card"
+            style={[styles.goalForecastCard, { borderColor: goalForecastColor + '55' }]}
+          >
+            <View style={styles.goalForecastHeader}>
+              <View style={[styles.goalForecastIcon, { backgroundColor: goalForecastColor + '20' }]}>
+                <Ionicons name="analytics-outline" size={18} color={goalForecastColor} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.goalForecastEyebrow}>GOAL ESTIMATE · UPDATED DAILY</Text>
+                <Text style={styles.goalForecastTitle}>{goalForecast.title}</Text>
+              </View>
+              <View style={[styles.goalForecastPill, { borderColor: goalForecastConfidenceColor + '88', backgroundColor: goalForecastConfidenceColor + '16' }]}>
+                <Text style={[styles.goalForecastPillText, { color: goalForecastConfidenceColor }]}>
+                  {goalForecast.confidence}
+                </Text>
+              </View>
+            </View>
+            <Text testID="progress-goal-forecast-headline" style={styles.goalForecastHeadline} numberOfLines={2}>
+              {goalForecast.headline}
+            </Text>
+            <Text style={styles.goalForecastSubheadline} numberOfLines={3}>
+              {goalForecast.subheadline}
+            </Text>
+            <View style={styles.goalProgressTrack}>
+              <AnimatedProgressFill
+                pct={goalForecast.executionPct}
+                minPct={5}
+                color={goalForecastColor}
+                delay={120}
+                style={styles.goalProgressFill}
+              />
+            </View>
+            <View style={styles.goalProgressMeta}>
+              <Text style={styles.goalProgressLabel}>{goalForecast.executionPct}% current execution</Text>
+              <Text style={styles.goalProgressConfidence}>{goalForecast.confidenceDetail}</Text>
+            </View>
+            <View style={styles.goalForecastStats}>
+              <View style={[styles.goalForecastPrimaryStat, { borderColor: goalForecastColor + '44' }]}>
+                <Text style={styles.goalForecastStatLabel}>{goalForecast.metricLabel}</Text>
+                <PulseOnChange trigger={`${goalForecast.metricLabel}-${goalForecast.metricValue}`}>
+                  <Text style={[styles.goalForecastMetricValue, { color: goalForecastColor }]} numberOfLines={1}>
+                    {goalForecast.metricValue}
+                  </Text>
+                </PulseOnChange>
+                <Text style={styles.goalForecastStatDetail} numberOfLines={2}>{goalForecast.metricDetail}</Text>
+              </View>
+              {goalForecast.stats.slice(0, 2).map(stat => (
+                <View key={stat.label} style={styles.goalForecastStat}>
+                  <Text style={styles.goalForecastStatLabel} numberOfLines={1}>{stat.label}</Text>
+                  <Text style={styles.goalForecastStatValue} numberOfLines={1}>{stat.value}</Text>
+                  <Text style={styles.goalForecastStatDetail} numberOfLines={2}>{stat.detail}</Text>
+                </View>
+              ))}
+            </View>
+            <View style={styles.goalForecastReason}>
+              <Ionicons name={goalForecast.limiters.length ? 'information-circle-outline' : 'checkmark-circle-outline'} size={16} color={goalForecastColor} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.goalForecastReasonText} numberOfLines={2}>{goalForecast.updateReason}</Text>
+                <Text style={styles.goalForecastAssumption} numberOfLines={2}>{goalForecast.assumption}</Text>
+              </View>
             </View>
           </View>
 
@@ -5027,7 +5119,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Ionicons name="heart-outline" size={36} color={tc.primary} />
                     <Text {...dynamicTextProps} style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary, marginTop: 8 }}>Apple Health is optional</Text>
                     <Text {...dynamicTextProps} style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6, marginBottom: 14 }}>
-                      Optional sync for sleep, HRV, resting heart rate, steps, workouts, weight, and active energy. Thallo also writes completed workouts back to Apple Health.
+                      Optional sync for sleep, heart rate, HRV, steps, workouts, weight, energy, VO2 max, respiratory rate, blood oxygen, standing hours, mindful minutes, and cycle-aware signals. Thallo can also write completed workout details back to Apple Health.
                     </Text>
                     <TouchableOpacity
                       style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 12, paddingHorizontal: 32 }}
@@ -5475,7 +5567,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                         ? `${missingWorkoutDays} more training day${missingWorkoutDays === 1 ? '' : 's'} to unlock your score`
                         : missingNutritionDays > 0
                           ? `${missingNutritionDays} more meal day${missingNutritionDays === 1 ? '' : 's'} to unlock your score`
-                          : 'Waiting on the server nutrition score before unlocking this card'}
+                          : 'Waiting on the projected nutrition score before unlocking this card'}
                   </Text>
                   <View style={{ width: '100%', height: 4, borderRadius: 2, backgroundColor: tc.border, marginTop: 12 }}>
                     <AnimatedProgressFill
@@ -5499,7 +5591,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             const activityScore = Math.round(workoutAdherence * 100);
 
             const nutScore = nutritionScoreWeekly!.avg_score;
-            const nutDetail = `${nutritionScoreWeekly!.days_with_data}/${nutritionScoreWeekly!.window_days} meal days · server nutrition score`;
+            const nutDetail = `${nutritionScoreWeekly!.days_with_data}/${nutritionScoreWeekly!.window_days} meal days · projected nutrition score`;
             const combined = Math.round(activityScore * 0.5 + nutScore * 0.5);
             const scoreColor = combined >= 70 ? '#22C55E' : combined >= 45 ? '#F59E0B' : '#EF4444';
             const rating = combined >= 80 ? 'Excellent' : combined >= 65 ? 'Good' : combined >= 45 ? 'Fair' : 'Needs work';
@@ -7144,6 +7236,133 @@ function createStyles(colors: ReturnType<typeof getTheme>['colors']) { return St
     fontWeight: '800',
     color: colors.textSecondary,
     lineHeight: 17,
+  },
+  goalForecastCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    padding: 14,
+    marginBottom: 12,
+    ...elevations.subtle,
+  },
+  goalForecastHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 11,
+  },
+  goalForecastIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  goalForecastEyebrow: {
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+    color: colors.textMuted,
+  },
+  goalForecastTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginTop: 1,
+  },
+  goalForecastPill: {
+    borderWidth: 1,
+    borderRadius: radius.full,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+  },
+  goalForecastPillText: {
+    fontSize: 10,
+    fontWeight: '900',
+    textTransform: 'uppercase',
+  },
+  goalForecastHeadline: {
+    fontSize: 19,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    lineHeight: 24,
+  },
+  goalForecastSubheadline: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    lineHeight: 17,
+    marginTop: 5,
+  },
+  goalForecastStats: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 12,
+  },
+  goalForecastPrimaryStat: {
+    flex: 1.25,
+    minHeight: 78,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    padding: 9,
+  },
+  goalForecastStat: {
+    flex: 1,
+    minHeight: 78,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceRaised,
+    padding: 9,
+  },
+  goalForecastStatLabel: {
+    fontSize: 9,
+    fontWeight: '900',
+    letterSpacing: 0.3,
+    textTransform: 'uppercase',
+    color: colors.textMuted,
+  },
+  goalForecastMetricValue: {
+    fontSize: 20,
+    fontWeight: '900',
+    marginTop: 2,
+  },
+  goalForecastStatValue: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: colors.textPrimary,
+    marginTop: 3,
+  },
+  goalForecastStatDetail: {
+    fontSize: 10,
+    color: colors.textSecondary,
+    lineHeight: 14,
+    marginTop: 2,
+  },
+  goalForecastReason: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 7,
+    marginTop: 12,
+    padding: 10,
+    borderRadius: radius.md,
+    backgroundColor: colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  goalForecastReasonText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: colors.textSecondary,
+    lineHeight: 17,
+  },
+  goalForecastAssumption: {
+    fontSize: 11,
+    color: colors.textMuted,
+    lineHeight: 15,
+    marginTop: 2,
   },
   todaySignalGrid: {
     flexDirection: 'row',

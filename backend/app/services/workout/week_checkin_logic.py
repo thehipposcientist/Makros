@@ -123,6 +123,7 @@ class WeeklyCheckinSummary:
     week_start: str = ""
     week_end: str = ""
     headline: str = ""
+    goal_forecast: dict[str, Any] | None = None
     coach_findings: CoachFindings = field(default_factory=CoachFindings)
     # Stash raw review for the recommendation engine
     _raw_review: Any = field(default=None, repr=False)
@@ -149,6 +150,7 @@ class WeeklyCheckinSummary:
             "week_start": self.week_start,
             "week_end": self.week_end,
             "headline": self.headline,
+            "goal_forecast": self.goal_forecast,
             "coach_findings": self.coach_findings.to_dict(),
         }
 
@@ -181,6 +183,7 @@ def compute_checkin_summary_from_review(review: Any) -> WeeklyCheckinSummary:
         week_start=str(review.week_start),
         week_end=str(review.week_end),
         headline=review.headline,
+        goal_forecast=getattr(review, "goal_forecast", None),
         _raw_review=review,
     )
 

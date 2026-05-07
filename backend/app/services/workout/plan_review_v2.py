@@ -28,7 +28,8 @@ from typing import Any, Literal
 from sqlmodel import select
 
 from app.models import (
-    DailyNutritionMetrics, DailyRollup, PlanDay, PlanWeek, UserGoal, UserRollup,
+    BodyScan, DailyNutritionMetrics, DailyRollup, PlanDay, PlanWeek, UserGoal,
+    UserProfile, UserRollup,
     WorkoutCompletion, WorkoutExercise, WorkoutPlan, WorkoutSession, ExerciseSet,
 )
 from app.services.workout.weekly_volume import (
@@ -102,6 +103,8 @@ class WeeklyReview:
     plateaus: list[dict[str, Any]] = field(default_factory=list)
     # One-sentence summary the UI can use as the card headline.
     headline: str = ""
+    # Goal-specific 6-week forecast shown in Progress + weekly recap.
+    goal_forecast: dict[str, Any] | None = None
     recommendations: list[Recommendation] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -142,6 +145,7 @@ class WeeklyReview:
             "soreness_areas": self.soreness_areas,
             "plateaus": self.plateaus,
             "headline": self.headline,
+            "goal_forecast": self.goal_forecast,
             "recommendations": [r.to_dict() for r in self.recommendations],
         }
 
@@ -411,13 +415,38 @@ def compute_weekly_review(
         end_date = date.today()
     start = end_date - timedelta(days=days - 1)
 
-    # Active goal — drives targets.
+    # Active goal — drives targets. If the caller supplies a goal snapshot,
+    # do not query UserGoal; completed-week reviews must stay tied to the
+    # goal that generated that week.
+    active_goal = None
     if not goal_override:
-        goal = db.exec(
+        active_goal = db.exec(
             select(UserGoal).where(UserGoal.user_id == user_id, UserGoal.is_active == True)
         ).first()
-        goal_override = effective_goal_id(goal, fallback="general_health")
+        goal_override = effective_goal_id(active_goal, fallback="general_health")
     goal_bucket = canonical_goal_bucket(goal_override)
+    goal_pace = None
+    if active_goal is not None and getattr(active_goal, "pace", None) is not None:
+        raw_pace = getattr(active_goal, "pace")
+        goal_pace = raw_pace.value if hasattr(raw_pace, "value") else str(raw_pace)
+    target_weight_lbs = (
+        float(active_goal.target_weight_lbs)
+        if active_goal is not None and active_goal.target_weight_lbs is not None else None
+    )
+    profile = db.exec(
+        select(UserProfile).where(UserProfile.user_id == user_id)
+    ).first()
+    current_weight_lbs = float(profile.weight_lbs) if profile and profile.weight_lbs else None
+    latest_body_scan = db.exec(
+        select(BodyScan)
+        .where(BodyScan.user_id == user_id)
+        .where(BodyScan.body_fat_pct != None)  # noqa: E711
+        .order_by(BodyScan.scan_date.desc(), BodyScan.created_at.desc())
+    ).first()
+    body_fat_pct = (
+        float(latest_body_scan.body_fat_pct)
+        if latest_body_scan and latest_body_scan.body_fat_pct is not None else None
+    )
 
     # Completions in window.
     completions = db.exec(
@@ -872,6 +901,37 @@ def compute_weekly_review(
             f"session{'s' if extra != 1 else ''}. Keep logging; align one with the plan to unlock adherence coaching."
         )
 
+    # Keep weekly review read-only. The score API is still the nutrition
+    # authority, but its weekly builder may materialize DailyNutritionMetrics
+    # rows; this review should not change the data it is summarizing.
+    weekly_nutrition_score = None
+
+    try:
+        from app.services.workout.goal_forecast import build_goal_forecast
+        goal_forecast = build_goal_forecast(
+            goal=goal_override,
+            pace=goal_pace,
+            current_weight_lbs=current_weight_lbs,
+            target_weight_lbs=target_weight_lbs,
+            body_fat_pct=body_fat_pct,
+            sessions_completed=completed_for_adherence,
+            sessions_planned=planned,
+            workout_adherence_pct=adherence_pct,
+            cardio_minutes=cardio_mins,
+            zone2_minutes=zone2_mins,
+            days_logged=days_logged,
+            days=days,
+            nutrition_logging_pct=nutrition_logging_pct,
+            avg_protein_g=avg_protein,
+            calorie_target_adherence_pct=calorie_target_adherence_pct,
+            protein_target_adherence_pct=protein_target_adherence_pct,
+            weekly_nutrition_score=weekly_nutrition_score,
+            weight_trend_lbs_per_week=weight_trend_lbs_per_week,
+            avg_sleep_hours=avg_sleep_hours,
+        ).to_dict()
+    except Exception:
+        goal_forecast = None
+
     # Smoothed weight (EMA) — pulled from the 7-day UserRollup. Cleaner
     # than the raw slope alone (which is noisy week-to-week) and gives
     # the UI a "current weight, smoothed: X lbs" line that doesn't
@@ -917,6 +977,7 @@ def compute_weekly_review(
         soreness_areas=soreness_areas,
         plateaus=plateaus,
         headline=headline,
+        goal_forecast=goal_forecast,
         recommendations=recs,
     )
 

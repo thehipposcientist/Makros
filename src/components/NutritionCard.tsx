@@ -88,9 +88,9 @@ interface NutritionCardProps {
     dose_unit: string;
     taken_count: number;
   }> | null;
-  /** Server-authoritative logged-meal score. When present, this
-   *  overrides the plan-preview score so Home, History, and Progress
-   *  all show the same number for logged days. */
+  /** Server-authoritative projected-day score. When present, this
+   *  overrides the local preview so Home, History, and Progress all
+   *  show the same number for the planned day. */
   authoritativeScore?: {
     score: number;
     adherence?: number | null;

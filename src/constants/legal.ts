@@ -1,7 +1,7 @@
 // Bump this whenever the body of any LEGAL_SECTIONS entry changes. The
 // frontend compares the active user's accepted version against this and
 // shows the LegalDisclosureModal on next launch when they differ.
-export const LEGAL_VERSION = '2026-05-06.1';
+export const LEGAL_VERSION = '2026-05-06.2';
 export const SUPPORT_EMAIL = 'thallosupport@gmail.com';
 
 export const LEGAL_SECTIONS = [
@@ -15,7 +15,7 @@ export const LEGAL_SECTIONS = [
   },
   {
     title: 'Third-Party Services',
-    body: 'Thallo uses OpenAI to power meal parsing, coach chat, food photo scanning, and gear photo identification. Prompts may include relevant workout, nutrition, macro, recovery, supplement, and photo-derived context needed for the feature; direct account identifiers such as your name or email are not required and are stripped from server-generated coach check-in payloads. Food nutrition data comes from the USDA FoodData Central database. Apple Health data stays on your device unless you explicitly share workout-only activity with a friend. We do not sell your data to advertisers, and calorie, macro, and weight data never crosses the social sharing boundary.',
+    body: 'Thallo uses OpenAI to power meal parsing, coach chat, scans, classification, and workout feedback. Prompts may include relevant workout, nutrition, macro, recovery, supplement, Health summary, and photo-derived context needed for the feature; direct account identifiers such as your name or email are not required and are stripped from server-generated coach check-in payloads. Food nutrition data comes from the USDA FoodData Central database. Apple Health reads happen on your device, and daily summaries may sync to your account for trends and check-ins. We do not sell your data to advertisers, and calorie, macro, and weight data never crosses the social sharing boundary.',
   },
   {
     title: 'Health And Fitness Disclaimer',
@@ -27,7 +27,7 @@ export const LEGAL_SECTIONS = [
   },
   {
     title: 'Account Deletion And Retention',
-    body: 'You can delete your account from Settings at any time. After deletion we anonymize your account immediately and permanently remove personal data within 30 days. Aggregate, non-identifying analytics may persist for product improvement.',
+    body: 'You can delete your account from Settings at any time. After deletion we remove Thallo-created profile and log data, disable login, and anonymize account identifiers. Aggregate, non-identifying analytics and records needed for security or moderation may persist for product safety.',
   },
 ] as const;
 

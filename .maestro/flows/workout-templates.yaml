@@ -57,8 +57,16 @@ tags:
     direction: DOWN
     timeout: 20000
     visibilityPercentage: 50
+- swipe:
+    start: 50%,78%
+    end: 50%,62%
+    duration: 350
+- waitForAnimationToEnd:
+    timeout: 1000
 - tapOn:
     id: "workout-template-new"
+- waitForAnimationToEnd:
+    timeout: 1000
 - extendedWaitUntil:
     visible: "New Template"
     timeout: 15000
@@ -91,22 +99,40 @@ tags:
 # ActiveWorkoutScreen with the template exercise intact. First reopen it in
 # edit mode; this catches the saved-template edit affordance and persisted
 # draft hydration.
-- extendedWaitUntil:
-    visible:
+- scrollUntilVisible:
+    element:
       id: "workout-template-edit-0"
+    direction: DOWN
     timeout: 15000
+    visibilityPercentage: 50
+- swipe:
+    start: 50%,78%
+    end: 50%,62%
+    duration: 350
+- waitForAnimationToEnd:
+    timeout: 1000
 - tapOn:
     id: "workout-template-edit-0"
+- waitForAnimationToEnd:
+    timeout: 1000
 - extendedWaitUntil:
     visible: "Edit Template"
     timeout: 15000
 - assertVisible: "Push-ups"
 - tapOn:
     id: "workout-template-save"
-- extendedWaitUntil:
-    visible:
+- scrollUntilVisible:
+    element:
       id: "workout-template-start-0"
+    direction: DOWN
     timeout: 15000
+    visibilityPercentage: 50
+- swipe:
+    start: 50%,78%
+    end: 50%,62%
+    duration: 350
+- waitForAnimationToEnd:
+    timeout: 1000
 - tapOn:
     id: "workout-template-start-0"
 - extendedWaitUntil:

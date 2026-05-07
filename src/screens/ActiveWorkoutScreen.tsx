@@ -6806,7 +6806,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 injury → stop the workout and seek a clinician, not the
                 chat. */}
             <Text style={[styles.coachHint, { fontStyle: 'italic', fontSize: 11, marginTop: -4 }]}>
-              AI replies can be wrong — verify before acting. Stop and seek medical advice for sharp pain or injury.
+              AI replies can be wrong — verify before acting. Stop for sharp pain or injury symptoms and get qualified help when needed.
             </Text>
 
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.coachPromptRow}>

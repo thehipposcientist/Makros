@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-SCORE_VERSION = 3   # bumped at unified-score rewrite
+SCORE_VERSION = 4   # v4 scores projected plans instead of logged meal totals
 
 
 # ─── RDA targets (adults, general) ───────────────────────────────────────────

@@ -9,11 +9,13 @@ One **Nutrition Score** (0-100) with three sub-scores:
 2. **Food Quality** (30-40%): 7 inputs — fiber density (14 g/1000 kcal target), added sugar % cals, saturated fat % cals, sodium, minimally-processed %, plant diversity, omega-3 signal.
 3. **Micronutrient Coverage** (20-30%): priority-6 micros = calcium, iron, potassium, magnesium, vitamin_d, vitamin_b12. Vitamin C dropped (trivially hit).
 
+Source: `/meals/score` scores the projected day plan from `UserDayState.nutrition_plan` / `PlanDay.nutrition_json`. Logged meal rows remain the source for meal history, Gut & Plants, recovery flags, and fallback scoring only when no projected plan exists.
+
 Goal weights (adherence/quality/micro):
 - fat_loss: 45/35/20 | muscle_gain: 45/30/25 | body_recomp: 40/35/25
 - endurance: 40/35/25 | general_health: 30/40/30 | strength: 45/30/25
 
-`SCORE_VERSION=3`, `METRICS_VERSION=3`, `CLASSIFIER_VERSION=5`
+`SCORE_VERSION=4`, `METRICS_VERSION=3`, `CLASSIFIER_VERSION=5`
 
 **The longevity_signals_score has been deleted.** Gut & Plants is descriptive only (no score).
 
@@ -64,7 +66,7 @@ Exercise kcal source: imported/wearable calories win. If a manual/custom activit
 ### Nutrition
 | Endpoint | Description |
 |---|---|
-| `GET /meals/score?days=7` | Authoritative Nutrition Score (today + 7-day). |
+| `GET /meals/score?days=7` | Authoritative projected Nutrition Score (today + 7-day). |
 | `GET /meals/gut-health?days=14` | Gut & Plants facts. Window includes serving totals plus daily averages for fermented/probiotic/omega-3; omega-3 includes logged EPA/DHA supplements. Today includes AI-estimated `collagen_g` + `probiotic_cfu_billions`. |
 | `GET /meals/recovery-flags?days=7` | Fueling & Recovery flags. |
 | `GET /meals/hydration` / `POST /meals/hydration` | Daily hydration log + target. Target uses body size/sex, planned/actual exercise, logged protein, and alcohol. Sodium/electrolytes/creatine/caffeine are returned as guidance signals; they do not silently raise ounces. |

@@ -49,11 +49,12 @@ tags:
     visible:
       id: "hydration-panel"
     timeout: 30000
-- assertVisible: "48 /"
+- assertVisible:
+    text: ".*48 /.*"
 - tapOn:
     id: "hydration-quick-add-8"
 - extendedWaitUntil:
-    visible: "56 /"
+    visible: ".*56 /.*"
     timeout: 15000
 
 # Favorite meal quick-log should create a real meal row in today's plan view.
@@ -97,7 +98,7 @@ tags:
 - tapOn:
     id: "meal-history-row-0"
 - extendedWaitUntil:
-    visible: "Greek yogurt protein bowl"
+    visible: ".*Greek yogurt protein bowl.*"
     timeout: 15000
 
 # Supplement stack: add a new daily item, then log it from Today.
@@ -158,5 +159,5 @@ tags:
 - tapOn:
     id: "supplement-mark-taken-e2e_electrolyte"
 - extendedWaitUntil:
-    visible: "Taken"
+    visible: ".*Taken.*"
     timeout: 15000

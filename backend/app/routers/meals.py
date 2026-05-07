@@ -108,8 +108,8 @@ _REFRESH_DEBOUNCE_SECONDS = 3.0
 
 def _refresh_daily_metrics(db: Session, user_id: int, meal_date: date, *, force: bool = False) -> None:
     """Recompute DailyNutritionMetrics for the given user + date. Called
-    after any write that changes what meals exist on that day so the
-    Nutrition Score reflects reality on the next /meals/score fetch.
+    after any write that changes what meals exist on that day so logged
+    meal history, gut facts, and recovery signals refresh on the next read.
     Non-blocking — failures here never break the caller."""
     key = (user_id, meal_date)
     now = _time.time()
@@ -1113,7 +1113,7 @@ def nutrition_score_endpoint(
     current_user: User = Depends(require_pro_feature("Nutrition scoring")),
     db: Session = Depends(get_session),
 ):
-    """Authoritative Nutrition Score for today + the rolling window.
+    """Authoritative projected Nutrition Score for today + rolling window.
     This is the server-side source of truth; the client renders it verbatim."""
     from app.services.nutrition.score_builder import compute_today_score, compute_weekly_score
 

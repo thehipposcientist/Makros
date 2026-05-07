@@ -491,6 +491,17 @@ export default function CoachCheckinModal({
                         {existingCheckin.review_snapshot_json.nutrition_summary}
                       </Text>
                     ) : null}
+                    {existingCheckin.review_snapshot_json.goal_forecast ? (
+                      <View style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border + '66' }}>
+                        <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '900' }}>GOAL ESTIMATE</Text>
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: colors.textPrimary, marginTop: 4, lineHeight: 17 }}>
+                          {String(existingCheckin.review_snapshot_json.goal_forecast.headline ?? '')}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: colors.textSecondary, marginTop: 3, lineHeight: 15 }}>
+                          {String(existingCheckin.review_snapshot_json.goal_forecast.update_reason ?? '')}
+                        </Text>
+                      </View>
+                    ) : null}
                   </View>
                 )}
 
@@ -612,6 +623,17 @@ export default function CoachCheckinModal({
                       <Text style={{ fontSize: 11, color: colors.textSecondary, marginTop: 10, lineHeight: 15 }}>
                         {review.nutrition_summary}
                       </Text>
+                    ) : null}
+                    {review.goal_forecast ? (
+                      <View style={{ marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: colors.border + '66' }}>
+                        <Text style={{ fontSize: 9, color: colors.textMuted, letterSpacing: 0.4, fontWeight: '900' }}>GOAL ESTIMATE</Text>
+                        <Text style={{ fontSize: 12, fontWeight: '800', color: colors.textPrimary, marginTop: 4, lineHeight: 17 }}>
+                          {review.goal_forecast.headline}
+                        </Text>
+                        <Text style={{ fontSize: 11, color: colors.textSecondary, marginTop: 3, lineHeight: 15 }}>
+                          {review.goal_forecast.update_reason}
+                        </Text>
+                      </View>
                     ) : null}
                     {/* Top 2 recs — the rest of the list lives on the
                         weekly coaching card. We surface the highest-

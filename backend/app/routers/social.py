@@ -493,7 +493,10 @@ def request_friend(
     db: Session = Depends(get_session),
 ):
     target = db.exec(
-        select(User).where(User.username == body.username, User.is_active == True)  # noqa: E712
+        select(User).where(
+            sa_func.lower(User.username) == body.username,
+            User.is_active == True,  # noqa: E712
+        )
     ).first()
     if not target:
         raise HTTPException(404, "user not found")

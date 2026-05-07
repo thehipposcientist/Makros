@@ -58,6 +58,12 @@ tags:
     direction: DOWN
     timeout: 20000
     visibilityPercentage: 50
+- swipe:
+    start: 50%,78%
+    end: 50%,62%
+    duration: 350
+- waitForAnimationToEnd:
+    timeout: 1000
 - tapOn:
     id: "extra-workout-log"
 - extendedWaitUntil:
@@ -89,12 +95,24 @@ tags:
     direction: DOWN
     timeout: 20000
     visibilityPercentage: 50
+- swipe:
+    start: 50%,78%
+    end: 50%,62%
+    duration: 350
+- waitForAnimationToEnd:
+    timeout: 1000
 - tapOn:
     id: "extra-workout-custom"
 - extendedWaitUntil:
     visible: "Custom Workout"
     timeout: 15000
 - assertVisible: "Pick a type. We'll time it and sync HR from Apple Health."
+- scrollUntilVisible:
+    element:
+      id: "live-quickstart-cardio-walk"
+    direction: DOWN
+    timeout: 15000
+    visibilityPercentage: 50
 - tapOn:
     id: "live-quickstart-cardio-walk"
 - extendedWaitUntil:

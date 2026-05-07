@@ -166,7 +166,7 @@ export const SUPPLEMENT_LIBRARY: SupplementEntry[] = [
     dose: '2–4g EPA+DHA combined daily',
     timing: 'With meals to reduce fishy burps',
     goodFor: ['Recovery', 'General health', 'Endurance'],
-    cautions: 'High doses can thin blood — consult a doctor if on blood thinners.',
+    cautions: 'High doses can thin blood — check with a clinician if you use blood thinners.',
   },
   {
     name: 'Magnesium Glycinate',

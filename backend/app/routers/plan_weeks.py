@@ -303,6 +303,7 @@ def _review_snapshot_from_review(review, *, history_context: dict | None = None)
         "nutrition_summary": getattr(review, "nutrition_summary", ""),
         "nutrition_notes": getattr(review, "nutrition_notes", []),
         "weight_trend_direction": review.weight_trend_direction,
+        "goal_forecast": getattr(review, "goal_forecast", None),
         "recommendations": [
             {
                 "key": r.key,
@@ -402,6 +403,7 @@ def _plan_week_review_snapshot_needs_backfill(snapshot: dict | None) -> bool:
         "protein_target_adherence_pct",
         "nutrition_summary",
         "nutrition_notes",
+        "goal_forecast",
     )
     if any(key not in snapshot for key in required_keys):
         return True

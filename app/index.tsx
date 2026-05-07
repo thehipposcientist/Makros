@@ -385,7 +385,7 @@ async function pullUserStateFromBackend(token: string): Promise<void> {
   }
 }
 import { UserProfile, WorkoutDay, WorkoutSession, UserLogEntry, SupplementItem } from '../src/types';
-import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, getAIRemainingWeekNutritionPlan, repairPlanWeekInjuryConflicts, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName, saveWeightEntryAPI, getHydration } from '../src/services/api';
+import { getMyProfile, getMe, syncOnboarding, getAIPlans, getAIWorkoutPlan, getAINutritionPlan, getAIRemainingWeekNutritionPlan, repairPlanWeekInjuryConflicts, upsertDayState, parseRecentWorkouts, logWorkoutDone, resumePendingPlanJob, getPendingPlanMarker, cancelPendingPlanJob, getUserState, putUserState, listWorkoutCompletions, exportAccountData, deleteAccount, requestEmailVerification, recordTelemetryEvent, updateName, updateUsername, saveWeightEntryAPI, getHydration } from '../src/services/api';
 import { clearAllSavedNutritionPlans, clearAllPreservedMeals, clearAllMealChecksExceptToday, clearSavedNutritionPlansForDates, clearPreservedMealsForDates, clearMealChecksForDates } from '../src/utils/mealTracker';
 import { clearAllPlanCache, clearWorkoutCache, clearMealCache } from '../src/utils/planCacheReset';
 import { loadCachedHydration, saveCachedHydration } from '../src/utils/hydrationCache';
@@ -555,6 +555,7 @@ export default function Index() {
   const [showAccount, setShowAccount]     = useState(false);
   const [showSettings, setShowSettings]   = useState(false);
   const [showSupplements, setShowSupplements] = useState(false);
+  const [usernameRefreshKey, setUsernameRefreshKey] = useState(0);
   // Re-acceptance gate: when the server-side legal versions a user has
   // accepted differ from the current LEGAL_VERSION constant, this flips
   // true and a blocking LegalDisclosureModal renders. Cleared after the
@@ -1986,6 +1987,7 @@ export default function Index() {
         authToken={authToken}
         userProfile={userProfile}
         planRefreshKey={planRefreshKey}
+        usernameRefreshKey={usernameRefreshKey}
         isWorkoutUpdating={isWorkoutUpdating}
         isNutritionUpdating={isNutritionUpdating}
         onCancelPlanGen={cancelPlanGen}
@@ -2158,6 +2160,7 @@ export default function Index() {
           onUpgradeToPro={handleUpgradeToPro}
           onClose={() => setShowAccount(false)}
           onSignOut={handleSignOut}
+          onUsernameChanged={() => setUsernameRefreshKey(k => k + 1)}
           onShowTutorial={() => {
             setShowTutorial(true);
             setShowAccount(false);
@@ -2605,7 +2608,7 @@ function SplashLoadingScreen() {
 // ── Account Info Modal ────────────────────────────────────────────────────────
 
 function AccountInfoModal({
-  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut, onShowTutorial, onOpenSettings,
+  token, profile, setUserProfile, onUpgradeToPro, onClose, onSignOut, onUsernameChanged, onShowTutorial, onOpenSettings,
 }: {
   token: string;
   profile: UserProfile;
@@ -2613,6 +2616,7 @@ function AccountInfoModal({
   onUpgradeToPro: (p: UserProfile) => void;
   onClose: () => void;
   onSignOut: () => void;
+  onUsernameChanged?: (username: string) => void;
   /** When set, the "Show tutorial again" button calls this directly
    *  (instead of clearing the AsyncStorage flag and asking the user
    *  to navigate). Owner is the app root, which renders the
@@ -2645,6 +2649,8 @@ function AccountInfoModal({
   const [nameFirst, setNameFirst] = useState(profile.firstName ?? '');
   const [nameLast, setNameLast] = useState(profile.lastName ?? '');
   const [nameStatus, setNameStatus] = useState('');
+  const [usernameDraft, setUsernameDraft] = useState('');
+  const [usernameStatus, setUsernameStatus] = useState('');
   const [watchStatus, setWatchStatus] = useState<string>('No sync recorded yet');
   const cleanProfileText = (value: unknown): string => {
     const text = typeof value === 'string' ? value.trim() : '';
@@ -2677,6 +2683,7 @@ function AccountInfoModal({
     ? `${formatProfilePounds(targetWeightLbs)} lbs`
     : '—';
   const ageValue = age != null && age > 0 ? String(Math.round(age)) : '—';
+  const ACCOUNT_ME_CACHE_KEY = 'accountModal.meCache.v1';
 
   useEffect(() => {
     let cancelled = false;
@@ -2692,10 +2699,9 @@ function AccountInfoModal({
     // for every open after the first. Cache is per-user-token so a
     // sign-out + sign-in-as-different-user can't leak data — the cache
     // gets overwritten by the new user's getMe response.
-    const CACHE_KEY = 'accountModal.meCache.v1';
     const hydrateFromCache = async () => {
       try {
-        const raw = await AsyncStorage.getItem(CACHE_KEY);
+        const raw = await AsyncStorage.getItem(ACCOUNT_ME_CACHE_KEY);
         if (!raw) return false;
         const data = JSON.parse(raw);
         if (data?.token !== token) return false;  // different user — don't trust
@@ -2708,6 +2714,7 @@ function AccountInfoModal({
             emailVerified: !!data.emailVerified,
             legalAccepted: !!data.legalAccepted,
           });
+          setUsernameDraft(data.username ?? '');
           setNameFirst(data.firstName ?? profile.firstName ?? '');
           setNameLast(data.lastName ?? profile.lastName ?? '');
           setHasRecoveryQuestion(!!data.hasRecoveryQuestion);
@@ -2731,13 +2738,14 @@ function AccountInfoModal({
               emailVerified: !!data.email_verified,
               legalAccepted: !!data.legal_accepted,
             });
+            setUsernameDraft(data.username ?? '');
             setNameFirst(data.first_name ?? profile.firstName ?? '');
             setNameLast(data.last_name ?? profile.lastName ?? '');
             setHasRecoveryQuestion(!!data.has_recovery_question);
           });
           // Persist for next open. Token included so a user-switch
           // invalidates the cache automatically.
-          AsyncStorage.setItem(CACHE_KEY, JSON.stringify({
+          AsyncStorage.setItem(ACCOUNT_ME_CACHE_KEY, JSON.stringify({
             token,
             email: data.email,
             username: data.username,
@@ -2827,6 +2835,45 @@ function AccountInfoModal({
       setTimeout(() => setNameStatus(''), 2000);
     } catch (e: any) {
       Alert.alert('Name not saved', e?.message ?? 'Try again.');
+    } finally {
+      setAccountBusy(null);
+    }
+  };
+
+  const handleSaveUsername = async () => {
+    const nextUsername = usernameDraft.trim().toLowerCase();
+    if (!nextUsername) {
+      Alert.alert('Username not saved', 'Enter a username.');
+      return;
+    }
+    if (nextUsername === (accountData?.username ?? '').toLowerCase()) {
+      setUsernameDraft(accountData?.username ?? nextUsername);
+      return;
+    }
+    setAccountBusy('username');
+    setUsernameStatus('');
+    try {
+      const res = await updateUsername(token, nextUsername);
+      const savedUsername = res.username;
+      setAccountData(prev => prev ? { ...prev, username: savedUsername } : prev);
+      setUsernameDraft(savedUsername);
+      await AsyncStorage.setItem('user_username', savedUsername);
+      try {
+        const raw = await AsyncStorage.getItem(ACCOUNT_ME_CACHE_KEY);
+        const cached = raw ? JSON.parse(raw) : null;
+        if (cached?.token === token) {
+          await AsyncStorage.setItem(ACCOUNT_ME_CACHE_KEY, JSON.stringify({
+            ...cached,
+            username: savedUsername,
+            cachedAt: Date.now(),
+          }));
+        }
+      } catch {}
+      onUsernameChanged?.(savedUsername);
+      setUsernameStatus('Saved');
+      setTimeout(() => setUsernameStatus(''), 2000);
+    } catch (e: any) {
+      Alert.alert('Username not saved', e?.message ?? 'Try another username.');
     } finally {
       setAccountBusy(null);
     }
@@ -3006,7 +3053,42 @@ function AccountInfoModal({
               </View>
             </View>
             <Row label="Email"        value={accountData?.email ?? (loading ? 'Loading…' : '—')} testID="account-email-row" />
-            <Row label="Username"     value={accountData?.username ?? (loading ? 'Loading…' : '—')} testID="account-username-row" />
+            <View style={am.nameBlock} testID="account-username-row" accessibilityLabel="account-username-row">
+              <Text style={am.rowLabel}>Username</Text>
+              <TextInput
+                testID="account-username-input"
+                style={am.nameInput}
+                value={usernameDraft || (loading ? 'Loading…' : '')}
+                onChangeText={(t) => {
+                  setUsernameDraft(t.replace(/\s/g, '').toLowerCase());
+                  setUsernameStatus('');
+                }}
+                onBlur={handleSaveUsername}
+                placeholder="username"
+                placeholderTextColor={tc.textMuted}
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!loading}
+                returnKeyType="done"
+                onSubmitEditing={handleSaveUsername}
+              />
+              <View style={am.nameFooter}>
+                <Text style={[am.nameStatus, usernameStatus ? { color: tc.success } : null]}>
+                  {usernameStatus || 'Used as your friend-search handle.'}
+                </Text>
+                <TouchableOpacity
+                  testID="account-username-save"
+                  accessibilityLabel="account-username-save"
+                  onPress={handleSaveUsername}
+                  disabled={loading || accountBusy === 'username'}
+                  style={[am.nameSaveBtn, { opacity: loading || accountBusy === 'username' ? 0.6 : 1 }]}
+                >
+                  {accountBusy === 'username'
+                    ? <ActivityIndicator size="small" color={tc.background} />
+                    : <Text style={am.nameSaveText}>Save</Text>}
+                </TouchableOpacity>
+              </View>
+            </View>
             {!betaFullAccess && (
               <Row label="Email Status" value={accountData ? (accountData.emailVerified ? 'Verified' : 'Not verified') : (loading ? 'Loading…' : '—')} testID="account-email-status-row" />
             )}

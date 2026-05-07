@@ -72,13 +72,16 @@ tags:
 
 # Settings should open from Account and expose stable controls for preflight
 # checks.
-- scrollUntilVisible:
-    element:
+- swipe:
+    start: 50%,82%
+    end: 50%,42%
+    duration: 500
+- waitForAnimationToEnd:
+    timeout: 1000
+- extendedWaitUntil:
+    visible:
       id: "account-settings-open"
-    direction: DOWN
     timeout: 15000
-    visibilityPercentage: 50
-    centerElement: true
 - tapOn:
     id: "account-settings-open"
 - extendedWaitUntil:
@@ -165,13 +168,16 @@ tags:
 # Tutorial replay is covered by its dedicated flow. Here we only verify the
 # Account entry point closes cleanly; the overlay presentation can race on iOS
 # during long grouped smoke runs.
-- scrollUntilVisible:
-    element:
+- swipe:
+    start: 50%,82%
+    end: 50%,42%
+    duration: 500
+- waitForAnimationToEnd:
+    timeout: 1000
+- extendedWaitUntil:
+    visible:
       id: "account-show-tutorial"
-    direction: DOWN
     timeout: 15000
-    visibilityPercentage: 50
-    centerElement: true
 - tapOn:
     id: "account-show-tutorial"
 - waitForAnimationToEnd:

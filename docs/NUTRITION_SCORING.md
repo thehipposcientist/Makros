@@ -10,6 +10,7 @@
 
 ## What Changed
 - New `nutrition_score.py` module — single source of truth for all nutrition scoring
+- `/meals/score` scores the projected day plan first, not checked/logged meal totals
 - 3-dimension scoring: Adherence (35-40%) + Food Quality (35-40%) + Micronutrient Coverage (20-25%)
 - Goal-aware weight adjustments (muscle_gain biases protein/calories, general_health biases micros)
 - Food quality classification (whole/processed/unknown) from existing food categories
@@ -25,7 +26,7 @@
 **Adherence Bucket (35-40% weight)**
 - Calorie alignment (0-40 pts): 1.0 at ±10%, drops to 0 at ±40% of target
 - Protein alignment (0-35 pts): 1.0 at ≥85% of target
-- Logging completeness (0-25 pts): meals_logged / meals_expected
+- Projected meal coverage for confidence: planned meals / expected meals
 
 **Food Quality Bucket (35-40% weight)**
 - Whole food % (0-35 pts): linear from 0-100%

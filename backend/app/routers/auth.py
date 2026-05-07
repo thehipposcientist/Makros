@@ -10,6 +10,7 @@ from urllib.request import urlopen
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from jose import JWTError, jwt
 from pydantic import BaseModel
+from sqlalchemy import func as sa_func
 from sqlmodel import Session, select
 
 from app.database import get_session
@@ -22,7 +23,7 @@ from app.services.email_delivery import send_password_reset_email, send_verifica
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 logger = get_logger("app.auth")
-LEGAL_VERSION = "2026-05-06.1"
+LEGAL_VERSION = "2026-05-06.2"
 TOKEN_TTL_MINUTES = 30
 APPLE_ISSUER = "https://appleid.apple.com"
 APPLE_JWKS_URL = "https://appleid.apple.com/auth/keys"
@@ -88,11 +89,23 @@ def _client_ip(request: Request) -> str:
 
 
 _EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+_USERNAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 
 def _validate_email(email: str) -> None:
     if not _EMAIL_RE.match(email):
         raise HTTPException(status_code=422, detail="Enter a valid email address")
+
+
+def _validate_username(username: str | None) -> str:
+    cleaned = (username or "").strip().lower()
+    if len(cleaned) < 3:
+        raise HTTPException(status_code=422, detail="Username must be at least 3 characters")
+    if len(cleaned) > 32:
+        raise HTTPException(status_code=422, detail="Username must be 32 characters or fewer")
+    if not _USERNAME_RE.match(cleaned):
+        raise HTTPException(status_code=422, detail="Username can only use letters, numbers, and underscores")
+    return cleaned
 
 
 def _validate_password(pwd: str) -> None:
@@ -367,7 +380,7 @@ def _unique_oauth_username(session: Session, email: str) -> str:
 @limiter.limit("30/hour;100/day")
 def register(body: UserCreate, request: Request, session: Session = Depends(get_session)):
     email = body.email.strip().lower()
-    username = body.username.strip()
+    username = _validate_username(body.username)
     first_name = _validate_name("First name", body.first_name)
     last_name = _validate_name("Last name", body.last_name)
     _validate_email(email)
@@ -379,7 +392,7 @@ def register(body: UserCreate, request: Request, session: Session = Depends(get_
         logger.info("auth_register_rejected", extra={"email": email, "ip": ip, "reason": "email_taken"})
         raise HTTPException(status_code=400, detail="Email already registered")
     # Check username not taken
-    if session.exec(select(User).where(User.username == username)).first():
+    if session.exec(select(User).where(sa_func.lower(User.username) == username)).first():
         logger.info("auth_register_rejected", extra={"email": email, "ip": ip, "reason": "username_taken"})
         raise HTTPException(status_code=400, detail="Username already taken")
 
@@ -677,6 +690,36 @@ def update_email(
     session.commit()
     session.refresh(current_user)
     logger.info("auth_email_updated", extra={"user_id": current_user.id, "new_email": new_email})
+    return _user_read(current_user)
+
+
+class UpdateUsernameBody(BaseModel):
+    username: str
+
+
+@router.put("/update-username", response_model=UserRead)
+def update_username(
+    body: UpdateUsernameBody,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    new_username = _validate_username(body.username)
+    current_username = (current_user.username or "").strip().lower()
+    existing = session.exec(
+        select(User).where(
+            sa_func.lower(User.username) == new_username,
+            User.id != current_user.id,
+        )
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already taken")
+    if new_username == current_username and current_user.username == new_username:
+        return _user_read(current_user)
+    current_user.username = new_username
+    session.add(current_user)
+    session.commit()
+    session.refresh(current_user)
+    logger.info("auth_username_updated", extra={"user_id": current_user.id, "new_username": new_username})
     return _user_read(current_user)
 
 

@@ -40,6 +40,29 @@ const READ_TYPES = [
   'MenstrualFlow',
 ];
 
+export const APPLE_HEALTH_PERMISSION_ITEMS = [
+  { label: 'Heart rate', why: 'Shows live workout heart rate and builds heart-rate zone summaries.' },
+  { label: 'Resting heart rate', why: 'Adds recovery context to readiness and weekly check-ins.' },
+  { label: 'Heart rate variability', why: 'Helps estimate recovery and compare today with your recent baseline.' },
+  { label: 'Sleep', why: 'Powers sleep scores, readiness, recovery insights, and check-ins.' },
+  { label: 'Steps', why: 'Helps estimate daily activity and training-day energy needs.' },
+  { label: 'Active energy', why: 'Improves calorie and recovery estimates when Apple Health has it.' },
+  { label: 'Basal energy', why: 'Displays Apple Health energy context alongside activity trends.' },
+  { label: 'Workouts', why: 'Imports runs, rides, classes, and other sessions you tracked elsewhere.' },
+  { label: 'Body weight', why: 'Keeps weight trends current without manual entry.' },
+  { label: 'VO2 max', why: 'Supports cardio fitness trends and heart-rate zone estimates.' },
+  { label: 'Respiratory rate', why: 'Adds overnight recovery context when your device records it.' },
+  { label: 'Blood oxygen', why: 'Adds optional sleep and recovery context when available.' },
+  { label: 'Standing hours', why: 'Displays movement consistency from Apple Health.' },
+  { label: 'Mindful minutes', why: 'Displays recovery habits logged in Apple Health.' },
+  { label: 'Menstrual flow', why: 'Enables optional cycle-aware training and recovery guidance.' },
+] as const;
+
+export const APPLE_HEALTH_WRITE_ITEMS = [
+  { label: 'Completed workouts', why: 'Finished Thallo sessions can appear in Apple Health and Fitness.' },
+  { label: 'Workout energy and distance', why: 'When a saved workout has calories or distance, those values are written with that workout.' },
+] as const;
+
 const SLEEP_HISTORY_KEY = 'sleepHistory_v1';
 const MAX_HISTORY_NIGHTS = 30;
 
@@ -47,9 +70,9 @@ export const APPLE_HEALTH_PERMISSION_COPY = {
   title: 'Connect Apple Health?',
   body:
     'Apple Health is optional.\n\n' +
-    'If you connect it, Thallo can read sleep, resting heart rate, HRV, steps, workouts, weight, active energy, and menstrual-flow data to improve readiness, recovery, progress trends, and optional cycle-aware training guidance.\n\n' +
-    'Thallo does not upload raw menstrual-flow samples; it only derives cycle phase and cycle day when that Apple Health category is shared.\n\n' +
-    'Thallo also writes your completed workouts back to Apple Health.',
+    'If you connect it, Thallo asks only for Apple Health categories used in the app: sleep, heart rate, HRV, steps, workouts, body weight, energy, VO2 max, respiratory rate, blood oxygen, standing hours, mindful minutes, and menstrual-flow data.\n\n' +
+    'This helps personalize readiness, recovery insights, weekly check-ins, and training or nutrition recommendations. Daily summaries may sync to your account so trends work across devices; raw HealthKit samples stay on your phone.\n\n' +
+    'Thallo can also write completed workouts, workout energy, and workout distance back to Apple Health.',
   denied:
     'Apple Health stays optional. You can keep using Thallo normally and enable or disable categories later in iPhone Settings -> Privacy & Security -> Health -> Thallo.',
 };

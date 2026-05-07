@@ -58,9 +58,9 @@
     <key>NSFaceIDUsageDescription</key>
     <string>Thallo uses Face ID to unlock the app quickly so you don't have to retype your password every session.</string>
     <key>NSHealthShareUsageDescription</key>
-    <string>Thallo reads your sleep, resting heart rate, heart rate variability, steps, workouts, weight, and active energy from Apple Health so you can see readiness, recovery, and progress trends in the app.</string>
+    <string>Thallo reads Apple Health categories you choose, including sleep, heart rate, HRV, steps, workouts, weight, energy, VO2 max, respiratory rate, blood oxygen, standing hours, mindful minutes, and menstrual-flow data for readiness, recovery, progress trends, and optional cycle-aware guidance.</string>
     <key>NSHealthUpdateUsageDescription</key>
-    <string>Thallo writes your completed workouts to Apple Health so they appear alongside your other activity.</string>
+    <string>Thallo writes completed workouts, workout energy, and workout distance to Apple Health so Thallo sessions can appear alongside your other activity.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Thallo uses the microphone for speech-to-meal voice entry — speak what you ate and we'll log it without typing.</string>
     <key>NSPhotoLibraryUsageDescription</key>

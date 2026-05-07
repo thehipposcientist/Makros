@@ -129,8 +129,24 @@ tags:
     direction: DOWN
     timeout: 15000
     visibilityPercentage: 50
+- swipe:
+    start: 50%,78%
+    end: 50%,62%
+    duration: 350
+- waitForAnimationToEnd:
+    timeout: 1000
 - tapOn:
     id: "summary-close"
+- waitForAnimationToEnd:
+    timeout: 2000
+- runFlow:
+    when:
+      visible:
+        id: "post-workout-summary"
+    commands:
+      - tapOn: "Close"
+      - waitForAnimationToEnd:
+          timeout: 2000
 
 - extendedWaitUntil:
     visible: "Plan tab"

@@ -2,20 +2,20 @@
 
 This is the server-side authority for the unified score. The client used
 to recompute it per-render; now it just reads from this pipeline via
-/meals/score. Having a single source eliminates drift between "plan
-preview" and "logged meals" numbers.
+/meals/score. The score is based on the projected day plan so checking or
+unchecking meals does not move the headline number away from the plan.
 
 Flow:
-  1. Load today's meals + items
-  2. Aggregate macros + micronutrients (via FoodNutrition.extra_nutrients)
-  3. Pull the already-computed DailyNutritionMetrics row for processing
+  1. Load today's projected nutrition plan from UserDayState / PlanDay
+  2. Aggregate planned macros + micronutrients
+  3. Fall back to logged meals only when no projected plan exists
+  4. Pull the already-computed DailyNutritionMetrics row for logged fallback
      mix, plant diversity, fermented/omega-3 servings, added sugar, etc.
-  4. Load profile + active goal → compute calorie + protein targets
-  5. Build NutritionIndicators, feed compute_nutrition_score
+  5. Load profile + active goal → compute calorie + protein targets
+  6. Build NutritionIndicators, feed compute_nutrition_score
 """
 from __future__ import annotations
 
-from dataclasses import asdict
 from datetime import date, timedelta
 from typing import Any
 
@@ -23,12 +23,12 @@ from sqlmodel import select
 
 from app.models import (
     Meal, MealItem, FoodNutrition, DailyNutritionMetrics,
-    UserProfile, UserGoal, UserDayState,
+    UserProfile, UserGoal, UserDayState, PlanDay, PlanWeek,
 )
 from app.services.nutrition.gut_health import compute_daily_metrics, compute_weekly_rollup
 from app.services.nutrition.meal_history import dedupe_meals_for_aggregation
 from app.services.nutrition.nutrition_score import (
-    NutritionIndicators, compute_nutrition_score, NutritionScore, RDA,
+    NutritionIndicators, compute_nutrition_score,
 )
 from app.services.nutrition.targets import resolve_targets_for_user
 
@@ -54,6 +54,340 @@ def _compute_targets(db: Any, user_id: int, profile: UserProfile | None, goal: U
         return targets.calories, targets.protein_g, goal_id, sex
     except Exception:
         return 2000, 120, goal_id, sex
+
+
+_LEGACY_MEAL_KEYS = ("breakfast", "lunch", "dinner", "snack")
+
+_MICRO_ALIASES: dict[str, str] = {
+    "fiber": "fiber_g",
+    "fiber_g": "fiber_g",
+    "added_sugar": "added_sugar_g",
+    "added_sugar_g": "added_sugar_g",
+    "added_sugars": "added_sugar_g",
+    "added_sugars_g": "added_sugar_g",
+    "saturated_fat": "saturated_fat_g",
+    "saturated_fat_g": "saturated_fat_g",
+    "saturatedFat": "saturated_fat_g",
+    "sat_fat": "saturated_fat_g",
+    "sat_fat_g": "saturated_fat_g",
+    "sodium": "sodium_mg",
+    "sodium_mg": "sodium_mg",
+    "calcium": "calcium_mg",
+    "calcium_mg": "calcium_mg",
+    "iron": "iron_mg",
+    "iron_mg": "iron_mg",
+    "potassium": "potassium_mg",
+    "potassium_mg": "potassium_mg",
+    "magnesium": "magnesium_mg",
+    "magnesium_mg": "magnesium_mg",
+    "vitamin_d": "vitamin_d_mcg",
+    "vitaminD": "vitamin_d_mcg",
+    "vitamin_d_mcg": "vitamin_d_mcg",
+    "vitamin_b12": "vitamin_b12_mcg",
+    "vitaminB12": "vitamin_b12_mcg",
+    "vitamin_b12_mcg": "vitamin_b12_mcg",
+    "vitamin_c": "vitamin_c_mg",
+    "vitaminC": "vitamin_c_mg",
+    "vitamin_c_mg": "vitamin_c_mg",
+    "vitamin_a": "vitamin_a_mcg",
+    "vitaminA": "vitamin_a_mcg",
+    "vitamin_a_mcg": "vitamin_a_mcg",
+    "zinc": "zinc_mg",
+    "zinc_mg": "zinc_mg",
+    "selenium": "selenium_mcg",
+    "selenium_mcg": "selenium_mcg",
+    "folate": "folate_mcg",
+    "folate_b9": "folate_mcg",
+    "folate_mcg": "folate_mcg",
+    "omega_3": "omega_3_mg",
+    "omega3": "omega_3_mg",
+    "omega_3_mg": "omega_3_mg",
+}
+
+
+def _num(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _iter_plan_meals(plan: dict | None) -> list[dict]:
+    if not isinstance(plan, dict):
+        return []
+    meals = plan.get("meals")
+    if isinstance(meals, list):
+        return [m for m in meals if isinstance(m, dict)]
+    out: list[dict] = []
+    for key in _LEGACY_MEAL_KEYS:
+        meal = plan.get(key)
+        if isinstance(meal, dict):
+            out.append(meal)
+    return out
+
+
+def _active_plan_meals(plan: dict | None) -> list[dict]:
+    meals = _iter_plan_meals(plan)
+    if not isinstance(plan, dict):
+        return meals
+    removed = {str(v) for v in (plan.get("removedMealIds") or [])}
+    return [
+        meal
+        for idx, meal in enumerate(meals)
+        if str(idx) not in removed and f"meal_{idx}" not in removed
+    ]
+
+
+def _plan_has_projected_meals(plan: dict | None) -> bool:
+    for meal in _active_plan_meals(plan):
+        if _num(meal.get("calories")) > 0 or _num(meal.get("protein")) > 0:
+            return True
+        items = meal.get("items")
+        if isinstance(items, list) and any(isinstance(i, dict) for i in items):
+            return True
+    return False
+
+
+def _get_projected_plan(db: Any, user_id: int, target_date: date) -> dict | None:
+    """Return the projected DailyNutritionPlan for `target_date`.
+
+    Per-day user edits in UserDayState win. If that row only contains
+    hydration/check state, fall back to the active PlanWeek's PlanDay and then
+    to the newest historical PlanDay for that date.
+    """
+    try:
+        state = db.exec(
+            select(UserDayState)
+            .where(UserDayState.user_id == user_id)
+            .where(UserDayState.day_key == target_date)
+        ).first()
+        if state and _plan_has_projected_meals(state.nutrition_plan):
+            return state.nutrition_plan
+    except Exception:
+        pass
+
+    try:
+        active_week = db.exec(
+            select(PlanWeek)
+            .where(PlanWeek.user_id == user_id)
+            .where(PlanWeek.status == "active")
+            .where(PlanWeek.start_date <= target_date)
+            .where(PlanWeek.end_date >= target_date)
+            .order_by(PlanWeek.created_at.desc())
+        ).first()
+        if active_week:
+            plan_day = db.exec(
+                select(PlanDay)
+                .where(PlanDay.plan_week_id == active_week.id)
+                .where(PlanDay.day_date == target_date)
+            ).first()
+            if plan_day and _plan_has_projected_meals(plan_day.nutrition_json):
+                return plan_day.nutrition_json
+    except Exception:
+        pass
+
+    try:
+        rows = db.exec(
+            select(PlanDay)
+            .where(PlanDay.user_id == user_id)
+            .where(PlanDay.day_date == target_date)
+            .order_by(PlanDay.id.desc())
+        ).all()
+        for row in rows:
+            if _plan_has_projected_meals(row.nutrition_json):
+                return row.nutrition_json
+    except Exception:
+        pass
+    return None
+
+
+def _plan_items(meals: list[dict]) -> list[dict]:
+    items: list[dict] = []
+    for meal in meals:
+        raw_items = meal.get("items")
+        if isinstance(raw_items, list):
+            items.extend([i for i in raw_items if isinstance(i, dict)])
+    return items
+
+
+def _macro_from_meal(meal: dict, key: str, item_key: str | None = None) -> float:
+    value = _num(meal.get(key))
+    if value > 0:
+        return value
+    raw_items = meal.get("items")
+    if not isinstance(raw_items, list):
+        return 0.0
+    total = 0.0
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        total += _num(item.get(item_key or key), _num(item.get(key), 0.0))
+    return total
+
+
+def _object_micros(obj: dict) -> dict[str, float]:
+    micros: dict[str, float] = {}
+    raw = obj.get("micronutrients")
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            canonical = _MICRO_ALIASES.get(str(key), str(key))
+            amount = _num(value)
+            if amount:
+                micros[canonical] = micros.get(canonical, 0.0) + amount
+    for key, canonical in _MICRO_ALIASES.items():
+        if canonical in micros:
+            continue
+        if key in obj:
+            amount = _num(obj.get(key))
+            if amount:
+                micros[canonical] = micros.get(canonical, 0.0) + amount
+    return micros
+
+
+def _add_micros(total: dict[str, float], incoming: dict[str, float]) -> None:
+    for key, value in incoming.items():
+        total[key] = total.get(key, 0.0) + value
+
+
+def _projected_micros(meals: list[dict]) -> tuple[dict[str, float], int, int]:
+    """Aggregate consumed micronutrients from planned meal/item payloads."""
+    micros: dict[str, float] = {}
+    food_count = 0
+    foods_with_micros = 0
+
+    for meal in meals:
+        raw_items = meal.get("items")
+        items = [i for i in raw_items if isinstance(i, dict)] if isinstance(raw_items, list) else []
+        if items:
+            food_count += len(items)
+            item_micro_count = 0
+            for item in items:
+                item_micros = _object_micros(item)
+                if item_micros:
+                    item_micro_count += 1
+                    _add_micros(micros, item_micros)
+            foods_with_micros += item_micro_count
+            if item_micro_count > 0:
+                continue
+
+        meal_micros = _object_micros(meal)
+        if meal_micros:
+            _add_micros(micros, meal_micros)
+            if not items:
+                food_count += 1
+            foods_with_micros += 1
+        elif not items:
+            food_count += 1
+
+    return micros, food_count, foods_with_micros
+
+
+def _item_processing_bucket(item: dict) -> str | None:
+    bucket = item.get("processing_bucket")
+    if isinstance(bucket, str) and bucket:
+        return bucket
+    quality = item.get("food_quality")
+    if quality in ("whole", "minimally_processed"):
+        return "minimally_processed"
+    if quality == "processed":
+        return "processed"
+    if quality == "ultra_processed":
+        return "ultra_processed"
+    return None
+
+
+def _projected_quality_signals(meals: list[dict]) -> dict[str, float]:
+    items = _plan_items(meals)
+    processing_counts: dict[str, int] = {}
+    distinct_plants = 0
+    omega3 = 0.0
+    seafood = 0.0
+
+    for item in items:
+        bucket = _item_processing_bucket(item)
+        if bucket:
+            processing_counts[bucket] = processing_counts.get(bucket, 0) + 1
+        distinct_plants += int(_num(item.get("plant_count"), 0))
+        if item.get("omega3_rich") or item.get("omega3_flag"):
+            omega3 += 1.0
+        if item.get("seafood") or item.get("seafood_flag"):
+            seafood += 1.0
+
+    proc_total = sum(processing_counts.values()) or 1
+    return {
+        "minimally_processed_pct": 100.0 * processing_counts.get("minimally_processed", 0) / proc_total,
+        "ultra_processed_pct": 100.0 * processing_counts.get("ultra_processed", 0) / proc_total,
+        "distinct_plant_foods": float(distinct_plants),
+        "omega3_servings": omega3,
+        "seafood_servings": seafood,
+    }
+
+
+def _projected_seafood_servings_window(db: Any, user_id: int, end_date: date, days: int = 7) -> float:
+    total = 0.0
+    for offset in range(days):
+        d = end_date - timedelta(days=offset)
+        plan = _get_projected_plan(db, user_id, d)
+        if not plan:
+            continue
+        total += _projected_quality_signals(_active_plan_meals(plan)).get("seafood_servings", 0.0)
+    return total
+
+
+def _build_projected_indicators(
+    db: Any,
+    user_id: int,
+    target_date: date,
+    *,
+    calorie_target: int,
+    protein_target: int,
+) -> NutritionIndicators | None:
+    plan = _get_projected_plan(db, user_id, target_date)
+    if not plan:
+        return None
+    meals = _active_plan_meals(plan)
+    if not meals:
+        return None
+
+    targets = plan.get("targets") if isinstance(plan.get("targets"), dict) else {}
+    plan_calorie_target = _num(targets.get("calories"), calorie_target) or calorie_target
+    plan_protein_target = (
+        _num(targets.get("protein"), 0.0)
+        or _num(targets.get("protein_g"), 0.0)
+        or protein_target
+    )
+
+    total_cal = sum(_macro_from_meal(m, "calories") for m in meals)
+    total_pro = sum(_macro_from_meal(m, "protein", "protein_g") for m in meals)
+    micros, food_count, foods_with_micros = _projected_micros(meals)
+    quality = _projected_quality_signals(meals)
+    seafood_week = _projected_seafood_servings_window(db, user_id, target_date, days=7)
+
+    indicators = NutritionIndicators(
+        calories_logged=total_cal,
+        calories_target=plan_calorie_target,
+        protein_logged=total_pro,
+        protein_target=plan_protein_target,
+        fiber_g=micros.get("fiber_g", 0.0),
+        added_sugar_g=micros.get("added_sugar_g", 0.0),
+        saturated_fat_g=micros.get("saturated_fat_g", 0.0),
+        sodium_mg=micros.get("sodium_mg", 0.0),
+        minimally_processed_pct=quality["minimally_processed_pct"],
+        ultra_processed_pct=quality["ultra_processed_pct"],
+        distinct_plant_foods=int(quality["distinct_plant_foods"]),
+        omega3_servings=quality["omega3_servings"],
+        seafood_servings_weekly=seafood_week,
+        meals_logged=len(meals),
+        meals_expected=max(3, len(meals)),
+        micronutrients=micros,
+        food_count=food_count,
+        foods_with_micros=foods_with_micros,
+        hydration_logged=False,
+    )
+    setattr(indicators, "source", "projected")
+    return indicators
 
 
 def _aggregate_micros(db: Any, items: list[MealItem]) -> tuple[dict[str, float], int, int]:
@@ -258,6 +592,16 @@ def build_indicators(
     profile, goal = _get_profile_and_goal(db, user_id)
     cal_target, pro_target, goal_id, sex = _compute_targets(db, user_id, profile, goal)
 
+    projected = _build_projected_indicators(
+        db,
+        user_id,
+        target_date,
+        calorie_target=cal_target,
+        protein_target=pro_target,
+    )
+    if projected is not None:
+        return projected, goal_id, sex
+
     # Ensure today's metrics row is fresh. Keep score reads deterministic:
     # collagen/probiotic facts come from rule-based metadata, not OpenAI.
     try:
@@ -349,6 +693,7 @@ def build_indicators(
         foods_with_micros=foods_with_micros,
         hydration_logged=hydration_logged,
     )
+    setattr(indicators, "source", "logged")
     return indicators, goal_id, sex
 
 
@@ -362,6 +707,7 @@ def compute_today_score(db: Any, user_id: int, target_date: date | None = None) 
     return {
         "date": str(target_date),
         "score": score.total,
+        "source": getattr(indicators, "source", "logged"),
         "adherence": score.adherence_score,
         "quality": score.quality_score,
         "micro": score.micro_score,
@@ -418,6 +764,7 @@ def compute_weekly_score(db: Any, user_id: int, end_date: date | None = None, da
         daily.append({
             "date": str(d),
             "score": score.total,
+            "source": getattr(indicators, "source", "logged"),
             "adherence": score.adherence_score,
             "quality": score.quality_score,
             "micro": score.micro_score,

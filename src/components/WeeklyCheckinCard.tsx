@@ -62,6 +62,15 @@ function recapChangePreview(checkin: PlanWeekCheckinRecord | null): string | nul
   return titles.length ? `Recommended: ${titles.join(' · ')}` : null;
 }
 
+function recapGoalForecast(checkin: PlanWeekCheckinRecord | null): { headline: string; reason: string } | null {
+  const forecast = checkin?.review_snapshot_json?.goal_forecast;
+  if (!forecast || typeof forecast !== 'object') return null;
+  const headline = String(forecast.headline ?? '').trim();
+  const reason = String(forecast.update_reason ?? '').trim();
+  if (!headline && !reason) return null;
+  return { headline, reason };
+}
+
 export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRecap = false, onCheckinCompleted }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -131,6 +140,7 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
   const dateRange = formatDateRange(status.week_start, status.week_end);
   const checkin: PlanWeekCheckinRecord | null = status.checkin ?? null;
   const changePreview = recapChangePreview(checkin);
+  const goalForecast = recapGoalForecast(checkin);
   const isPending = status.status === 'pending';
   const isCompleted = status.status === 'completed';
   const isSkipped = status.status === 'skipped';
@@ -277,6 +287,22 @@ export default function WeeklyCheckinCard({ authToken, themeName, dismissibleRec
           <Text style={{ fontSize: 11, color: tc.textSecondary, lineHeight: 16, marginBottom: 10 }}>
             {changePreview}
           </Text>
+        ) : null}
+
+        {hasRecap && goalForecast ? (
+          <View style={{ padding: 10, borderRadius: radius.md, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border, marginBottom: 10 }}>
+            <Text style={{ fontSize: 9, fontWeight: '900', color: tc.textMuted, letterSpacing: 0.5 }}>GOAL ESTIMATE</Text>
+            {goalForecast.headline ? (
+              <Text style={{ fontSize: 12, fontWeight: '800', color: tc.textPrimary, marginTop: 4, lineHeight: 17 }}>
+                {goalForecast.headline}
+              </Text>
+            ) : null}
+            {goalForecast.reason ? (
+              <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 3, lineHeight: 15 }}>
+                {goalForecast.reason}
+              </Text>
+            ) : null}
+          </View>
         ) : null}
 
         {/* CTA buttons */}

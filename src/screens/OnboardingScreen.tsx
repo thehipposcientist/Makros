@@ -49,7 +49,13 @@ import { useMetaData, pacesForGoal } from '../hooks/useMetaData';
 import { useLiveFoodSearch } from '../hooks/useLiveFoodSearch';
 import { scanFoodsPhoto, scanEquipmentPhoto, matchGoal, getMe, type FoodSearchResult } from '../services/api';
 import { requirePro, type ProFeature } from '../utils/subscription';
-import { APPLE_HEALTH_PERMISSION_COPY, isHealthKitAvailable, requestHealthPermissions } from '../services/appleHealth';
+import {
+  APPLE_HEALTH_PERMISSION_COPY,
+  APPLE_HEALTH_PERMISSION_ITEMS,
+  APPLE_HEALTH_WRITE_ITEMS,
+  isHealthKitAvailable,
+  requestHealthPermissions,
+} from '../services/appleHealth';
 import { setAppleHealthEnabled as persistHealthEnabled } from '../utils/workoutHistory';
 import { groupKitchenFoodsByCategory } from '../utils/foodGrouping';
 import { badgeLabelForSource } from '../utils/customFoodSearch';
@@ -2704,37 +2710,25 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   const renderAppleHealthStep = () => {
     // Pre-permission education. Shown BEFORE the OS-level HealthKit prompt so
     // users see exactly what's read, what's written, and why it matters.
-    // Industry data shows pre-permission education roughly doubles grant rates
-    // vs jumping straight to the system sheet — and HK denial is permanent
-    // until the user manually re-enables it in Settings, so getting opt-in
-    // right matters more than minimizing onboarding length.
-    const READS: { icon: string; label: string; why: string }[] = [
-      { icon: '🌙', label: 'Sleep + HRV',     why: 'Drives your daily readiness score.' },
-      { icon: '❤️', label: 'Resting heart rate', why: 'Detects elevated load + recovery debt.' },
-      { icon: '🏃', label: 'Steps + active energy', why: 'Adjusts daily calorie targets to actual activity.' },
-      { icon: '🏋️', label: 'Workouts',       why: 'Imports outdoor runs, classes, and rides automatically.' },
-      { icon: '⚖️', label: 'Body weight',    why: 'Powers weight trend charts without manual logging.' },
-    ];
-
     return (
       <View>
         <Text style={styles.stepTitle}>Connect Apple Health (optional)</Text>
         <Text style={styles.hint}>
-          When you connect it, Thallo personalizes readiness, recovery, and calorie targets to your real data instead of estimates. Skip if you'd rather not — you can connect anytime from Settings.
+          When you connect it, Thallo uses the categories below for personalization, recovery insights, weekly check-ins, and training or nutrition recommendations. Skip if you'd rather not — you can connect anytime from Settings.
         </Text>
 
         {/* What we read — itemized so users see exactly what they're granting. */}
         <View style={{ marginTop: 14, marginBottom: 6 }}>
           <Text style={[styles.sectionHeading, { marginTop: 0, marginBottom: 8 }]}>What Thallo reads</Text>
           <View style={{ gap: 8 }}>
-            {READS.map((r) => (
+            {APPLE_HEALTH_PERMISSION_ITEMS.map((r) => (
               <View key={r.label} style={{
                 flexDirection: 'row', alignItems: 'flex-start', gap: 10,
                 paddingVertical: 6, paddingHorizontal: 10,
                 backgroundColor: colors.surface, borderRadius: 10,
                 borderWidth: 1, borderColor: colors.border,
               }}>
-                <Text style={{ fontSize: 16 }}>{r.icon}</Text>
+                <Ionicons name="checkmark-circle-outline" size={17} color={colors.primary} />
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textPrimary }}>{r.label}</Text>
                   <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 1 }}>{r.why}</Text>
@@ -2748,24 +2742,25 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
             polluting Health with extra data. */}
         <View style={{ marginTop: 12, marginBottom: 6 }}>
           <Text style={[styles.sectionHeading, { marginTop: 0, marginBottom: 8 }]}>What Thallo writes</Text>
-          <View style={{
-            flexDirection: 'row', alignItems: 'flex-start', gap: 10,
-            paddingVertical: 8, paddingHorizontal: 10,
-            backgroundColor: colors.surface, borderRadius: 10,
-            borderWidth: 1, borderColor: colors.border,
-          }}>
-            <Text style={{ fontSize: 16 }}>✅</Text>
-            <View style={{ flex: 1 }}>
-              <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textPrimary }}>Completed workouts only</Text>
-              <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 1 }}>
-                When you finish a workout, it appears in Apple Health alongside your other activity. Nothing else is written.
-              </Text>
-            </View>
+          <View style={{ gap: 8 }}>
+            {APPLE_HEALTH_WRITE_ITEMS.map((item) => (
+              <View key={item.label} style={{
+                flexDirection: 'row', alignItems: 'flex-start', gap: 10,
+                paddingVertical: 8, paddingHorizontal: 10,
+                backgroundColor: colors.surface, borderRadius: 10,
+                borderWidth: 1, borderColor: colors.border,
+              }}>
+                <Ionicons name="arrow-up-circle-outline" size={17} color={colors.primary} />
+                <View style={{ flex: 1 }}>
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: colors.textPrimary }}>{item.label}</Text>
+                  <Text style={{ fontSize: 11, color: colors.textMuted, marginTop: 1 }}>{item.why}</Text>
+                </View>
+              </View>
+            ))}
           </View>
         </View>
 
-        {/* Privacy reassurance — important because users worry health data
-            is monetized. State the fact: HK data stays on device. */}
+        {/* Privacy note — raw samples stay local; summaries can sync. */}
         <View style={{
           marginTop: 12, marginBottom: 16,
           padding: 11, borderRadius: 10,
@@ -2773,10 +2768,10 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
           borderWidth: 1, borderColor: (colors.primary as string) + '44',
         }}>
           <Text style={{ fontSize: 12, fontWeight: '700', color: colors.primary, marginBottom: 3 }}>
-            🔒 Your Health data stays on your device
+            Raw samples stay on your phone
           </Text>
           <Text style={{ fontSize: 11, color: colors.textSecondary, lineHeight: 16 }}>
-            Thallo reads Apple Health locally on your phone. Aggregated daily summaries (e.g. average sleep, RHR) sync to your account so we can show recovery trends across devices — your raw HealthKit samples never leave the phone.
+            Thallo reads Apple Health locally. Daily summaries, like sleep totals, heart-rate averages, steps, and weight snapshots, may sync to your account so trends work across devices.
           </Text>
         </View>
 

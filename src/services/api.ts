@@ -437,6 +437,14 @@ export async function updateEmail(token: string, email: string) {
   });
 }
 
+export async function updateUsername(token: string, username: string): Promise<{ username: string }> {
+  return request<{ username: string }>('/auth/update-username', {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ username }),
+  });
+}
+
 export async function getMyProfile(token: string): Promise<import('../types').UserProfile | null> {
   try {
     const data = await request<any>('/profile/me', {
@@ -3172,7 +3180,7 @@ export async function getProteinBreakdown(token: string): Promise<ProteinBreakdo
   });
 }
 
-// Unified Nutrition Score — server-side authority.
+// Unified Nutrition Score — server-side authority for the projected day plan.
 export interface NutritionScoreBreakdownItem {
   label: string;
   value_pct: number;     // 0-100 for bar
@@ -3185,6 +3193,7 @@ export interface NutritionScoreBreakdownItem {
 export interface NutritionScoreToday {
   date: string;
   score: number;
+  source?: 'projected' | 'logged';
   adherence: number;
   quality: number;
   micro: number;
@@ -3207,6 +3216,7 @@ export interface NutritionScoreToday {
 export interface NutritionScoreWeeklyDay {
   date: string;
   score: number | null;
+  source?: 'projected' | 'logged';
   adherence?: number;
   quality?: number;
   micro?: number;
@@ -3911,7 +3921,26 @@ export interface WeeklyReviewResponse {
   avg_sleep_hours: number | null;
   avg_resting_hr: number | null;
   headline: string;
+  goal_forecast?: GoalForecastSummary | null;
   recommendations: PlanRecommendation[];
+}
+
+export interface GoalForecastSummary {
+  bucket: string;
+  window_weeks: number;
+  headline: string;
+  subheadline: string;
+  metric_label: string;
+  metric_value: string;
+  metric_detail: string;
+  execution_pct: number;
+  confidence: 'low' | 'medium' | 'high';
+  tone: 'success' | 'warning' | 'neutral';
+  assumption: string;
+  update_reason: string;
+  drivers: string[];
+  limiters: string[];
+  stats: Array<{ label: string; value: string; detail: string }>;
 }
 
 export async function getWeeklyReview(
@@ -3984,6 +4013,7 @@ export interface WeekSummaryResponse {
   week_start: string;
   week_end: string;
   headline: string;
+  goal_forecast?: GoalForecastSummary | null;
   coach_findings: WeekCheckinCoachFindings;
 }
 

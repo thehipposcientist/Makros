@@ -137,7 +137,7 @@ Pulled from Apple Health (see [Cycle Phase](#9-cycle-phase-not-scored)):
 
 **Question:** "How well did I eat today / this week?"
 **File:** `backend/app/services/nutrition/nutrition_score.py`, `score_builder.py`
-**Range:** 0–100. Server-authoritative for logged meals via `GET /meals/score`. See `NUTRITION_SCORING.md` for the full deep-dive.
+**Range:** 0–100. Server-authoritative for the projected day plan via `GET /meals/score`. See `NUTRITION_SCORING.md` for the full deep-dive.
 
 ### Three sub-scores, weighted by goal
 
@@ -156,7 +156,7 @@ Pulled from Apple Health (see [Cycle Phase](#9-cycle-phase-not-scored)):
 - strength: 45 / 30 / 25
 
 ### Versioning
-`SCORE_VERSION=3`, `METRICS_VERSION=3`, `CLASSIFIER_VERSION=5`. Bumping any one invalidates `FoodMetadata` cache and re-runs classification on next meal write.
+`SCORE_VERSION=4`, `METRICS_VERSION=3`, `CLASSIFIER_VERSION=5`. Bumping any one invalidates `FoodMetadata` cache and re-runs classification on next meal write.
 
 ### Design rules
 - Protein gets full credit at ≥95% (not 100%) to avoid false penalties for hitting "close enough"

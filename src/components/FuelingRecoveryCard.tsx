@@ -188,7 +188,7 @@ function FuelingRecoveryModal({
               These are nutrition-pattern signals, not a medical diagnosis. They flag when your
               food log suggests sustained under-fueling, low fat intake, or gaps in recovery
               nutrients — not a specific hormone level. If you have medical concerns, talk to
-              your doctor.
+              a clinician.
             </Text>
           </View>
         </ScrollView>

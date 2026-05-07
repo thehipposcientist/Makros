@@ -387,6 +387,26 @@ export default function WeeklyCheckinModal({
             </Text>
           )}
         </View>
+
+        {summary.goal_forecast && (
+          <View style={{ backgroundColor: tc.surface, borderRadius: radius.md, padding: 12, borderWidth: 1, borderColor: tc.primary + '44' }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+              <Text style={{ fontSize: 11, color: tc.primary, fontWeight: '900', letterSpacing: 0.5 }}>GOAL ESTIMATE</Text>
+              <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '800', textTransform: 'uppercase' }}>
+                {summary.goal_forecast.confidence}
+              </Text>
+            </View>
+            <Text style={{ fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginTop: 6, lineHeight: 18 }}>
+              {summary.goal_forecast.headline}
+            </Text>
+            <Text style={{ fontSize: 12, color: tc.textSecondary, marginTop: 5, lineHeight: 17 }}>
+              {summary.goal_forecast.update_reason}
+            </Text>
+            <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 4, lineHeight: 15 }}>
+              {summary.goal_forecast.assumption}
+            </Text>
+          </View>
+        )}
       </ScrollView>
     );
   };

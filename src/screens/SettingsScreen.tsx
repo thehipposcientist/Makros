@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, Switch, Alert, StyleSheet, Platform, Linking,
+  View, Text, ScrollView, TouchableOpacity, Switch, Alert, StyleSheet, Platform, Linking, ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -24,6 +24,7 @@ import {
 } from '../utils/notificationPrefs';
 import type { WeightUnit, DistanceUnit } from '../utils/units';
 import { configureExpandAnimation } from '../utils/layoutAnim';
+import { SUPPORT_EMAIL } from '../constants/legal';
 
 interface Props {
   visible: boolean;
@@ -88,6 +89,7 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
   const [pausedUntil, setPausedUntil] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [themesExpanded, setThemesExpanded] = useState(false);
+  const [privacyBusy, setPrivacyBusy] = useState<null | 'export' | 'delete'>(null);
 
   // Load reminder settings on every open so toggles reflect actual stored
   // state — important because reminders can also be modified during
@@ -182,6 +184,75 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
   const toggleThemesExpanded = () => {
     configureExpandAnimation(240);
     setThemesExpanded(v => !v);
+  };
+
+  const handlePrivacyExport = async () => {
+    if (!authToken) {
+      Alert.alert('Sign in required', 'Sign in to export your account data.');
+      return;
+    }
+    setPrivacyBusy('export');
+    try {
+      const { exportAccountData } = await import('../services/api');
+      const { exportAccountDataJson } = await import('../utils/dataExport');
+      const data = await exportAccountData(authToken);
+      await exportAccountDataJson(data);
+    } catch (e: any) {
+      Alert.alert('Export failed', e?.message ?? 'Could not export account data.');
+    } finally {
+      setPrivacyBusy(null);
+    }
+  };
+
+  const handlePrivacyContact = () => {
+    const subject = encodeURIComponent('Thallo privacy question');
+    Linking.openURL(`mailto:${SUPPORT_EMAIL}?subject=${subject}`).catch(() => {
+      Alert.alert('Privacy support', `Email ${SUPPORT_EMAIL} for privacy or account data questions.`);
+    });
+  };
+
+  const handlePrivacyDelete = () => {
+    if (!authToken) {
+      Alert.alert('Sign in required', 'Sign in to delete your account data.');
+      return;
+    }
+    Alert.alert(
+      'Delete account and data?',
+      'This disables your login, removes your Thallo profile and logs, and anonymizes your account identifiers. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Continue',
+          style: 'destructive',
+          onPress: () => {
+            Alert.alert(
+              'Final confirmation',
+              'Delete your account and data now?',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: 'Delete',
+                  style: 'destructive',
+                  onPress: async () => {
+                    setPrivacyBusy('delete');
+                    try {
+                      const { deleteAccount } = await import('../services/api');
+                      await deleteAccount(authToken);
+                      onClose();
+                      onSignOut?.();
+                    } catch (e: any) {
+                      Alert.alert('Delete failed', e?.message ?? 'Could not delete account.');
+                    } finally {
+                      setPrivacyBusy(null);
+                    }
+                  },
+                },
+              ],
+            );
+          },
+        },
+      ],
+    );
   };
 
   return (
@@ -570,6 +641,88 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
           </>
         )}
 
+        {/* ── Privacy / Data ────────────────────────────────────────── */}
+        <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>PRIVACY & DATA</Text>
+        <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+          <View style={styles.privacyBlock}>
+            <Ionicons name="list-outline" size={18} color={tc.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>What data we use</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Account, profile, workout, meal, weight, supplement, recovery, check-in, and optional social activity data power your plan and history.
+              </Text>
+            </View>
+          </View>
+
+          <View style={[styles.privacyBlock, { borderTopColor: tc.border, borderTopWidth: 1 }]}>
+            <Ionicons name="heart-outline" size={18} color={tc.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Apple Health data</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Optional. Used for readiness, sleep, heart-rate, activity, weight, cycle-aware guidance, and weekly check-in context when you choose to share it.
+              </Text>
+            </View>
+          </View>
+
+          <View style={[styles.privacyBlock, { borderTopColor: tc.border, borderTopWidth: 1 }]}>
+            <Ionicons name="sparkles-outline" size={18} color={tc.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>AI features</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Coach chat, scans, meal parsing, and check-ins may send relevant inputs to Thallo's AI vendor to generate recommendations. Workout plan structure stays deterministic.
+              </Text>
+            </View>
+          </View>
+
+          <TouchableOpacity
+            testID="settings-export-data"
+            accessibilityLabel="settings-export-data"
+            style={[styles.privacyActionRow, { borderTopColor: tc.border }]}
+            disabled={privacyBusy !== null}
+            onPress={handlePrivacyExport}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Export data</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Available now as a JSON account export.
+              </Text>
+            </View>
+            {privacyBusy === 'export'
+              ? <ActivityIndicator size="small" color={tc.primary} />
+              : <Ionicons name="share-outline" size={18} color={tc.textMuted} />}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            testID="settings-contact-privacy"
+            accessibilityLabel="settings-contact-privacy"
+            style={[styles.privacyActionRow, { borderTopColor: tc.border }]}
+            onPress={handlePrivacyContact}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Contact support/privacy</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Email {SUPPORT_EMAIL} for account, data, or privacy questions.
+              </Text>
+            </View>
+            <Ionicons name="mail-outline" size={18} color={tc.textMuted} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            testID="settings-delete-account-data"
+            accessibilityLabel="settings-delete-account-data"
+            style={[styles.privacyActionRow, { borderTopColor: tc.border }]}
+            disabled={privacyBusy !== null}
+            onPress={handlePrivacyDelete}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.error }]}>Delete account/data</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Removes Thallo-created logs and profile data, then anonymizes login identifiers.
+              </Text>
+            </View>
+            {privacyBusy === 'delete'
+              ? <ActivityIndicator size="small" color={tc.error} />
+              : <Ionicons name="trash-outline" size={18} color={tc.error} />}
+          </TouchableOpacity>
+        </View>
+
         {/* ── Permissions footer ────────────────────────────────────── */}
         <Text style={[styles.sectionLabel, { color: tc.textMuted, marginTop: 24 }]}>PERMISSIONS</Text>
         <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
@@ -660,6 +813,21 @@ const styles = StyleSheet.create({
   },
   rowTitle: { fontSize: 14, fontWeight: '700' },
   rowSub: { fontSize: 11, marginTop: 2, lineHeight: 15 },
+  privacyBlock: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingVertical: 12,
+  },
+  privacyActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingTop: 14,
+    marginTop: 2,
+    borderTopWidth: 1,
+  },
   signOutButton: {
     minHeight: 52,
     borderRadius: radius.lg,

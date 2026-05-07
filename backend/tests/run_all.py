@@ -55,6 +55,7 @@ _TEST_MODULES = (
     "tests.test_weekly_digest",
     # Pure-function tests for the new deterministic services.
     "tests.test_weekly_volume",
+    "tests.test_goal_forecast",
     "tests.test_carb_distribution",
     "tests.test_quick_intents",
     "tests.test_rolling_e1rm",
@@ -84,6 +85,8 @@ _TEST_MODULES = (
     "tests.test_plan_week_goal_change",
     # Auth: DEV_EMAIL_TOKENS gating — dev tokens must not leak in prod.
     "tests.test_auth_dev_token_isolation",
+    # Auth: users can change their globally unique social handle.
+    "tests.test_auth_username",
     # Entitlements: unknown users fail closed; beta signups default to Pro.
     "tests.test_entitlements",
     # CORS: prod must fail closed instead of wildcard+credentials.
