@@ -44,6 +44,9 @@ struct RestTimerWidget: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(alignment: .leading, spacing: 6) {
+                        if hasHeartRateZone(context.state) {
+                            HeartRateZoneBadge(state: context.state)
+                        }
                         Text(statusText(context.state))
                             .font(.footnote)
                             .foregroundStyle(.white)
@@ -91,6 +94,9 @@ private struct LockScreenView: View {
                     .font(.caption)
                     .foregroundStyle(.white.opacity(0.75))
                     .lineLimit(1)
+                if hasHeartRateZone(state) {
+                    HeartRateZoneBadge(state: state)
+                }
                 Text(statusText(state))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white)
@@ -157,6 +163,44 @@ private struct TimerCircle: View {
             }
         }
         .frame(width: 68, height: 68, alignment: .center)
+    }
+}
+
+private struct HeartRateZoneBadge: View {
+    let state: RestTimerAttributes.ContentState
+
+    private var zoneColor: Color {
+        Color(hex: state.hrZoneColorHex ?? zoneColorHex(state.hrZone))
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "heart.fill")
+                .font(.system(size: 9, weight: .bold))
+            if let bpm = state.heartRate, bpm > 0 {
+                Text("\(bpm)")
+                    .monospacedDigit()
+            }
+            if let zone = state.hrZone, zone > 0 {
+                Text("Z\(zone)")
+                    .fontWeight(.heavy)
+            }
+            if let range = zoneRangeText(state) {
+                Text(range)
+                    .foregroundStyle(.white.opacity(0.75))
+            }
+        }
+        .font(.caption2.weight(.bold))
+        .foregroundStyle(zoneColor)
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(zoneColor.opacity(0.18), in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(zoneColor.opacity(0.55), lineWidth: 1)
+        )
     }
 }
 
@@ -252,6 +296,30 @@ private func isElapsedWorkout(_ state: RestTimerAttributes.ContentState) -> Bool
 
 private func isRestTimer(_ state: RestTimerAttributes.ContentState) -> Bool {
     return !isElapsedWorkout(state)
+}
+
+private func hasHeartRateZone(_ state: RestTimerAttributes.ContentState) -> Bool {
+    if let bpm = state.heartRate, bpm > 0 { return true }
+    if let zone = state.hrZone, zone > 0 { return true }
+    return false
+}
+
+private func zoneColorHex(_ zone: Int?) -> String {
+    switch zone {
+    case 1: return "#38BDF8"
+    case 2: return "#22C55E"
+    case 3: return "#EAB308"
+    case 4: return "#F97316"
+    case 5: return "#EF4444"
+    default: return "#38BDF8"
+    }
+}
+
+private func zoneRangeText(_ state: RestTimerAttributes.ContentState) -> String? {
+    guard let low = state.hrZoneLow, let high = state.hrZoneHigh, low > 0, high >= low else {
+        return state.hrZoneLabel
+    }
+    return "\(low)-\(high)"
 }
 
 private func statusText(_ state: RestTimerAttributes.ContentState) -> String {

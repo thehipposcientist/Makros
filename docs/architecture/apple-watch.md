@@ -13,7 +13,7 @@ Workout snapshots use a v2 envelope:
 `{ schemaVersion: 2, channel: "workout", eventId, revision, reason, sentAtMs, userId, workout }`.
 The bridge stores it under `workoutEnvelope` and also writes a legacy top-level `workout` copy for older watch builds. The watch prefers `workoutEnvelope`, orders by monotonic `revision`, rejects mismatched `userId`, and only falls back to legacy `workout` when no valid envelope is present.
 
-Active workout exercise rows can include `plannedTargetWeightLbs` and up to five phone-ranked `swapOptions`. The phone ranks swaps with the same library scorer used by the in-workout picker, so substitutions stay in the same archetype/slot while the watch keeps the original placement, sets, reps, and rest prescription.
+Active workout exercise rows can include `plannedTargetWeightLbs` and up to five phone-ranked `swapOptions`. Workout snapshots can also include phone-computed `hrZones` from `/workouts/hr-zones`; the watch uses these same ranges for live HR zone display so the wrist view matches phone recommendations. The phone ranks swaps with the same library scorer used by the in-workout picker, so substitutions stay in the same archetype/slot while the watch keeps the original placement, sets, reps, and rest prescription.
 
 **Inbound (watch → phone):**
 `start_workout`, `skip_workout`, `cancel_workout`, `end_workout`, `log_set`, `swap_exercise`, `toggle_meal`, `log_hydration`, `toggle_supplement`, `take_all_supplements`, `pull_state`.

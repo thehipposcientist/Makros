@@ -58,10 +58,6 @@ tags:
     visible:
       id: "meal-history-row-0"
     timeout: 15000
-- tapOn:
-    id: "meal-history-row-0"
-- waitForAnimationToEnd:
-    timeout: 1000
 - runFlow:
     when:
       notVisible:
@@ -97,24 +93,66 @@ tags:
     timeout: 30000
 - tapOn:
     id: "progress-subtab-health"
-- scrollUntilVisible:
-    element:
+- tapOn:
+    point: 85%,19%
+- waitForAnimationToEnd:
+    timeout: 1000
+- runFlow:
+    when:
+      notVisible:
+        id: "nutrition-trend-card"
+    commands:
+      - swipe:
+          start: 50%,78%
+          end: 50%,28%
+          duration: 450
+      - waitForAnimationToEnd:
+          timeout: 1000
+- runFlow:
+    when:
+      notVisible:
+        id: "nutrition-trend-card"
+    commands:
+      - swipe:
+          start: 50%,78%
+          end: 50%,28%
+          duration: 450
+      - waitForAnimationToEnd:
+          timeout: 1000
+- runFlow:
+    when:
+      notVisible:
+        id: "nutrition-trend-card"
+    commands:
+      - swipe:
+          start: 50%,78%
+          end: 50%,28%
+          duration: 450
+      - waitForAnimationToEnd:
+          timeout: 1000
+- extendedWaitUntil:
+    visible:
       id: "nutrition-trend-card"
-    direction: DOWN
-    timeout: 30000
-    visibilityPercentage: 50
-- scrollUntilVisible:
-    element:
+    timeout: 15000
+- extendedWaitUntil:
+    visible:
       id: "nutrition-trend-logged-calories-1145"
-    direction: DOWN
-    timeout: 30000
-    visibilityPercentage: 30
-- scrollUntilVisible:
-    element:
+    timeout: 15000
+- runFlow:
+    when:
+      notVisible:
+        id: "nutrition-gut-facts-card"
+    commands:
+      - swipe:
+          start: 50%,78%
+          end: 50%,42%
+          duration: 350
+      - waitForAnimationToEnd:
+          timeout: 1000
+- extendedWaitUntil:
+    visible:
       id: "nutrition-gut-facts-card"
-    direction: DOWN
-    timeout: 30000
-    visibilityPercentage: 50
+    timeout: 15000
 - tapOn:
     id: "nutrition-gut-facts-toggle"
 - extendedWaitUntil:

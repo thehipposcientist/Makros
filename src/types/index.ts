@@ -352,16 +352,20 @@ export interface Exercise {
    *  regenerated from history ('increase_load' | 'hold_load' | 'reduce_load'). */
   progressionAction?: 'increase_load' | 'hold_load' | 'reduce_load' | 'keep_reps' | 'add_rep' | null;
   /** Equipment-specific cardio prescription from the planner — present on
-   *  cardio exercises when the user has a UserEquipmentProfile with
-   *  capabilities (watts/rpm for IC6, speed+incline for treadmill, etc.). */
+   *  cardio exercises when the planner can infer useful machine targets
+   *  (watts/rpm/resistance for bikes, speed+incline for treadmill, etc.). */
   cardioGuidance?: {
     duration_min?: number;
     is_intervals?: boolean;
     watts_range?: string;
     rpm_range?: string;
+    resistance_cue?: string;
     speed_range?: string;
     incline_range?: string;
-    hr_zone?: string;
+    hr_zone?: number;
+    hr_zone_label?: string;
+    hr_low_bpm?: number;
+    hr_high_bpm?: number;
     hr_range?: string;
     pace_per_500m?: string;
     stroke_rate?: string;
@@ -433,6 +437,8 @@ export interface MealMicronutrients {
   // Core / always-present
   fiber?: number;       // g
   sugar?: number;       // g
+  added_sugar_g?: number; // g
+  added_sugar?: number;   // g — legacy alias
   sodium?: number;      // mg
   cholesterol?: number; // mg
   // Fats panel
@@ -580,6 +586,14 @@ export interface SupplementItem {
   checked?: boolean;     // user has taken it today
 }
 
+export interface WorkoutSummaryTrainingPillar {
+  key: string;
+  label: string;
+  value: number;
+  max: number;
+  present?: boolean;
+}
+
 export interface WorkoutSummary {
   caloriesBurned: number;
   motivationMessage: string;
@@ -603,6 +617,7 @@ export interface WorkoutSummary {
   trainingScore?: number;
   trainingRating?: 'Crushed' | 'Solid' | 'Light' | 'Below';
   trainingPillars?: { effort: number; volume: number; duration: number; consistency: number };
+  trainingPillarBreakdown?: WorkoutSummaryTrainingPillar[];
 }
 
 /** Per-exercise logged detail kept alongside the AI summary so the

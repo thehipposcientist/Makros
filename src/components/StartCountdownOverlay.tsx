@@ -14,7 +14,7 @@
 // `primary`, trim accents use `primary + "55"` so every theme preset
 // gets the same treatment for free.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { View, Text, Animated, Easing } from 'react-native';
 import { getTheme } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -35,6 +35,10 @@ function pickPhrase(): string {
 
 type Tick = { label: string; duration: number; isFinal: boolean };
 
+const NUMBER_TICK_MS = 640;
+const FINAL_TICK_MS = 760;
+export const START_COUNTDOWN_TOTAL_MS = NUMBER_TICK_MS * 3 + FINAL_TICK_MS;
+
 export default function StartCountdownOverlay({ themeName, onComplete, finalMessage }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -43,74 +47,75 @@ export default function StartCountdownOverlay({ themeName, onComplete, finalMess
   const phrase = useRef<string>(finalMessage ?? pickPhrase()).current;
 
   const ticks: Tick[] = [
-    { label: '3', duration: 640, isFinal: false },
-    { label: '2', duration: 640, isFinal: false },
-    { label: '1', duration: 640, isFinal: false },
-    { label: phrase, duration: 760, isFinal: true },
+    { label: '3', duration: NUMBER_TICK_MS, isFinal: false },
+    { label: '2', duration: NUMBER_TICK_MS, isFinal: false },
+    { label: '1', duration: NUMBER_TICK_MS, isFinal: false },
+    { label: phrase, duration: FINAL_TICK_MS, isFinal: true },
   ];
 
-  const [idx, setIdx] = useState(0);
-  const scale = useRef(new Animated.Value(1.22)).current;
-  const opacity = useRef(new Animated.Value(1)).current;
+  const tickStarts = ticks.reduce<number[]>((starts, tick, i) => {
+    starts[i] = i === 0 ? 0 : starts[i - 1] + ticks[i - 1].duration;
+    return starts;
+  }, []);
+  const progress = useRef(new Animated.Value(0)).current;
+  const onCompleteRef = useRef(onComplete);
 
   useEffect(() => {
-    if (idx >= ticks.length) {
-      onComplete();
-      return;
-    }
-    const tick = ticks[idx];
-    // Haptic on each enter. Heavy on the go-word, light on the counts.
-    import('../utils/feedback').then(f => {
-      if (tick.isFinal) f.hapticHeavy?.();
-      else f.hapticLight?.();
-    }).catch(() => {});
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
 
-    // Reset and animate as one sequence so the beat doesn't drift
-    // between fade and advance timers.
-    const firstTick = idx === 0;
-    scale.setValue(tick.isFinal ? 1.12 : 1.22);
-    opacity.setValue(firstTick ? 1 : 0);
-    const enterMs = tick.isFinal ? 190 : 170;
-    const exitMs = 170;
-    const holdMs = Math.max(80, tick.duration - enterMs - exitMs);
-    const animation = Animated.sequence([
-      Animated.parallel([
-        Animated.timing(scale, {
-          toValue: 1.0,
-          duration: enterMs,
-          easing: Easing.out(Easing.cubic),
-          useNativeDriver: true,
-        }),
-        Animated.timing(opacity, {
-          toValue: 1,
-          duration: firstTick ? 1 : enterMs,
-          easing: Easing.out(Easing.quad),
-          useNativeDriver: true,
-        }),
-      ]),
-      Animated.delay(holdMs),
-      Animated.timing(opacity, {
-        toValue: 0,
-        duration: exitMs,
-        easing: Easing.in(Easing.quad),
-        useNativeDriver: true,
-      }),
-    ]);
+  useEffect(() => {
+    let cancelled = false;
+    const hapticTimers: ReturnType<typeof setTimeout>[] = [];
+    const startedAt = Date.now();
+
+    progress.stopAnimation();
+    progress.setValue(0);
+    const animation = Animated.timing(progress, {
+      toValue: START_COUNTDOWN_TOTAL_MS,
+      duration: START_COUNTDOWN_TOTAL_MS,
+      easing: Easing.linear,
+      useNativeDriver: true,
+    });
     animation.start(({ finished }) => {
-      if (finished) setIdx(i => i + 1);
+      if (finished) onCompleteRef.current();
     });
 
+    (async () => {
+      try {
+        const [{ loadSettings }, Haptics] = await Promise.all([
+          import('../utils/feedback'),
+          import('expo-haptics'),
+        ]);
+        const settings = await loadSettings();
+        if (cancelled || !settings.hapticsEnabled) return;
+        ticks.forEach((tick, i) => {
+          const fire = () => {
+            if (tick.isFinal) Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
+            else Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+          };
+          const delayMs = Math.max(0, tickStarts[i] - (Date.now() - startedAt));
+          hapticTimers.push(setTimeout(fire, delayMs));
+        });
+      } catch {}
+    })();
+
     return () => {
+      cancelled = true;
+      hapticTimers.forEach(clearTimeout);
       animation.stop();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [idx]);
+  }, []);
 
-  if (idx >= ticks.length) return null;
-  const tick = ticks[idx];
+  const overlayOpacity = progress.interpolate({
+    inputRange: [0, START_COUNTDOWN_TOTAL_MS - 120, START_COUNTDOWN_TOTAL_MS],
+    outputRange: [1, 1, 0],
+    extrapolate: 'clamp',
+  });
 
   return (
-    <View
+    <Animated.View
       pointerEvents="auto"
       style={{
         position: 'absolute',
@@ -119,6 +124,7 @@ export default function StartCountdownOverlay({ themeName, onComplete, finalMess
         alignItems: 'center',
         justifyContent: 'center',
         zIndex: 10_000,
+        opacity: overlayOpacity,
       }}
     >
       {/* Soft coloured halo — a single big translucent ring that sits
@@ -134,48 +140,67 @@ export default function StartCountdownOverlay({ themeName, onComplete, finalMess
           borderWidth: 2, borderColor: tc.primary + '55',
         }}
       />
-      <Animated.View style={{
-        transform: [{ scale }],
-        opacity,
-        alignItems: 'center',
-        // Clamp to the inner diameter of the halo ring (280 − 2*16
-        // padding = 248) so long phrases like "MAKE IT COUNT." stay
-        // inside the circle instead of spilling across the screen.
-        maxWidth: 248,
-        paddingHorizontal: 4,
-      }}>
-        <Text
-          numberOfLines={1}
-          adjustsFontSizeToFit
-          minimumFontScale={0.5}
-          style={{
-            // Final phrase starts smaller so it fits without scaling;
-            // adjustsFontSizeToFit handles the outliers.
-            fontSize: tick.isFinal ? 40 : 140,
-            fontWeight: '900',
-            letterSpacing: tick.isFinal ? 1.2 : -4,
-            color: tc.primary,
-            textAlign: 'center',
-            // Hard shadow for readability over whatever content is
-            // behind the translucent background.
-            textShadowColor: tc.primary + '55',
-            textShadowRadius: tick.isFinal ? 14 : 24,
-          }}
-        >
-          {tick.label}
-        </Text>
-        {!tick.isFinal ? (
-          <Text style={{
-            fontSize: 11,
-            letterSpacing: 2,
-            fontWeight: '700',
-            color: tc.textMuted,
-            marginTop: 8,
+      {ticks.map((tick, i) => {
+        const startMs = tickStarts[i];
+        const enterMs = tick.isFinal ? 190 : 170;
+        const exitMs = 170;
+        const holdEndMs = startMs + Math.max(80, tick.duration - exitMs);
+        const endMs = startMs + tick.duration;
+        const opacity = progress.interpolate({
+          inputRange: [startMs, startMs + (i === 0 ? 1 : enterMs), holdEndMs, endMs],
+          outputRange: [i === 0 ? 1 : 0, 1, 1, 0],
+          extrapolate: 'clamp',
+        });
+        const scale = progress.interpolate({
+          inputRange: [startMs, startMs + enterMs, endMs],
+          outputRange: [tick.isFinal ? 1.12 : 1.22, 1, 0.98],
+          extrapolate: 'clamp',
+        });
+        return (
+          <Animated.View key={`${tick.label}-${i}`} style={{
+            position: 'absolute',
+            transform: [{ scale }],
+            opacity,
+            alignItems: 'center',
+            // Clamp to the inner diameter of the halo ring (280 - 2*16
+            // padding = 248) so long phrases stay inside the circle.
+            maxWidth: 248,
+            paddingHorizontal: 4,
           }}>
-            STARTING
-          </Text>
-        ) : null}
-      </Animated.View>
-    </View>
+            <Text
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.5}
+              style={{
+                // Final phrase starts smaller so it fits without scaling;
+                // adjustsFontSizeToFit handles the outliers.
+                fontSize: tick.isFinal ? 40 : 140,
+                fontWeight: '900',
+                letterSpacing: 0,
+                color: tc.primary,
+                textAlign: 'center',
+                // Hard shadow for readability over whatever content is
+                // behind the translucent background.
+                textShadowColor: tc.primary + '55',
+                textShadowRadius: tick.isFinal ? 14 : 24,
+              }}
+            >
+              {tick.label}
+            </Text>
+            {!tick.isFinal ? (
+              <Text style={{
+                fontSize: 11,
+                letterSpacing: 0,
+                fontWeight: '700',
+                color: tc.textMuted,
+                marginTop: 8,
+              }}>
+                STARTING
+              </Text>
+            ) : null}
+          </Animated.View>
+        );
+      })}
+    </Animated.View>
   );
 }

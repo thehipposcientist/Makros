@@ -67,9 +67,11 @@ import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNot
 import { humanizeToken } from '../utils/exerciseGuide';
 import { shouldHideWeight, shouldHideReps, formatDurationTarget, isGuideExercise } from '../utils/exerciseDisplay';
 import { startRestActivity, updateRestActivity, getRestActivityState, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
+import type { RestActivityState } from '../services/liveActivity';
 import { exerciseEquipmentLabel, isExerciseUsableWithEquipment, MAX_SWAP_SCORE, rankWorkoutAddCandidates, scoreSwapCandidate, scoreWorkoutAddCandidate, workoutAddAlignmentPercent } from '../utils/swapScoring';
 import { FREE_WORKOUT_TEMPLATE_LIMIT, canCreateWorkoutTemplate, tierOf } from '../utils/subscription';
 import { buildWorkoutBestSetHighlights } from '../utils/workoutBestSets';
+import { hrZoneColorHex, liveActivityHrZoneFields, zoneForHeartRate } from '../utils/hrZones';
 import { clearManagedInterval, restartManagedInterval, useManagedInterval } from '../hooks/useManagedInterval';
 import {
   distanceSuffix,
@@ -541,6 +543,12 @@ type ClearRestStateOptions = {
   endAllLiveActivities?: boolean;
 };
 
+type ExerciseTimerState = {
+  running: boolean;
+  baseElapsed: number;
+  startedAt: number | null;
+};
+
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60).toString().padStart(2, '0');
   const s = (seconds % 60).toString().padStart(2, '0');
@@ -973,8 +981,9 @@ function getTimedMetricsConfig(name: string, cardioGuidance?: any, distanceUnit:
     };
   }
   if (/bike|cycling|ride|peloton|spin/.test(n)) {
-    // If equipment has watts capability (IC6, smart bike), show watts + RPM
-    if (cardioGuidance?.watts_range || cardioGuidance?.rpm_range) {
+    // Smart bikes expose watts; simpler stationary bikes still get useful
+    // cadence/resistance targets from the planner.
+    if (cardioGuidance?.watts_range) {
       return {
         title: 'Bike power details',
         subtitle: 'Power and cadence are the cleanest way to compare bike sessions.',
@@ -983,6 +992,18 @@ function getTimedMetricsConfig(name: string, cardioGuidance?: any, distanceUnit:
           { key: 'watts', label: 'Avg Watts', placeholder: cardioGuidance?.watts_range ?? '175', keyboard: 'number-pad', helper: 'Console average' },
           { key: 'cadence', label: 'Cadence', placeholder: cardioGuidance?.rpm_range ?? '85 rpm', keyboard: 'number-pad', helper: 'Average RPM' },
           { key: 'output', label: 'Output', placeholder: '350 kJ', keyboard: 'number-pad', helper: 'If shown' },
+        ],
+      };
+    }
+    if (cardioGuidance?.rpm_range || cardioGuidance?.resistance_cue) {
+      return {
+        title: 'Bike details',
+        subtitle: 'Cadence and resistance keep easy rides consistent without needing power data.',
+        icon: 'bicycle-outline',
+        fields: [
+          { key: 'cadence', label: 'Cadence', placeholder: cardioGuidance?.rpm_range ?? '85 rpm', keyboard: 'number-pad', helper: 'Average RPM' },
+          { key: 'resistance', label: 'Resistance', placeholder: cardioGuidance?.resistance_cue ?? 'medium', keyboard: 'default', helper: 'Average level or feel' },
+          { key: 'distance', label: `Distance (${dist})`, placeholder: distanceUnit === 'km' ? '20.0 km' : '12.5 mi', keyboard: 'decimal-pad', helper: 'Total ride' },
         ],
       };
     }
@@ -1303,6 +1324,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // async after the initial push).
     const warmupStepsRef = useRef<string[]>(warmupSteps);
     useEffect(() => { warmupStepsRef.current = warmupSteps; }, [warmupSteps]);
+    const startTime = useRef(Date.now());
+    // Show the 3-2-1 countdown only on a true fresh start. If we find a
+    // persisted start time on mount, the user is resuming after a
+    // background / app restart and the countdown would be jarring.
+    const [showStartCountdown, setShowStartCountdown] = useState(
+      () => playStartCountdown,
+    );
     const loadCachedProfile = useCallback(async (): Promise<UserProfile | null> => {
       try {
         const raw = await AsyncStorage.getItem('userProfile');
@@ -1361,6 +1389,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       return backendWorkoutHistoryRef.current;
     }, [authToken]);
     useEffect(() => {
+      if (showStartCountdown) return;
       let cancelled = false;
       const loadWarmup = async () => {
         if (!authToken) return;
@@ -1409,21 +1438,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       };
       loadWarmup();
       return () => { cancelled = true; };
-    }, [authToken, workout.day, workout.focus, cachedProfileIsPro, loadCachedProfile]);
+    }, [authToken, workout.day, workout.focus, cachedProfileIsPro, loadCachedProfile, showStartCountdown]);
   const theme = getTheme(themeName);
   const themeColors = theme.colors;
   const workoutPalette = theme.sections.workout;
   const styles = useMemo(() => createStyles(themeColors), [themeName]);
-  const startTime = useRef(Date.now());
-  // Show the 3-2-1 countdown only on a true fresh start. If we find a
-  // persisted start time on mount, the user is resuming after a
-  // background / app restart and the countdown would be jarring.
-  const [showStartCountdown, setShowStartCountdown] = useState(
-    () => playStartCountdown,
-  );
   // Track paired/reachable state for the header. The root start handler
-  // owns the watchOS launch request so this screen's local countdown
-  // cannot be interrupted by a watch-connection prompt.
+  // owns the watchOS launch request and schedules it after the local
+  // countdown so a watch-connection prompt cannot interrupt the overlay.
   const [watchStatus, setWatchStatus] = useState<{ paired: boolean; reachable: boolean } | null>(null);
   const watchSessionId = useRef(getActiveWatchSessionId() ?? `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   const [watchSessionHydrated, setWatchSessionHydrated] = useState(false);
@@ -1504,27 +1526,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       if (watchWorkoutEndedRef.current) setActiveWatchSessionId(null);
     };
   }, []);
-  // Fetch HR zones for cardio prescription display
+  // Fetch HR zones for cardio prescriptions, live display, and watch sync.
   useEffect(() => {
-    if (!authToken) return;
+    if (!authToken || showStartCountdown) return;
     let cancelled = false;
     (async () => {
       if (!(await cachedProfileIsPro()) || cancelled) return;
-      const hasCardio = workout.exercises?.some((e: any) =>
-        /treadmill|bike|run|row|elliptical|stair|swim|cardio/i.test(e.name ?? '')
-      );
-      if (hasCardio) {
-        readHealthSummary?.().then?.((hs: any) => {
-          getHRZones(authToken, hs?.restingHeartRate, hs?.vo2Max)
-            .then(r => setHrZones(r.zones))
+      readHealthSummary?.().then?.((hs: any) => {
+        if (cancelled) return;
+        getHRZones(authToken, hs?.restingHeartRate, hs?.vo2Max)
+          .then(r => { if (!cancelled) setHrZones(r.zones); })
+          .catch(() => {});
+      }).catch(() => {
+        if (!cancelled) {
+          getHRZones(authToken)
+            .then(r => { if (!cancelled) setHrZones(r.zones); })
             .catch(() => {});
-        }).catch(() => {
-          getHRZones(authToken).then(r => setHrZones(r.zones)).catch(() => {});
-        });
-      }
+        }
+      });
     })();
     return () => { cancelled = true; };
-  }, [authToken, cachedProfileIsPro, workout.exercises]);
+  }, [authToken, cachedProfileIsPro, showStartCountdown]);
   // Phone↔watch active-state sync. On mount we push `status: 'active'`
   // AND subscribe to WCSession reachability changes — when the user
   // opens Thallo on their watch, reachability flips to true and we
@@ -1677,6 +1699,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // below the handleFinish definition).
 
   useEffect(() => {
+    if (showStartCountdown) return;
     // Ref-token cleanup so a teardown that fires before the async
     // import resolves still removes the listener once it attaches.
     const token = {
@@ -1819,7 +1842,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
       if (token.unsub) { try { token.unsub(); } catch {} }
     };
-  }, [cachedProfileIsPro, rememberWatchCommandId]);
+  }, [cachedProfileIsPro, rememberWatchCommandId, showStartCountdown]);
 
   const restNotificationIds = useRef<{ startId?: string; warningId?: string; completeId?: string } | null>(null);
   const restDurationSeconds = useRef<number>(0);
@@ -1827,6 +1850,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const restTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Active Live Activity ID so we can update/end it from timer callbacks.
   const liveActivityIdRef = useRef<string | null>(null);
+  const liveActivityTimerKeyRef = useRef<string | null>(null);
   const liveActivityGenerationRef = useRef(0);
   // One-time per-workout diagnostic flag so the alert only fires on first rest.
   const liveActivityDiagShownRef = useRef<boolean>(false);
@@ -1840,16 +1864,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [postRestIdleSecs, setPostRestIdleSecs] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [liveHR, setLiveHR] = useState<number | null>(null);
+  const [hrZones, setHrZones] = useState<HRZone[]>([]);
+  const currentLiveHRZone = useMemo(() => zoneForHeartRate(liveHR, hrZones), [hrZones, liveHR]);
+  const currentLiveActivityHrFields = useMemo(() => liveActivityHrZoneFields(liveHR, hrZones), [hrZones, liveHR]);
+
+  useEffect(() => {
+    if (Object.keys(currentLiveActivityHrFields).length === 0) return;
+    const activityId = liveActivityIdRef.current;
+    if (!activityId) return;
+    updateRestActivity(activityId, currentLiveActivityHrFields).catch(() => undefined);
+  }, [currentLiveActivityHrFields]);
 
   const endActiveRestLiveActivity = useCallback((opts?: { endAll?: boolean }) => {
     liveActivityGenerationRef.current += 1;
     const activityId = liveActivityIdRef.current;
     liveActivityIdRef.current = null;
+    liveActivityTimerKeyRef.current = null;
     if (activityId) endRestActivity(activityId).catch(() => undefined);
     if (opts?.endAll) endAllActivities().catch(() => undefined);
   }, []);
 
   useEffect(() => {
+    if (showStartCountdown) return;
     let active = true;
     let interval: ReturnType<typeof setInterval> | null = null;
     (async () => {
@@ -1865,7 +1901,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       interval = setInterval(poll, 6000);
     })();
     return () => { active = false; if (interval) clearInterval(interval); };
-  }, []);
+  }, [cachedProfileIsPro, showStartCountdown]);
 
   // Post-rest idle counter — ticks every 5s while restEndedAtRef is set.
   // Cleared when a new set is logged or a new rest timer starts.
@@ -1995,7 +2031,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   //  - exercises where the first set is already logged (race-safe)
   //  - workout has no auth token (offline)
   useEffect(() => {
-    if (!authToken) return;
+    if (!authToken || showStartCountdown) return;
     let cancelled = false;
     (async () => {
       try {
@@ -2044,9 +2080,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
     })();
     return () => { cancelled = true; };
-    // Run ONCE on mount — we don't want this firing every state update.
+    // Run once after the start countdown — we don't want this firing every state update.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [showStartCountdown]);
 
   const [activeExIdx, setActiveExIdx] = useState<number>(0);
   const activeExIdxRef = useRef(activeExIdx);
@@ -2068,6 +2104,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [activeInjuryTokens, setActiveInjuryTokens] = useState<string[]>([]);
   const [exerciseHistorySignals, setExerciseHistorySignals] = useState<Record<string, ExerciseHistorySignal>>({});
   useEffect(() => {
+    if (showStartCountdown) return;
     (async () => {
       try {
         const raw = await AsyncStorage.getItem('userProfile');
@@ -2078,9 +2115,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         setActiveInjuryTokens(extractActiveInjuryTokens(prof));
       } catch { /* best-effort — fall back to empty list = bodyweight only */ }
     })();
-  }, []);
+  }, [showStartCountdown]);
 
   useEffect(() => {
+    if (showStartCountdown) return;
     let cancelled = false;
     loadWorkoutHistory()
       .then(rows => {
@@ -2103,7 +2141,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         if (!cancelled) setExerciseHistorySignals({});
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [showStartCountdown]);
 
   // Pre-set coach hints keyed by exercise index. Populated lazily when
   // an exercise becomes active with no sets logged yet. Each entry is
@@ -2123,6 +2161,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // Skips if already cached. Uses last session data looked up via
   // getLastSetsForExercise to ground the opening weight suggestion.
   useEffect(() => {
+    if (showStartCountdown) return;
     const ex = exercises[activeExIdx];
     if (!ex || !authToken) return;
     if (isGuideExercise(ex, workout)) {
@@ -2173,7 +2212,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       }
     })();
     return () => { cancelled = true; };
-  }, [activeExIdx, exercises, authToken, goal, weightLbs, workout.focus, workout.stimulus, loadBackendWorkoutHistory]);
+  }, [activeExIdx, exercises, authToken, goal, weightLbs, workout.focus, workout.stimulus, loadBackendWorkoutHistory, showStartCountdown]);
 
   // Inline set inputs: keyed by "exIdx-setSlot" (0-based slot index)
   const [setInputs, setSetInputs] = useState<Record<string, { weight: string; reps: string; duration: string }>>({});
@@ -2465,7 +2504,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // and jumps straight to the correct total. `getTimerElapsed()` is
   // the single read path; UI code should never read `elapsed` off
   // state directly.
-  const [activeTimers, setActiveTimers] = useState<Record<string, { running: boolean; baseElapsed: number; startedAt: number | null }>>({});
+  const [activeTimers, setActiveTimers] = useState<Record<string, ExerciseTimerState>>({});
   const timerIntervalsRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   // Full-screen timer modal for timed exercises. When set to a
   // "exIdx-setSlot" key, the modal is open for that slot; when null
@@ -2477,6 +2516,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // the derived-from-wall-clock computation stays cheap.
   const [, setTimerTick] = useState(0);
   const tickIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeTimersRef = useRef(activeTimers);
+  const timerModalKeyRef = useRef(timerModalKey);
+  useEffect(() => { activeTimersRef.current = activeTimers; }, [activeTimers]);
+  useEffect(() => { timerModalKeyRef.current = timerModalKey; }, [timerModalKey]);
 
   const getTimerElapsed = useCallback((key: string): number => {
     const t = activeTimers[key];
@@ -2487,18 +2530,126 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     return t.baseElapsed;
   }, [activeTimers]);
 
+  const parseExerciseTimerKey = useCallback((key: string): { exIdx: number; slot: number } | null => {
+    const [exIdxRaw, slotRaw] = key.split('-');
+    const exIdx = Number(exIdxRaw);
+    const slot = Number(slotRaw);
+    if (!Number.isFinite(exIdx) || !Number.isFinite(slot) || exIdx < 0 || slot < 0) return null;
+    return { exIdx: Math.floor(exIdx), slot: Math.floor(slot) };
+  }, []);
+
+  const timerElapsedFromState = useCallback((timer: ExerciseTimerState | undefined): number => {
+    if (!timer) return 0;
+    if (timer.running && timer.startedAt != null) {
+      return timer.baseElapsed + Math.max(0, Math.floor((Date.now() - timer.startedAt) / 1000));
+    }
+    return timer.baseElapsed;
+  }, []);
+
+  const buildTimedLiveActivityState = useCallback((
+    key: string,
+    timer: ExerciseTimerState,
+  ): RestActivityState | null => {
+    const parsed = parseExerciseTimerKey(key);
+    if (!parsed) return null;
+    const currentExercises = exercisesRef.current.length > 0 ? exercisesRef.current : exercises;
+    const ex = currentExercises[parsed.exIdx];
+    if (!ex) return null;
+    const totalSets = getEffectiveTargetSetCount(parsed.exIdx, ex, ex.sets.length + 1);
+    const setNumber = Math.min(parsed.slot, Math.max(0, totalSets - 1));
+    const elapsedSeconds = timerElapsedFromState(timer);
+    const startedAtMs = Date.now() - elapsedSeconds * 1000;
+    const target = String(ex.targetReps ?? '').trim();
+    const targetHasDurationUnit = /\b(s|sec|secs|second|seconds|m|min|mins|minute|minutes)\b/i.test(target);
+    const targetLooksLikeMachineMetric = /\b(rpm|watt|watts|bpm|mph|kph|km\/h|pace|resistance)\b/i.test(target);
+    const preferMinutes = isLongCardioExercise(ex.name, ex.targetReps, { primaryMuscle: ex.primaryMuscle ?? ex.primary_muscle });
+    const plannedSeconds = !targetHasDurationUnit && targetLooksLikeMachineMetric
+      ? NaN
+      : parseDurationTargetSeconds(ex.targetReps, preferMinutes);
+    const durationSeconds = Number.isFinite(plannedSeconds) && plannedSeconds > 0
+      ? plannedSeconds
+      : Math.max(1, elapsedSeconds || 1);
+    return {
+      mode: 'elapsed',
+      exerciseName: ex.name,
+      setNumber,
+      totalSets,
+      startedAtMs,
+      durationSeconds,
+      endDateMs: startedAtMs + durationSeconds * 1000,
+      nextSetRecommendation: totalSets > 1
+        ? `Round ${setNumber + 1}${target ? ` - ${target}` : ''}`
+        : target || 'Timed set',
+      themeColorHex: theme.colors.primary,
+      workoutId: `w_${workout.focus}_${key}`,
+      paused: !timer.running,
+      elapsedSeconds,
+      ...liveActivityHrZoneFields(liveHR, hrZones),
+    };
+  }, [exercises, getEffectiveTargetSetCount, hrZones, liveHR, parseExerciseTimerKey, theme.colors.primary, timerElapsedFromState, workout.focus]);
+
+  const startOrUpdateTimedLiveActivity = useCallback((key: string, timer: ExerciseTimerState) => {
+    const state = buildTimedLiveActivityState(key, timer);
+    if (!state) return;
+    (async () => {
+      try {
+        const generation = liveActivityGenerationRef.current + 1;
+        liveActivityGenerationRef.current = generation;
+        const priorActivityId = liveActivityIdRef.current;
+        const priorTimerKey = liveActivityTimerKeyRef.current;
+        if (priorActivityId && priorTimerKey === key) {
+          await updateRestActivity(priorActivityId, state);
+          return;
+        }
+        liveActivityIdRef.current = null;
+        liveActivityTimerKeyRef.current = null;
+        if (priorActivityId) {
+          await endRestActivity(priorActivityId);
+          if (liveActivityGenerationRef.current !== generation) return;
+        }
+        const id = await startRestActivity(state);
+        if (!id) return;
+        if (liveActivityGenerationRef.current !== generation) {
+          await endRestActivity(id);
+          return;
+        }
+        liveActivityIdRef.current = id;
+        liveActivityTimerKeyRef.current = key;
+      } catch {
+        // Live Activities are a mirror only; the in-app timer remains authoritative.
+      }
+    })();
+  }, [buildTimedLiveActivityState]);
+
+  const updateTimedLiveActivity = useCallback((key: string, timer: ExerciseTimerState) => {
+    const activityId = liveActivityIdRef.current;
+    if (!activityId || liveActivityTimerKeyRef.current !== key) return;
+    const state = buildTimedLiveActivityState(key, timer);
+    if (!state) return;
+    updateRestActivity(activityId, state).catch(() => undefined);
+  }, [buildTimedLiveActivityState]);
+  const updateTimedLiveActivityRef = useRef(updateTimedLiveActivity);
+  useEffect(() => { updateTimedLiveActivityRef.current = updateTimedLiveActivity; }, [updateTimedLiveActivity]);
+
+  const endTimedLiveActivity = useCallback((key: string) => {
+    if (liveActivityTimerKeyRef.current !== key) return;
+    endActiveRestLiveActivity();
+  }, [endActiveRestLiveActivity]);
+
   const startExerciseTimer = useCallback((key: string) => {
+    const existing = activeTimers[key];
+    const nextTimer: ExerciseTimerState = {
+      running: true,
+      baseElapsed: existing?.baseElapsed ?? 0,
+      startedAt: Date.now(),
+    };
     setActiveTimers(prev => {
-      const existing = prev[key];
       return {
         ...prev,
-        [key]: {
-          running: true,
-          baseElapsed: existing?.baseElapsed ?? 0,
-          startedAt: Date.now(),
-        },
+        [key]: nextTimer,
       };
     });
+    startOrUpdateTimedLiveActivity(key, nextTimer);
     // Single shared ticker — only starts when at least one timer is
     // running, fires every second to trigger re-renders, and stops
     // itself below when all timers are paused.
@@ -2507,9 +2658,20 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         setTimerTick(t => (t + 1) % 1_000_000);
       }, 1000);
     }
-  }, []);
+  }, [activeTimers, startOrUpdateTimedLiveActivity]);
 
   const stopExerciseTimer = useCallback((key: string) => {
+    const current = activeTimers[key];
+    if (current) {
+      const runElapsed = current.running && current.startedAt != null
+        ? Math.max(0, Math.floor((Date.now() - current.startedAt) / 1000))
+        : 0;
+      updateTimedLiveActivity(key, {
+        running: false,
+        baseElapsed: current.baseElapsed + runElapsed,
+        startedAt: null,
+      });
+    }
     setActiveTimers(prev => {
       const t = prev[key];
       if (!t) return prev;
@@ -2529,16 +2691,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       if (!anyRunning) clearManagedInterval(tickIntervalRef);
       return next;
     });
-  }, []);
+  }, [activeTimers, updateTimedLiveActivity]);
 
   const resetExerciseTimer = useCallback((key: string) => {
+    endTimedLiveActivity(key);
     setActiveTimers(prev => {
       const next = { ...prev, [key]: { running: false, baseElapsed: 0, startedAt: null } };
       const anyRunning = Object.values(next).some(v => v?.running);
       if (!anyRunning) clearManagedInterval(tickIntervalRef);
       return next;
     });
-  }, []);
+  }, [endTimedLiveActivity]);
 
   // Cleanup timer intervals on unmount. We only hold the shared
   // ticker now; legacy per-timer intervals in timerIntervalsRef are
@@ -2558,9 +2721,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // Last-session data for comparison display
   const [lastExerciseSets, setLastExerciseSets] = useState<Record<string, CompletedSet[]>>({});
   const lastSessionLookupKeysRef = useRef<Set<string>>(new Set());
-
-  // HR zones for cardio exercises
-  const [hrZones, setHrZones] = useState<HRZone[]>([]);
 
   // AMRAP / EMOM / Tabata timer modal
   const [timerModalVisible, setTimerModalVisible] = useState(false);
@@ -2840,6 +3000,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     opts?: { skipHintIndex?: number },
   ): any => ({
     ...workout,
+    hrZones,
     exercises: sourceExercises.map((ex, index) => {
       const guide = isGuideExercise(ex, workout);
       const hint = index === opts?.skipHintIndex ? undefined : preSetHints[index];
@@ -2853,6 +3014,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         reps: ex.targetReps,
         restSeconds: guide ? 0 : ex.targetRestSeconds,
         equipment: ex.equipment,
+        primaryMuscle: ex.primaryMuscle ?? ex.primary_muscle ?? null,
+        primary_muscle: ex.primaryMuscle ?? ex.primary_muscle ?? null,
+        cardioGuidance: (ex as any).cardioGuidance ?? null,
         targetWeightLbs: recommendedWeight,
         recommendedWeightLbs: recommendedWeight,
         recommendation,
@@ -2867,7 +3031,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         })),
       };
     }),
-	  }), [displayExerciseWeight, preSetHints, swapCandidatesForExercise, workout]);
+	  }), [displayExerciseWeight, hrZones, preSetHints, swapCandidatesForExercise, workout]);
 
   buildWatchWorkoutSnapshotRef.current = buildWatchWorkoutSnapshot;
 
@@ -2943,6 +3107,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   watchSwapExerciseRef.current = performWatchExerciseSwap;
 
   useEffect(() => {
+    if (showStartCountdown) return;
     const timer = setTimeout(() => {
       if (watchWorkoutEndedRef.current) return;
       import('../utils/watchSync')
@@ -2956,12 +3121,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         .catch(() => {});
     }, 250);
     return () => clearTimeout(timer);
-  }, [buildWatchWorkoutSnapshot, exercises, warmupSteps]);
+  }, [buildWatchWorkoutSnapshot, exercises, showStartCountdown, warmupSteps]);
 
   // Elapsed workout timer
   useManagedInterval(() => {
     setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
-  }, 1000);
+  }, 1000, !showStartCountdown);
 
   // Set up notifications immediately so lock screen alerts work from the
   // first rest. If the user previously denied notifications, the OS
@@ -3213,8 +3378,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     if (timed) {
       const durText = overrideDuration?.trim() || input?.duration?.trim() || '';
       const preferMinutes = isLongCardioExercise(ex?.name ?? '', ex?.targetReps, { primaryMuscle: ex?.primaryMuscle });
-      const plannedDurationSeconds = guide ? parseDurationTargetSeconds(ex?.targetReps, preferMinutes) : NaN;
-      if (!durText && !guide && !Number.isFinite(plannedDurationSeconds)) {
+      const plannedDurationSeconds = parseDurationTargetSeconds(ex?.targetReps, preferMinutes);
+      if (!durText && !Number.isFinite(plannedDurationSeconds)) {
         if (!silent) Alert.alert('Enter duration', 'Fill in the duration before logging this set.');
         return;
       }
@@ -3230,6 +3395,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         return;
       }
       newSet = { setNumber: setSlot + 1, reps: 0, weightLbs: 0, durationSeconds };
+      endTimedLiveActivity(key);
     } else {
       // Mirror the UI display predicates: when the exercise is
       // bodyweight-only we don't ask for weight, and when reps are a
@@ -3417,7 +3583,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     } else if (pendingRir?.exIdx === exIdx) {
       setPendingRir(null);
     }
-  }, [authToken, clearLiveRecommendationState, displayExerciseWeight, exercises, getEffectiveTargetSetCount, parseInputWeightLbs, pendingRir, setInputs, workout.focus, workout.stimulus]);
+  }, [authToken, clearLiveRecommendationState, displayExerciseWeight, endTimedLiveActivity, exercises, getEffectiveTargetSetCount, parseInputWeightLbs, pendingRir, setInputs, workout.focus, workout.stimulus]);
   handleLogSetInlineRef.current = handleLogSetInline;
 
   const openAddExerciseModal = useCallback(async () => {
@@ -3663,6 +3829,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         liveActivityGenerationRef.current = generation;
         const priorActivityId = liveActivityIdRef.current;
         liveActivityIdRef.current = null;
+        liveActivityTimerKeyRef.current = null;
         if (priorActivityId) {
           await endRestActivity(priorActivityId);
           if (liveActivityGenerationRef.current !== generation) return;
@@ -3690,6 +3857,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           nextSetRecommendation: nextCue ? `${nextTarget} - ${nextCue}` : nextTarget,
           themeColorHex: theme.colors.primary,
           workoutId: `w_${workout.focus}_${Date.now()}`,
+          ...liveActivityHrZoneFields(liveHR, hrZones),
         });
         if (!id) {
           if (!liveActivityDiagShownRef.current) {
@@ -3769,7 +3937,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         endActiveRestLiveActivity();
       }
     }, 500); // 500ms tick for smooth countdown without drift
-  }, [buildWatchPositionProgress, endActiveRestLiveActivity, getEffectiveTargetSetCount, theme.colors.primary, workout.focus]);
+  }, [buildWatchPositionProgress, endActiveRestLiveActivity, getEffectiveTargetSetCount, hrZones, liveHR, theme.colors.primary, workout.focus]);
   startRestTimerRef.current = startRestTimer;
 
   // Force-update timers when app returns from background. Also re-persist
@@ -3783,6 +3951,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       if (state === 'active') {
         // Catch up elapsed workout time
         setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
+        const timers = activeTimersRef.current;
+        const runningTimerKey =
+          (timerModalKeyRef.current && timers[timerModalKeyRef.current]?.running ? timerModalKeyRef.current : null)
+          ?? Object.keys(timers).find(key => timers[key]?.running);
+        if (runningTimerKey) {
+          setTimerTick(t => (t + 1) % 1_000_000);
+          restartManagedInterval(tickIntervalRef, () => {
+            setTimerTick(t => (t + 1) % 1_000_000);
+          }, 1000);
+          updateTimedLiveActivityRef.current(runningTimerKey, timers[runningTimerKey]);
+        }
         // Catch up rest timer
         if (restStartAtRef.current > 0 && restTotalSecondsRef.current > 0) {
           const restElapsed = Math.floor((Date.now() - restStartAtRef.current) / 1000);
@@ -3808,8 +3987,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               // when the user dismissed the LA — exactly the
               // "swiping off skips rest" symptom.
               liveActivityIdRef.current = null;
+              liveActivityTimerKeyRef.current = null;
               return;
             }
+            if (activityState.mode === 'elapsed') return;
             const remaining = Math.max(0, Math.ceil((activityState.endDateMs - Date.now()) / 1000));
             if (remaining <= 0) {
               clearRestStateRef.current();
@@ -4151,7 +4332,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       setRestNextTarget(`Set ${setN}: ${ex.targetReps} reps`);
       setRestCue(baseTip);
       setExercises(prev => prev.map((item, i) => i === exIdx ? { ...item, aiRecommendation: baseTip } : item));
-      if (liveActivityIdRef.current) {
+      if (liveActivityIdRef.current && liveActivityTimerKeyRef.current == null) {
         updateRestActivity(liveActivityIdRef.current, {
           setNumber: setsForExercise.length,
           totalSets: targetSetCount,
@@ -4206,7 +4387,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
 	      setRestNextTarget(`Set ${setsForExercise.length + 1}: ${recWeightText} x ${rec.reps}`);
       setRestCue(rec.tip);
       setExercises(prev => prev.map((item, i) => i === exIdx ? { ...item, aiRecommendation: tip } : item));
-      if (liveActivityIdRef.current) {
+      if (liveActivityIdRef.current && liveActivityTimerKeyRef.current == null) {
         updateRestActivity(liveActivityIdRef.current, {
           setNumber: setsForExercise.length,
           totalSets: targetSetCount,
@@ -4456,7 +4637,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         } catch {}
 
         const [hrSummary, appleCalories] = await Promise.all([
-          getWorkoutHrSummary(startTime.current, now.getTime(), profileAge, restingHeartRate).catch((err) => {
+          getWorkoutHrSummary(startTime.current, now.getTime(), profileAge, restingHeartRate, hrZones).catch((err) => {
             console.warn('[handleFinish] workout HR summary read failed:', err);
             return null;
           }),
@@ -4710,6 +4891,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           (s as any).trainingScore = ts.score;
           (s as any).trainingRating = ts.rating;
           (s as any).trainingPillars = ts.pillars;
+          (s as any).trainingPillarBreakdown = ts.pillarBreakdown;
           console.log(`[training-score] ${ts.score} (${ts.rating}) pillars=${JSON.stringify(ts.pillars)}`);
         } catch (e) {
           console.log('[training-score] compute failed (non-fatal):', e);
@@ -5224,11 +5406,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               <Ionicons name="time-outline" size={13} color={workoutPalette.strong} />
               <Text style={[styles.headerWorkoutTimerText, { color: workoutPalette.strong }]}>{formatTime(elapsed)}</Text>
             </View>
+            {liveHR != null && liveHR > 0 && currentLiveHRZone ? (
+              <View style={[
+                styles.headerWorkoutTimer,
+                {
+                  backgroundColor: hrZoneColorHex(currentLiveHRZone.zone, workoutPalette.strong) + '18',
+                  borderColor: hrZoneColorHex(currentLiveHRZone.zone, workoutPalette.strong) + '66',
+                },
+              ]}>
+                <Ionicons name="heart" size={12} color={hrZoneColorHex(currentLiveHRZone.zone, workoutPalette.strong)} />
+                <Text style={[
+                  styles.headerWorkoutTimerText,
+                  { color: hrZoneColorHex(currentLiveHRZone.zone, workoutPalette.strong) },
+                ]}>
+                  Z{currentLiveHRZone.zone} {liveHR}
+                </Text>
+              </View>
+            ) : null}
             <View style={styles.headerTitleBlock}>
               <Text style={styles.focusLabel} numberOfLines={1}>{workout.focus}</Text>
               <Text style={styles.headerMetaText} numberOfLines={1}>
                 {totalLoggedSets}/{totalPlannedSets} sets logged
-                {liveHR != null && liveHR > 0 ? `  ·  ${liveHR} bpm` : ''}
+                {liveHR != null && liveHR > 0 && !currentLiveHRZone ? `  ·  ${liveHR} bpm` : ''}
                 {watchSyncing ? '  ·  syncing watch…' : ''}
               </Text>
             </View>
@@ -5578,11 +5777,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   {timed && !guide && hrZones.length > 0 && (() => {
                     const n = (ex.name || '').toLowerCase();
                     const isInterval = /interval|hiit|sprint|tabata/.test(n);
-                    const isEasy = /walk|jog|easy|zone.?2|recovery/.test(n);
-                    const zone = isEasy ? hrZones[0] : isInterval ? hrZones[3] : hrZones[1];
+                    const isEasy = /walk|jogging|easy|recovery/.test(n) && !/zone.?2/.test(n);
+                    const cardioGuidance = (ex as any).cardioGuidance ?? (ex as any).cardio_guidance;
+                    const prescribedZoneNumber = Number(cardioGuidance?.hr_zone ?? cardioGuidance?.hrZone);
+                    const zone = Number.isFinite(prescribedZoneNumber) && prescribedZoneNumber > 0
+                      ? hrZones.find(z => z.zone === prescribedZoneNumber)
+                      : isEasy ? hrZones[0] : isInterval ? hrZones[3] : hrZones[1];
                     if (!zone) return null;
+                    const zoneColor = hrZoneColorHex(zone.zone, themeColors.primary);
                     return (
-                      <Text style={{ fontSize: 11, color: themeColors.primary, fontWeight: '700', marginTop: 1 }}>
+                      <Text style={{ fontSize: 11, color: zoneColor, fontWeight: '700', marginTop: 1 }}>
                         Target: Z{zone.zone} {zone.label} ({zone.low}–{zone.high} bpm)
                       </Text>
                     );
@@ -5795,7 +5999,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                   import('../utils/watchSync').then(({ pushProgressToWatch }) =>
                                     pushProgressToWatch({ recommendation: suggestion.watchText })
                                   ).catch(() => undefined);
-                                  if (liveActivityIdRef.current) {
+                                  if (liveActivityIdRef.current && liveActivityTimerKeyRef.current == null) {
                                     updateRestActivity(liveActivityIdRef.current, {
                                       setNumber: updatedSets.length,
                                       totalSets: getEffectiveTargetSetCount(i, exercises[i], updatedSets.length),
@@ -5823,15 +6027,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     </View>
                   )}
 
-                  {/* Cardio guidance strip — shows equipment-specific targets
-                      (watts range, rpm, speed+incline) when the planner
-                      built a capability-aware prescription for this exercise. */}
+                  {/* Cardio guidance strip — shows planner targets such as
+                      watts, RPM, resistance, speed, and incline. */}
                   {(() => {
                     const cg = (ex as any).cardioGuidance;
                     if (!cg) return null;
                     const chips: { label: string; value: string }[] = [];
                     if (cg.watts_range)      chips.push({ label: 'Watts', value: cg.watts_range });
                     if (cg.rpm_range)        chips.push({ label: 'RPM', value: cg.rpm_range });
+                    if (cg.resistance_cue)   chips.push({ label: 'Resistance', value: cg.resistance_cue });
                     if (cg.speed_range)      chips.push({ label: 'Speed', value: cg.speed_range });
                     if (cg.incline_range)    chips.push({ label: 'Incline', value: cg.incline_range });
                     if (cg.pace_per_500m)    chips.push({ label: '/500m', value: cg.pace_per_500m });
@@ -5989,7 +6193,26 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                     placeholder={isLongCardioExercise(ex.name, ex.targetReps, { primaryMuscle: ex.primaryMuscle }) ? '25 min' : '45s'}
                                     placeholderTextColor={themeColors.textMuted}
                                     keyboardType="default"
+                                    returnKeyType="done"
+                                    onSubmitEditing={() => {
+                                      const inputKey = `${i}-${currentSlot}`;
+                                      const durText = (setInputs[inputKey] ?? { duration: '' }).duration?.trim();
+                                      handleLogSetInline(i, currentSlot, false, durText || undefined);
+                                    }}
                                   />
+                                  <TouchableOpacity
+                                    style={{ backgroundColor: themeColors.primary, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10 }}
+                                    onPress={() => {
+                                      const inputKey = `${i}-${currentSlot}`;
+                                      const durText = (setInputs[inputKey] ?? { duration: '' }).duration?.trim();
+                                      handleLogSetInline(i, currentSlot, false, durText || undefined);
+                                    }}
+                                    accessibilityRole="button"
+                                    accessibilityLabel="Log manual duration">
+                                    <Text style={{ color: getContrastingTextColor(themeColors.primary), fontSize: 13, fontWeight: '800' }}>
+                                      Log
+                                    </Text>
+                                  </TouchableOpacity>
                                 </View>
                               )}
                               {/* Optional metrics input — shown when done, exercise-type-specific */}
@@ -6455,6 +6678,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 },
               }));
             }
+            endTimedLiveActivity(timerModalKey);
             setTimerModalKey(null);
           };
           return (
@@ -6750,16 +6974,50 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         : score >= 65 ? themeColors.primary
                         : score >= 45 ? themeColors.warning
                         : themeColors.error;
-                      const p = summaryData.trainingPillars ?? { effort: 0, volume: 0, duration: 0, consistency: 0 };
-                      // Per-pillar maxima from `services/trainingScore.ts`.
-                      // Used to compute the "+N to max" delta + actionable
-                      // tip shown when the user taps to expand.
-                      const PILLAR_MAX = { effort: 40, volume: 25, duration: 20, consistency: 15 };
-                      const tipFor = (key: 'effort' | 'volume' | 'duration' | 'consistency'): string => {
-                        if (key === 'effort') return 'More time in Z3+ heart rate (or higher self-rated intensity).';
+                      const legacyPillars = summaryData.trainingPillars ?? { effort: 0, volume: 0, duration: 0, consistency: 0 };
+                      const dynamicPillars = Array.isArray(summaryData.trainingPillarBreakdown)
+                        ? summaryData.trainingPillarBreakdown
+                          .map(pillar => ({
+                            key: String(pillar.key ?? ''),
+                            label: String(pillar.label ?? pillar.key ?? 'Pillar'),
+                            value: Math.max(0, Math.round(Number(pillar.value) || 0)),
+                            max: Math.max(0, Math.round(Number(pillar.max) || 0)),
+                          }))
+                          .filter(pillar => pillar.max > 0)
+                        : [];
+                      const shortPillarLabel = (key: string, label: string): string => {
+                        if (key === 'zoneCompliance') return 'Z2';
+                        if (key === 'intervalIntensity') return 'Intervals';
+                        if (key === 'workRestCompletion') return 'Work/rest';
+                        if (key === 'movementCompletion') return 'Moves';
+                        if (key === 'lowIntensityCompliance') return 'Low HR';
+                        if (key === 'duration') return 'Time';
+                        return label;
+                      };
+                      const displayPillars = dynamicPillars.length > 0
+                        ? dynamicPillars
+                        : [
+                          { key: 'effort', label: 'Effort', value: legacyPillars.effort, max: 40 },
+                          { key: 'volume', label: 'Volume', value: legacyPillars.volume, max: 25 },
+                          { key: 'duration', label: 'Time', value: legacyPillars.duration, max: 20 },
+                          { key: 'consistency', label: 'Consistency', value: legacyPillars.consistency, max: 15 },
+                        ];
+                      const compactPillars = displayPillars
+                        .slice(0, dynamicPillars.length > 0 ? 3 : 4)
+                        .map(pillar => `${shortPillarLabel(pillar.key, pillar.label)} ${pillar.value}/${pillar.max}`)
+                        .join(' · ');
+                      const tipFor = (key: string): string => {
+                        if (key === 'zoneCompliance') return 'Hold the recommended Zone 2 range more consistently.';
+                        if (key === 'intervalIntensity') return 'Push the hard intervals into the prescribed HR range.';
+                        if (key === 'workRestCompletion') return 'Complete the planned intervals and recoveries.';
+                        if (key === 'movementCompletion') return 'Complete every planned movement.';
+                        if (key === 'lowIntensityCompliance') return 'Keep recovery work easy and controlled.';
+                        if (key === 'hr') return 'Spend more of the session in the intended heart-rate range.';
+                        if (key === 'stimulus' || key === 'effort') return 'Match the prescribed workout intensity.';
                         if (key === 'volume') return 'Complete all planned sets.';
-                        if (key === 'duration') return 'Train 85–120% of the estimated session duration.';
-                        return 'Complete every planned exercise.';
+                        if (key === 'duration') return 'Train 85-120% of the estimated session duration.';
+                        if (key === 'progression') return 'Beat a previous mark or hit the prescribed load target.';
+                        return 'Complete more of the planned session.';
                       };
                       return (
                         <View>
@@ -6790,7 +7048,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                 {summaryData.trainingRating ?? '—'}
                               </Text>
                               <Text style={{ fontSize: 10, color: themeColors.textMuted, lineHeight: 13 }}>
-                                E {p.effort}/40 · V {p.volume}/25 · T {p.duration}/20 · C {p.consistency}/15
+                                {compactPillars}
                               </Text>
                             </View>
                             <Ionicons
@@ -6809,15 +7067,15 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                               <Text style={{ fontSize: 10, fontWeight: '800', color: themeColors.textMuted, letterSpacing: 0.5 }}>
                                 HOW THIS IS SCORED
                               </Text>
-                              {(['effort', 'volume', 'duration', 'consistency'] as const).map(key => {
-                                const value = p[key];
-                                const max = PILLAR_MAX[key];
+                              {displayPillars.map(pillar => {
+                                const value = pillar.value;
+                                const max = pillar.max || 1;
                                 const deficit = Math.max(0, max - value);
-                                const pct = Math.round((value / max) * 100);
-                                const label = key === 'duration' ? 'Time' : key.charAt(0).toUpperCase() + key.slice(1);
+                                const pct = Math.max(0, Math.min(100, Math.round((value / max) * 100)));
+                                const label = shortPillarLabel(pillar.key, pillar.label);
                                 const barColor = pct >= 90 ? themeColors.success : pct >= 60 ? themeColors.primary : themeColors.warning;
                                 return (
-                                  <View key={key} style={{ gap: 3 }}>
+                                  <View key={pillar.key} style={{ gap: 3 }}>
                                     <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 6 }}>
                                       <Text style={{ fontSize: 12, fontWeight: '700', color: themeColors.textPrimary, flex: 1 }}>
                                         {label}
@@ -6836,14 +7094,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                                     </View>
                                     {deficit > 0 && (
                                       <Text style={{ fontSize: 10, color: themeColors.textMuted, lineHeight: 13 }}>
-                                        {tipFor(key)}
+                                        {tipFor(pillar.key)}
                                       </Text>
                                     )}
                                   </View>
                                 );
                               })}
                               <Text style={{ fontSize: 9, color: themeColors.textMuted, fontStyle: 'italic', marginTop: 2, lineHeight: 12 }}>
-                                Effort favors Z3+ heart rate. Mobility / recovery sessions count as full credit even when easy.
+                                Score uses the workout archetype, so cardio days prioritize zones and time while lift days prioritize sets and load.
                               </Text>
                             </View>
                           )}
@@ -6868,13 +7126,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                           const zones = summaryData.hrZoneMinutes!;
                           const total = zones.reduce((a, b) => a + b, 0);
                           if (total <= 0) return null;
-                          const colors = ['#22C55E', '#EAB308', themeColors.primary, '#F97316', '#EF4444'];
                           return (
                             <View style={{ flexDirection: 'row', height: 8, borderRadius: 4, overflow: 'hidden', backgroundColor: themeColors.border, marginBottom: 6 }}>
                               {zones.map((m, i) => {
                                 if (m <= 0) return null;
                                 const flex = m / total;
-                                return <View key={i} style={{ flex, backgroundColor: colors[i] }} />;
+                                return <View key={i} style={{ flex, backgroundColor: hrZoneColorHex(i + 1, themeColors.primary) }} />;
                               })}
                             </View>
                           );
@@ -6882,7 +7139,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
                           {(['Z1', 'Z2', 'Z3', 'Z4', 'Z5'] as const).map((label, i) => {
                             const min = summaryData.hrZoneMinutes![i];
-                            const zoneColor = ['#22C55E', '#EAB308', themeColors.primary, '#F97316', '#EF4444'][i];
+                            const zoneColor = hrZoneColorHex(i + 1, themeColors.primary);
                             const isEmpty = min < 0.5;
                             return (
                               <View key={label} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
@@ -7378,7 +7635,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       {showStartCountdown && (
         <StartCountdownOverlay
           themeName={themeName}
-          onComplete={() => setShowStartCountdown(false)}
+          onComplete={() => {
+            setElapsed(Math.floor((Date.now() - startTime.current) / 1000));
+            setShowStartCountdown(false);
+          }}
         />
       )}
 
@@ -7387,6 +7647,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         mode={timerMode}
         themeName={themeName}
         exerciseName={exercises[timerExerciseIdx]?.name}
+        hrZones={hrZones}
         onClose={() => setTimerModalVisible(false)}
         onComplete={(result: TimerResult) => {
           setTimerModalVisible(false);

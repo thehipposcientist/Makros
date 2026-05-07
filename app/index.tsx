@@ -393,6 +393,7 @@ import OnboardingScreen from '../src/screens/OnboardingScreen';
 import HomeScreen from '../src/screens/HomeScreen';
 import EditProfileScreen from '../src/screens/EditProfileScreen';
 import ActiveWorkoutScreen from '../src/screens/ActiveWorkoutScreen';
+import { START_COUNTDOWN_TOTAL_MS } from '../src/components/StartCountdownOverlay';
 import SettingsScreen from '../src/screens/SettingsScreen';
 
 function serverTierOf(profile: UserProfile | null | undefined): 'free' | 'pro' {
@@ -408,6 +409,8 @@ import { LEGAL_VERSION, SUPPORT_EMAIL } from '../src/constants/legal';
 import { recordGoalChange, loadWorkoutHistory, saveWorkoutSession, savePlanChange, todayKey } from '../src/utils/workoutHistory';
 import { nextPlanWeekStart, formatPlanStartDateShort } from '../src/utils/planEffectiveDate';
 import { workoutSessionToLoggedPayload } from '../src/utils/workoutLogPayload';
+
+const START_WORKOUT_POST_COUNTDOWN_DELAY_MS = START_COUNTDOWN_TOTAL_MS + 350;
 import { isHealthKitAvailable, requestHealthPermissions } from '../src/services/appleHealth';
 import { effectiveAge } from '../src/utils/age';
 import { setActiveWatchSessionId } from '../src/utils/activeWatchSession';
@@ -614,10 +617,25 @@ export default function Index() {
   const [playStartCountdown, setPlayStartCountdown] = useState(false);
   const [resumeWorkoutData, setResumeWorkoutData] = useState<{ workout: any; loggedCount: number } | null>(null);
   const startWorkoutInitialUrlHandledRef = useRef(false);
-  const setActiveWorkout = useCallback((w: WorkoutDay | null) => {
+  const activeWorkoutPersistTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startWorkoutSequenceRef = useRef(0);
+  const setActiveWorkout = useCallback((w: WorkoutDay | null, options?: { persistDelayMs?: number }) => {
+    if (activeWorkoutPersistTimeoutRef.current) {
+      clearTimeout(activeWorkoutPersistTimeoutRef.current);
+      activeWorkoutPersistTimeoutRef.current = null;
+    }
     setActiveWorkoutRaw(w);
     if (w) {
-      AsyncStorage.setItem('activeWorkoutSession', JSON.stringify(w)).catch(() => {});
+      const persist = () => {
+        activeWorkoutPersistTimeoutRef.current = null;
+        AsyncStorage.setItem('activeWorkoutSession', JSON.stringify(w)).catch(() => {});
+      };
+      const delayMs = Math.max(0, options?.persistDelayMs ?? 0);
+      if (delayMs > 0) {
+        activeWorkoutPersistTimeoutRef.current = setTimeout(persist, delayMs);
+      } else {
+        persist();
+      }
     } else {
       AsyncStorage.removeItem('activeWorkoutSession').catch(() => {});
     }
@@ -630,28 +648,44 @@ export default function Index() {
   // async listener registration.
   const handleStartWorkout = useCallback((workout: WorkoutDay, options?: { playCountdown?: boolean }) => {
     const shouldPlayCountdown = options?.playCountdown !== false;
+    const sequence = startWorkoutSequenceRef.current + 1;
+    startWorkoutSequenceRef.current = sequence;
     setPlayStartCountdown(shouldPlayCountdown);
+    const watchSyncDelayMs = shouldPlayCountdown ? START_WORKOUT_POST_COUNTDOWN_DELAY_MS : 0;
     if (shouldPlayCountdown) {
       const startedAtMs = Date.now();
       const sessionId = `${startedAtMs}-${Math.random().toString(36).slice(2, 8)}`;
       setActiveWatchSessionId(sessionId);
       AsyncStorage.setItem('activeWatchSessionId', sessionId).catch(() => {});
       AsyncStorage.setItem('activeWorkoutStartTime', String(startedAtMs)).catch(() => {});
-      import('../src/utils/watchSync')
-        .then(async ({ pushWorkoutToWatch, WatchBridge }) => {
-          await pushWorkoutToWatch(workout, {
-            dateISO: todayKey(),
-            status: 'active',
-            sessionId,
-            reason: 'active_snapshot',
-          }).catch(() => false);
-          await WatchBridge.startWatchWorkout().catch(() => false);
-        })
-        .catch(() => {});
+      const startWatchAfterCountdown = () => {
+        if (startWorkoutSequenceRef.current !== sequence) return;
+        import('../src/utils/watchSync')
+          .then(async ({ pushWorkoutToWatch, WatchBridge }) => {
+            if (startWorkoutSequenceRef.current !== sequence) return;
+            await pushWorkoutToWatch(workout, {
+              dateISO: todayKey(),
+              status: 'active',
+              sessionId,
+              reason: 'active_snapshot',
+            }).catch(() => false);
+            await WatchBridge.startWatchWorkout().catch(() => false);
+          })
+          .catch(() => {});
+      };
+      // Keep the 3-2-1 window free of workout JSON serialization and
+      // WatchConnectivity bridge calls; ActiveWorkoutScreen also waits
+      // for the overlay before starting its richer active snapshot sync.
+      setTimeout(() => {
+        InteractionManager.runAfterInteractions(startWatchAfterCountdown);
+      }, watchSyncDelayMs);
     }
-    setActiveWorkout(workout);
+    setActiveWorkout(workout, {
+      persistDelayMs: shouldPlayCountdown ? START_WORKOUT_POST_COUNTDOWN_DELAY_MS : 0,
+    });
   }, [setActiveWorkout]);
   const handleCancelActiveWorkout = useCallback(() => {
+    startWorkoutSequenceRef.current += 1;
     setPlayStartCountdown(false);
     setActiveWorkout(null);
   }, [setActiveWorkout]);

@@ -2,8 +2,9 @@ import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { HealthSummary, SleepScore, SleepStages } from '../types';
 import { scoreSleep, minutesFromMidnight } from './sleepScore';
-import { recordTelemetryEvent } from './api';
+import { recordTelemetryEvent, type HRZone } from './api';
 import { loadAuthToken } from '../utils/authTokenStorage';
+import { zoneForHeartRate } from '../utils/hrZones';
 
 let _module: any = null;
 let _moduleChecked = false;
@@ -555,8 +556,37 @@ export async function getLatestHeartRate(): Promise<number | null> {
 }
 
 // Pulls raw HR samples for a workout window and summarizes them into avg, max,
-// and minutes-in-zone. When resting HR is available, zones use heart-rate
-// reserve so the summary matches the personalized training-zone endpoint.
+// and minutes-in-zone. Prefer the exact server-computed zone boundaries already
+// used for live phone/watch display; fallback mirrors the backend's HRR default.
+
+function fallbackHrZones(age: number | null, restingHeartRate: number | null): HRZone[] {
+  const maxHR = age && age > 0 ? 220 - age : 190;
+  const rhr = restingHeartRate && restingHeartRate > 0 && restingHeartRate < maxHR
+    ? restingHeartRate
+    : 60;
+  const hrrPct = (pct: number) => Math.round(rhr + (maxHR - rhr) * pct);
+  return [
+    { zone: 1, label: 'Recovery', low: hrrPct(0.50), high: hrrPct(0.60) },
+    { zone: 2, label: 'Aerobic', low: hrrPct(0.60), high: hrrPct(0.70) },
+    { zone: 3, label: 'Tempo', low: hrrPct(0.70), high: hrrPct(0.80) },
+    { zone: 4, label: 'Threshold', low: hrrPct(0.80), high: hrrPct(0.90) },
+    { zone: 5, label: 'VO2 Max', low: hrrPct(0.90), high: maxHR },
+  ];
+}
+
+function workoutHrZones(
+  explicitZones: HRZone[] | null | undefined,
+  age: number | null,
+  restingHeartRate: number | null,
+): HRZone[] {
+  const zones = Array.isArray(explicitZones)
+    ? explicitZones.filter(z =>
+      Number.isFinite(Number(z.zone)) &&
+      Number.isFinite(Number(z.low)) &&
+      Number.isFinite(Number(z.high)))
+    : [];
+  return zones.length > 0 ? zones : fallbackHrZones(age, restingHeartRate);
+}
 
 export interface WorkoutHrSummary {
   avgBpm: number;
@@ -570,16 +600,14 @@ export async function getWorkoutHrSummary(
   endMs: number,
   age: number | null = null,
   restingHeartRate: number | null = null,
+  explicitZones: HRZone[] | null = null,
 ): Promise<WorkoutHrSummary | null> {
   const mod = getModule();
   if (!mod || typeof mod.getHeartRate !== 'function') return null;
   try {
     const samples = await mod.getHeartRate(startMs, endMs, 500);
     if (!Array.isArray(samples) || samples.length === 0) return null;
-    const maxHR = age && age > 0 ? 220 - age : 190;
-    const rhr = restingHeartRate && restingHeartRate > 0 && restingHeartRate < maxHR
-      ? restingHeartRate
-      : null;
+    const zoneDefinitions = workoutHrZones(explicitZones, age, restingHeartRate);
 
     let sum = 0;
     let max = 0;
@@ -597,10 +625,8 @@ export async function getWorkoutHrSummary(
       // Assign the gap until next sample (or end) to this zone.
       const nextT = i + 1 < sorted.length ? sorted[i + 1].t : endMs;
       const minutes = Math.max(0, (nextT - t) / 60000);
-      const pct = rhr
-        ? ((v - rhr) / Math.max(1, maxHR - rhr)) * 100
-        : (v / maxHR) * 100;
-      const zIdx = pct >= 90 ? 4 : pct >= 80 ? 3 : pct >= 70 ? 2 : pct >= 60 ? 1 : 0;
+      const zone = zoneForHeartRate(v, zoneDefinitions);
+      const zIdx = Math.max(0, Math.min(4, Math.round(Number(zone?.zone ?? 1)) - 1));
       zones[zIdx] += minutes;
     }
     return {

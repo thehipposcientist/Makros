@@ -1,10 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, TouchableOpacity, Modal, StyleSheet, Vibration } from 'react-native';
+import { AppState, View, Text, TouchableOpacity, Modal, StyleSheet, Vibration } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme } from '../constants/theme';
 import { AppThemeName } from '../types';
 import Svg, { Circle } from 'react-native-svg';
 import { clearManagedInterval, useManagedInterval } from '../hooks/useManagedInterval';
+import { getLatestHeartRate, isHealthKitAvailable } from '../services/appleHealth';
+import type { HRZone } from '../services/api';
+import { hrZoneColorHex, hrZoneRangeText, zoneForHeartRate } from '../utils/hrZones';
 
 export type TimerMode = 'amrap' | 'emom' | 'tabata';
 
@@ -21,6 +24,7 @@ interface Props {
   tabataRestSeconds?: number;
   tabataRounds?: number;
   exerciseName?: string;
+  hrZones?: HRZone[];
 }
 
 export interface TimerResult {
@@ -41,6 +45,7 @@ export default function WorkoutTimerModal({
   tabataRestSeconds = 10,
   tabataRounds = 8,
   exerciseName,
+  hrZones = [],
 }: Props) {
   const theme = getTheme(themeName ?? 'dark');
   const colors = theme.colors;
@@ -52,7 +57,9 @@ export default function WorkoutTimerModal({
   const [phase, setPhase] = useState<Phase>('work');
   const [phaseRemaining, setPhaseRemaining] = useState(0);
   const [amrapReps, setAmrapReps] = useState(0);
+  const [hr, setHr] = useState<number | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const hrIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTimeRef = useRef(0);
   const phaseStartRef = useRef(0);
 
@@ -63,6 +70,7 @@ export default function WorkoutTimerModal({
 
   const reset = useCallback(() => {
     clearManagedInterval(intervalRef);
+    clearManagedInterval(hrIntervalRef);
     setRunning(false);
     setFinished(false);
     setElapsed(0);
@@ -70,6 +78,7 @@ export default function WorkoutTimerModal({
     setPhase('work');
     setPhaseRemaining(mode === 'amrap' ? amrapCapSeconds : mode === 'emom' ? emomIntervalSeconds : tabataWorkSeconds);
     setAmrapReps(0);
+    setHr(null);
   }, [mode, amrapCapSeconds, emomIntervalSeconds, tabataWorkSeconds]);
 
   useEffect(() => {
@@ -150,6 +159,28 @@ export default function WorkoutTimerModal({
 
   useManagedInterval(tick, 500, running, intervalRef);
 
+  const tickHeartRate = useCallback(async () => {
+    try {
+      const bpm = await getLatestHeartRate();
+      if (bpm && bpm > 30 && bpm < 230) setHr(bpm);
+    } catch {}
+  }, []);
+  const shouldPollHr = visible && running && isHealthKitAvailable();
+  useEffect(() => {
+    if (!shouldPollHr) return;
+    tickHeartRate();
+  }, [shouldPollHr, tickHeartRate]);
+  useManagedInterval(tickHeartRate, 6000, shouldPollHr, hrIntervalRef);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active' || !visible || !running) return;
+      tick();
+      if (shouldPollHr) tickHeartRate();
+    });
+    return () => sub.remove();
+  }, [running, shouldPollHr, tick, tickHeartRate, visible]);
+
   const handleStart = () => {
     const now = Date.now();
     startTimeRef.current = now;
@@ -192,6 +223,8 @@ export default function WorkoutTimerModal({
 
   const modeLabel = mode === 'amrap' ? 'AMRAP' : mode === 'emom' ? 'EMOM' : 'TABATA';
   const phaseColor = phase === 'rest' ? colors.success : colors.primary;
+  const liveZone = zoneForHeartRate(hr, hrZones);
+  const liveZoneColor = hrZoneColorHex(liveZone?.zone, colors.primary);
 
   return (
     <Modal visible={visible} animationType="slide" transparent>
@@ -225,6 +258,23 @@ export default function WorkoutTimerModal({
             )}
           </View>
         </View>
+
+        {hr != null && hr > 0 ? (
+          <View style={[
+            s.hrZonePill,
+            { backgroundColor: liveZoneColor + '18', borderColor: liveZoneColor + '66' },
+          ]}>
+            <Ionicons name="heart" size={14} color={liveZoneColor} />
+            <Text style={[s.hrZoneText, { color: liveZoneColor }]}>
+              {liveZone ? `Z${liveZone.zone} ${hr}` : `${hr}`} bpm
+            </Text>
+            {liveZone ? (
+              <Text style={[s.hrZoneRange, { color: colors.textMuted }]}>
+                {hrZoneRangeText(liveZone)}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
 
         {/* Stats row */}
         <View style={s.statsRow}>
@@ -301,6 +351,9 @@ const s = StyleSheet.create({
   ringCenter: { position: 'absolute', alignItems: 'center' },
   bigTime: { fontSize: 48, fontWeight: '700', fontVariant: ['tabular-nums'] },
   phaseText: { fontSize: 16, fontWeight: '700', marginTop: 2 },
+  hrZonePill: { flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 7, minHeight: 34 },
+  hrZoneText: { fontSize: 13, fontWeight: '900', fontVariant: ['tabular-nums'] },
+  hrZoneRange: { fontSize: 11, fontWeight: '700', fontVariant: ['tabular-nums'] },
   statsRow: { flexDirection: 'row', gap: 32, marginVertical: 16 },
   stat: { alignItems: 'center' },
   statValue: { fontSize: 22, fontWeight: '700', fontVariant: ['tabular-nums'] },

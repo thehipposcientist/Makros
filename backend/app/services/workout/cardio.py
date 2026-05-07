@@ -425,17 +425,33 @@ def build_cardio_guidance(
             guidance["rpe_range"] = "8–9/10 work" if is_intervals else "5–6/10"
         elif CAP_HEART_RATE in caps:
             guidance["intensity_cue"] = f"HR Zone {guidance.get('hr_zone', 2)}"
-            if CAP_RPM in caps:
-                guidance["rpm_range"] = "80–95 RPM"
-            guidance["rpe_range"] = "5–6/10"
+            if is_intervals:
+                guidance["resistance_cue"] = "hard resistance on work, easy on recovery"
+                guidance["rpm_range"] = "90–105 RPM on work"
+                guidance["rpe_range"] = "8–9/10 work, 4–5/10 rest"
+            else:
+                guidance["resistance_cue"] = "medium resistance"
+                guidance["rpm_range"] = "75–90 RPM"
+                guidance["rpe_range"] = "5–6/10"
         elif CAP_RESISTANCE in caps:
-            guidance["resistance_cue"] = "moderate resistance"
-            if CAP_RPM in caps:
-                guidance["rpm_range"] = "80–95 RPM if available"
-            guidance["rpe_range"] = "5–6/10"
+            if is_intervals:
+                guidance["resistance_cue"] = "hard resistance on work, easy on recovery"
+                guidance["rpm_range"] = "90–105 RPM on work"
+                guidance["rpe_range"] = "8–9/10 work, 4–5/10 rest"
+            else:
+                guidance["resistance_cue"] = "medium resistance"
+                guidance["rpm_range"] = "75–90 RPM"
+                guidance["rpe_range"] = "5–6/10"
         else:
-            guidance["intensity_cue"] = "conversational pace"
-            guidance["rpe_range"]     = "5–6/10"
+            if is_intervals:
+                guidance["resistance_cue"] = "hard resistance on work, easy on recovery"
+                guidance["rpm_range"] = "90–105 RPM on work"
+                guidance["rpe_range"] = "8–9/10 work, 4–5/10 rest"
+            else:
+                guidance["resistance_cue"] = "medium resistance"
+                guidance["rpm_range"] = "75–90 RPM"
+                guidance["rpe_range"] = "5–6/10"
+                guidance["intensity_cue"] = "conversational pace"
 
     elif modality == MODALITY_ROWER:
         if CAP_PACE in caps:

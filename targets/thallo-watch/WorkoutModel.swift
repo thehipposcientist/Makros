@@ -70,6 +70,8 @@ struct WatchExercise: Codable, Identifiable, Equatable {
     let restSeconds: Int
     let equipment: String?
     let plannedTargetWeightLbs: Double?
+    let isTimed: Bool?
+    let plannedDurationSeconds: Int?
     let recommendation: String?
     let isGuide: Bool?
     /// "warmup" | "primary" | "secondary" | "isolation" | "core" | "cooldown"
@@ -82,7 +84,7 @@ struct WatchExercise: Codable, Identifiable, Equatable {
     let swapOptions: [WatchSwapOption]
 
     enum CodingKeys: String, CodingKey {
-        case name, sets, reps, restSeconds, equipment, plannedTargetWeightLbs, recommendation, isGuide, slotRole, swapOptions
+        case name, sets, reps, restSeconds, equipment, plannedTargetWeightLbs, isTimed, plannedDurationSeconds, recommendation, isGuide, slotRole, swapOptions
     }
 
     init(
@@ -92,6 +94,8 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         restSeconds: Int,
         equipment: String?,
         plannedTargetWeightLbs: Double?,
+        isTimed: Bool? = nil,
+        plannedDurationSeconds: Int? = nil,
         recommendation: String?,
         isGuide: Bool?,
         slotRole: String?,
@@ -103,6 +107,8 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         self.restSeconds = restSeconds
         self.equipment = equipment
         self.plannedTargetWeightLbs = plannedTargetWeightLbs
+        self.isTimed = isTimed
+        self.plannedDurationSeconds = plannedDurationSeconds
         self.recommendation = recommendation
         self.isGuide = isGuide
         self.slotRole = slotRole
@@ -117,6 +123,12 @@ struct WatchExercise: Codable, Identifiable, Equatable {
         self.restSeconds = max(0, c.decodeFlexibleIntIfPresent(forKey: .restSeconds) ?? 60)
         self.equipment = c.decodeFlexibleStringIfPresent(forKey: .equipment)
         self.plannedTargetWeightLbs = c.decodeFlexibleDoubleIfPresent(forKey: .plannedTargetWeightLbs)
+        self.isTimed = try? c.decodeIfPresent(Bool.self, forKey: .isTimed)
+        if let plannedDurationSeconds = c.decodeFlexibleIntIfPresent(forKey: .plannedDurationSeconds), plannedDurationSeconds > 0 {
+            self.plannedDurationSeconds = plannedDurationSeconds
+        } else {
+            self.plannedDurationSeconds = nil
+        }
         self.recommendation = c.decodeFlexibleStringIfPresent(forKey: .recommendation)
         self.isGuide = try? c.decodeIfPresent(Bool.self, forKey: .isGuide)
         self.slotRole = c.decodeFlexibleStringIfPresent(forKey: .slotRole)
@@ -134,6 +146,33 @@ enum WatchWorkoutStatus: String, Codable {
     case completed
     case skipped
     case rest
+}
+
+struct WatchHRZone: Codable, Equatable, Identifiable {
+    var id: Int { zone }
+    let zone: Int
+    let label: String
+    let low: Int
+    let high: Int
+
+    enum CodingKeys: String, CodingKey {
+        case zone, label, low, high
+    }
+
+    init(zone: Int, label: String, low: Int, high: Int) {
+        self.zone = zone
+        self.label = label
+        self.low = low
+        self.high = high
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.zone = c.decodeFlexibleIntIfPresent(forKey: .zone) ?? 0
+        self.label = c.decodeFlexibleStringIfPresent(forKey: .label) ?? ""
+        self.low = c.decodeFlexibleIntIfPresent(forKey: .low) ?? 0
+        self.high = c.decodeFlexibleIntIfPresent(forKey: .high) ?? 0
+    }
 }
 
 struct WatchWorkout: Codable, Equatable {
@@ -157,6 +196,10 @@ struct WatchWorkout: Codable, Equatable {
     /// on the exercise tab before the first set. Nil / empty = no
     /// warmup (recovery / cardio / cold-start days).
     let warmupSteps: [String]?
+    /// Phone-computed HR zones from the same endpoint used for cardio
+    /// prescriptions. The watch uses these for live zone display so
+    /// "current zone" matches "recommended zone".
+    let hrZones: [WatchHRZone]?
     let syncedAtMs: Double
     /// Owning user id. Optional for back-compat — when present and
     /// non-empty, ConnectivityStore rejects workouts that don't match
@@ -164,7 +207,7 @@ struct WatchWorkout: Codable, Equatable {
     let userId: String?
 
     enum CodingKeys: String, CodingKey {
-        case focus, durationMinutes, dateISO, status, sessionId, readiness, readinessLabel, exercises, warmupSteps, syncedAtMs, userId
+        case focus, durationMinutes, dateISO, status, sessionId, readiness, readinessLabel, exercises, warmupSteps, hrZones, syncedAtMs, userId
     }
 
     init(
@@ -177,6 +220,7 @@ struct WatchWorkout: Codable, Equatable {
         readinessLabel: String?,
         exercises: [WatchExercise],
         warmupSteps: [String]?,
+        hrZones: [WatchHRZone]?,
         syncedAtMs: Double,
         userId: String?
     ) {
@@ -189,6 +233,7 @@ struct WatchWorkout: Codable, Equatable {
         self.readinessLabel = readinessLabel
         self.exercises = exercises
         self.warmupSteps = warmupSteps
+        self.hrZones = hrZones
         self.syncedAtMs = syncedAtMs
         self.userId = userId
     }
@@ -211,6 +256,10 @@ struct WatchWorkout: Codable, Equatable {
         self.readinessLabel = c.decodeFlexibleStringIfPresent(forKey: .readinessLabel)
         self.exercises = (try? c.decodeIfPresent([WatchExercise].self, forKey: .exercises)) ?? []
         self.warmupSteps = try? c.decodeIfPresent([String].self, forKey: .warmupSteps)
+        let decodedZones = (try? c.decodeIfPresent([WatchHRZone].self, forKey: .hrZones)) ?? []
+        self.hrZones = decodedZones
+            .filter { $0.zone >= 1 && $0.zone <= 5 && $0.low > 0 && $0.high >= $0.low }
+            .sorted { $0.zone < $1.zone }
         self.syncedAtMs = c.decodeFlexibleDoubleIfPresent(forKey: .syncedAtMs) ?? Date().timeIntervalSince1970 * 1000
         self.userId = c.decodeFlexibleStringIfPresent(forKey: .userId)
     }

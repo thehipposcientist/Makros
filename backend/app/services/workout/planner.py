@@ -58,7 +58,7 @@ from typing import Iterable
 # signatures) so removed Layer 4 block can stay removed.
 from .slots import Slot, density_adjust_slots  # noqa: F401
 from .archetypes import DayArchetype
-from .cardio import classify_cardio
+from .cardio import build_cardio_guidance, classify_cardio
 from .equipment import expand_owned_equipment_aliases
 
 
@@ -2926,6 +2926,8 @@ def generate_cardio_day(
             "equipment": equipment,
             "muscles_targeted": muscles or ["cardio"],
             "primary_muscle": primary_muscle,
+            "exercise_type": "cardio",
+            "movement_pattern": "cardio",
             "_req": req,
         }
 
@@ -2985,6 +2987,16 @@ def generate_cardio_day(
         prescription_type: str = "cardio_steady",
     ) -> dict:
         out = {k: v for k, v in template.items() if k != "_req"}
+        cardio_guidance = None
+        if role in ("primary", "secondary"):
+            cardio_guidance = build_cardio_guidance(
+                out,
+                session_minutes=sm,
+                capabilities=[],
+            )
+            import re as _re
+            if minute_match := _re.search(r"(\d+)\s*min", reps):
+                cardio_guidance["duration_min"] = int(minute_match.group(1))
         out.update({
             "sets": sets,
             "reps": reps,
@@ -2993,6 +3005,7 @@ def generate_cardio_day(
             "_role": role,
             "_training_type": "conditioning",
             "prescriptionType": prescription_type,
+            "cardioGuidance": cardio_guidance,
         })
         return out
 

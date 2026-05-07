@@ -96,12 +96,12 @@ if TYPE_CHECKING:
 #: food — missing fields default to 0. Adding a new field here automatically
 #: makes it flow through `build_food_lookup` → `assemble_meal` → the
 #: meal["micronutrients"] dict the frontend displays. Source data backed
-#: only by the seed/USDA today: fiber, sugar, sodium. Everything else is
-#: schema-supported via the FoodNutrition.extra_nutrients JSON column and
-#: will populate as the seed gets enriched.
+#: by the seed/USDA today: fiber, total sugar, added sugar, sodium. Everything
+#: else is schema-supported via the FoodNutrition.extra_nutrients JSON column
+#: and will populate as the seed gets enriched.
 MICRONUTRIENT_FIELDS: tuple[str, ...] = (
     # Always-present in the legacy contract — seed data covers these.
-    "fiber", "sugar", "sodium",
+    "fiber", "sugar", "added_sugar_g", "sodium",
     # Fats panel.
     "cholesterol",
     "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
@@ -1232,11 +1232,11 @@ def assemble_meal(
     else:
         confidence = "high"
 
-    # Round every micronutrient to 2 dp for display. Fiber/sugar use 1 dp
-    # to match the legacy frontend display; sodium goes to whole mg.
+    # Round every micronutrient to 2 dp for display. Fiber/sugar/added sugar
+    # use 1 dp to match the legacy frontend display; sodium goes to whole mg.
     micros_out: dict[str, float] = {}
     for k, v in total_micros.items():
-        if k == "fiber" or k == "sugar":
+        if k in ("fiber", "sugar", "added_sugar_g"):
             micros_out[k] = round(v, 1)
         elif k == "sodium":
             micros_out[k] = round(v)

@@ -15,6 +15,7 @@ import {
   WatchWorkoutPayload,
   WatchWorkoutSyncReason,
   WatchWorkoutStatus,
+  WatchHRZone,
   WatchPalette,
   WatchProgress,
   WatchMealsPayload,
@@ -31,7 +32,7 @@ import { WorkoutDay, AppThemeName, DailyNutritionPlan } from '../types';
 import { getTheme, resolveThemeName } from '../constants/theme';
 import { recordTelemetryEvent } from '../services/api';
 import { getActiveWatchSessionId } from './activeWatchSession';
-import { isGuideExercise } from './exerciseDisplay';
+import { isGuideExercise, shouldHideReps } from './exerciseDisplay';
 
 export { WatchBridge };
 
@@ -101,6 +102,68 @@ function nullableString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
 }
 
+const WATCH_TIMED_NAME_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone ?2|tempo|steady state|long run|\bwalk\b|walking|boxing|kickboxing|sparring|bag.?work|shadow.?box|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|farmer.?carry|suitcase carry|loaded carry/i;
+
+function watchDurationPrefersMinutes(exercise: any): boolean {
+  const name = String(exercise?.name ?? '').toLowerCase();
+  const primaryMuscle = String(exercise?.primaryMuscle ?? exercise?.primary_muscle ?? exercise?._primary_muscle ?? '').toLowerCase();
+  const trainingType = String(exercise?.trainingType ?? exercise?.training_type ?? exercise?._training_type ?? exercise?.stimulus ?? '').toLowerCase();
+  return primaryMuscle === 'cardio'
+    || trainingType === 'cardio'
+    || trainingType === 'conditioning'
+    || /treadmill|bike|cycling|row|elliptical|stair|run|jog|swim|cardio|zone ?2|tempo|steady state|long run|\bwalk\b|walking|boxing|kickboxing|sparring|bag.?work|shadow.?box/.test(name);
+}
+
+function parseWatchDurationTargetSeconds(target: unknown, preferMinutes: boolean): number | null {
+  const text = String(target ?? '').trim().toLowerCase();
+  if (!text) return null;
+  const match = text.match(/(\d+(?:\.\d+)?)\s*(?:[-–—]\s*(\d+(?:\.\d+)?))?\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes)?/);
+  if (!match) return null;
+  if (!match[3] && /\b(rpm|watt|watts|bpm|mph|kph|km\/h|pace|resistance)\b/.test(text)) return null;
+  const first = Number(match[1]);
+  const second = match[2] ? Number(match[2]) : first;
+  if (!Number.isFinite(first) || !Number.isFinite(second)) return null;
+  const planned = (first + second) / 2;
+  const unit = match[3] ?? '';
+  const minutes = /^m/.test(unit) || (!unit && preferMinutes);
+  const seconds = Math.round(minutes ? planned * 60 : planned);
+  return seconds > 0 ? seconds : null;
+}
+
+function plannedDurationSecondsForWatchExercise(exercise: any): number | null {
+  const explicitSeconds = finiteNumber(
+    exercise?.durationSeconds
+      ?? exercise?.duration_seconds
+      ?? exercise?.targetDurationSeconds
+      ?? exercise?.target_duration_seconds,
+  );
+  if (explicitSeconds != null && explicitSeconds > 0) return Math.max(1, Math.round(explicitSeconds));
+
+  const guidanceDurationMin = finiteNumber(
+    exercise?.cardioGuidance?.duration_min
+      ?? exercise?.cardio_guidance?.duration_min,
+  );
+  if (guidanceDurationMin != null && guidanceDurationMin > 0) {
+    return Math.max(1, Math.round(guidanceDurationMin * 60));
+  }
+
+  return parseWatchDurationTargetSeconds(
+    exercise?.reps ?? exercise?.targetReps,
+    watchDurationPrefersMinutes(exercise),
+  );
+}
+
+function isTimedWatchExercise(exercise: any, plannedDurationSeconds: number | null): boolean {
+  if (plannedDurationSeconds != null) return true;
+  const name = String(exercise?.name ?? '');
+  const prescriptionType = String(exercise?.prescriptionType ?? exercise?.prescription_type ?? exercise?._prescription_type ?? '').toLowerCase();
+  const primaryMuscle = String(exercise?.primaryMuscle ?? exercise?.primary_muscle ?? exercise?._primary_muscle ?? '').toLowerCase();
+  return primaryMuscle === 'cardio'
+    || /cardio|conditioning|interval|tempo|zone.?2|duration|timed/.test(prescriptionType)
+    || WATCH_TIMED_NAME_RE.test(name)
+    || shouldHideReps(exercise);
+}
+
 function nextWorkoutRevision(nowMs: number = Date.now()): number {
   workoutRevisionSequence = (workoutRevisionSequence + 1) % 1000;
   return nowMs * 1000 + workoutRevisionSequence;
@@ -143,6 +206,8 @@ export type WatchExerciseClient = {
   restSeconds: number;
   equipment?: string | null;
   plannedTargetWeightLbs?: number | null;
+  isTimed?: boolean;
+  plannedDurationSeconds?: number | null;
   recommendation?: string | null;
   slotRole?: string | null;
   isGuide?: boolean;
@@ -153,6 +218,19 @@ export type WatchExerciseClient = {
     overlap?: number | null;
   }>;
 };
+
+function normalizeWatchHrZones(value: unknown): WatchHRZone[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((z: any) => ({
+      zone: positiveInt(z?.zone, 0),
+      label: nullableString(z?.label) ?? '',
+      low: positiveInt(z?.low, 0),
+      high: positiveInt(z?.high, 0),
+    }))
+    .filter(z => z.zone >= 1 && z.zone <= 5 && z.low > 0 && z.high >= z.low)
+    .slice(0, 5);
+}
 
 /** Build the compact watch payload from the day AND its current
  *  status. Status drives which UI the watch shows (scheduled = Start
@@ -198,6 +276,8 @@ export function buildWatchWorkoutPayload(
   // badges it so users know to dial intensity down).
   const exercises: WatchExerciseClient[] = (day.exercises ?? []).map((e: any) => {
     const guide = isGuideExercise(e, day);
+    const plannedDurationSeconds = plannedDurationSecondsForWatchExercise(e);
+    const timed = !guide && isTimedWatchExercise(e, plannedDurationSeconds);
     const swapOptions = Array.isArray(e.swapOptions)
       ? e.swapOptions
         .map((option: any) => ({
@@ -221,6 +301,8 @@ export function buildWatchWorkoutPayload(
           ?? e.recommendedWeightLbs
           ?? e.weight,
       ),
+      isTimed: timed,
+      plannedDurationSeconds,
       recommendation: guide ? null : nullableString(e.recommendation),
       slotRole: nullableString(e.slot_role ?? e.slotRole),
       isGuide: guide,
@@ -228,6 +310,7 @@ export function buildWatchWorkoutPayload(
     };
   });
   const durationMinutes = positiveInt((day as any).durationMinutes ?? (day as any).duration, 60);
+  const hrZones = normalizeWatchHrZones((day as any).hrZones ?? (day as any).hr_zones);
   return {
     focus: String(day.focus || 'Workout'),
     durationMinutes,
@@ -242,6 +325,7 @@ export function buildWatchWorkoutPayload(
     ...(opts.warmupSteps && opts.warmupSteps.length > 0 && (opts.status === 'active' || opts.status === 'scheduled')
       ? { warmupSteps: opts.warmupSteps }
       : {}),
+    ...(hrZones.length > 0 ? { hrZones } : {}),
     userId: opts.userId ?? null,
     syncedAtMs: Date.now(),
   };

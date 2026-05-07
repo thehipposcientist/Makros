@@ -74,6 +74,7 @@ const MICRO_ALIASES: Record<string, string> = {
   magnesium_mg: 'magnesium', vitamin_d_mcg: 'vitamin_d',
   vitamin_b12_mcg: 'vitamin_b12', zinc_mg: 'zinc',
   fiber_g: 'fiber', selenium_mcg: 'selenium', folate_mcg: 'folate',
+  added_sugar_g: 'added_sugar', addedSugars: 'added_sugar',
   folate_b9: 'folate',
   vitaminD: 'vitamin_d', vitaminB12: 'vitamin_b12',
 };
@@ -213,7 +214,7 @@ export function computeNutritionScore(
   }
 
   const fiber_g = micros['fiber'] ?? activeMeals.reduce((s, m) => s + ((m as any).fiber || 0), 0);
-  const added_sugar_g = micros['added_sugar'] ?? 0;
+  const added_sugar_g = micros['added_sugar'] ?? micros['added_sugar_g'] ?? 0;
   const sodium_mg = micros['sodium_mg'] ?? micros['sodium'] ?? 0;
   const sat_fat_g = micros['saturated_fat'] ?? 0;
 

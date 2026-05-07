@@ -8583,6 +8583,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 .filter(d => d < todayStr)
                 .sort((a, b) => b.localeCompare(a))
                 .slice(0, 14);
+              const activeExpandedHistoryDate = expandedHistoryDate === null ? (sorted[0] ?? null) : expandedHistoryDate;
               if (sorted.length === 0) {
                 return (
                   <View style={[styles.emptyStateCard, { backgroundColor: themeColors.surface, borderColor: themeColors.border }]}>
@@ -8625,7 +8626,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         const dt = new Date(c.date + 'T12:00:00');
                         const dateLabel = `${dt.getMonth() + 1}/${dt.getDate()}`;
                         const isToday = c.date === todayStr;
-                        const isSelected = expandedHistoryDate === c.date;
+                        const isSelected = activeExpandedHistoryDate === c.date;
                         const color = scoreColor(c.score);
                         const hasScore = c.score != null;
                         // "Fully logged" — day counts as complete when
@@ -8651,7 +8652,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             onPress={() => {
                               if (isToday) return;
                               configureExpandAnimation(300);
-                              setExpandedHistoryDate(isSelected ? null : c.date);
+                              setExpandedHistoryDate(isSelected ? '' : c.date);
                             }}
                             style={{
                               width: `${100 / 7 - 2}%`,
@@ -8744,7 +8745,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         ? backendMealTotals
                         : loggedPlanTotals;
                     const targets = plan?.targets;
-                    const isExpanded = expandedHistoryDate === d;
+                    const isExpanded = activeExpandedHistoryDate === d;
                     const dateObj = new Date(d + 'T12:00:00');
                     const label = dateObj.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
                     // Mirror the Meals-tab "fully logged" rule so the
@@ -8772,7 +8773,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             try {
                               configureExpandAnimation(300);
                             } catch {}
-                            setExpandedHistoryDate(isExpanded ? null : d);
+                            setExpandedHistoryDate(isExpanded ? '' : d);
                           }}
                           style={({ pressed }) => ({ padding: 14, opacity: pressed ? 0.85 : 1 })}>
                           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -10089,6 +10090,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         }}
         themeName={userProfile.themePreference}
         enableHealthKit={!isFreeTier}
+        authToken={authToken}
         onSave={async (session) => {
           await saveWorkoutSession(session);
           const sessionDate = dateKey(new Date(session.date));

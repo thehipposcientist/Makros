@@ -81,24 +81,12 @@ tags:
       - inputText: ${TEST_EMAIL}
       - pressKey: enter
 
-      - runFlow:
-          when:
-            visible: "Speed up your typing"
-          commands:
-            - tapOn: "Continue"
-
       - tapOn:
           id: "auth-password-toggle"
       - tapOn:
           id: "auth-password-input"
       - inputText: ${TEST_PASSWORD}
       - pressKey: enter
-
-      - runFlow:
-          when:
-            visible: "Speed up your typing"
-          commands:
-            - tapOn: "Continue"
 
       - runFlow:
           when:
@@ -120,12 +108,6 @@ tags:
 
 - waitForAnimationToEnd:
     timeout: 2000
-
-- runFlow:
-    when:
-      visible: "Save Password?"
-    commands:
-      - tapOn: "Not Now"
 
 - runFlow:
     when:
@@ -202,44 +184,6 @@ tags:
       - tapOn:
           text: "Close"
           waitToSettleTimeoutMs: 0
-
-- runFlow:
-    when:
-      visible:
-        id: "auth-email-input"
-    commands:
-      - tapOn:
-          id: "auth-email-input"
-      - inputText: ${TEST_EMAIL}
-      - pressKey: enter
-
-      - runFlow:
-          when:
-            visible: "Speed up your typing"
-          commands:
-            - tapOn: "Continue"
-
-      - tapOn:
-          id: "auth-password-toggle"
-      - tapOn:
-          id: "auth-password-input"
-      - inputText: ${TEST_PASSWORD}
-      - pressKey: enter
-
-      - runFlow:
-          when:
-            visible: "Speed up your typing"
-          commands:
-            - tapOn: "Continue"
-
-      - runFlow:
-          when:
-            visible:
-              id: "auth-submit"
-          commands:
-            - tapOn: "Personalized training, nutrition, and AI coaching."
-            - tapOn:
-                id: "auth-submit"
 
 - waitForAnimationToEnd:
     timeout: 3000

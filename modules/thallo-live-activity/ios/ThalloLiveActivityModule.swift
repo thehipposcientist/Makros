@@ -26,6 +26,12 @@ public struct RestTimerAttributes: ActivityAttributes {
         public var themeColorHex: String
         public var paused: Bool?
         public var elapsedSeconds: Double?
+        public var heartRate: Int?
+        public var hrZone: Int?
+        public var hrZoneLabel: String?
+        public var hrZoneLow: Int?
+        public var hrZoneHigh: Int?
+        public var hrZoneColorHex: String?
     }
 
     public var workoutId: String
@@ -56,6 +62,38 @@ private func boolValue(_ value: Any?, fallback: Bool) -> Bool {
     return fallback
 }
 
+private func optionalIntValue(_ value: Any?) -> Int? {
+    if value == nil || value is NSNull { return nil }
+    if let value = value as? Int { return value }
+    if let value = value as? Double, value.isFinite { return Int(value.rounded()) }
+    if let value = value as? NSNumber { return value.intValue }
+    if let value = value as? String {
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty { return nil }
+        if let i = Int(cleaned) { return i }
+        if let d = Double(cleaned), d.isFinite { return Int(d.rounded()) }
+    }
+    return nil
+}
+
+private func optionalStringValue(_ value: Any?) -> String? {
+    if value == nil || value is NSNull { return nil }
+    if let value = value as? String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+    if let value = value as? Int { return String(value) }
+    if let value = value as? Double, value.isFinite {
+        return value.rounded() == value ? String(Int(value)) : String(value)
+    }
+    if let value = value as? NSNumber { return String(value.intValue) }
+    return nil
+}
+
+private func anyOrNull(_ value: Any?) -> Any {
+    return value ?? NSNull()
+}
+
 public class ThalloLiveActivityModule: Module {
     public func definition() -> ModuleDefinition {
         Name("ThalloLiveActivityModule")
@@ -81,7 +119,13 @@ public class ThalloLiveActivityModule: Module {
                 nextSetRecommendation: (payload["nextSetRecommendation"] as? String) ?? "",
                 themeColorHex: (payload["themeColorHex"] as? String) ?? "#15C7B8",
                 paused: boolValue(payload["paused"], fallback: false),
-                elapsedSeconds: doubleValue(payload["elapsedSeconds"], fallback: 0)
+                elapsedSeconds: doubleValue(payload["elapsedSeconds"], fallback: 0),
+                heartRate: optionalIntValue(payload["heartRate"]),
+                hrZone: optionalIntValue(payload["hrZone"]),
+                hrZoneLabel: optionalStringValue(payload["hrZoneLabel"]),
+                hrZoneLow: optionalIntValue(payload["hrZoneLow"]),
+                hrZoneHigh: optionalIntValue(payload["hrZoneHigh"]),
+                hrZoneColorHex: optionalStringValue(payload["hrZoneColorHex"])
             )
             let attrs = RestTimerAttributes(
                 workoutId: (payload["workoutId"] as? String) ?? UUID().uuidString
@@ -117,7 +161,13 @@ public class ThalloLiveActivityModule: Module {
                     nextSetRecommendation: (payload["nextSetRecommendation"] as? String) ?? activity.content.state.nextSetRecommendation,
                     themeColorHex: (payload["themeColorHex"] as? String) ?? activity.content.state.themeColorHex,
                     paused: boolValue(payload["paused"], fallback: activity.content.state.paused ?? false),
-                    elapsedSeconds: doubleValue(payload["elapsedSeconds"], fallback: activity.content.state.elapsedSeconds ?? 0)
+                    elapsedSeconds: doubleValue(payload["elapsedSeconds"], fallback: activity.content.state.elapsedSeconds ?? 0),
+                    heartRate: payload.keys.contains("heartRate") ? optionalIntValue(payload["heartRate"]) : activity.content.state.heartRate,
+                    hrZone: payload.keys.contains("hrZone") ? optionalIntValue(payload["hrZone"]) : activity.content.state.hrZone,
+                    hrZoneLabel: payload.keys.contains("hrZoneLabel") ? optionalStringValue(payload["hrZoneLabel"]) : activity.content.state.hrZoneLabel,
+                    hrZoneLow: payload.keys.contains("hrZoneLow") ? optionalIntValue(payload["hrZoneLow"]) : activity.content.state.hrZoneLow,
+                    hrZoneHigh: payload.keys.contains("hrZoneHigh") ? optionalIntValue(payload["hrZoneHigh"]) : activity.content.state.hrZoneHigh,
+                    hrZoneColorHex: payload.keys.contains("hrZoneColorHex") ? optionalStringValue(payload["hrZoneColorHex"]) : activity.content.state.hrZoneColorHex
                 )
                 await activity.update(.init(state: state, staleDate: nil))
                 return true
@@ -141,6 +191,12 @@ public class ThalloLiveActivityModule: Module {
                     "themeColorHex": state.themeColorHex,
                     "paused": state.paused ?? false,
                     "elapsedSeconds": state.elapsedSeconds ?? 0,
+                    "heartRate": anyOrNull(state.heartRate),
+                    "hrZone": anyOrNull(state.hrZone),
+                    "hrZoneLabel": anyOrNull(state.hrZoneLabel),
+                    "hrZoneLow": anyOrNull(state.hrZoneLow),
+                    "hrZoneHigh": anyOrNull(state.hrZoneHigh),
+                    "hrZoneColorHex": anyOrNull(state.hrZoneColorHex),
                     "workoutId": activity.attributes.workoutId
                 ]
             }

@@ -10,7 +10,7 @@ ECR_REPO        := $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/thallo-
 APP_RUNNER_URL  := https://q4q8mjjhmp.us-east-1.awsapprunner.com
 MAESTRO_DRIVER_STARTUP_TIMEOUT ?= 120000
 MAESTRO ?= MAESTRO_DRIVER_STARTUP_TIMEOUT=$(MAESTRO_DRIVER_STARTUP_TIMEOUT) maestro
-MAESTRO_FAST_FLAGS ?= --no-reinstall-driver
+MAESTRO_FAST_FLAGS ?=
 MAESTRO_PARALLEL_SHARDS ?= 2
 MAESTRO_PARALLEL_DEVICES ?=
 MAESTRO_PARALLEL_DEVICE_ARG = $(if $(MAESTRO_PARALLEL_DEVICES),--device "$(MAESTRO_PARALLEL_DEVICES)",)
@@ -311,10 +311,10 @@ smoke-mobile-preflight:
 	@$(MAKE) seed-e2e
 	@$(MAESTRO) test .maestro/flows/social-digest.yaml
 
-# Faster local preflight: same coverage as smoke-mobile-preflight, but grouped
-# to avoid paying seed + Maestro driver startup for every individual flow.
+# Faster local preflight: same coverage as smoke-mobile-preflight, but with
+# fast deterministic reseeds and isolated flow processes.
 smoke-mobile-preflight-fast:
-	@echo "Running faster Maestro preflight pack with grouped safe flows and fewer reseeds..."
+	@echo "Running faster Maestro preflight pack with isolated flows and fast reseeds..."
 	@command -v maestro >/dev/null 2>&1 || { \
 	  echo "ERROR: maestro not found. Install with:"; \
 	  echo "  curl -Ls \"https://get.maestro.mobile.dev\" | bash"; \

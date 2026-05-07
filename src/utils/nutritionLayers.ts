@@ -174,6 +174,9 @@ const BACKEND_KEY_ALIASES: Record<string, NutrientKey> = {
   // Legacy matches — pass through
   fiber: 'fiber',
   sugar: 'sugar',
+  added_sugar: 'addedSugar',
+  added_sugar_g: 'addedSugar',
+  addedSugars: 'addedSugar',
   sodium: 'sodium',
   cholesterol: 'cholesterol',
 };
@@ -210,7 +213,7 @@ export function normalizeNutrientKeys(raw: Record<string, any>): Record<string, 
 export function computeDayInsights(dayTotals: Record<string, number>): NutrientInsight[] {
   const normalized = normalizeNutrientKeys(dayTotals);
   const candidates: NutrientInsight[] = [];
-  const keys: NutrientKey[] = [...NUTRIENT_LAYER_1, ...NUTRIENT_LAYER_2] as any;
+  const keys: NutrientKey[] = [...NUTRIENT_LAYER_1, ...NUTRIENT_LAYER_2, 'addedSugar'] as any;
   for (const k of keys) {
     if (!(k in DAILY_TARGETS)) continue;
     const v = normalized[k];

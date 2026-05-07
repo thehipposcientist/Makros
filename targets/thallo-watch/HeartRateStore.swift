@@ -4,14 +4,10 @@
 // the active view is dismissed.
 //
 // Zone math:
-//   Zone 1 < 60% HRmax          — recovery
-//   Zone 2 60-70%               — easy aerobic
-//   Zone 3 70-80%               — tempo
-//   Zone 4 80-90%               — threshold
-//   Zone 5 >= 90%               — max
-// HRmax is approximated as 220 - age; we pull age from the phone-sent
-// payload when we have it, fall back to 30 years old (= 190 bpm max)
-// when we don't — same default the phone side uses.
+//   Prefer phone-computed HR zones from /workouts/hr-zones so the live
+//   watch display matches the phone's recommended cardio ranges.
+//   Fall back to simple %HRmax only when a workout snapshot has not
+//   delivered zones yet.
 
 import Foundation
 import HealthKit
@@ -19,6 +15,7 @@ import HealthKit
 final class HeartRateStore: NSObject, ObservableObject {
     @Published var heartRate: Int? = nil
     @Published var zone: Int? = nil           // 1-5, nil before first sample
+    @Published private(set) var zones: [WatchHRZone] = []
     @Published var running: Bool = false
     @Published var errorMessage: String? = nil
 
@@ -93,7 +90,22 @@ final class HeartRateStore: NSObject, ObservableObject {
         if let a = age, a > 0 { userAge = a }
     }
 
+    func setZones(_ incoming: [WatchHRZone]?) {
+        let normalized = (incoming ?? [])
+            .filter { $0.zone >= 1 && $0.zone <= 5 && $0.low > 0 && $0.high >= $0.low }
+            .sorted { $0.zone < $1.zone }
+        zones = normalized
+        if let bpm = heartRate {
+            zone = computeZone(for: bpm)
+        }
+    }
+
     var maxHR: Int { max(120, 220 - userAge) }
+
+    var currentZoneDefinition: WatchHRZone? {
+        guard let zone else { return nil }
+        return zones.first { $0.zone == zone }
+    }
 
     /// Request HealthKit authorization at app launch — no session start.
     /// The HK auth dialog is the slow step in the start-workout flow; if
@@ -236,6 +248,17 @@ final class HeartRateStore: NSObject, ObservableObject {
     }
 
     private func computeZone(for bpm: Int) -> Int {
+        if !zones.isEmpty {
+            if let match = zones.first(where: { bpm >= $0.low && bpm <= $0.high }) {
+                return match.zone
+            }
+            if let first = zones.first, bpm < first.low {
+                return first.zone
+            }
+            if let last = zones.last {
+                return last.zone
+            }
+        }
         let pct = Double(bpm) / Double(maxHR)
         if pct < 0.60 { return 1 }
         if pct < 0.70 { return 2 }

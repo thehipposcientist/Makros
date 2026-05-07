@@ -4,7 +4,7 @@ Covers:
   - Incline walk → duration + speed range + incline + zone (NOT strength-style reps)
   - IC6 bike (watts+rpm caps) → watts/RPM prescription
   - Basic bike (resistance only) → resistance/RPE prescription
-  - No-display bike (time only) → conversational-pace + RPE fallback
+  - No-display bike (time only) → cadence + resistance + RPE fallback
   - Cardio steady vs interval → different prescription_types
   - Yoga → yoga_flow prescription_type, NOT generic stretching
   - Core slots → core_circuit prescription_type with rounds/hold structure
@@ -109,8 +109,8 @@ def test_basic_bike_resistance_no_watts():
     print(f"  ✓ basic bike render: '{text}'")
 
 
-def test_no_display_bike_rpe_only():
-    """Bike with [time] only (no watts/resistance/rpm) → conversational pace + RPE."""
+def test_no_display_bike_cadence_resistance_fallback():
+    """Bike with [time] only still gets useful cadence + resistance targets."""
     from app.services.workout.cardio import (
         build_cardio_guidance, render_cardio_prescription_text, CAP_TIME,
     )
@@ -119,9 +119,11 @@ def test_no_display_bike_rpe_only():
     g    = build_cardio_guidance(ex, session_minutes=40, capabilities=caps)
     assert "intensity_cue" in g,          "No-display bike must get intensity_cue"
     assert "watts_range"   not in g,      "No-display bike must not get watts_range"
-    assert "resistance_cue" not in g,     "No-display bike must not get resistance_cue"
+    assert g.get("resistance_cue") == "medium resistance", g
+    assert g.get("rpm_range") == "75–90 RPM", g
     text = render_cardio_prescription_text(g, "Stationary Bike")
-    assert "RPE" in text or "pace" in text.lower(), f"Expected RPE or pace cue in '{text}'"
+    assert "resistance" in text.lower(), f"Expected resistance cue in '{text}'"
+    assert "RPM" in text, f"Expected RPM cue in '{text}'"
     print(f"  ✓ no-display bike render: '{text}'")
 
 
@@ -164,6 +166,10 @@ def test_cardio_steady_prescription_type():
     p    = prescribe_for_slot(DayArchetype.COND_ZONE2, slot, ex, FakeInputs())
     assert p.prescription_type == "cardio_steady", f"Got '{p.prescription_type}'"
     assert p.cardio_guidance is not None,          "cardio_guidance should be present"
+    assert p.cardio_guidance.get("resistance_cue") == "medium resistance", p.cardio_guidance
+    assert p.cardio_guidance.get("rpm_range") == "75–90 RPM", p.cardio_guidance
+    assert "resistance" in p.reps.lower(), f"expected bike resistance cue in '{p.reps}'"
+    assert "RPM" in p.reps, f"expected bike RPM cue in '{p.reps}'"
     print(f"  ✓ Zone2 → prescription_type=cardio_steady, reps='{p.reps}'")
 
 
@@ -355,7 +361,7 @@ TESTS = [
     test_incline_walk_prescription_text,
     test_ic6_bike_guidance_watts_rpm,
     test_basic_bike_resistance_no_watts,
-    test_no_display_bike_rpe_only,
+    test_no_display_bike_cadence_resistance_fallback,
     test_rower_with_pace_caps,
     test_rower_no_caps,
     test_cardio_steady_prescription_type,

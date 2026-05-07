@@ -347,6 +347,34 @@ function ExerciseRow({ index, exercise, isLast, section, c, styles, onOpenVideo,
               />
             );
           })()}
+          {(() => {
+            const cg = (exercise as any).cardioGuidance;
+            if (!cg) return null;
+            const repsText = String(exercise.reps ?? '');
+            type GuidanceTarget = { icon: keyof typeof Ionicons.glyphMap; label: string; value?: string };
+            const targetOptions: GuidanceTarget[] = [
+              { icon: 'speedometer-outline', label: 'RPM', value: cg.rpm_range },
+              { icon: 'options-outline', label: 'Resistance', value: cg.resistance_cue },
+              { icon: 'flash-outline', label: 'Watts', value: cg.watts_range },
+              { icon: 'walk-outline', label: 'Speed', value: cg.speed_range },
+              { icon: 'trending-up-outline', label: 'Incline', value: cg.incline_range },
+            ];
+            const targets = targetOptions.filter(
+              (target): target is GuidanceTarget & { value: string } =>
+                Boolean(target.value) && !repsText.includes(String(target.value)),
+            );
+            if (targets.length === 0) return null;
+            return targets.slice(0, 2).map(target => (
+              <Chip
+                key={`${target.label}-${target.value}`}
+                icon={target.icon}
+                label={`${target.label}: ${target.value}`}
+                strong={section.strong}
+                soft={section.soft}
+                text={section.text}
+              />
+            ));
+          })()}
           {onOpenVideo && (
             <Pressable
               style={({ pressed }) => [

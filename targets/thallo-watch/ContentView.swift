@@ -44,6 +44,7 @@ struct ContentView: View {
             readinessLabel: nil,
             exercises: [],
             warmupSteps: nil,
+            hrZones: nil,
             syncedAtMs: Date().timeIntervalSince1970 * 1000,
             userId: nil
         )
@@ -65,6 +66,7 @@ struct ContentView: View {
             readinessLabel: w.readinessLabel,
             exercises: w.exercises,
             warmupSteps: w.warmupSteps,
+            hrZones: w.hrZones,
             syncedAtMs: max(w.syncedAtMs, Date().timeIntervalSince1970 * 1000),
             userId: w.userId
         )
@@ -80,7 +82,7 @@ struct ContentView: View {
                 focus: w.focus, durationMinutes: w.durationMinutes,
                 dateISO: w.dateISO, status: .scheduled, sessionId: w.sessionId,
                 readiness: w.readiness, readinessLabel: w.readinessLabel,
-                exercises: w.exercises, warmupSteps: w.warmupSteps,
+                exercises: w.exercises, warmupSteps: w.warmupSteps, hrZones: w.hrZones,
                 syncedAtMs: w.syncedAtMs, userId: w.userId
             )
         }

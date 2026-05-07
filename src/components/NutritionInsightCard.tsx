@@ -32,6 +32,7 @@ function windowLabel(w: Props['window']): string {
 const BACKEND_KEYS: Record<string, string[]> = {
   fiber: ['fiber'],
   sugar: ['sugar'],
+  addedSugar: ['added_sugar_g', 'added_sugar', 'addedSugar'],
   sodium: ['sodium'],
   cholesterol: ['cholesterol'],
   saturatedFat: ['saturated_fat', 'saturatedFat'],
@@ -62,6 +63,7 @@ const RICH_FOODS: Partial<Record<NutrientKey, string[]>> = {
 
 const LOW_IN_FOODS: Partial<Record<NutrientKey, string[]>> = {
   sugar: ['eggs', 'chicken breast', 'fish', 'nuts', 'cheese', 'leafy greens', 'avocado'],
+  addedSugar: ['eggs', 'chicken breast', 'fish', 'nuts', 'cheese', 'leafy greens', 'avocado'],
   sodium: ['fresh fruit', 'rice', 'fresh vegetables', 'unsalted nuts', 'eggs', 'oats'],
   saturatedFat: ['chicken breast', 'fish', 'olive oil', 'avocado', 'egg whites', 'turkey'],
   cholesterol: ['oats', 'beans', 'nuts', 'olive oil', 'avocado', 'tofu', 'fruit'],

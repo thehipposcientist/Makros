@@ -266,10 +266,13 @@ final class ActiveWorkoutState: ObservableObject {
     /// Called when advancing to a new exercise so the user doesn't
     /// have to dial from zero.
     func seed(for ex: WatchExercise) {
-        if pendingWeight == 0, ex.isGuide != true, let w = ex.plannedTargetWeightLbs {
+        let timed = ex.isTimed == true || ex.plannedDurationSeconds != nil
+        if pendingWeight == 0, ex.isGuide != true, !timed, let w = ex.plannedTargetWeightLbs {
             pendingWeight = w
         }
-        if pendingReps == 0 {
+        if timed {
+            pendingReps = 0
+        } else if pendingReps == 0 {
             // Parse "5-8" → 6, "8" → 8, "30s" → 30, fall back to 8.
             let s = ex.reps.lowercased()
             let clean = s.replacingOccurrences(of: "s", with: "")
@@ -364,6 +367,7 @@ struct ActiveWorkoutView: View {
         }
         .onAppear {
             HeartRateStore.saveDiag("ActiveView.onAppear")
+            hr.setZones(workout.hrZones)
             if showCountdown, let sessionId = workout.sessionId, !sessionId.isEmpty {
                 UserDefaults.standard.set(sessionId, forKey: Self.countdownConsumedSessionKey)
             }
@@ -374,6 +378,9 @@ struct ActiveWorkoutView: View {
         .onChange(of: workout.sessionId) { _, _ in
             state.attach(to: workout)
             seedCurrentExerciseIfNeeded()
+        }
+        .onChange(of: workout.hrZones) { _, zones in
+            hr.setZones(zones)
         }
         .onChange(of: workout.exercises) { _, _ in seedCurrentExerciseIfNeeded() }
         .onChange(of: state.exerciseIndex) { _, _ in seedCurrentExerciseIfNeeded() }
@@ -540,6 +547,17 @@ private struct WatchPendingRirLog {
     let reps: Int
 }
 
+private func hrZoneColor(_ zone: Int?) -> Color {
+    switch zone {
+    case 1: return Color(hex: "#38BDF8")
+    case 2: return Color(hex: "#22C55E")
+    case 3: return Color(hex: "#EAB308")
+    case 4: return Color(hex: "#F97316")
+    case 5: return Color(hex: "#EF4444")
+    default: return Color(hex: "#38BDF8")
+    }
+}
+
 private struct ExerciseTab: View {
     let workout: WatchWorkout
     @ObservedObject var state: ActiveWorkoutState
@@ -592,6 +610,23 @@ private struct ExerciseTab: View {
         ) != nil
     }
 
+    private func isTimedExercise(_ ex: WatchExercise) -> Bool {
+        if ex.isTimed == true { return true }
+        return plannedDurationSeconds(for: ex) != nil
+    }
+
+    private func durationTargetText(for ex: WatchExercise) -> String {
+        if let seconds = plannedDurationSeconds(for: ex) {
+            return formatTime(seconds)
+        }
+        let raw = ex.reps.trimmingCharacters(in: .whitespacesAndNewlines)
+        return raw.isEmpty ? "Timed" : raw
+    }
+
+    private func setTargetText(for ex: WatchExercise) -> String {
+        isTimedExercise(ex) ? durationTargetText(for: ex) : ex.reps
+    }
+
     private func targetRepMax(_ raw: String) -> Int? {
         let regex = try? NSRegularExpression(pattern: "\\d+")
         let nsRange = NSRange(raw.startIndex..<raw.endIndex, in: raw)
@@ -616,15 +651,7 @@ private struct ExerciseTab: View {
     // Small HR chip color mirrors the HR tab's zone palette so the two
     // views read consistently. Falls back to muted when no zone yet.
     var hrChipColor: Color {
-        guard let z = hr.zone else { return theme.error }
-        switch z {
-        case 1: return theme.textMuted
-        case 2: return theme.success
-        case 3: return theme.primary
-        case 4: return theme.warning
-        case 5: return theme.error
-        default: return theme.textSecondary
-        }
+        hrZoneColor(hr.zone)
     }
 
     @State private var warmupDismissed: Bool = false
@@ -771,7 +798,8 @@ private struct ExerciseTab: View {
     }
 
     private func header(_ ex: WatchExercise) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        let timed = isTimedExercise(ex)
+        return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
                 Text("EXERCISE \(state.exerciseIndex + 1) / \(workout.exercises.count)")
                     .font(.system(size: 9, weight: .bold))
@@ -795,7 +823,7 @@ private struct ExerciseTab: View {
                     HStack(spacing: 3) {
                         Image(systemName: "heart.fill")
                             .font(.system(size: 8))
-                        Text("\(bpm)")
+                        Text(hr.zone.map { "Z\($0) \(bpm)" } ?? "\(bpm)")
                             .font(.system(size: 11, weight: .heavy, design: .rounded))
                     }
                     .foregroundColor(hrChipColor)
@@ -814,7 +842,7 @@ private struct ExerciseTab: View {
                 .lineLimit(2)
                 .onLongPressGesture { showMenu = true }
             HStack(spacing: 4) {
-                Text("SET")
+                Text(timed ? (ex.sets > 1 ? "ROUND" : "TIME") : "SET")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundColor(theme.textMuted)
                 Text("\(displaySetNumber(for: ex)) of \(ex.sets)")
@@ -822,7 +850,7 @@ private struct ExerciseTab: View {
                     .foregroundColor(theme.textPrimary)
                 Text("·")
                     .foregroundColor(theme.textMuted)
-                Text(ex.reps)
+                Text(setTargetText(for: ex))
                     .font(.system(size: 12))
                     .foregroundColor(theme.textSecondary)
                 if state.paused {
@@ -835,13 +863,13 @@ private struct ExerciseTab: View {
                         .cornerRadius(4)
                 }
             }
-            if !isGuideExercise(ex), let rec = (state.currentRecommendation ?? ex.recommendation) {
+            if !isGuideExercise(ex), !timed, let rec = (state.currentRecommendation ?? ex.recommendation) {
                 Text(rec)
                     .font(.system(size: 11))
                     .foregroundColor(theme.primary)
                     .lineLimit(2)
             }
-            if !isGuideExercise(ex), let lw = state.lastLoggedWeight, let lr = state.lastLoggedReps {
+            if !isGuideExercise(ex), !timed, let lw = state.lastLoggedWeight, let lr = state.lastLoggedReps {
                 Text("Last: \(Int(lw)) lb × \(lr)")
                     .font(.system(size: 10))
                     .foregroundColor(theme.textMuted)
@@ -861,6 +889,8 @@ private struct ExerciseTab: View {
     private func logSetCard(_ ex: WatchExercise) -> some View {
         if isGuideExercise(ex) {
             guideSetCard(ex)
+        } else if isTimedExercise(ex) {
+            timedSetCard(ex)
         } else if let pending = pendingRirLog,
                   pending.exerciseIndex == state.exerciseIndex,
                   pending.setNumber == displaySetNumber(for: ex) {
@@ -963,6 +993,47 @@ private struct ExerciseTab: View {
                 isHapticFeedbackEnabled: true
             )
         }
+    }
+
+    private func timedSetCard(_ ex: WatchExercise) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "stopwatch.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(theme.primary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(ex.sets > 1 ? "TIMED ROUND" : "TIMED")
+                        .font(.system(size: 9, weight: .heavy))
+                        .tracking(0.8)
+                        .foregroundColor(theme.primary)
+                    Text(durationTargetText(for: ex))
+                        .font(.system(size: 18, weight: .black, design: .rounded))
+                        .foregroundColor(theme.textPrimary)
+                    if !ex.reps.isEmpty && ex.reps != durationTargetText(for: ex) {
+                        Text(ex.reps)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(theme.textMuted)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            Button(action: logSet) {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill")
+                    Text(isLastSet ? "Done" : "Log round")
+                        .fontWeight(.bold)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 9)
+            .background(theme.primary)
+            .foregroundColor(theme.background)
+            .cornerRadius(10)
+        }
+        .padding(10)
+        .background(theme.surface)
+        .cornerRadius(12)
     }
 
     private func rirPromptCard(_ pending: WatchPendingRirLog) -> some View {
@@ -1168,10 +1239,11 @@ private struct ExerciseTab: View {
     private func upNextLine() -> some View {
         if let ex = currentExercise {
             if state.setNumber > ex.sets, let next = nextExercise {
-                Text("Up next: \(next.name) · \(next.sets) × \(next.reps)")
+                Text("Up next: \(next.name) · \(next.sets) × \(setTargetText(for: next))")
                     .lineLimit(2)
             } else {
-                Text("Up next: set \(displaySetNumber(for: ex)) of \(ex.sets) · \(ex.reps)")
+                let setLabel = isTimedExercise(ex) ? "round" : "set"
+                Text("Up next: \(setLabel) \(displaySetNumber(for: ex)) of \(ex.sets) · \(setTargetText(for: ex))")
                     .lineLimit(1)
             }
         } else {
@@ -1235,7 +1307,8 @@ private struct ExerciseTab: View {
     private func logSet() {
         guard let ex = currentExercise else { return }
         let guide = isGuideExercise(ex)
-        if !guide, shouldPromptRir(actualReps: state.pendingReps, targetReps: ex.reps) {
+        let timed = isTimedExercise(ex)
+        if !guide, !timed, shouldPromptRir(actualReps: state.pendingReps, targetReps: ex.reps) {
             pendingRirLog = WatchPendingRirLog(
                 exerciseIndex: state.exerciseIndex,
                 setNumber: displaySetNumber(for: ex),
@@ -1251,6 +1324,7 @@ private struct ExerciseTab: View {
     private func commitLoggedSet(rir: Int?, pendingLog: WatchPendingRirLog? = nil) {
         guard let ex = currentExercise else { return }
         let guide = isGuideExercise(ex)
+        let timed = isTimedExercise(ex)
         // Haptic click — different from the rest-end notification so
         // the two are distinguishable by feel.
         WKInterfaceDevice.current().play(.click)
@@ -1265,11 +1339,11 @@ private struct ExerciseTab: View {
             "sessionId": workout.sessionId ?? "",
             "exerciseIndex": state.exerciseIndex,
             "setNumber": setNumber,
-            "weightLbs": guide ? 0 : loggedWeight,
-            "reps": guide ? 0 : loggedReps,
+            "weightLbs": guide || timed ? 0 : loggedWeight,
+            "reps": guide || timed ? 0 : loggedReps,
             "exerciseName": ex.name,
         ]
-        if let rir, !guide {
+        if let rir, !guide, !timed {
             payload["rir"] = max(0, min(4, rir))
         }
         if let durationSeconds = plannedDurationSeconds(for: ex) {
@@ -1277,8 +1351,13 @@ private struct ExerciseTab: View {
         }
         conn.sendCommand("log_set", payload: payload)
         pendingRirLog = nil
-        state.lastLoggedWeight = loggedWeight
-        state.lastLoggedReps = loggedReps
+        if timed || guide {
+            state.lastLoggedWeight = nil
+            state.lastLoggedReps = nil
+        } else {
+            state.lastLoggedWeight = loggedWeight
+            state.lastLoggedReps = loggedReps
+        }
 
         if setNumber >= ex.sets {
             // Last set of this exercise → advance to next exercise.
@@ -1340,6 +1419,9 @@ private struct ExerciseTab: View {
     }
 
     private func plannedDurationSeconds(for ex: WatchExercise) -> Int? {
+        if let planned = ex.plannedDurationSeconds, planned > 0 {
+            return planned
+        }
         let reps = ex.reps.lowercased()
         let name = ex.name.lowercased()
         let timedName = name.range(of: "treadmill|bike|row|elliptical|stair|run|jog|cycling|swim|cardio|plank|dead.?hang|wall.?sit|hollow.?hold|carry|walk|yoga|mobility|stretch", options: .regularExpression) != nil
@@ -1479,6 +1561,12 @@ private struct HeartRateTab: View {
                         Text(zoneLabel(z))
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(theme.textPrimary)
+                        if let range = hr.currentZoneDefinition {
+                            Text("\(range.low)-\(range.high) bpm")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(theme.textSecondary)
+                                .monospacedDigit()
+                        }
                     }
                     .padding(.vertical, 6)
                     .padding(.horizontal, 12)
@@ -1505,21 +1593,16 @@ private struct HeartRateTab: View {
     }
 
     private var zoneColor: Color {
-        guard let z = hr.zone else { return theme.textMuted }
-        switch z {
-        case 1: return theme.textMuted
-        case 2: return theme.success
-        case 3: return theme.primary
-        case 4: return theme.warning
-        case 5: return theme.error
-        default: return theme.textSecondary
-        }
+        hr.zone == nil ? theme.textMuted : hrZoneColor(hr.zone)
     }
 
     private func zoneLabel(_ z: Int) -> String {
+        if let label = hr.currentZoneDefinition?.label, !label.isEmpty {
+            return label
+        }
         switch z {
         case 1: return "Recovery"
-        case 2: return "Easy"
+        case 2: return "Aerobic"
         case 3: return "Tempo"
         case 4: return "Threshold"
         case 5: return "Max effort"

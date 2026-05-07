@@ -295,7 +295,7 @@ def _hydrate_foods_from_db(food_names: list[str], *, user_id: int | None = None)
             default_serving = next((s for s in servings if s.is_default), servings[0] if servings else None)
 
             # FoodNutrition holds the full per-100g micronutrient data
-            # (fiber, sugar, sodium_mg). FoodServing only stores the
+            # (fiber, sugar, added_sugar_g, sodium_mg). FoodServing only stores the
             # basic four macros. We need both: the serving for portion
             # info, the nutrition for micros — scaled by the serving's
             # grams ratio.
@@ -315,6 +315,7 @@ def _hydrate_foods_from_db(food_names: list[str], *, user_id: int | None = None)
                 out = {
                     "fiber":  round((nutrition.fiber or 0) * ratio, 2),
                     "sugar":  round((nutrition.sugar or 0) * ratio, 2),
+                    "added_sugar_g": round((getattr(nutrition, "added_sugar_g", 0) or 0) * ratio, 2),
                     "sodium": round((nutrition.sodium_mg or 0) * ratio, 2),
                 }
                 extras = getattr(nutrition, "extra_nutrients", None) or {}
@@ -637,7 +638,7 @@ def _enrich_via_ai(
     if meal_routine:
         parts.append(f"MEAL ROUTINE (user's fixed meals):\n{meal_routine}")
 
-    # Lean prompt — macros + fiber/sugar/sodium only. Full Layer 2
+    # Lean prompt — macros + core label nutrients only. Full Layer 2
     # micros (omega-3, calcium, etc.) are handled by the startup
     # enrichment script with proper batching. Keeping this prompt
     # small avoids the 32k-token cost + timeout issue that hit when
@@ -647,12 +648,13 @@ def _enrich_via_ai(
         "For each food, return a STANDARD SERVING as an explicit numeric quantity and unit.\n"
         "Units: oz (meat/fish), cup (grains/veg/liquid), piece (eggs/fruit), "
         "tbsp (oils/butters), scoop (protein powder), slice (bread).\n"
-        "Include: calories, protein, carbs, fat, fiber (g), sugar (g), sodium (mg).\n\n"
+        "Include: calories, protein, carbs, fat, fiber (g), sugar (g), "
+        "added_sugar_g (g), sodium (mg).\n\n"
         + "\n\n".join(parts) + "\n\n"
         'Return JSON:\n'
         '{"foods": [{"name": "chicken breast", "quantity": 6, "unit": "oz", '
         '"calories": 280, "protein": 53, "carbs": 0, "fat": 6, '
-        '"fiber": 0, "sugar": 0, "sodium": 120}], '
+        '"fiber": 0, "sugar": 0, "added_sugar_g": 0, "sodium": 120}], '
         '"routine_meals": [{"meal_slot": "breakfast", "description": "...", '
         '"foods": [{"name": "...", "quantity": "...", "calories": 0, '
         '"protein": 0, "carbs": 0, "fat": 0}], '
@@ -1379,7 +1381,7 @@ SCHEMA_WORKOUT_SUMMARY = {
 # keep these in sync. Field name + unit guidance is duplicated in the
 # prompts that ask the AI to populate them.
 MICRONUTRIENT_AI_FIELDS: tuple[str, ...] = (
-    "fiber", "sugar", "sodium",
+    "fiber", "sugar", "added_sugar_g", "sodium",
     "cholesterol",
     "saturated_fat", "monounsaturated_fat", "polyunsaturated_fat",
     "omega_3", "omega_6",
@@ -1402,7 +1404,7 @@ def _micros_schema_props() -> dict:
 # panel using USDA per-serving values, with explicit unit guidance.
 MICRONUTRIENT_PROMPT_GUIDE = (
     "Populate `micronutrients` with USDA-style values per the SAME serving "
-    "you reported in the macros. Units: fiber/sugar in grams; sodium, "
+    "you reported in the macros. Units: fiber/sugar/added_sugar_g in grams; sodium, "
     "cholesterol, calcium, iron, magnesium, phosphorus, potassium, zinc, "
     "vitamin_c, vitamin_e, thiamin_b1, riboflavin_b2, niacin_b3, vitamin_b6, "
     "pantothenic_acid_b5 in mg; vitamin_a, vitamin_d, vitamin_k, folate_b9, "

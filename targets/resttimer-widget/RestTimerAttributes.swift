@@ -21,6 +21,12 @@ public struct RestTimerAttributes: ActivityAttributes {
         public var themeColorHex: String
         public var paused: Bool?
         public var elapsedSeconds: Double?
+        public var heartRate: Int?
+        public var hrZone: Int?
+        public var hrZoneLabel: String?
+        public var hrZoneLow: Int?
+        public var hrZoneHigh: Int?
+        public var hrZoneColorHex: String?
 
         public init(
             mode: String? = "rest",
@@ -33,7 +39,13 @@ public struct RestTimerAttributes: ActivityAttributes {
             nextSetRecommendation: String,
             themeColorHex: String,
             paused: Bool? = false,
-            elapsedSeconds: Double? = 0
+            elapsedSeconds: Double? = 0,
+            heartRate: Int? = nil,
+            hrZone: Int? = nil,
+            hrZoneLabel: String? = nil,
+            hrZoneLow: Int? = nil,
+            hrZoneHigh: Int? = nil,
+            hrZoneColorHex: String? = nil
         ) {
             self.mode = mode
             self.startedAtMs = startedAtMs
@@ -46,6 +58,12 @@ public struct RestTimerAttributes: ActivityAttributes {
             self.themeColorHex = themeColorHex
             self.paused = paused
             self.elapsedSeconds = elapsedSeconds
+            self.heartRate = heartRate
+            self.hrZone = hrZone
+            self.hrZoneLabel = hrZoneLabel
+            self.hrZoneLow = hrZoneLow
+            self.hrZoneHigh = hrZoneHigh
+            self.hrZoneColorHex = hrZoneColorHex
         }
     }
 

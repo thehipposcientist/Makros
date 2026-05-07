@@ -169,6 +169,34 @@ def test_stub_food_marked_low_confidence() -> None:
     _ok("meal with stub → confidence='low'")
 
 
+def test_added_sugar_flows_into_meal_micronutrients() -> None:
+    print("\n[test] added sugar flows into assembled meal micronutrients")
+    food_lookup: dict[str, FoodMacros] = {
+        "granola": FoodMacros(
+            name="Granola",
+            serving_label="1 cup",
+            serving_quantity=1,
+            serving_unit="cup",
+            calories=200,
+            protein=6,
+            carbs=30,
+            fat=5,
+            micros={"fiber": 3, "sugar": 14, "added_sugar_g": 8, "sodium": 50},
+        ),
+    }
+    skeleton = MealSkeleton(
+        name="Granola bowl",
+        index=0,
+        food_refs=["granola"],
+        target_fraction=1.0,
+    )
+    meal = assemble_meal(skeleton, food_lookup, 200, 6, 30, 5)
+    micros = meal["micronutrients"]
+    assert micros["added_sugar_g"] == 8, micros
+    assert meal["items"][0]["micronutrients"]["added_sugar_g"] == 8, meal["items"][0]
+    _ok("added_sugar_g present on item + day-summed meal micros")
+
+
 # ─── 5. Solver residual accept/reject ────────────────────────────────────────
 
 def test_solver_accept_tight_residual() -> None:
@@ -249,6 +277,7 @@ if __name__ == "__main__":
         test_validate_truncates_to_required_count,
         test_validate_cleans_out_of_list_foods,
         test_stub_food_marked_low_confidence,
+        test_added_sugar_flows_into_meal_micronutrients,
         test_solver_accept_tight_residual,
         test_solver_rejects_infeasible_target,
         test_assemble_template_response_shape,

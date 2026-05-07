@@ -17,7 +17,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Modal, View, Text, TouchableOpacity, ScrollView, Alert, StyleSheet,
+  AppState, Modal, View, Text, TouchableOpacity, ScrollView, Alert, StyleSheet,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -25,11 +25,13 @@ import { getTheme, radius } from '../constants/theme';
 import {
   AppThemeName, WorkoutSession,
 } from '../types';
-import { isHealthKitAvailable, getLatestHeartRate, getWorkoutHrSummary, getAppleWorkoutCaloriesForWindow } from '../services/appleHealth';
+import { isHealthKitAvailable, getLatestHeartRate, getWorkoutHrSummary, getAppleWorkoutCaloriesForWindow, readHealthSummary } from '../services/appleHealth';
+import { getHRZones, type HRZone } from '../services/api';
 import LogActivityModal, { LogActivityPrefill } from './LogActivityModal';
 import { saveWorkoutSession } from '../utils/workoutHistory';
 import { startRestActivity, updateRestActivity, endRestActivity } from '../services/liveActivity';
 import { clearManagedInterval, useManagedInterval } from '../hooks/useManagedInterval';
+import { hrZoneColorHex, hrZoneRangeText, liveActivityHrZoneFields, zoneForHeartRate } from '../utils/hrZones';
 import {
   LIVE_ACTIVITY_QUICK_START,
   liveActivityQuickStartKey,
@@ -58,6 +60,7 @@ interface Props {
   onStartStrengthWorkout?: (focus: string) => void;
   enableHealthKit?: boolean;
   initialActivity?: LiveActivityInitialActivity | null;
+  authToken?: string | null;
 }
 
 type Phase = 'pick' | 'running' | 'paused' | 'finishing';
@@ -71,7 +74,7 @@ function fmtElapsed(seconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
-export default function LiveActivityTracker({ visible, onClose, themeName, onSaved, onSave, onStartStrengthWorkout, enableHealthKit = true, initialActivity = null }: Props) {
+export default function LiveActivityTracker({ visible, onClose, themeName, onSaved, onSave, onStartStrengthWorkout, enableHealthKit = true, initialActivity = null, authToken = null }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
   const insets = useSafeAreaInsets();
@@ -85,6 +88,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   // Simple running HR average — sum + count, not per-sample history.
   const [hrSum, setHrSum] = useState<number>(0);
   const [hrN, setHrN] = useState<number>(0);
+  const [hrZones, setHrZones] = useState<HRZone[]>([]);
   const [prefill, setPrefill] = useState<LogActivityPrefill | null>(null);
   const [logModalVisible, setLogModalVisible] = useState(false);
 
@@ -94,6 +98,8 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   const liveActivityGenerationRef = useRef(0);
   const autoStartKeyRef = useRef<string | null>(null);
   const canUseHealthKit = enableHealthKit && isHealthKitAvailable();
+  const liveZone = zoneForHeartRate(hr, hrZones);
+  const liveZoneColor = hrZoneColorHex(liveZone?.zone, tc.primary);
 
   const endWorkoutLiveActivity = useCallback(() => {
     liveActivityGenerationRef.current += 1;
@@ -118,6 +124,20 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     clearManagedInterval(timerRef);
     clearManagedInterval(hrIntervalRef);
   }, [endWorkoutLiveActivity]);
+
+  useEffect(() => {
+    if (!visible || !authToken || !enableHealthKit) {
+      setHrZones([]);
+      return;
+    }
+    let cancelled = false;
+    readHealthSummary()
+      .then((hs: any) => getHRZones(authToken, hs?.restingHeartRate, hs?.vo2Max))
+      .catch(() => getHRZones(authToken))
+      .then(r => { if (!cancelled) setHrZones(r.zones ?? []); })
+      .catch(() => { if (!cancelled) setHrZones([]); });
+    return () => { cancelled = true; };
+  }, [authToken, enableHealthKit, visible]);
 
   // On close from outside (e.g. swipe down without saving) clean up
   // the timers so they don't leak into the next open.
@@ -154,15 +174,27 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
         setHr(bpm);
         setHrSum(prev => prev + bpm);
         setHrN(prev => prev + 1);
+        if (liveActivityIdRef.current) {
+          updateRestActivity(liveActivityIdRef.current, liveActivityHrZoneFields(bpm, hrZones)).catch(() => undefined);
+        }
       }
     } catch { /* swallow — HR isn't required */ }
-  }, []);
+  }, [hrZones]);
   const shouldPollHr = phase === 'running' && canUseHealthKit;
   useEffect(() => {
     if (!shouldPollHr) return;
     tickHeartRate();
   }, [shouldPollHr, tickHeartRate]);
   useManagedInterval(tickHeartRate, 10_000, shouldPollHr, hrIntervalRef);
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return;
+      if (phase === 'running' && startedAtMs) tickElapsed();
+      if (shouldPollHr) tickHeartRate();
+    });
+    return () => sub.remove();
+  }, [phase, shouldPollHr, startedAtMs, tickElapsed, tickHeartRate]);
 
   const handleStart = (c: LiveActivityQuickStartOption) => {
     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
@@ -206,6 +238,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
       themeColorHex: tc.primary,
       paused: false,
       elapsedSeconds: 0,
+      ...liveActivityHrZoneFields(hr, hrZones),
     }).then((id) => {
       if (!id) return;
       if (liveActivityGenerationRef.current !== generation) {
@@ -241,6 +274,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
         paused: true,
         elapsedSeconds: currentElapsed,
         nextSetRecommendation: 'Paused',
+        ...liveActivityHrZoneFields(hr, hrZones),
       }).catch(() => undefined);
     }
   };
@@ -262,6 +296,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
         startedAtMs: resumedAt - currentElapsed * 1000,
         elapsedSeconds: currentElapsed,
         nextSetRecommendation: 'Timer running',
+        ...liveActivityHrZoneFields(hr, hrZones),
       }).catch(() => undefined);
     }
   };
@@ -289,7 +324,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     let kcal: number | null = null;
     if (canUseHealthKit) {
       try {
-        const hr = await getWorkoutHrSummary(startedAtMs, endedMs).catch(() => null);
+        const hr = await getWorkoutHrSummary(startedAtMs, endedMs, null, null, hrZones).catch(() => null);
         if (hr?.avgBpm) avgHr = Math.round(hr.avgBpm);
       } catch { /* swallow — HK optional */ }
       try {
@@ -416,12 +451,27 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                     <Text style={{ fontSize: 10, color: tc.textMuted, fontWeight: '700', letterSpacing: 1 }}>
                       HEART RATE
                     </Text>
-                    <Text style={{ fontSize: 28, fontWeight: '900', color: tc.error, marginTop: 4 }}>
+                    <Text style={{ fontSize: 28, fontWeight: '900', color: hr != null && hr > 0 ? liveZoneColor : tc.error, marginTop: 4 }}>
                       {hr != null ? `${hr}` : '—'}
                     </Text>
                     <Text style={{ fontSize: 10, color: tc.textMuted }}>
                       {hrN > 0 ? `avg ${Math.round(hrSum / hrN)} bpm` : 'bpm'}
                     </Text>
+                    {hr != null && hr > 0 ? (
+                      <View style={{
+                        flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 8,
+                        alignSelf: 'flex-start', borderRadius: 999, borderWidth: 1,
+                        borderColor: liveZoneColor + '66', backgroundColor: liveZoneColor + '18',
+                        paddingHorizontal: 9, paddingVertical: 5,
+                      }}>
+                        <Text style={{ fontSize: 11, fontWeight: '900', color: liveZoneColor }}>
+                          {liveZone ? `Z${liveZone.zone}` : 'HR'}
+                        </Text>
+                        <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textMuted }}>
+                          {liveZone ? hrZoneRangeText(liveZone) : 'live'}
+                        </Text>
+                      </View>
+                    ) : null}
                   </View>
                 </View>
               </View>

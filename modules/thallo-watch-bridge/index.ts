@@ -29,10 +29,19 @@ export type WatchExercise = {
   restSeconds: number;
   equipment?: string | null;
   plannedTargetWeightLbs?: number | null;
+  isTimed?: boolean;
+  plannedDurationSeconds?: number | null;
   recommendation?: string | null;
   slotRole?: string | null;
   isGuide?: boolean;
   swapOptions?: WatchSwapOption[];
+};
+
+export type WatchHRZone = {
+  zone: number;
+  label: string;
+  low: number;
+  high: number;
 };
 
 export type WatchSwapOption = {
@@ -60,6 +69,7 @@ export type WatchWorkoutPayload = {
    *  exercise as a dismissable card so users can cue off them without
    *  pulling the phone out. Empty / undefined = no card. */
   warmupSteps?: string[];
+  hrZones?: WatchHRZone[];
   /** The phone-side user id. Embedded in the workout dict (not just the
    *  top-level context) so the watch can reject cross-account payloads
    *  that arrive after a user switch before the context is re-keyed. */

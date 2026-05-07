@@ -198,6 +198,7 @@ export default function NutritionCard({
   const microFieldSpec: Array<{ out: string; keys: string[] }> = [
     { out: 'fiber',              keys: ['fiber'] },
     { out: 'sugar',              keys: ['sugar'] },
+    { out: 'addedSugar',         keys: ['added_sugar_g', 'added_sugar', 'addedSugar'] },
     { out: 'sodium',             keys: ['sodium'] },
     { out: 'cholesterol',        keys: ['cholesterol', 'cholesterol_mg'] },
     { out: 'saturatedFat',       keys: ['saturated_fat', 'saturatedFat'] },
@@ -549,7 +550,7 @@ export default function NutritionCard({
                 {/* ── Section 4: Key Gaps ── */}
                 {(() => {
                   const day: Record<string, number> = {
-                    fiber: dailyMicros.fiber || 0, sugar: dailyMicros.sugar || 0,
+                    fiber: dailyMicros.fiber || 0, sugar: dailyMicros.sugar || 0, addedSugar: dailyMicros.addedSugar || 0,
                     sodium: dailyMicros.sodium || 0, saturatedFat: dailyMicros.saturatedFat || 0,
                     omega3: dailyMicros.omega3 || 0, potassium: dailyMicros.potassium || 0,
                     calcium: dailyMicros.calcium || 0, magnesium: dailyMicros.magnesium || 0,
@@ -616,7 +617,7 @@ export default function NutritionCard({
                   contributions.sort((a, b) => b.amount - a.amount);
                   const total = contributions.reduce((s, c) => s + c.amount, 0);
                   const displayLabel = spec.out.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase());
-                  const unitStr = ['fiber', 'sugar', 'saturatedFat', 'monounsaturatedFat', 'polyunsaturatedFat'].includes(spec.out) ? 'g' : ['vitaminD', 'vitaminB12'].includes(spec.out) ? 'mcg' : 'mg';
+                  const unitStr = ['fiber', 'sugar', 'addedSugar', 'saturatedFat', 'monounsaturatedFat', 'polyunsaturatedFat'].includes(spec.out) ? 'g' : ['vitaminD', 'vitaminB12'].includes(spec.out) ? 'mcg' : 'mg';
                   return (
                     <View style={{ backgroundColor: colors.primary + '15', borderRadius: 14, padding: 14, marginBottom: 14, borderWidth: 1, borderColor: colors.primary + '33' }}>
                       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -703,6 +704,7 @@ export default function NutritionCard({
                   <View style={styles.microGridLg}>
                     <MicroChipLg label="Fiber" value={dailyMicros.fiber > 0 ? `${Math.round(dailyMicros.fiber)}g` : '—'} target="28g" pct={dailyMicros.fiber / 28} colors={colors} styles={styles} low={dailyMicros.fiber > 0 && dailyMicros.fiber < 20} onPress={() => setDrillNutrient(drillNutrient === 'fiber' ? null : 'fiber')} />
                     <MicroChipLg label="Sugar" value={dailyMicros.sugar > 0 ? `${Math.round(dailyMicros.sugar)}g` : '—'} target="<50g" pct={dailyMicros.sugar > 0 ? Math.min(dailyMicros.sugar / 50, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sugar > 50} onPress={() => setDrillNutrient(drillNutrient === 'sugar' ? null : 'sugar')} />
+                    <MicroChipLg label="Added Sugar" value={dailyMicros.addedSugar > 0 ? `${Math.round(dailyMicros.addedSugar)}g` : '—'} target="<36g" pct={dailyMicros.addedSugar > 0 ? Math.min(dailyMicros.addedSugar / 36, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.addedSugar > 36} onPress={() => setDrillNutrient(drillNutrient === 'addedSugar' ? null : 'addedSugar')} />
                     <MicroChipLg label="Sodium" value={dailyMicros.sodium > 0 ? `${Math.round(dailyMicros.sodium)}mg` : '—'} target="<2300mg" pct={dailyMicros.sodium > 0 ? Math.min(dailyMicros.sodium / 2300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.sodium > 2300} onPress={() => setDrillNutrient(drillNutrient === 'sodium' ? null : 'sodium')} />
                     <MicroChipLg label="Cholesterol" value={dailyMicros.cholesterol > 0 ? `${Math.round(dailyMicros.cholesterol)}mg` : '—'} target="<300mg" pct={dailyMicros.cholesterol > 0 ? Math.min(dailyMicros.cholesterol / 300, 1) : 0} colors={colors} styles={styles} warn={dailyMicros.cholesterol > 300} onPress={() => setDrillNutrient(drillNutrient === 'cholesterol' ? null : 'cholesterol')} />
                   </View>
@@ -1271,7 +1273,7 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
       {(() => {
         const fiber = Math.round(meal.fiber ?? meal.micronutrients?.fiber ?? 0);
         const sugar = Math.round(meal.micronutrients?.sugar ?? 0);
-        const addedSugar = Math.round((meal.micronutrients as any)?.added_sugar ?? 0);
+        const addedSugar = Math.round((meal.micronutrients as any)?.added_sugar_g ?? (meal.micronutrients as any)?.added_sugar ?? 0);
         const sodium = Math.round((meal.micronutrients as any)?.sodium_mg ?? meal.micronutrients?.sodium ?? 0);
         const highSugar = addedSugar > 0 ? addedSugar >= 10 : sugar >= 15;
         const highSodium = sodium >= 700;

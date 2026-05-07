@@ -21,6 +21,12 @@ export interface RestActivityState {
   workoutId?: string;
   paused?: boolean;
   elapsedSeconds?: number;
+  heartRate?: number | null;
+  hrZone?: number | null;
+  hrZoneLabel?: string | null;
+  hrZoneLow?: number | null;
+  hrZoneHigh?: number | null;
+  hrZoneColorHex?: string | null;
 }
 
 // Lazy-load the native module so non-iOS platforms never touch it.
@@ -90,6 +96,12 @@ export async function startRestActivity(state: RestActivityState): Promise<strin
       themeColorHex: state.themeColorHex,
       paused: !!state.paused,
       elapsedSeconds: state.elapsedSeconds ?? 0,
+      heartRate: state.heartRate ?? null,
+      hrZone: state.hrZone ?? null,
+      hrZoneLabel: state.hrZoneLabel ?? null,
+      hrZoneLow: state.hrZoneLow ?? null,
+      hrZoneHigh: state.hrZoneHigh ?? null,
+      hrZoneColorHex: state.hrZoneColorHex ?? null,
     });
     if (!id) {
       _lastStartDiagnostic = 'native startActivity returned null — Activity.request failed in Swift (check device logs for NSLog entries starting with [ThalloLiveActivity])';

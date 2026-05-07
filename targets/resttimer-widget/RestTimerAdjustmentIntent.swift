@@ -52,7 +52,13 @@ struct AdjustRestTimerIntent: AppIntent {
                 nextSetRecommendation: state.nextSetRecommendation,
                 themeColorHex: state.themeColorHex,
                 paused: state.paused,
-                elapsedSeconds: state.elapsedSeconds
+                elapsedSeconds: state.elapsedSeconds,
+                heartRate: state.heartRate,
+                hrZone: state.hrZone,
+                hrZoneLabel: state.hrZoneLabel,
+                hrZoneLow: state.hrZoneLow,
+                hrZoneHigh: state.hrZoneHigh,
+                hrZoneColorHex: state.hrZoneColorHex
             )
             await activity.update(.init(state: nextState, staleDate: nil))
         }

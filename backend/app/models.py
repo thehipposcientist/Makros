@@ -897,6 +897,7 @@ GEAR_RETIREMENT_DEFAULTS: dict[str, float | None] = {
     "trail_shoe":      350.0,
     "cycling_shoe":    None,   # track sessions, not miles
     "bike":            None,
+    "stationary_bike": None,
     "bike_tire":       2000.0,
     "bike_chain":      1500.0,
     "treadmill_belt":  3000.0,

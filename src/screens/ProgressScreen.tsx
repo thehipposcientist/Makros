@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo, type ReactNode } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, TouchableOpacity, ActivityIndicator,
+  View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, ActivityIndicator,
   TextInput, Alert, Image, Linking, Modal, Animated,
 } from 'react-native';
 // Lazy reference — keeps expo-image-picker out of the cold-start parse pass.
@@ -24,6 +24,7 @@ import { TIMING_SMOOTH, TIMING_STANDARD, staggerDelay, useReducedMotion } from '
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
+const AnimatedTouchableOpacity = Animated.createAnimatedComponent(TouchableOpacity);
 import Svg, { Polyline, Circle, Line, Text as SvgText } from 'react-native-svg';
 import ViewShot from 'react-native-view-shot';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -2203,21 +2204,20 @@ function AnimatedPressable({
   };
 
   return (
-    <Animated.View style={[style, { transform: [{ scale }, { translateY }] }]}>
-      <TouchableOpacity
-        testID={testID}
-        activeOpacity={1}
-        disabled={disabled}
-        onPress={onPress}
-        onPressIn={pressIn}
-        onPressOut={pressOut}
-        accessibilityLabel={accessibilityLabel}
-        accessibilityRole={accessibilityRole}
-        accessibilityState={accessibilityState}
-        hitSlop={hitSlop}>
-        {children}
-      </TouchableOpacity>
-    </Animated.View>
+    <AnimatedTouchableOpacity
+      testID={testID}
+      activeOpacity={1}
+      disabled={disabled}
+      onPress={onPress}
+      onPressIn={pressIn}
+      onPressOut={pressOut}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityRole={accessibilityRole}
+      accessibilityState={accessibilityState}
+      hitSlop={hitSlop}
+      style={[style, { transform: [{ scale }, { translateY }] }]}>
+      {children}
+    </AnimatedTouchableOpacity>
   );
 }
 
@@ -3124,21 +3124,29 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           ['body', 'Body'],
           ['health', 'Health'],
         ] as const).map(([key, label]) => (
-          <AnimatedPressable
+          <Pressable
             key={key}
             testID={`progress-subtab-${key}`}
             style={[styles.tab, tab === key && styles.tabActive]}
-            scaleDown={0.94}
             accessibilityRole="tab"
             accessibilityLabel={label}
             accessibilityState={{ selected: tab === key }}
+            onPressIn={() => {
+              if (tab !== key) setTab(key);
+            }}
             onPress={() => {
               if (tab === key) return;
               import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
               setTab(key);
             }}>
-            <Text style={[styles.tabText, tab === key && styles.tabTextActive]}>{label}</Text>
-          </AnimatedPressable>
+            <Text
+              onPress={() => {
+                if (tab !== key) setTab(key);
+              }}
+              style={[styles.tabText, tab === key && styles.tabTextActive]}>
+              {label}
+            </Text>
+          </Pressable>
         ))}
       </View>
 
