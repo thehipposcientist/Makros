@@ -65,6 +65,7 @@ import {
   inferChartMuscleFromName,
   type E1RMTrendPoint,
 } from '../utils/workoutProgressFilters';
+import { shouldShowMeals, shouldShowWorkouts } from '../utils/hiddenSurfaces';
 
 type ProgressTab = 'today' | 'trends' | 'body' | 'health';
 
@@ -92,7 +93,14 @@ interface ProgressScreenProps {
   inProgressWorkout?: InProgressWorkoutSummary | null;
   onResumeInProgressWorkout?: () => void;
   onDiscardInProgressWorkout?: () => void | Promise<void>;
+  showWorkoutProgress?: boolean;
+  showMealProgress?: boolean;
 }
+
+type ProgressSurfaceVisibility = {
+  showWorkoutProgress: boolean;
+  showMealProgress: boolean;
+};
 
 function sentenceLabel(value: unknown): string {
   return humanizeToken(String(value ?? '')).toLowerCase();
@@ -176,12 +184,13 @@ function buildCoachInsightVisuals(
   guardrails: string[],
   coachMemory: any[],
   progressionHint: string,
+  visibility: ProgressSurfaceVisibility = { showWorkoutProgress: true, showMealProgress: true },
 ): CoachInsightVisual[] {
   const rows: CoachInsightVisual[] = [];
   const workoutPct = Number(insights?.adherence?.workout_7d_pct);
   const mealPct = Number(insights?.adherence?.meal_7d_pct);
 
-  if (Number.isFinite(workoutPct)) {
+  if (visibility.showWorkoutProgress && Number.isFinite(workoutPct)) {
     rows.push({
       key: 'workout-adherence',
       label: 'Workouts',
@@ -192,7 +201,7 @@ function buildCoachInsightVisuals(
     });
   }
 
-  if (Number.isFinite(mealPct)) {
+  if (visibility.showMealProgress && Number.isFinite(mealPct)) {
     rows.push({
       key: 'meal-adherence',
       label: 'Meals',
@@ -225,7 +234,7 @@ function buildCoachInsightVisuals(
     });
   }
 
-  if (progressionHint) {
+  if (visibility.showWorkoutProgress && progressionHint) {
     rows.push({
       key: 'progression',
       label: 'Next',
@@ -892,6 +901,7 @@ function buildProgressMilestones(
   oneRepMaxLifts: Array<{ name: string; oneRepMaxLbs: number }>,
   weightUnit: WeightUnit,
   distanceUnit: DistanceUnit,
+  visibility: ProgressSurfaceVisibility = { showWorkoutProgress: true, showMealProgress: true },
 ): ProgressMilestone[] {
   const now = Date.now();
   const thirtyDaysAgo = now - PR_MOMENTUM_WINDOW_DAYS * 86400000;
@@ -915,7 +925,7 @@ function buildProgressMilestones(
   );
 
   const cards: ProgressMilestone[] = [];
-  if (activeDays30 > 0) {
+  if (visibility.showWorkoutProgress && activeDays30 > 0) {
     cards.push({
       key: 'active-days',
       title: '30-day consistency',
@@ -925,7 +935,7 @@ function buildProgressMilestones(
       color: '#22C55E',
     });
   }
-  if (recentPrs.length > 0) {
+  if (visibility.showWorkoutProgress && recentPrs.length > 0) {
     cards.push({
       key: 'recent-prs',
       title: 'PR momentum',
@@ -935,7 +945,7 @@ function buildProgressMilestones(
       color: '#F59E0B',
     });
   }
-  if (topLift) {
+  if (visibility.showWorkoutProgress && topLift) {
     cards.push({
       key: 'top-lift',
       title: 'Top strength marker',
@@ -945,7 +955,7 @@ function buildProgressMilestones(
       color: '#6366F1',
     });
   }
-  if (mealAverages && mealAverages.days_with_data > 0) {
+  if (visibility.showMealProgress && mealAverages && mealAverages.days_with_data > 0) {
     const loggedDayProtein = mealAverages.avg_protein_g_when_logged ?? mealAverages.avg_protein_g;
     cards.push({
       key: 'nutrition-data',
@@ -958,7 +968,7 @@ function buildProgressMilestones(
       color: '#14B8A6',
     });
   }
-  if (cardioMiles > 0) {
+  if (visibility.showWorkoutProgress && cardioMiles > 0) {
     cards.push({
       key: 'cardio-base',
       title: 'Cardio base',
@@ -968,7 +978,7 @@ function buildProgressMilestones(
       color: '#EF4444',
     });
   }
-  if (cards.length < 4 && completed.length > 0) {
+  if (visibility.showWorkoutProgress && cards.length < 4 && completed.length > 0) {
     cards.push({
       key: 'total-workouts',
       title: 'Workout bank',
@@ -1133,6 +1143,7 @@ function buildThisWeekOverview(
   weightUnit: WeightUnit,
   distanceUnit: DistanceUnit,
   window: ProgressDateWindow,
+  visibility: ProgressSurfaceVisibility = { showWorkoutProgress: true, showMealProgress: true },
 ): ProgressOverviewItem[] {
   const currentWindowText = window.source === 'plan_week' ? 'this plan week' : 'this calendar week';
   const previousWindowText = window.source === 'plan_week' ? 'previous week' : 'previous calendar week';
@@ -1172,7 +1183,7 @@ function buildThisWeekOverview(
     .reduce((sum, row) => sum + Math.round(Number(row.hrZoneMinutes?.[1] ?? 0)), 0);
 
   const items: ProgressOverviewItem[] = [];
-  if (recentWorkoutDays > 0) {
+  if (visibility.showWorkoutProgress && recentWorkoutDays > 0) {
     items.push({
       key: 'week-workouts',
       label: 'Training days',
@@ -1183,7 +1194,7 @@ function buildThisWeekOverview(
       targetTab: 'trends',
     });
   }
-  if (recentSets > 0) {
+  if (visibility.showWorkoutProgress && recentSets > 0) {
     items.push({
       key: 'week-volume',
       label: 'Lift volume',
@@ -1195,7 +1206,7 @@ function buildThisWeekOverview(
     });
   }
 
-  if (recentZone2 > 0 || previousZone2 > 0) {
+  if (visibility.showWorkoutProgress && (recentZone2 > 0 || previousZone2 > 0)) {
     const delta = recentZone2 - previousZone2;
     items.push({
       key: 'week-zone2',
@@ -1211,7 +1222,7 @@ function buildThisWeekOverview(
   }
 
   const recentPrs = prs.filter(pr => inCurrent(pr.date));
-  if (recentPrs.length > 0) {
+  if (visibility.showWorkoutProgress && recentPrs.length > 0) {
     const top = recentPrs[0];
     items.push({
       key: 'week-prs',
@@ -1245,7 +1256,7 @@ function buildThisWeekOverview(
   const recentCardioMiles = paceHistory
     .filter(p => inCurrent(p.date))
     .reduce((sum, p) => sum + (p.distance ?? 0), 0);
-  if (recentCardioMiles > 0) {
+  if (visibility.showWorkoutProgress && recentCardioMiles > 0) {
     items.push({
       key: 'week-cardio',
       label: 'Cardio distance',
@@ -1260,7 +1271,7 @@ function buildThisWeekOverview(
   const mealDays = new Set((mealHistory ?? [])
     .filter(row => inCurrent(row.meal_date))
     .map(row => row.meal_date.slice(0, 10)));
-  if (mealDays.size > 0) {
+  if (visibility.showMealProgress && mealDays.size > 0) {
     items.push({
       key: 'week-meals',
       label: 'Meal signal',
@@ -1520,6 +1531,7 @@ function buildWeightGoalSignal(
   weightEntries: Array<{ date: string; weightLbs: number }>,
   weightUnit: WeightUnit,
   tc: ReturnType<typeof getTheme>['colors'],
+  showMealProgress = true,
 ): TodayTrackSignal {
   const sorted = [...weightEntries]
     .filter(entry => Number.isFinite(entry.weightLbs) && entry.weightLbs > 0 && parseDateKeyMs(entry.date) > 0)
@@ -1566,9 +1578,9 @@ function buildWeightGoalSignal(
     action: status === 'good'
       ? 'Keep calories and weigh-in timing consistent.'
       : bucket === 'fat_loss'
-        ? 'Tighten meal logging before changing the plan.'
+        ? showMealProgress ? 'Tighten meal logging before changing the plan.' : 'Use consistent weigh-ins before changing the plan.'
         : bucket === 'muscle_gain'
-          ? 'Make sure meals support the surplus before adding training stress.'
+          ? showMealProgress ? 'Make sure meals support the surplus before adding training stress.' : 'Use weight trend and recovery before adding training stress.'
           : 'Use weight plus photos or measurements before judging recomp.',
     icon: slope < -0.05 ? 'trending-down-outline' : slope > 0.05 ? 'trending-up-outline' : 'remove-outline',
     color: signalColor(status, tc),
@@ -1646,15 +1658,17 @@ function buildTodayTrackSummary(input: {
   distanceUnit: DistanceUnit;
   window: ProgressDateWindow;
   tc: ReturnType<typeof getTheme>['colors'];
+  showWorkoutProgress: boolean;
+  showMealProgress: boolean;
 }): TodayTrackSummary {
   const bucket = resolveProgressGoalBucket(input.profile);
   const training = buildTrainingPaceSignal(input.history, input.summaries, input.profile, input.window, input.tc);
   const strength = buildStrengthGoalSignal(input.history, input.tc);
   const cardio = buildCardioGoalSignal(input.paceHistory, input.summaries, input.distanceUnit, input.window, input.tc);
-  const weight = buildWeightGoalSignal(input.profile, bucket, input.weightEntries, input.weightUnit, input.tc);
+  const weight = buildWeightGoalSignal(input.profile, bucket, input.weightEntries, input.weightUnit, input.tc, input.showMealProgress);
   const nutrition = buildMealGoalSignal(input.mealHistory, input.mealAverages, input.window, input.tc);
 
-  const ordered = bucket === 'fat_loss'
+  const orderedRaw = bucket === 'fat_loss'
     ? [weight, training, nutrition, strength]
     : bucket === 'muscle_gain'
       ? [strength, training, nutrition, weight]
@@ -1667,12 +1681,17 @@ function buildTodayTrackSummary(input: {
             : bucket === 'athletic'
               ? [training, cardio, strength, nutrition]
               : [training, strength, cardio, nutrition];
+  const ordered = orderedRaw.filter(signal => {
+    if (signal === training || signal === strength || signal === cardio) return input.showWorkoutProgress;
+    if (signal === nutrition) return input.showMealProgress;
+    return true;
+  });
   const signals = uniqueTodaySignals(ordered);
   const dataSignals = signals.filter(signal => signal.status !== 'needs_data');
   const totalWeight = signals.reduce((sum, signal, index) => sum + (index === 0 ? 1.3 : 1), 0);
   const score = signals.reduce((sum, signal, index) => sum + signal.score * (index === 0 ? 1.3 : 1), 0);
   const progressPct = clampPct((score / Math.max(1, totalWeight)) * 100);
-  const primary = signals[0] ?? training;
+  const primary = signals[0] ?? weight;
   const hasPrimaryProblem = primary.status === 'off';
   const state = dataSignals.length < 2
     ? 'needs_data'
@@ -1695,8 +1714,10 @@ function buildTodayTrackSummary(input: {
       : state === 'off_track'
         ? 'Needs attention today'
         : "Build today's baseline";
-  const supporting = signals.find(signal => signal.key !== primary.key && signal.status !== 'needs_data') ?? signals.find(signal => signal.key !== primary.key) ?? training;
-  const subtitle = `${GOAL_LABELS[bucket]} goal: ${primary.detail}. ${supporting.label}: ${supporting.value}.`;
+  const supporting = signals.find(signal => signal.key !== primary.key && signal.status !== 'needs_data') ?? signals.find(signal => signal.key !== primary.key) ?? primary;
+  const subtitle = supporting.key === primary.key
+    ? `${GOAL_LABELS[bucket]} goal: ${primary.detail}.`
+    : `${GOAL_LABELS[bucket]} goal: ${primary.detail}. ${supporting.label}: ${supporting.value}.`;
   const worst = [...signals].sort((a, b) => a.score - b.score)[0] ?? primary;
   return {
     bucket,
@@ -2221,7 +2242,7 @@ function AnimatedPressable({
   );
 }
 
-export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true, planWeekWindow, inProgressWorkout = null, onResumeInProgressWorkout, onDiscardInProgressWorkout }: ProgressScreenProps) {
+export default function ProgressScreen({ onBack, authToken, userProfile, onUpdateWeight, onCancelScheduledPlanChange, themeName, noHeader = false, nutritionPlan, nutritionLogRefreshKey = 0, isActive = true, planWeekWindow, inProgressWorkout = null, onResumeInProgressWorkout, onDiscardInProgressWorkout, showWorkoutProgress: showWorkoutProgressProp, showMealProgress: showMealProgressProp }: ProgressScreenProps) {
   const tc = getTheme(themeName).colors;
   const styles = useMemo(() => createStyles(tc), [themeName]);
   const primaryButtonTextColor = getContrastingTextColor(tc.primary);
@@ -2230,6 +2251,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const hasServerProTier = userProfile.subscriptionTier === 'pro';
   const weightUnit = resolveWeightUnit(userProfile);
   const distanceUnit = resolveDistanceUnit(userProfile);
+  const showWorkoutProgress = showWorkoutProgressProp ?? shouldShowWorkouts(userProfile);
+  const showMealProgress = showMealProgressProp ?? shouldShowMeals(userProfile);
+  const showMixedGoalProgress = showWorkoutProgress && showMealProgress;
+  const visibleProgressTabs = useMemo(() => {
+    const tabs: Array<readonly [ProgressTab, string]> = [['today', 'Today']];
+    if (showWorkoutProgress) tabs.push(['trends', 'Trends']);
+    tabs.push(['body', 'Body'], ['health', 'Health']);
+    return tabs;
+  }, [showWorkoutProgress]);
   const [tab, setTab] = useState<ProgressTab>('today');
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null);
   const [showLogActivity, setShowLogActivity] = useState(false);
@@ -2327,6 +2357,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const exerciseMuscleMap = workoutHistoryIndex.muscleMap;
   const exerciseTrendMap = workoutHistoryIndex.trendMap;
   const chartExerciseOptions = useMemo(() => {
+    if (!showWorkoutProgress) return [];
     const prNameByKey = new Map(prs.map(pr => [pr.exerciseName.toLowerCase(), pr.exerciseName] as const));
     return Object.entries(exerciseTrendMap)
       .filter(([, points]) => points.length >= 2)
@@ -2335,7 +2366,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         name: prNameByKey.get(key) ?? key.replace(/\b\w/g, c => c.toUpperCase()),
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [exerciseTrendMap, prs]);
+  }, [exerciseTrendMap, prs, showWorkoutProgress]);
   const activeChartBucket = useMemo(
     () => CHART_MUSCLE_BUCKETS.find(b => b.id === chartMuscleFilter) ?? CHART_MUSCLE_BUCKETS[0],
     [chartMuscleFilter],
@@ -2357,7 +2388,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     () => e1rmHistory.length >= 2 ? e1rmHistory : localSelectedE1rmHistory,
     [e1rmHistory, localSelectedE1rmHistory],
   );
-  const cardioInsightsMemo = useMemo(() => buildCardioInsights(paceHistory, distanceUnit), [distanceUnit, paceHistory]);
+  const cardioInsightsMemo = useMemo(() => showWorkoutProgress ? buildCardioInsights(paceHistory, distanceUnit) : [], [distanceUnit, paceHistory, showWorkoutProgress]);
   const paceExerciseGroups = useMemo(() => {
     const groups = new Map<string, PaceHistoryPoint[]>();
     for (const point of paceHistory) {
@@ -2412,27 +2443,27 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   }, [history, prs]);
   const displayedOneRepMaxLifts = oneRepMaxLifts.length > 0 ? oneRepMaxLifts : localOneRepMaxLifts;
   const progressMilestones = useMemo(
-    () => buildProgressMilestones(history, prs, summaries, paceHistory, mealAverages, displayedOneRepMaxLifts, weightUnit, distanceUnit),
-    [distanceUnit, displayedOneRepMaxLifts, history, mealAverages, paceHistory, prs, summaries, weightUnit],
+    () => buildProgressMilestones(history, prs, summaries, paceHistory, mealAverages, displayedOneRepMaxLifts, weightUnit, distanceUnit, { showWorkoutProgress, showMealProgress }),
+    [distanceUnit, displayedOneRepMaxLifts, history, mealAverages, paceHistory, prs, showMealProgress, showWorkoutProgress, summaries, weightUnit],
   );
   const progressAnalytics = useMemo(
-    () => buildProgressAnalytics(history, summaries, prs, plateaus),
-    [history, plateaus, prs, summaries],
+    () => showWorkoutProgress ? buildProgressAnalytics(history, summaries, prs, plateaus) : [],
+    [history, plateaus, prs, showWorkoutProgress, summaries],
   );
   const coachInsightVisuals = useMemo(
-    () => buildCoachInsightVisuals(insights, guardrails, coachMemory, progressionHint),
-    [coachMemory, guardrails, insights, progressionHint],
+    () => buildCoachInsightVisuals(insights, guardrails, coachMemory, progressionHint, { showWorkoutProgress, showMealProgress }),
+    [coachMemory, guardrails, insights, progressionHint, showMealProgress, showWorkoutProgress],
   );
   const progressWeekWindow = useMemo(
     () => buildProgressDateWindow(planWeekWindow),
     [planWeekWindow?.startDate, planWeekWindow?.endDate],
   );
   const thisWeekOverview = useMemo(
-    () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory, weightUnit, distanceUnit, progressWeekWindow),
-    [distanceUnit, history, mealHistory, paceHistory, progressWeekWindow, prs, summaries, weightEntries, weightUnit],
+    () => buildThisWeekOverview(history, summaries, prs, weightEntries, paceHistory, mealHistory, weightUnit, distanceUnit, progressWeekWindow, { showWorkoutProgress, showMealProgress }),
+    [distanceUnit, history, mealHistory, paceHistory, progressWeekWindow, prs, showMealProgress, showWorkoutProgress, summaries, weightEntries, weightUnit],
   );
   const goalTrajectory = useMemo(
-    () => buildGoalTrajectory({
+    () => showMixedGoalProgress ? buildGoalTrajectory({
       profile: userProfile,
       weightEntries,
       history,
@@ -2443,11 +2474,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       oneRepMaxLifts: displayedOneRepMaxLifts,
       weightUnit,
       distanceUnit,
-    }),
-    [displayedOneRepMaxLifts, distanceUnit, history, mealAverages, mealHistory, paceHistory, summaries, userProfile, weightEntries, weightUnit],
+    }) : null,
+    [displayedOneRepMaxLifts, distanceUnit, history, mealAverages, mealHistory, paceHistory, showMixedGoalProgress, summaries, userProfile, weightEntries, weightUnit],
   );
   const goalForecast = useMemo(
-    () => buildGoalForecast({
+    () => showMixedGoalProgress ? buildGoalForecast({
       profile: userProfile,
       weightEntries,
       history,
@@ -2460,8 +2491,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       bodyScanHistory,
       weightUnit,
       distanceUnit,
-    }),
-    [bodyScanHistory, displayedOneRepMaxLifts, distanceUnit, history, mealAverages, mealHistory, nutritionScoreWeekly, paceHistory, summaries, userProfile, weightEntries, weightUnit],
+    }) : null,
+    [bodyScanHistory, displayedOneRepMaxLifts, distanceUnit, history, mealAverages, mealHistory, nutritionScoreWeekly, paceHistory, showMixedGoalProgress, summaries, userProfile, weightEntries, weightUnit],
   );
   const todayTrack = useMemo(
     () => buildTodayTrackSummary({
@@ -2476,27 +2507,29 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       distanceUnit,
       window: progressWeekWindow,
       tc,
+      showWorkoutProgress,
+      showMealProgress,
     }),
-    [distanceUnit, history, mealAverages, mealHistory, paceHistory, progressWeekWindow, summaries, tc, userProfile, weightEntries, weightUnit],
+    [distanceUnit, history, mealAverages, mealHistory, paceHistory, progressWeekWindow, showMealProgress, showWorkoutProgress, summaries, tc, userProfile, weightEntries, weightUnit],
   );
-  const goalTrajectoryColor = goalTrajectory.tone === 'success'
+  const goalTrajectoryColor = goalTrajectory?.tone === 'success'
     ? tc.success
-    : goalTrajectory.tone === 'warning'
+    : goalTrajectory?.tone === 'warning'
       ? tc.warning
       : tc.primary;
-  const goalTrajectoryConfidenceColor = goalTrajectory.confidence === 'high'
+  const goalTrajectoryConfidenceColor = goalTrajectory?.confidence === 'high'
     ? tc.success
-    : goalTrajectory.confidence === 'medium'
+    : goalTrajectory?.confidence === 'medium'
       ? tc.warning
       : tc.textMuted;
-  const goalForecastColor = goalForecast.tone === 'success'
+  const goalForecastColor = goalForecast?.tone === 'success'
     ? tc.success
-    : goalForecast.tone === 'warning'
+    : goalForecast?.tone === 'warning'
       ? tc.warning
       : tc.primary;
-  const goalForecastConfidenceColor = goalForecast.confidence === 'high'
+  const goalForecastConfidenceColor = goalForecast?.confidence === 'high'
     ? tc.success
-    : goalForecast.confidence === 'medium'
+    : goalForecast?.confidence === 'medium'
       ? tc.warning
       : tc.textMuted;
   const planWeekZone2 = useMemo(() => {
@@ -2519,8 +2552,8 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     return mealAverages ? macrosHeadlineFromAverages(mealAverages as any) : null;
   }, [mealAverages, mealHistoryDailyRows]);
   const trainingSignals = useMemo(
-    () => buildTrainingSignals(history, summaries, isHealthKitAvailable(), healthEnabled),
-    [healthEnabled, history, summaries],
+    () => showWorkoutProgress ? buildTrainingSignals(history, summaries, isHealthKitAvailable(), healthEnabled) : [],
+    [healthEnabled, history, showWorkoutProgress, summaries],
   );
   const prFocusOptions = useMemo(
     () => Array.from(new Set(prs.map(p => p.sessionFocus).filter(Boolean))).sort(),
@@ -2544,7 +2577,13 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   }, [prFocusFilter, prSearch]);
 
   useEffect(() => {
-    if (tab !== 'trends') return;
+    if (!visibleProgressTabs.some(([key]) => key === tab)) {
+      setTab('today');
+    }
+  }, [tab, visibleProgressTabs]);
+
+  useEffect(() => {
+    if (!showWorkoutProgress || tab !== 'trends') return;
     if (filteredChartExercises.length === 0) {
       if (selectedExercise) setSelectedExercise(null);
       return;
@@ -2553,15 +2592,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       ? filteredChartExercises.some(option => option.name === selectedExercise)
       : false;
     if (!stillVisible) setSelectedExercise(filteredChartExercises[0].name);
-  }, [filteredChartExercises, selectedExercise, tab]);
+  }, [filteredChartExercises, selectedExercise, showWorkoutProgress, tab]);
 
   useEffect(() => {
     if (!isActive) return;
+    if (!showWorkoutProgress) return;
     if (tab === 'trends' && authToken && !paceLoadedRef.current) {
       paceLoadedRef.current = true;
       getPaceHistory(authToken).then(r => setPaceHistory(r.points)).catch(() => {});
     }
-  }, [tab, authToken, isActive]);
+  }, [tab, authToken, isActive, showWorkoutProgress]);
 
   useEffect(() => {
     if (!isActive) return;
@@ -2587,10 +2627,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       setGoalHistory(g);
       setPlanChanges(c);
       setLoading(false);
-      if (authToken && isProTier && p.length > 0) {
+      if (authToken && isProTier && showWorkoutProgress && p.length > 0) {
         getProgressionInsights(authToken, p[0].exerciseName)
           .then((r: any) => setProgressionHint(r?.suggestion ?? ''))
           .catch(() => null);
+      } else {
+        setProgressionHint('');
       }
       import('../utils/weightHistory').then(({ loadWeightHistory }) =>
         Promise.all([
@@ -2609,15 +2651,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           setWeightEntries(local);
         }).catch(() => null)
       );
-      if (authToken && isProTier) {
+      if (authToken && isProTier && showWorkoutProgress) {
         import('../services/api').then(({ getFatigueScore }) => {
           getFatigueScore(authToken).then(fs => setMuscleFatigue({
             score: fs.readiness_score, label: fs.readiness_label,
             topFatigued: fs.top_fatigued ?? [], muscleFatigue: fs.muscle_fatigue ?? {},
           })).catch(() => null);
         });
+      } else {
+        setMuscleFatigue(null);
       }
-      if (authToken && isProTier) {
+      if (authToken && isProTier && showWorkoutProgress) {
         import('../services/api').then(({ getOneRepMaxShowcase, getE1RMHistory }) =>
           getOneRepMaxShowcase(authToken)
             .then(async (lifts) => {
@@ -2660,6 +2704,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             })
             .catch(() => setPlateaus([]))
         );
+      } else {
+        setOneRepMaxLifts([]);
+        setTopLiftHistory(null);
+        setPlateaus([]);
+        setPlateauDismissed(true);
       }
     });
     if (authToken) {
@@ -2670,35 +2719,50 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       } else {
         setCoachMemory([]);
       }
-      import('../services/api').then(({ getMealAverages }) =>
-        getMealAverages(authToken, 14).then(setMealAverages).catch(() => null)
-      );
-      // Pull the same meal history the meal tab uses; the Facts card's
-      // dailyRows will re-aggregate from this so both surfaces agree.
-      import('../services/api').then(({ getMealHistory }) =>
-        getMealHistory(authToken, 14)
-          .then(r => setMealHistory(r.meals ?? []))
-          .catch(() => setMealHistory(null))
-      );
+      if (showMealProgress) {
+        import('../services/api').then(({ getMealAverages }) =>
+          getMealAverages(authToken, 14).then(setMealAverages).catch(() => null)
+        );
+        // Pull the same meal history the meal tab uses; the Facts card's
+        // dailyRows will re-aggregate from this so both surfaces agree.
+        import('../services/api').then(({ getMealHistory }) =>
+          getMealHistory(authToken, 14)
+            .then(r => setMealHistory(r.meals ?? []))
+            .catch(() => setMealHistory(null))
+        );
+      } else {
+        setMealAverages(null);
+        setMealHistory(null);
+      }
       if (isProTier) {
-        import('../services/api').then(({ getMealInsights }) =>
-          getMealInsights(authToken)
-            .then(r => setMealInsightPatterns(r.patterns ?? null))
-            .catch(() => setMealInsightPatterns(null))
-        );
-        import('../services/api').then(({ getNutritionScore }) =>
-          getNutritionScore(authToken, 14)
-            .then(r => setNutritionScoreWeekly(r.weekly ?? null))
-            .catch(() => setNutritionScoreWeekly(null))
-        );
-        import('../services/api').then(({ getMuscleBalance }) =>
-          getMuscleBalance(authToken, 14).then(setMuscleBalance).catch(() => null)
-        );
-        import('../services/api').then(({ getGutHealth }) =>
-          getGutHealth(authToken, 14).then(r => {
-            setGutHealthWindow(r.window);
-          }).catch(() => null)
-        );
+        if (showMealProgress) {
+          import('../services/api').then(({ getMealInsights }) =>
+            getMealInsights(authToken)
+              .then(r => setMealInsightPatterns(r.patterns ?? null))
+              .catch(() => setMealInsightPatterns(null))
+          );
+          import('../services/api').then(({ getNutritionScore }) =>
+            getNutritionScore(authToken, 14)
+              .then(r => setNutritionScoreWeekly(r.weekly ?? null))
+              .catch(() => setNutritionScoreWeekly(null))
+          );
+          import('../services/api').then(({ getGutHealth }) =>
+            getGutHealth(authToken, 14).then(r => {
+              setGutHealthWindow(r.window);
+            }).catch(() => null)
+          );
+        } else {
+          setMealInsightPatterns(null);
+          setNutritionScoreWeekly(null);
+          setGutHealthWindow(null);
+        }
+        if (showWorkoutProgress) {
+          import('../services/api').then(({ getMuscleBalance }) =>
+            getMuscleBalance(authToken, 14).then(setMuscleBalance).catch(() => null)
+          );
+        } else {
+          setMuscleBalance(null);
+        }
       } else {
         setMealInsightPatterns(null);
         setNutritionScoreWeekly(null);
@@ -2712,7 +2776,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     }
 
     // ── Gut / longevity insights — compute from existing meal data ──
-    if (isProTier) (async () => {
+    if (isProTier && showMealProgress) (async () => {
       try {
         const today = new Date();
         const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
@@ -2762,7 +2826,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       healthLiveLoadedRef.current = false;
       setHealthEnabled(false);
     }
-  }, [authToken, isActive, isProTier, nutritionPlan, userProfile.goal, userProfile.mealsPerDay, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
+  }, [authToken, isActive, isProTier, nutritionPlan, showMealProgress, showWorkoutProgress, userProfile.goal, userProfile.mealsPerDay, userProfile.physicalStats?.age, userProfile.physicalStats?.gender]);
 
   useEffect(() => {
     if (!isActive || tab !== 'body' || !isProTier || bodyScanHistoryLoadedRef.current) return;
@@ -2908,6 +2972,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     if (!isActive) return;
     if (nutritionRefreshSeenRef.current === nutritionLogRefreshKey) return;
     nutritionRefreshSeenRef.current = nutritionLogRefreshKey;
+    if (!showMealProgress) {
+      setMealAverages(null);
+      setMealHistory(null);
+      setMealInsightPatterns(null);
+      setNutritionScoreWeekly(null);
+      setGutHealthWindow(null);
+      return;
+    }
     if (!authToken) return;
 
     let cancelled = false;
@@ -2940,7 +3012,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     })().catch(() => {});
 
     return () => { cancelled = true; };
-  }, [authToken, isActive, isProTier, nutritionLogRefreshKey]);
+  }, [authToken, isActive, isProTier, nutritionLogRefreshKey, showMealProgress]);
 
   const handleShareBodyScan = async () => {
     try {
@@ -3064,7 +3136,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   // show a skeleton while it's in flight instead of an empty flash.
   const [compositeFitnessLoading, setCompositeFitnessLoading] = useState(true);
   useEffect(() => {
-    if (!isActive || !authToken || !isProTier || tab !== 'health') {
+    if (!isActive || !authToken || !isProTier || tab !== 'health' || !showWorkoutProgress) {
       setCompositeFitness(null);
       setCompositeFitnessLoading(false);
       return;
@@ -3081,10 +3153,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         .catch(() => setCompositeFitness(null))
         .finally(() => setCompositeFitnessLoading(false))
     );
-  }, [authToken, isActive, isProTier, tab, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length]);
+  }, [authToken, isActive, isProTier, tab, userProfile?.daysPerWeek, userProfile?.physicalStats?.weightLbs, healthSummary?.lastNightSleepHours, history.length, showWorkoutProgress]);
 
   useEffect(() => {
-    if (!isActive || !authToken || !selectedExercise) { setE1rmHistory([]); return; }
+    if (!isActive || !authToken || !selectedExercise || !showWorkoutProgress) { setE1rmHistory([]); return; }
     let cancelled = false;
     setE1rmHistory([]);
     import('../services/api').then(({ getE1RMHistory }) =>
@@ -3093,7 +3165,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         .catch(() => { if (!cancelled) setE1rmHistory([]); })
     );
     return () => { cancelled = true; };
-  }, [authToken, isActive, selectedExercise]);
+  }, [authToken, isActive, selectedExercise, showWorkoutProgress]);
 
   const startWeight = userProfile.goalDetails.startWeightLbs ?? userProfile.physicalStats.weightLbs;
   const currentWeight = userProfile.physicalStats.weightLbs;
@@ -3118,12 +3190,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       )}
 
       <View style={styles.tabs}>
-        {([
-          ['today', 'Today'],
-          ['trends', 'Trends'],
-          ['body', 'Body'],
-          ['health', 'Health'],
-        ] as const).map(([key, label]) => (
+        {visibleProgressTabs.map(([key, label]) => (
           <Pressable
             key={key}
             testID={`progress-subtab-${key}`}
@@ -3199,6 +3266,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           </View>
 
+          {goalForecast && (
           <View
             testID="progress-goal-forecast-card"
             style={[styles.goalForecastCard, { borderColor: goalForecastColor + '55' }]}
@@ -3262,8 +3330,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               </View>
             </View>
           </View>
+          )}
 
-          {inProgressWorkout && (
+          {showWorkoutProgress && inProgressWorkout && (
             <FadeInView delay={20} duration={TIMING_STANDARD.duration} slideDistance={6}>
               <View
                 testID="progress-today-in-progress-workout-card"
@@ -3332,7 +3401,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </FadeInView>
           )}
 
-          {isProTier && authToken && (
+          {showWorkoutProgress && isProTier && authToken && (
             <FadeInView delay={40} duration={TIMING_STANDARD.duration} slideDistance={6}>
               <WeeklyCheckinCard
                 authToken={authToken}
@@ -3341,7 +3410,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </FadeInView>
           )}
 
-          {isProTier && authToken && (
+          {showWorkoutProgress && isProTier && authToken && (
             <FadeInView delay={80} duration={TIMING_STANDARD.duration} slideDistance={6}>
               <Zone2TargetCard
                 authToken={authToken}
@@ -3405,8 +3474,9 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             ))}
           </View>
         </ScrollView>
-      ) : tab === 'trends' ? (
+      ) : tab === 'trends' && showWorkoutProgress ? (
         <ScrollView contentContainerStyle={styles.content}>
+          {goalTrajectory && (
           <View testID="progress-goal-trajectory-card" style={styles.goalTrajectoryCard}>
             <View style={styles.goalTrajectoryHeader}>
               <View style={[styles.goalTrajectoryIcon, { backgroundColor: goalTrajectoryColor + '22' }]}>
@@ -3461,6 +3531,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <Text style={styles.goalTrajectoryLeverText} numberOfLines={2}>{goalTrajectory.lever}</Text>
             </View>
           </View>
+          )}
 
           {progressAnalytics.length > 0 && (
             <View style={styles.performanceGaugeCard}>
@@ -5034,7 +5105,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
           )}
 
-          {isProTier && isHealthKitAvailable() && (
+          {showWorkoutProgress && isProTier && isHealthKitAvailable() && (
             <FadeInView delay={100} duration={TIMING_STANDARD.duration} slideDistance={6}>
             <DetectedWorkoutsCard
               themeName={userProfile.themePreference}
@@ -5126,7 +5197,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     <Ionicons name="heart-outline" size={36} color={tc.primary} />
                     <Text {...dynamicTextProps} style={{ fontSize: 16, fontWeight: '700', color: tc.textPrimary, marginTop: 8 }}>Apple Health is optional</Text>
                     <Text {...dynamicTextProps} style={{ fontSize: 13, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6, marginBottom: 14 }}>
-                      Optional sync for sleep, heart rate, HRV, steps, workouts, weight, energy, VO2 max, respiratory rate, blood oxygen, standing hours, mindful minutes, and cycle-aware signals. Thallo can also write completed workout details back to Apple Health.
+                      Optional sync for sleep, heart rate, HRV, steps, {showWorkoutProgress ? 'workouts, ' : ''}weight, energy, VO2 max, respiratory rate, blood oxygen, standing hours, mindful minutes, and cycle-aware signals.{showWorkoutProgress ? ' Thallo can also write completed workout details back to Apple Health.' : ''}
                     </Text>
                     <TouchableOpacity
                       style={{ backgroundColor: tc.primary, borderRadius: radius.md, paddingVertical: 12, paddingHorizontal: 32 }}
@@ -5238,7 +5309,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               { label: 'Sleep/day', value: formatSleepHours(sleepAvg7), color: '#818CF8' },
               { label: 'Steps/day', value: stepsAvg7 != null ? Math.round(stepsAvg7).toLocaleString() : '—', color: tc.primary },
               { label: 'Latest HRV', value: hrvLatest != null ? `${Math.round(hrvLatest)} ms` : '—', color: '#14B8A6' },
-              { label: 'Zone 2 total', value: zone2Values.length > 0 ? `${Math.round(zone2Total)}m` : '—', color: '#F59E0B' },
+              ...(showWorkoutProgress ? [{ label: 'Zone 2 total', value: zone2Values.length > 0 ? `${Math.round(zone2Total)}m` : '—', color: '#F59E0B' }] : []),
             ];
             const scoreColor = (score: number | null | undefined) => {
               const v = Number(score);
@@ -5552,7 +5623,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {/* Combined Health Score — backward-looking, requires 14 days */}
-          {isProTier && (() => {
+          {isProTier && showWorkoutProgress && showMealProgress && (() => {
             const completedWorkouts = history.filter(s => s.completed);
             const allDates = new Set(completedWorkouts.map(s => s.date?.slice(0, 10)).filter(Boolean));
             const daysOfData = allDates.size;
@@ -5637,11 +5708,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             );
           })()}
 
-          {isProTier && authToken && (
+          {isProTier && authToken && showWorkoutProgress && showMealProgress && (
             <AdherenceTrendCard authToken={authToken} themeName={themeName} />
           )}
 
-          {(() => {
+          {showMealProgress && (() => {
             const trends = mealInsightPatterns?.adherence_trends;
             const recent = trends?.recent;
             if (!trends || !recent) return null;
@@ -5704,7 +5775,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           })()}
 
           {/* Nutrition & Gut Facts — 14-day logged-food window (facts only, no scores). */}
-          {isProTier && (gutHealthWindow || mealAverages) && (
+          {showMealProgress && isProTier && (gutHealthWindow || mealAverages) && (
             <View testID="nutrition-gut-facts-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
               <TouchableOpacity
                 testID="nutrition-gut-facts-toggle"
@@ -6107,12 +6178,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         <ScrollView contentContainerStyle={styles.content}>
           {/* Per-muscle recovery (moved from Health tab) — shows fatigue across
               all 12 muscle groups with the full expanded bars. */}
-          {isProTier && muscleFatigue && (
+          {showWorkoutProgress && isProTier && muscleFatigue && (
             <RecoveryCard data={muscleFatigue as any} themeName={themeName} defaultExpanded />
           )}
 
           {/* Muscle Balance — volume distribution across muscle groups (14d) */}
-          {isProTier && muscleBalance && muscleBalance.total_sets > 0 && (() => {
+          {showWorkoutProgress && isProTier && muscleBalance && muscleBalance.total_sets > 0 && (() => {
             const entries = Object.entries(muscleBalance.muscles);
             const maxSets = entries.length ? Math.max(...entries.map(([, v]) => v.sets)) : 1;
             const BALANCE_MUSCLES = new Set(['chest', 'back', 'shoulders', 'biceps', 'triceps', 'quads', 'hamstrings', 'glutes']);

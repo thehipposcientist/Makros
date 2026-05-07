@@ -550,6 +550,26 @@ def test_remaining_nutrition_skip_reason_preserves_day_state_overrides():
     ) == "macro_override"
 
 
+def test_backfill_missing_nutrition_only_repairs_empty_plan_days():
+    today = date.today()
+    pw, days = _build_week(today)
+    days[0].nutrition_json = None
+    days[1].nutrition_json = {"meals": []}
+    days[2].nutrition_json = {"meals": [{"meal": "Existing"}]}
+
+    with _patch_get_week_days(days):
+        updated = week_manager.backfill_missing_week_nutrition(
+            FakeSession(),
+            pw,
+            _nutrition_templates(),
+        )
+
+    assert [d.day_index for d in updated] == [0, 1]
+    assert days[0].nutrition_json["meals"][0]["meal"] == "template-0"
+    assert days[1].nutrition_json["meals"][0]["meal"] == "template-1"
+    assert days[2].nutrition_json["meals"][0]["meal"] == "Existing"
+
+
 # ─── Section 3c: Immediate injury repair ─────────────────────────────────────
 
 

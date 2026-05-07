@@ -1689,11 +1689,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           if (info.reachable) {
             const now = Date.now();
             if (now - lastActiveWatchReachabilityPushAtRef.current < WATCH_FULL_SYNC_COOLDOWN_MS) {
-              console.log('[watch] reachable active push skipped — recently synced');
               return;
             }
             lastActiveWatchReachabilityPushAtRef.current = now;
-            console.log('[watch] reachable — re-pushing active workout');
             pushActive();
           }
         });
@@ -1755,7 +1753,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     if (!commandId) return true;
     const seen = processedWatchCommandIdsRef.current;
     if (seen.has(commandId)) {
-      console.log(`[watch] ignored duplicate command ${commandId.slice(0, 18)}`);
       return false;
     }
     seen.add(commandId);
@@ -1796,12 +1793,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             ? payload.sessionId.trim()
             : null;
           if (incomingSessionId && incomingSessionId !== watchSessionId.current) {
-            console.log(`[watch] ignored stale ${command} for session=${incomingSessionId.slice(0, 8)} current=${watchSessionId.current.slice(0, 8)}`);
             return false;
           }
           const tsMs = Number(payload?.tsMs);
           if (Number.isFinite(tsMs) && tsMs + WATCH_COMMAND_START_GRACE_MS < startTime.current) {
-            console.log(`[watch] ignored stale ${command}; command was before current phone workout start`);
             return false;
           }
           return true;
@@ -1811,7 +1806,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             const forcePull = payload?.force === true;
             const now = Date.now();
             if (!forcePull && now - lastActiveWatchReachabilityPushAtRef.current < WATCH_FULL_SYNC_COOLDOWN_MS) {
-              console.log('[watch] pull_state active push skipped — recently synced');
               return;
             }
             lastActiveWatchReachabilityPushAtRef.current = now;

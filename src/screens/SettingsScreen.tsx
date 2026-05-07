@@ -26,6 +26,7 @@ import type { WeightUnit, DistanceUnit } from '../utils/units';
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import { SUPPORT_EMAIL } from '../constants/legal';
 import { HEALTH_PLATFORM_LABEL, HEALTH_PLATFORM_PRIVACY_COPY } from '../constants/platformHealth';
+import { shouldShowMeals, shouldShowWorkouts } from '../utils/hiddenSurfaces';
 
 interface Props {
   visible: boolean;
@@ -124,6 +125,8 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
 
   const weightUnit: WeightUnit = profile.weightUnit ?? 'lbs';
   const distanceUnit: DistanceUnit = profile.distanceUnit ?? 'mi';
+  const showWorkouts = shouldShowWorkouts(profile);
+  const showMeals = shouldShowMeals(profile);
   const currentTheme = resolveThemeName(profile.themePreference ?? themeName);
   const collapsedThemeKeys: AppThemeName[] = [];
   for (const key of [currentTheme, ...THEME_PICKER_ORDER]) {
@@ -337,6 +340,51 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
                 </TouchableOpacity>
               );
             })}
+          </View>
+        </View>
+
+        {/* ── App Surfaces ─────────────────────────────────────────── */}
+        <Text style={[styles.sectionLabel, { color: tc.textMuted }]}>APP SURFACES</Text>
+        <View style={[styles.card, { backgroundColor: tc.surface, borderColor: tc.border }]}>
+          <View style={styles.row}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Workouts tab</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Show training navigation, watch workout sync, reminders, and workout progress.
+              </Text>
+            </View>
+            <Switch
+              testID="settings-show-workouts-toggle"
+              value={showWorkouts}
+              onValueChange={(v) => onProfileUpdate({
+                hiddenSurfaces: {
+                  ...(profile.hiddenSurfaces ?? {}),
+                  workouts: !v,
+                },
+              } as Partial<UserProfile>, true)}
+              disabled={loading}
+              trackColor={{ false: tc.border, true: tc.primary }}
+            />
+          </View>
+          <View style={[styles.row, { borderTopColor: tc.border, borderTopWidth: 1, paddingTop: 14, marginTop: 6 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Meals tab</Text>
+              <Text style={[styles.rowSub, { color: tc.textMuted }]}>
+                Show food navigation, watch meal sync, reminders, and nutrition progress.
+              </Text>
+            </View>
+            <Switch
+              testID="settings-show-meals-toggle"
+              value={showMeals}
+              onValueChange={(v) => onProfileUpdate({
+                hiddenSurfaces: {
+                  ...(profile.hiddenSurfaces ?? {}),
+                  meals: !v,
+                },
+              } as Partial<UserProfile>, true)}
+              disabled={loading}
+              trackColor={{ false: tc.border, true: tc.primary }}
+            />
           </View>
         </View>
 

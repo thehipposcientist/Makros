@@ -37,6 +37,7 @@ import SocialAvatar from '../components/SocialAvatar';
 const { width: SCREEN_W } = Dimensions.get('window');
 const WATCH_WORKOUT_COMMAND_TTL_MS = 4 * 60 * 60_000;
 const WATCH_FULL_SYNC_COOLDOWN_MS = 5_000;
+const WATCH_ACTIVE_HANDOFF_GRACE_MS = 60_000;
 type WatchSyncUiSnapshot = {
   surface: string;
   ok: boolean;
@@ -46,6 +47,70 @@ type WatchSyncUiSnapshot = {
   available?: boolean;
   detail?: string;
 };
+
+type WatchWorkoutActivityState = {
+  isActive: boolean;
+  sessionId: string | null;
+};
+
+function countLoggedWorkoutSets(rawSets: string | null | undefined): number {
+  if (!rawSets) return 0;
+  try {
+    const parsed = JSON.parse(rawSets);
+    if (!Array.isArray(parsed)) return 0;
+    return parsed.reduce((total: number, entry: any) => {
+      const sets = Array.isArray(entry?.sets) ? entry.sets.length : 0;
+      return total + sets;
+    }, 0);
+  } catch {
+    return 0;
+  }
+}
+
+async function readWatchWorkoutActivityState(): Promise<WatchWorkoutActivityState> {
+  let values: Record<string, string | null> = {};
+  try {
+    const pairs = await AsyncStorage.multiGet([
+      'activeWorkoutStartTime',
+      'activeWatchSessionId',
+      'activeWorkoutSession',
+      'activeWorkoutSets',
+    ]);
+    values = Object.fromEntries(pairs);
+  } catch {
+    return { isActive: false, sessionId: null };
+  }
+
+  const startedAt = parseInt(values.activeWorkoutStartTime ?? '', 10);
+  if (!Number.isFinite(startedAt) || startedAt <= 0) {
+    return { isActive: false, sessionId: null };
+  }
+
+  const ageMs = Date.now() - startedAt;
+  if (ageMs >= 4 * 3600_000) {
+    await AsyncStorage.multiRemove([
+      'activeWorkoutStartTime',
+      'activeWorkoutRest',
+      'activeWatchSessionId',
+    ]).catch(() => {});
+    return { isActive: false, sessionId: null };
+  }
+
+  const hasPersistedWorkout = !!values.activeWorkoutSession?.trim();
+  const loggedSets = countLoggedWorkoutSets(values.activeWorkoutSets);
+  const inHandoffWindow = ageMs < WATCH_ACTIVE_HANDOFF_GRACE_MS;
+  if (!hasPersistedWorkout && loggedSets <= 0 && !inHandoffWindow) {
+    await AsyncStorage.multiRemove([
+      'activeWorkoutStartTime',
+      'activeWorkoutRest',
+      'activeWatchSessionId',
+    ]).catch(() => {});
+    return { isActive: false, sessionId: null };
+  }
+
+  const sessionId = values.activeWatchSessionId?.trim() || null;
+  return { isActive: true, sessionId };
+}
 
 function calorieAdjustmentLine(target: import('../services/api').AdjustedDailyTarget): string {
   const base = Math.round(target.base_daily_target);
@@ -174,6 +239,7 @@ import {
 } from '../utils/injuryCheckins';
 import { formatDistance, formatWeight, resolveDistanceUnit, resolveWeightUnit } from '../utils/units';
 import { estimateWorkoutMinutes } from '../utils/workoutDurationEstimate';
+import { fallbackHomeTab, isHomeTabVisible, shouldShowMeals, shouldShowWorkouts, type HomeTabKey } from '../utils/hiddenSurfaces';
 
 interface HomeScreenProps {
   authToken: string;
@@ -1685,6 +1751,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
 	  const plannerPalette = theme.sections.planner;
 	  const weightUnit = resolveWeightUnit(userProfile);
 	  const distanceUnit = resolveDistanceUnit(userProfile);
+  const showWorkoutsSurface = shouldShowWorkouts(userProfile);
+  const showMealsSurface = shouldShowMeals(userProfile);
   const onUpdateWeightRef = useRef(onUpdateWeight);
   useEffect(() => {
     onUpdateWeightRef.current = onUpdateWeight;
@@ -1716,13 +1784,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   // Bottom-tab navigation. All five tabs render inline content within
   // HomeScreen's body — true SPA behavior. The bottom nav stays pinned
   // and never disappears no matter which tab is active.
-  const [activeTab, setActiveTabRaw]      = useState<'friends' | 'workout' | 'meals' | 'progress' | 'you'>('workout');
+  const [activeTab, setActiveTabRaw]      = useState<HomeTabKey>('workout');
   const [watchSyncStatus, setWatchSyncStatus] = useState<WatchSyncUiSnapshot | null>(null);
   const lastHomeFullWatchSyncAtRef = useRef(0);
   const claimHomeFullWatchSync = useCallback((reason: string, force = false) => {
+    void reason;
     const now = Date.now();
     if (!force && now - lastHomeFullWatchSyncAtRef.current < WATCH_FULL_SYNC_COOLDOWN_MS) {
-      console.log(`[watch] ${reason} full sync skipped — recently synced`);
       return false;
     }
     lastHomeFullWatchSyncAtRef.current = now;
@@ -1731,10 +1799,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [progressTabMounted, setProgressTabMounted] = useState(false);
   const progressFade = useRef(new Animated.Value(0)).current;
   const bottomNavFloat = useRef(new Animated.Value(1)).current;
-  const setActiveTab = useCallback((tab: typeof activeTab) => {
+  const setActiveTab = useCallback((tab: HomeTabKey) => {
+    const targetTab = isHomeTabVisible(tab, userProfile) ? tab : fallbackHomeTab(userProfile);
     onHomeTabNavigate?.();
-    if (tab === activeTab) return;
-    if (tab === 'progress') setProgressTabMounted(true);
+    if (targetTab === activeTab) return;
+    if (targetTab === 'progress') setProgressTabMounted(true);
     bottomNavFloat.setValue(0);
     Animated.spring(bottomNavFloat, {
       toValue: 1,
@@ -1742,13 +1811,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       tension: 150,
       useNativeDriver: true,
     }).start();
-    setActiveTabRaw(tab);
-    if (tab === 'progress') {
+    setActiveTabRaw(targetTab);
+    if (targetTab === 'progress') {
       progressFade.setValue(0);
       Animated.timing(progressFade, { toValue: 1, duration: 300, useNativeDriver: true }).start();
     }
-    AsyncStorage.setItem('lastActiveTab', tab).catch(() => {});
-  }, [activeTab, bottomNavFloat, onHomeTabNavigate, progressFade]);
+    AsyncStorage.setItem('lastActiveTab', targetTab).catch(() => {});
+  }, [activeTab, bottomNavFloat, onHomeTabNavigate, progressFade, userProfile]);
+
+  useEffect(() => {
+    if (isHomeTabVisible(activeTab, userProfile)) return;
+    const nextTab = fallbackHomeTab(userProfile);
+    setActiveTabRaw(nextTab);
+    if (nextTab === 'progress') {
+      setProgressTabMounted(true);
+      progressFade.setValue(1);
+    }
+    AsyncStorage.setItem('lastActiveTab', nextTab).catch(() => {});
+  }, [activeTab, progressFade, userProfile]);
 
   useEffect(() => {
     if (Platform.OS !== 'ios') return;
@@ -2902,19 +2982,35 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       try {
         const { loadReminderSettings, scheduleWorkoutReminder } = await import('../utils/workoutReminders');
         const workoutSettings = await loadReminderSettings();
-        if (workoutSettings.enabled) await scheduleWorkoutReminder(workoutSettings);
+        if (workoutSettings.enabled && showWorkoutsSurface) await scheduleWorkoutReminder(workoutSettings);
+        if (!showWorkoutsSurface) {
+          const { cancelWorkoutReminders } = await import('../utils/workoutReminders');
+          await cancelWorkoutReminders();
+        }
       } catch {}
       try {
         const { loadMealReminderSettings, scheduleMealReminder } = await import('../utils/mealReminders');
         const settings = await loadMealReminderSettings();
-        if (settings.enabled) await scheduleMealReminder(settings);
+        if (settings.enabled && showMealsSurface) await scheduleMealReminder(settings);
+        if (!showMealsSurface) {
+          const { cancelMealReminder } = await import('../utils/mealReminders');
+          await cancelMealReminder();
+        }
+      } catch {}
+      try {
+        if (!showWorkoutsSurface || !showMealsSurface) {
+          const { clearWorkoutFromWatch, clearMealsFromWatch } = await import('../utils/watchSync');
+          if (!showWorkoutsSurface) await clearWorkoutFromWatch();
+          if (!showMealsSurface) await clearMealsFromWatch();
+        }
       } catch {}
     })();
-  }, []);
+  }, [showMealsSurface, showWorkoutsSurface]);
 
   useEffect(() => {
     if (unloggedPromptCheckedRef.current) return;
     if (!userProfile || !authToken) return;
+    if (!showMealsSurface) return;
     const yesterdayDate = new Date(Date.now() - 86400000);
     const yesterdayStr = `${yesterdayDate.getFullYear()}-${String(yesterdayDate.getMonth() + 1).padStart(2, '0')}-${String(yesterdayDate.getDate()).padStart(2, '0')}`;
     const plan = nutritionPlansByDate[yesterdayStr];
@@ -2964,7 +3060,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       })();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userProfile, authToken, nutritionPlansByDate, checkedMealsByDate]);
+  }, [userProfile, authToken, nutritionPlansByDate, checkedMealsByDate, showMealsSurface]);
 
   // Clear fresh-day flag only when workout-specific settings actually change
   // (not on initial mount). Uses a ref to track previous values.
@@ -3025,20 +3121,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         // re-push will keep overriding the watch's active state and
         // closing the watch app. Was the root cause of "tap Start →
         // app closes on watch even after a fresh build."
-        let isWorkoutInProgress = false;
-        try {
-          const startTimeRaw = await AsyncStorage.getItem('activeWorkoutStartTime');
-          if (startTimeRaw) {
-            const t = parseInt(startTimeRaw, 10);
-            // Only trust the flag if it's within the last 4 hours —
-            // beyond that it's stale (app force-close, etc).
-            if (Number.isFinite(t) && (Date.now() - t) < 4 * 3600_000) {
-              isWorkoutInProgress = true;
-            }
-          }
-        } catch { /* AsyncStorage flake — assume not in workout */ }
+        const watchWorkoutState = await readWatchWorkoutActivityState();
+        const activeWorkoutOwnedByScreen = watchWorkoutState.isActive && hasActiveWatchCommandConsumer();
         const status: 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest' =
-          isWorkoutInProgress ? 'active'
+          watchWorkoutState.isActive ? 'active'
           : todayDone ? 'completed'
           : skippedDates.has(todayKey()) ? 'skipped'
           : todayItem?.isRest ? 'rest'
@@ -3086,11 +3172,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }
           } catch { /* keep the last displayed readiness score */ }
         }
-        if (status !== 'active') {
+        if (showWorkoutsSurface && !activeWorkoutOwnedByScreen) {
           await pushWorkoutToWatch(todayWorkout, {
             dateISO: todayISO,
             status,
-            sessionId: null,
+            sessionId: status === 'active' ? watchWorkoutState.sessionId : null,
             readiness: unifiedPrepScore,
             readinessLabel: unifiedPrepLabel,
             reason: 'home_snapshot',
@@ -3099,12 +3185,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         await pushThemeToWatch(userProfile?.themePreference);
         const todayPlan = nutritionPlansByDate[todayISO]
           ?? (Object.values(nutritionPlansByDate)[0] as any);
-        await pushMealsToWatch(
-          todayPlan,
-          checkedMealsByDate[todayISO],
-          todayISO,
-          nutritionScoreData?.score ?? null,
-        );
+        if (showMealsSurface) {
+          await pushMealsToWatch(
+            todayPlan,
+            checkedMealsByDate[todayISO],
+            todayISO,
+            nutritionScoreData?.score ?? null,
+          );
+        }
         await pushHydrationSnapshotToWatch(todayISO).catch(() => {});
         // Today's supplement stack — mirrored so the Supps tab on the
         // watch renders instantly. Commands from the watch round-trip
@@ -3201,6 +3289,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     planWeek, workoutPlan, userProfile?.themePreference, todayDone, skippedDates,
     nutritionPlansByDate, checkedMealsByDate,
     hydration, hydrationByDate, readinessScore, nutritionScoreData,
+    showMealsSurface, showWorkoutsSurface,
     pushHydrationSnapshotToWatch,
   ]);
 
@@ -3229,58 +3318,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     workoutPlan: null as any,
     planWeek: null as import('../services/api').PlanWeekResponse | null,
     profileAge: null as number | null,
+    showWorkoutsSurface: true,
+    showMealsSurface: true,
   });
-  // WCSession diagnostic firehose. Mirrors every delegate callback
-  // from the phone bridge into console.log with a `[wc-diag]` prefix
-  // — activation completion, reachability flips, every didReceiveMessage
-  // / didReceiveUserInfo arrival. Visible via Console.app (Mac) with
-  // the iPhone tethered, filter by "ThalloWatch" or "wc-diag".
-  // Tells us whether (a) phone bridge never activates, (b) reachability
-  // never flips true, (c) messages arrive but malformed, or (d)
-  // nothing arrives at all (= watch isn't sending or iOS isn't routing).
-  useEffect(() => {
-    // eslint-disable-next-line no-console
-    console.log('[wc-diag] effect mounted — about to import watchSync');
-    const token = { cancelled: false, unsub: null as (() => void) | null };
-    (async () => {
-      try {
-        const watchSyncMod = await import('../utils/watchSync');
-        const { onWatchSessionDiag, WatchBridge } = watchSyncMod as any;
-        // eslint-disable-next-line no-console
-        console.log('[wc-diag] watchSync imported — bridge available?',
-          !!WatchBridge?.isAvailable?.(),
-          'paired=', !!WatchBridge?.isPaired?.(),
-          'reachable=', !!WatchBridge?.isReachable?.(),
-        );
-        const unsub = onWatchSessionDiag((entry: Record<string, any>) => {
-          // Map activationState int → human label so logs are scannable.
-          // 0=notActivated, 1=inactive, 2=activated.
-          const stateLabel =
-            entry.activationState === 2 ? 'activated' :
-            entry.activationState === 1 ? 'inactive' :
-            entry.activationState === 0 ? 'notActivated' :
-            String(entry.activationState ?? '?');
-          // eslint-disable-next-line no-console
-          console.log(
-            `[wc-diag] ${entry.event} state=${stateLabel} reachable=${!!entry.reachable} paired=${!!entry.paired} installed=${!!entry.installed}`,
-            entry,
-          );
-        });
-        // eslint-disable-next-line no-console
-        console.log('[wc-diag] listener subscribed — waiting for events');
-        if (token.cancelled) { try { unsub(); } catch {} }
-        else { token.unsub = unsub; }
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.log('[wc-diag] subscribe failed:', String(err));
-      }
-    })();
-    return () => {
-      token.cancelled = true;
-      if (token.unsub) { try { token.unsub(); } catch {} }
-    };
-  }, []);
-
   useEffect(() => {
     // Ref-based teardown: cleanup may run BEFORE the async import below
     // resolves. Using a plain `let unsubscribe` left it null at cleanup
@@ -3326,28 +3366,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           // Concurrent fire-and-forget causes all three to read the
           // same stale context and only the last writer's keys survive.
           (async () => {
-            let isWorkoutInProgress = false;
-            try {
-              const startTimeRaw = await AsyncStorage.getItem('activeWorkoutStartTime');
-              if (startTimeRaw) {
-                const t = parseInt(startTimeRaw, 10);
-                if (Number.isFinite(t) && (Date.now() - t) < 4 * 3600_000) {
-                  isWorkoutInProgress = true;
-                }
-              }
-            } catch { /* AsyncStorage flake — assume not in workout */ }
+            const watchWorkoutState = await readWatchWorkoutActivityState();
+            const activeWorkoutOwnedByScreen = watchWorkoutState.isActive && hasActiveWatchCommandConsumer();
             const status: 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest' =
-              isWorkoutInProgress ? 'active'
+              watchWorkoutState.isActive ? 'active'
               : s.todayDone ? 'completed'
               : s.skippedDates.has(todayKey()) ? 'skipped'
               : todayItem?.isRest ? 'rest'
               : 'scheduled';
-            console.log('[watch] reachable — re-pushing full home snapshot', { status });
-            if (status !== 'active') {
+            if (s.showWorkoutsSurface && !activeWorkoutOwnedByScreen) {
               await pushWorkoutToWatch(todayWorkout, {
                 dateISO: todayISO,
                 status,
-                sessionId: null,
+                sessionId: status === 'active' ? watchWorkoutState.sessionId : null,
                 readiness: s.readinessScore?.score ?? null,
                 readinessLabel: s.readinessScore?.label ?? null,
                 reason: 'reachability',
@@ -3356,12 +3387,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             await pushThemeToWatch(s.themePreference).catch(() => {});
             const todayPlan = s.nutritionPlansByDate[todayISO]
               ?? (Object.values(s.nutritionPlansByDate)[0] as any);
-            await pushMealsToWatch(
-              todayPlan,
-              s.checkedMealsByDate[todayISO],
-              todayISO,
-              s.nutritionScoreData?.score ?? null,
-            ).catch(() => {});
+            if (s.showMealsSurface) {
+              await pushMealsToWatch(
+                todayPlan,
+                s.checkedMealsByDate[todayISO],
+                todayISO,
+                s.nutritionScoreData?.score ?? null,
+              ).catch(() => {});
+            }
             let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
             if (!hydrationSnapshot && authToken) {
               hydrationSnapshot = await getHydration(authToken, todayISO).catch(() => null);
@@ -3602,7 +3635,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             // covers timer + log + HK write on finish.
             const subtype = String(payload?.subtype || 'run');
             const category = typeof payload?.category === 'string' ? payload.category : undefined;
-            console.log('[watch] start_custom_workout subtype=', subtype);
             setLiveTrackerInitialActivity({ category, subtype });
             setShowLiveTracker(true);
             return;
@@ -3615,7 +3647,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             // reachability listener uses. Bypasses stale
             // applicationContext so the watch UI is always current
             // the moment the user opens Thallo on their wrist.
-            console.log('[watch] pull_state requested — pushing snapshot');
             (async () => {
               try {
                 const watchSync = await import('../utils/watchSync');
@@ -3637,18 +3668,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 // active view — exactly the "tap Start → app closes on
                 // watch" symptom. The regular sync useEffect already
                 // does this check; the pull_state handler was missing it.
-                let isWorkoutInProgress = false;
-                try {
-                  const startTimeRaw = await AsyncStorage.getItem('activeWorkoutStartTime');
-                  if (startTimeRaw) {
-                    const t = parseInt(startTimeRaw, 10);
-                    if (Number.isFinite(t) && (Date.now() - t) < 4 * 3600_000) {
-                      isWorkoutInProgress = true;
-                    }
-                  }
-                } catch { /* AsyncStorage flake — assume not in workout */ }
+                const watchWorkoutState = await readWatchWorkoutActivityState();
+                const activeWorkoutOwnedByScreen = watchWorkoutState.isActive && hasActiveWatchCommandConsumer();
                 const status: 'scheduled' | 'active' | 'completed' | 'skipped' | 'rest' =
-                  isWorkoutInProgress ? 'active'
+                  watchWorkoutState.isActive ? 'active'
                   : s.todayDone ? 'completed'
                   : s.skippedDates.has(todayKey()) ? 'skipped'
                   : todayItem?.isRest ? 'rest'
@@ -3657,11 +3680,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 // before the next reads it. Concurrent fire-and-forget causes
                 // a race where all three read the same stale applicationContext
                 // and only the last writer's keys survive (dropping workout).
-                if (status !== 'active') {
+                if (s.showWorkoutsSurface && !activeWorkoutOwnedByScreen) {
                   await pushWorkoutToWatch(todayWorkout, {
                     dateISO: todayISO,
                     status,
-                    sessionId: null,
+                    sessionId: status === 'active' ? watchWorkoutState.sessionId : null,
                     readiness: s.readinessScore?.score ?? null,
                     readinessLabel: s.readinessScore?.label ?? null,
                     reason: 'pull_state',
@@ -3671,13 +3694,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 await pushThemeToWatch(s.themePreference, { force: forcePull }).catch(() => {});
                 const todayPlan = s.nutritionPlansByDate[todayISO]
                   ?? (Object.values(s.nutritionPlansByDate)[0] as any);
-                await pushMealsToWatch(
-                  todayPlan,
-                  s.checkedMealsByDate[todayISO],
-                  todayISO,
-                  s.nutritionScoreData?.score ?? null,
-                  { force: forcePull },
-                ).catch(() => {});
+                if (s.showMealsSurface) {
+                  await pushMealsToWatch(
+                    todayPlan,
+                    s.checkedMealsByDate[todayISO],
+                    todayISO,
+                    s.nutritionScoreData?.score ?? null,
+                    { force: forcePull },
+                  ).catch(() => {});
+                }
                 let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
                 if (!hydrationSnapshot && authToken) {
                   hydrationSnapshot = await getHydration(authToken, todayISO).catch(() => null);
@@ -3738,13 +3763,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             return;
           }
           if (command === 'start_workout') {
+            if (!rePushStateRef.current.showWorkoutsSurface) return;
             // Read from rePushStateRef (always current) instead of any
             // closure-captured value — the listener is registered once
             // and the ref carries the freshest schedule + plan.
             const refState = rePushStateRef.current;
             const todayScheduleItem = resolveTodayScheduleItem(refState.schedule, refState.workoutPlan, refState.planWeek);
             const today = todayScheduleItem?.workout ?? refState.workoutPlan?.days?.[0];
-            console.log('[watch cmd] start_workout — todayFocus=', today?.focus);
             if (today) {
               const nowMs = Date.now();
               const commandTsMs = Number(payload?.tsMs);
@@ -3785,19 +3810,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               console.warn('[watch cmd] start_workout: no today workout available');
             }
           } else if (command === 'skip_workout') {
+            if (!rePushStateRef.current.showWorkoutsSurface) return;
             const refState = rePushStateRef.current;
             const todayScheduleItemSkip = resolveTodayScheduleItem(refState.schedule, refState.workoutPlan, refState.planWeek);
             const today = todayScheduleItemSkip?.workout ?? refState.workoutPlan?.days?.[0];
             if (today) watchCmdHandlersRef.current.skip(today.focus);
-          } else if (command === 'watch_log') {
-            // Watch-side `wlog(...)` forwards Swift print lines so they
-            // land in the phone's console output, visible via Console.app
-            // on Mac (filter by ThalloWatch). Watch-side `print()` also
-            // hits Console directly when the watch is tethered, so this
-            // is mostly useful when the watch isn't physically reachable.
-            const msg = String(payload?.msg ?? '');
-            if (msg) console.log(msg);
           } else if (command === 'toggle_meal') {
+            if (!rePushStateRef.current.showMealsSurface) return;
             const mealType = String(payload?.mealType || '');
             const todayISO = todayKey();
             if (mealType) watchCmdHandlersRef.current.toggleMeal(todayISO, mealType);
@@ -3973,6 +3992,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               } catch { /* non-fatal */ }
             })();
           } else if (command === 'cancel_workout') {
+            if (!rePushStateRef.current.showWorkoutsSurface) return;
             (async () => {
               try {
                 const AsyncStorage = (await import('@react-native-async-storage/async-storage')).default;
@@ -4001,6 +4021,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               } catch { /* non-fatal */ }
             })();
           } else if (command === 'parse_meal_speech') {
+            if (!rePushStateRef.current.showMealsSurface) return;
             // Watch spoke a meal description — parse it with AI and push
             // the structured preview back to the watch for review.
             (async () => {
@@ -4015,6 +4036,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               } catch { /* non-fatal */ }
             })();
           } else if (command === 'confirm_meal_speech') {
+            if (!rePushStateRef.current.showMealsSurface) return;
             // User reviewed parsed items on watch and confirmed — log the
             // meal to the backend and re-push meals so the watch tally updates.
             (async () => {
@@ -4067,15 +4089,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const todayPlan = s.nutritionPlansByDate[todayISO]
                   ?? (Object.values(s.nutritionPlansByDate)[0] as any);
                 const { pushMealsToWatch } = await import('../utils/watchSync');
-                await pushMealsToWatch(
-                  todayPlan,
-                  s.checkedMealsByDate[todayISO],
-                  todayISO,
-                  s.nutritionScoreData?.score ?? null,
-                ).catch(() => {});
+                if (s.showMealsSurface) {
+                  await pushMealsToWatch(
+                    todayPlan,
+                    s.checkedMealsByDate[todayISO],
+                    todayISO,
+                    s.nutritionScoreData?.score ?? null,
+                  ).catch(() => {});
+                }
               } catch { /* non-fatal */ }
             })();
           } else if (isActiveWorkoutWatchCommand(command)) {
+            if (!rePushStateRef.current.showWorkoutsSurface) return;
             if (!hasActiveWatchCommandConsumer()) {
               if (command === 'log_set') {
                 const mirrorLogSet = async () => {
@@ -6745,6 +6770,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     workoutPlan,
     planWeek,
     profileAge: userProfile?.physicalStats?.age ?? null,
+    showWorkoutsSurface,
+    showMealsSurface,
   };
 
   const readinessAdjustmentRecommendation = useMemo(() => {
@@ -7150,7 +7177,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           visible regardless of what content (day cards, library, editor)
           is rendered underneath. Uses safe-area insets so it sits cleanly
           below the gradient header on any device. */}
-      {activeTab === 'workout' && !(isWorkoutUpdating && !isNutritionUpdating) && (
+      {showWorkoutsSurface && activeTab === 'workout' && !(isWorkoutUpdating && !isNutritionUpdating) && (
         <LinearGradient
           colors={[headerGradientColors[1], themeColors.background]}
           start={{ x: 0, y: 0 }}
@@ -7166,7 +7193,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
       )}
 
       {/* Fixed meals sub-tab bar — same pattern. */}
-      {activeTab === 'meals' && !(isNutritionUpdating && !isWorkoutUpdating) && (
+      {showMealsSurface && activeTab === 'meals' && !(isNutritionUpdating && !isWorkoutUpdating) && (
         <LinearGradient
           colors={[headerGradientColors[1], themeColors.background]}
           start={{ x: 0, y: 0 }}
@@ -7185,7 +7212,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           section-specific regens don't block the other tab.
           Only the workout/meals tabs render the existing ScrollView body;
           goals/progress/profile render their own inline pages below. */}
-      {(activeTab === 'workout' || activeTab === 'meals') && (
+      {((showWorkoutsSurface && activeTab === 'workout') || (showMealsSurface && activeTab === 'meals')) && (
       <ErrorBoundary>
       <ScrollView
         style={styles.scrollView}
@@ -7215,7 +7242,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 <View style={{ width: `${planProgress}%`, height: '100%', borderRadius: 2, backgroundColor: workoutPalette.strong }} />
               </View>
               <Text style={{ color: themeColors.textMuted, fontSize: 11, marginTop: 12, textAlign: 'center', paddingHorizontal: 30 }}>
-                Safe to switch apps or lock your screen. Tap the Meals tab to keep using the app.
+                {showMealsSurface
+                  ? 'Safe to switch apps or lock your screen. Tap the Meals tab to keep using the app.'
+                  : 'Safe to switch apps or lock your screen.'}
               </Text>
               {onCancelPlanGen && (
                 <TouchableOpacity
@@ -8823,7 +8852,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   </View>
                 );
               }
-              // Build a 14-day calendar strip (7 per row, oldest → newest).
+              // Build a 14-day calendar strip (7 per row, oldest -> newest).
               // Each cell is colored by that day's nutrition score.
               const calendarDays: Array<{ date: string; score: number | null }> = [];
               for (let i = 13; i >= 0; i--) {
@@ -9207,6 +9236,23 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   targets: { calories: 0, protein: 0, carbs: 0, fat: 0 },
                 } as any;
               }
+              const isToday = d.key === todayKey();
+              const isPast = d.date < new Date(new Date().setHours(0, 0, 0, 0));
+              const backendMealsForDay = backendMealSuggestionsByDate.get(d.key) ?? [];
+              const historyBackedMealPlan = isPast && backendMealsForDay.length > 0;
+              if (!plan && historyBackedMealPlan) {
+                plan = {
+                  meals: backendMealsForDay,
+                  removedMealIds: [],
+                  targets: { calories: 0, protein: 0, carbs: 0, fat: 0 },
+                } as any;
+              } else if (plan && historyBackedMealPlan) {
+                plan = {
+                  ...plan,
+                  meals: backendMealsForDay,
+                  removedMealIds: [],
+                };
+              }
               if (!plan) return (
                 <FadeInView key={d.key} delay={idx * 60}>
                   <View style={{ height: 60, justifyContent: 'center', alignItems: 'center' }}>
@@ -9218,8 +9264,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               // Date-based today check — with the dated PlanWeek, today is
               // no longer guaranteed to live at index 0 (e.g., Tue when the
               // week started Mon).
-              const isToday = d.key === todayKey();
-              const isPast = d.date < new Date(new Date().setHours(0, 0, 0, 0));
               // "Logged" past day: any meal checked on that date (or all checked).
               const dayChecks = checkedMealsByDate[d.key] ?? {};
               const checkedCount = Object.values(dayChecks).filter(Boolean).length;
@@ -9230,6 +9274,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const authoritativeNutritionScore = projectedNutritionScoreByDate.get(d.key);
               const removedSet = new Set(plan.removedMealIds ?? []);
               const meals = (plan.meals ?? []).filter((_, i) => !removedSet.has(`meal_${i}`));
+              const mealChecksForDisplay = historyBackedMealPlan
+                ? Object.fromEntries((plan.meals ?? []).map((_, i) => [`meal_${i}`, true]))
+                : (checkedMealsByDate[d.key] ?? {});
               // Single-pass macro totals — was 4 separate `.reduce` calls
               // per day. With 7 day cards × ~5 meals each, that's 28
               // unnecessary iterations per parent render. The for-of
@@ -9463,13 +9510,22 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         embedded
                         themeName={userProfile.themePreference}
                         nutritionPlan={planForDisplay}
-                        checkedMeals={checkedMealsByDate[d.key] ?? {}}
-                        onToggleMeal={(mealType) => handleToggleMeal(d.key, mealType)}
-                        onEditMeal={(mealType, meal) => setEditingMeal({ dateKey: d.key, type: mealType, meal })}
-                        onAddSnack={() => handleAddSnack(d.key)}
-                        onRemoveMeal={(mealType) => handleRemoveMeal(d.key, mealType)}
-                        onRestoreMeal={(mealType) => handleRestoreMeal(d.key, mealType)}
-                        onHardDeleteMeal={(mealType) => {
+                        checkedMeals={mealChecksForDisplay}
+                        onToggleMeal={historyBackedMealPlan ? undefined : ((mealType) => handleToggleMeal(d.key, mealType))}
+                        onEditMeal={(mealType, meal) => {
+                          if (historyBackedMealPlan) {
+                            const historyMealId = Number((meal as any)._loggedMealId || 0) || undefined;
+                            if (historyMealId) {
+                              setEditingMeal({ dateKey: d.key, type: `history_${historyMealId}`, meal, historyMealId });
+                            }
+                            return;
+                          }
+                          setEditingMeal({ dateKey: d.key, type: mealType, meal });
+                        }}
+                        onAddSnack={historyBackedMealPlan ? undefined : (() => handleAddSnack(d.key))}
+                        onRemoveMeal={historyBackedMealPlan ? undefined : ((mealType) => handleRemoveMeal(d.key, mealType))}
+                        onRestoreMeal={historyBackedMealPlan ? undefined : ((mealType) => handleRestoreMeal(d.key, mealType))}
+                        onHardDeleteMeal={historyBackedMealPlan ? undefined : ((mealType) => {
                           Alert.alert(
                             'Delete meal?',
                             'This removes the meal entirely. You won\'t be able to restore it.',
@@ -9478,13 +9534,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               { text: 'Delete', style: 'destructive', onPress: () => handleHardDeleteMeal(d.key, mealType) },
                             ],
                           );
-                        }}
-                        onToggleRoutine={(mealType) => handleToggleRoutine(d.key, mealType)}
-                        onShowRecipe={(mealType, meal) => setRecipeTarget({ dateKey: d.key, type: mealType, meal })}
-                        onMoveMeal={(mealType, direction) => handleMoveMeal(d.key, mealType, direction)}
-                        onShuffleMeal={(mealType, meal) => handleShuffleMeal(d.key, mealType, meal)}
+                        })}
+                        onToggleRoutine={historyBackedMealPlan ? undefined : ((mealType) => handleToggleRoutine(d.key, mealType))}
+                        onShowRecipe={historyBackedMealPlan ? undefined : ((mealType, meal) => setRecipeTarget({ dateKey: d.key, type: mealType, meal }))}
+                        onMoveMeal={historyBackedMealPlan ? undefined : ((mealType, direction) => handleMoveMeal(d.key, mealType, direction))}
+                        onShuffleMeal={historyBackedMealPlan ? undefined : ((mealType, meal) => handleShuffleMeal(d.key, mealType, meal))}
                         shufflingMealKey={shufflingInfo?.date === d.key ? shufflingInfo.mealKey : null}
-                        onRenameMeal={(mealType, newName) => handleRenameMeal(d.key, mealType, newName)}
+                        onRenameMeal={historyBackedMealPlan ? undefined : ((mealType, newName) => handleRenameMeal(d.key, mealType, newName))}
                         goal={userProfile.goal}
                         savedMealNames={savedMealNames}
                         onAddFromSaved={() => setAddFromSavedFor(d.key)}
@@ -9934,6 +9990,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               themeName={userProfile.themePreference}
               noHeader
               isActive={activeTab === 'progress'}
+              showWorkoutProgress={showWorkoutsSurface}
+              showMealProgress={showMealsSurface}
               nutritionPlan={nutritionPlansByDate[todayKey()] ?? null}
               nutritionLogRefreshKey={mealLogRefreshKey + activityNutritionRefreshKey}
               planWeekWindow={planWeek ? { startDate: planWeek.start_date, endDate: planWeek.end_date } : null}
@@ -12983,24 +13041,28 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             onPress={() => setActiveTab('friends')}
             badge={Math.max(pendingFriendCount, socialUnreadCount) > 0 ? Math.max(pendingFriendCount, socialUnreadCount) : undefined}
           />
-          <BottomTabButton
-            testID="bottom-tab-workouts"
-            label="Workouts"
-            iconName="barbell-outline"
-            active={activeTab === 'workout'}
-            tint={workoutPalette.strong}
-            mutedColor={navMutedColor}
-            onPress={() => setActiveTab('workout')}
-          />
-          <BottomTabButton
-            testID="bottom-tab-meals"
-            label="Meals"
-            iconName="nutrition-outline"
-            active={activeTab === 'meals'}
-            tint={mealPalette.strong}
-            mutedColor={navMutedColor}
-            onPress={() => setActiveTab('meals')}
-          />
+          {showWorkoutsSurface && (
+            <BottomTabButton
+              testID="bottom-tab-workouts"
+              label="Workouts"
+              iconName="barbell-outline"
+              active={activeTab === 'workout'}
+              tint={workoutPalette.strong}
+              mutedColor={navMutedColor}
+              onPress={() => setActiveTab('workout')}
+            />
+          )}
+          {showMealsSurface && (
+            <BottomTabButton
+              testID="bottom-tab-meals"
+              label="Meals"
+              iconName="nutrition-outline"
+              active={activeTab === 'meals'}
+              tint={mealPalette.strong}
+              mutedColor={navMutedColor}
+              onPress={() => setActiveTab('meals')}
+            />
+          )}
           <BottomTabButton
             testID="bottom-tab-progress"
             label="Progress"

@@ -514,18 +514,8 @@ function canPush(): boolean {
 }
 
 function wsLog(fn: string, extra?: Record<string, any>): void {
-  // Wraps console.log so we can grep Metro logs for every watch
-  // push. Kept deliberately chatty during sync debugging — trim
-  // once the flow is stable. `installed` matters because pushes can
-  // succeed when the watch app isn't currently reachable (queued
-  // applicationContext) but only if the app is actually installed
-  // on a paired watch — paired+installed+!reachable means "watch app
-  // backgrounded, will absorb on next launch."
-  // eslint-disable-next-line no-console
-  console.log(
-    `[watchSync] ${fn} reachable=${WatchBridge.isReachable()} paired=${WatchBridge.isPaired()}`,
-    extra ?? '',
-  );
+  void fn;
+  void extra;
 }
 
 /** Push today's workout with its current lifecycle status. */
@@ -557,6 +547,8 @@ export async function pushWorkoutToWatch(
   const envelope = buildWatchWorkoutEnvelope(payload, { reason: opts.reason, userId });
   const force = !!opts.force
     || envelope.reason === 'start_echo'
+    || envelope.reason === 'reachability'
+    || envelope.reason === 'pull_state'
     || envelope.reason === 'complete'
     || envelope.reason === 'skip'
     || envelope.reason === 'clear';
@@ -565,13 +557,8 @@ export async function pushWorkoutToWatch(
     await recordWatchSyncUnchanged('workout');
     return true;
   }
-  // Surface payload shape + size so we can spot the case where the
-  // merged WCSession applicationContext gets too large to enqueue
-  // (256KB hard cap). When updateApplicationContext throws on iOS, the
-  // bridge falls back to sendMessage which only delivers when the
-  // watch is reachable — explaining "everything else syncs but workout
-  // doesn't" if a single oversized exercise list pushes the merged
-  // dict past the limit.
+  // Keep payload size in the sync status detail so failures can still
+  // be inspected without noisy watch console logs.
   let payloadBytes = 0;
   try { payloadBytes = JSON.stringify(envelope).length; } catch {}
   wsLog('pushWorkoutToWatch', {
@@ -821,6 +808,50 @@ export async function pushWeightToWatch(opts: {
   return ok;
 }
 
+export async function clearWorkoutFromWatch(): Promise<boolean> {
+  if (!canPush()) return false;
+  const now = Date.now();
+  const userId = await stampBridgeUserId();
+  const clearWorkout = {
+    focus: 'Rest',
+    durationMinutes: 0,
+    dateISO: localDateISO(),
+    status: 'rest',
+    sessionId: null,
+    readiness: null,
+    readinessLabel: null,
+    exercises: [],
+    userId,
+    syncedAtMs: now,
+    clearWorkoutMs: now,
+  } as WatchWorkoutPayload & { clearWorkoutMs: number };
+  const ok = await WatchBridge.syncWorkout(buildWatchWorkoutEnvelope(clearWorkout, {
+    reason: 'clear',
+    sentAtMs: now,
+    userId,
+  })).catch(() => false);
+  if (ok) lastPayloadSignatures.delete('workout');
+  await recordWatchSync('workout', !!ok, 'clear/hidden');
+  return !!ok;
+}
+
+export async function clearMealsFromWatch(): Promise<boolean> {
+  if (!canPush()) return false;
+  const now = Date.now();
+  await stampBridgeUserId();
+  const ok = await WatchBridge.syncMeals({
+    dateISO: localDateISO(),
+    targets: { calories: 0, proteinG: 0, carbsG: 0, fatG: 0 },
+    actual:  { calories: 0, proteinG: 0, carbsG: 0, fatG: 0 },
+    score: null,
+    meals: [],
+    syncedAtMs: now,
+  }).catch(() => false);
+  if (ok) lastPayloadSignatures.delete('meals');
+  await recordWatchSync('meals', !!ok, 'clear/hidden');
+  return !!ok;
+}
+
 /** Wipe the watch's local store on sign-out / user-switch. Pushes
  *  empty payloads for workout / meals / hydration / supplements / theme and
  *  clears userId so the watch doesn't retain the previous user's
@@ -945,16 +976,4 @@ export function onWatchReachabilityChange(
  *  whether to show an "Open Thallo on your watch" nudge. */
 export function isWatchReachable(): boolean {
   return WatchBridge.isAvailable() && WatchBridge.isReachable();
-}
-
-/** Subscribe to verbose WCSession diagnostic events from the phone
- *  bridge. Fires for every delegate callback (activation, reachability,
- *  every receive path) with a snapshot of session state. The HomeScreen
- *  logger turns these into `[wc-diag] …` console lines visible in
- *  Console.app on Mac (filter by ThalloWatch / connectivityd). */
-export function onWatchSessionDiag(
-  cb: (entry: Record<string, any>) => void,
-): () => void {
-  if (!WatchBridge.isAvailable()) return () => {};
-  return WatchBridge.addSessionDiagListener(cb);
 }

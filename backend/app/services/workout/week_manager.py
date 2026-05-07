@@ -540,6 +540,63 @@ def refresh_remaining_week_nutrition(
     return updated, skipped
 
 
+def _has_projected_nutrition(payload: object) -> bool:
+    return (
+        isinstance(payload, dict)
+        and isinstance(payload.get("meals"), list)
+        and len(payload.get("meals") or []) > 0
+    )
+
+
+def backfill_missing_week_nutrition(
+    db: Session,
+    plan_week: PlanWeek,
+    nutrition_templates: list[dict],
+) -> list[PlanDay]:
+    """Fill PlanDay nutrition only where it is missing."""
+    if not nutrition_templates:
+        return []
+
+    days = get_week_days(db, plan_week.id)
+    updated: list[PlanDay] = []
+    now = datetime.now(timezone.utc)
+
+    for plan_day in days:
+        if _has_projected_nutrition(plan_day.nutrition_json):
+            continue
+        template = nutrition_templates[plan_day.day_index % len(nutrition_templates)]
+        if not _has_projected_nutrition(template):
+            continue
+        payload = _nutrition_payload_for_day(
+            template,
+            workout_payload=plan_day.workout_json,
+            goal=plan_week.goal,
+        )
+        if not _has_projected_nutrition(payload):
+            continue
+        plan_day.nutrition_json = payload
+        plan_day.updated_at = now
+        db.add(plan_day)
+        updated.append(plan_day)
+
+    if updated:
+        db.commit()
+        for plan_day in updated:
+            db.refresh(plan_day)
+    return updated
+
+
+def backfill_active_week_missing_nutrition(
+    db: Session,
+    user_id: int,
+    nutrition_templates: list[dict],
+) -> list[PlanDay]:
+    plan_week = get_active_week(db, user_id)
+    if not plan_week:
+        return []
+    return backfill_missing_week_nutrition(db, plan_week, nutrition_templates)
+
+
 def _normalized_focus(value: object) -> str:
     return " ".join(str(value or "").lower().replace("_", " ").split())
 

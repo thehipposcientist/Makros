@@ -341,20 +341,4 @@ export const WatchBridge = {
     };
   },
 
-  /** Verbose diagnostic firehose. Fires for every WCSession delegate
-   *  callback on the phone bridge — activation, reachability changes,
-   *  every receive path. Carries full session state (activationState,
-   *  paired, installed, reachable). Subscribers turn each entry into
-   *  a `[wc-diag]` console.log line, visible via Console.app on Mac
-   *  (filter "ThalloWatch" or "wc-diag"). */
-  addSessionDiagListener(
-    cb: (entry: Record<string, any>) => void,
-  ): () => void {
-    if (!native) return () => {};
-    const handler = (evt: Record<string, any>) => { cb(evt ?? {}); };
-    const sub = native.addListener('watchSessionDiag', handler);
-    return () => {
-      try { sub?.remove?.(); } catch { /* no-op */ }
-    };
-  },
 };

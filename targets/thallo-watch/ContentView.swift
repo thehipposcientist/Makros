@@ -322,7 +322,6 @@ private struct TodayView: View {
     // payload. The meals day carries a `score: Int?` populated by
     // the phone's /meals/score endpoint.
     @EnvironmentObject var conn: ConnectivityStore
-    @State private var syncRequestedAt: Date? = nil
 
     var body: some View {
         ScrollView {
@@ -379,80 +378,8 @@ private struct TodayView: View {
                 .foregroundColor(theme.textMuted)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 10)
-            // Manual force-sync button — sends pull_state to the phone
-            // so the user has an escape hatch when the auto-push didn't
-            // land (transient WC drop, phone was backgrounded, etc).
-            Button {
-                WKInterfaceDevice.current().play(.click)
-                syncRequestedAt = Date()
-                conn.requestPull(force: true)
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 10))
-                    Text(syncRequestedAt == nil ? "Sync from phone" : "Request sent")
-                        .font(.system(size: 11, weight: .heavy))
-                }
-                .foregroundColor(theme.background)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(theme.primary)
-                .cornerRadius(8)
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 6)
-            if syncRequestedAt != nil {
-                Text("Keep the iPhone app open for a few seconds.")
-                    .font(.system(size: 9))
-                    .foregroundColor(theme.textMuted)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 12)
-            }
-            // Recent sync diagnostics — surfaces context arrival, decode
-            // failures, and silent JSON-serialization failures right on
-            // the wrist so the user (and Sawyer) doesn't need Console.app
-            // to figure out why the workout panel is empty.
-            recentDiagStrip
         }
         .padding(.vertical, 20)
-    }
-
-    /// Small list of the last few HeartRateStore diag entries. Visible
-    /// only on the empty-state prompt so a working watch UI stays clean.
-    /// The "Last ctx:" line is pinned from a separate UserDefaults key so
-    /// rapid pull_state entries can never rotate it out of view.
-    private var recentDiagStrip: some View {
-        let entries = HeartRateStore.recentDiag(limit: 10)
-        let lastCtx = HeartRateStore.lastAbsorb()
-        return Group {
-            if !entries.isEmpty || lastCtx != nil {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Sync log (newest last)")
-                        .font(.system(size: 9, weight: .heavy))
-                        .tracking(0.8)
-                        .foregroundColor(theme.textMuted)
-                    if let ctx = lastCtx {
-                        Text(ctx)
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundColor(theme.warning)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                    }
-                    ForEach(Array(entries.enumerated()), id: \.offset) { _, line in
-                        Text(line)
-                            .font(.system(size: 9))
-                            .foregroundColor(theme.textMuted)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                    }
-                }
-                .padding(6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(theme.warning.opacity(0.08))
-                .cornerRadius(4)
-                .padding(.top, 6)
-            }
-        }
     }
 
     @ViewBuilder

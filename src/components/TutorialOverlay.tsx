@@ -28,7 +28,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
+import { APP_THEMES, THEME_PICKER_ORDER, getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import type { AppThemeName } from '../types';
 
 export type TutorialTier = 'free' | 'pro';
@@ -41,6 +41,7 @@ interface Props {
    *  AsyncStorage flag completed in BOTH cases — once the user has
    *  seen the tutorial we don't want to re-prompt. */
   onClose: (result: { completed: boolean }) => void;
+  onThemeChange?: (themeName: AppThemeName) => void | Promise<void>;
   /** Optional — fires when a free user taps the upsell CTA. Caller
    *  routes to the paywall / RevenueCat sheet. Tutorial closes
    *  itself first so the paywall has a clean stage. */
@@ -68,12 +69,13 @@ interface Step {
   /** When true, the Next button shows the upgrade copy on the LAST
    *  step for free users. Caller wires onUpgrade. */
   upsell?: boolean;
+  themePicker?: boolean;
 }
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 export default function TutorialOverlay({
-  visible, tier, themeName, onClose, onUpgrade,
+  visible, tier, themeName, onClose, onThemeChange, onUpgrade,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -165,7 +167,14 @@ export default function TutorialOverlay({
           onMomentumScrollEnd={handleScroll}
           style={styles.pager}>
           {steps.map((step, i) => (
-            <StepView key={i} step={step} tc={tc} styles={styles} />
+            <StepView
+              key={i}
+              step={step}
+              tc={tc}
+              currentThemeName={theme.name}
+              styles={styles}
+              onThemeChange={onThemeChange}
+            />
           ))}
         </ScrollView>
 
@@ -230,7 +239,15 @@ export default function TutorialOverlay({
 
 // ── Step view ─────────────────────────────────────────────────────
 
-function StepView({ step, tc, styles }: { step: Step; tc: any; styles: any }) {
+function StepView({
+  step, tc, currentThemeName, styles, onThemeChange,
+}: {
+  step: Step;
+  tc: any;
+  currentThemeName: AppThemeName;
+  styles: any;
+  onThemeChange?: (themeName: AppThemeName) => void | Promise<void>;
+}) {
   return (
     <View style={styles.stepFrame}>
       <ScrollView
@@ -253,6 +270,59 @@ function StepView({ step, tc, styles }: { step: Step; tc: any; styles: any }) {
             ))}
           </View>
         )}
+        {step.themePicker && (
+          <View style={styles.themeGrid}>
+            {THEME_PICKER_ORDER.map((themeName) => {
+              const option = APP_THEMES[themeName];
+              const selected = option.name === currentThemeName;
+              return (
+                <TouchableOpacity
+                  key={option.name}
+                  activeOpacity={0.82}
+                  accessibilityRole="button"
+                  accessibilityLabel={`tutorial-theme-${option.name}`}
+                  accessibilityState={{ selected }}
+                  style={[
+                    styles.themeOption,
+                    {
+                      backgroundColor: option.colors.surface,
+                      borderColor: selected ? option.colors.primary : option.colors.border,
+                    },
+                  ]}
+                  onPress={() => {
+                    if (selected) return;
+                    try { Haptics.selectionAsync(); } catch {}
+                    onThemeChange?.(option.name);
+                  }}>
+                  <View style={styles.themeOptionTop}>
+                    <Text
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.82}
+                      style={[styles.themeOptionName, { color: option.colors.textPrimary }]}>
+                      {option.label}
+                    </Text>
+                    {selected && (
+                      <View style={[styles.themeCheck, { backgroundColor: option.colors.primary }]}>
+                        <Ionicons
+                          name="checkmark"
+                          size={12}
+                          color={getContrastingTextColor(option.colors.primary)}
+                        />
+                      </View>
+                    )}
+                  </View>
+                  <View style={styles.themeSwatchRow}>
+                    <View style={[styles.themeSwatch, { backgroundColor: option.colors.background, borderColor: option.colors.border }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: option.colors.surfaceRaised, borderColor: option.colors.border }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: option.colors.primary, borderColor: option.colors.border }]} />
+                    <View style={[styles.themeSwatch, { backgroundColor: option.colors.accent, borderColor: option.colors.border }]} />
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        )}
       </ScrollView>
     </View>
   );
@@ -268,6 +338,12 @@ function StepView({ step, tc, styles }: { step: Step; tc: any; styles: any }) {
 function buildSteps(tier: TutorialTier, tc: any): Step[] {
   const healthLabel = Platform.OS === 'android' ? 'Health Connect' : 'Apple Health';
   const watchLabel = Platform.OS === 'android' ? 'wearables' : 'Watch';
+  const themeStep: Step = {
+    icon: 'color-palette-outline',
+    title: 'Choose your theme',
+    body: 'Pick the look you want before you start. You can change this later from Account and Settings.',
+    themePicker: true,
+  };
   const tabsStep: Step = {
     icon: 'apps-outline',
     title: 'Three tabs, all you need',
@@ -299,6 +375,7 @@ function buildSteps(tier: TutorialTier, tc: any): Step[] {
         title: 'Start with manual tracking',
         body: 'Free gives you the training and nutrition logbook: custom workouts, meal logging, hydration, weight, and basic progress without generated plans or AI calls.',
       },
+      themeStep,
       tabsStep,
       {
         icon: 'lock-closed-outline',
@@ -325,6 +402,7 @@ function buildSteps(tier: TutorialTier, tc: any): Step[] {
       title: 'Welcome to Thallo Pro',
       body: 'Your plan is ready and every AI coaching feature is unlocked. Here\'s a quick tour of what you have access to so nothing stays hidden.',
     },
+    themeStep,
     tabsStep,
     {
       icon: 'rocket-outline',
@@ -425,6 +503,48 @@ function createStyles(tc: any) {
     bulletText: {
       flex: 1, fontSize: 13, lineHeight: 18,
       color: tc.textPrimary, fontWeight: '600',
+    },
+    themeGrid: {
+      width: '100%',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 10,
+    },
+    themeOption: {
+      width: '48%',
+      minHeight: 86,
+      borderWidth: 1.5,
+      borderRadius: radius.sm,
+      padding: 10,
+      gap: 10,
+    },
+    themeOptionTop: {
+      minHeight: 20,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    themeOptionName: {
+      flex: 1,
+      fontSize: 12,
+      fontWeight: '800',
+    },
+    themeCheck: {
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    themeSwatchRow: {
+      flexDirection: 'row',
+      gap: 5,
+    },
+    themeSwatch: {
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      borderWidth: 1,
     },
     dotsRow: {
       flexDirection: 'row', justifyContent: 'center',

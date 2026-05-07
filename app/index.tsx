@@ -2307,6 +2307,18 @@ export default function Index() {
           visible={showTutorial}
           tier={tierOf(userProfile)}
           themeName={userProfile.themePreference}
+          onThemeChange={async (themePreference) => {
+            const updated = { ...userProfile, themePreference };
+            setUserProfile(updated);
+            await AsyncStorage.setItem('userProfile', JSON.stringify(updated)).catch(() => {});
+            if (authToken) {
+              syncOnboarding(authToken, updated).catch(() => null);
+            }
+            try {
+              const { pushThemeToWatch } = await import('../src/utils/watchSync');
+              await pushThemeToWatch(updated.themePreference);
+            } catch {}
+          }}
           onUpgrade={tierOf(userProfile) === 'pro' ? () => handleUpgradeToPro(userProfile) : undefined}
           onClose={async ({ completed }) => {
             setShowTutorial(false);

@@ -235,6 +235,12 @@ export interface UserProfile {
   focusedMuscleGroup?: string;   // @deprecated — replaced by priorityRegion
 
   themePreference?: AppThemeName;
+  /** Reversible app-surface visibility. Hidden surfaces keep their data
+   *  intact but are removed from primary navigation and related progress UI. */
+  hiddenSurfaces?: {
+    workouts?: boolean;
+    meals?: boolean;
+  };
   /** Display preference for body weight + lifting weight inputs. Storage
    *  is always lbs (canonical); formatters convert at the display layer. */
   weightUnit?: 'lbs' | 'kg';

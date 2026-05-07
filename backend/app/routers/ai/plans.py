@@ -518,6 +518,20 @@ def _persist_active_nutrition_plan(
             f"[nutrition-plan] persisted active plan for user={user_id} "
             f"version={PLANNER_VERSION} reason={reason} templates={len(plans_list or [])}"
         )
+        try:
+            from app.services.workout.week_manager import backfill_active_week_missing_nutrition
+            updated_days = backfill_active_week_missing_nutrition(db, user_id, plans_list or [])
+            if updated_days:
+                print(
+                    f"[nutrition-plan] backfilled PlanDay nutrition for user={user_id} "
+                    f"dates={[d.day_date.isoformat() for d in updated_days]}"
+                )
+        except Exception as backfill_exc:
+            print(f"[nutrition-plan] PlanDay nutrition backfill failed (non-fatal): {backfill_exc}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
     except Exception as exc:
         # Non-fatal — the plan still ships via the job queue's result_json.
         print(f"[nutrition-plan] persist FAILED (non-fatal): {exc}")

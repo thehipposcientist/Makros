@@ -184,6 +184,7 @@ export default function NutritionCard({
   const visibleMeals = allMeals.filter(m => !removed.has(m.key));
   const hiddenMeals  = allMeals.filter(m =>  removed.has(m.key));
   const allVisible = visibleMeals;
+  const hasSwipeActions = !!(onShowRecipe || onShuffleMeal || onMoveMeal || onRemoveMeal);
   const actual = {
     calories: Math.round(allVisible.reduce((sum, m) => sum + m.meal.calories, 0)),
     protein:  Math.round(allVisible.reduce((sum, m) => sum + m.meal.protein, 0)),
@@ -872,7 +873,7 @@ export default function NutritionCard({
             arranged with the up/down arrows. Routines are tagged with a
             📌 emoji but are otherwise rendered identically to other meals. */}
         <View style={[styles.meals, embedded && styles.mealsEmbedded]}>
-          {visibleMeals.length > 0 && !swipeHintDismissed && (
+          {visibleMeals.length > 0 && hasSwipeActions && !swipeHintDismissed && (
             <TouchableOpacity
               onPress={() => setSwipeHintDismissed(true)}
               activeOpacity={0.6}
@@ -1115,10 +1116,11 @@ function MealRow({ mealType, meal, checked, onToggle, onEdit, onRemove, onHardDe
           testID={`meal-check-${mealType}`}
           style={[styles.checkbox, checked && styles.checkboxDone]}
           onPress={() => onToggle?.(mealType)}
+          disabled={!onToggle}
           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
           accessibilityRole="checkbox"
           accessibilityLabel={`Mark ${meal.meal} as ${checked ? 'not done' : 'done'}`}
-          accessibilityState={{ checked }}>
+          accessibilityState={{ checked, disabled: !onToggle }}>
           {checked && (
             <Animated.View style={{ transform: [{ scale: checkScale }] }}>
               <Ionicons name="checkmark" size={14} color="#fff" />

@@ -27,13 +27,8 @@ public class ThalloWatchBridgeModule: Module {
         // current app state the moment the watch app becomes
         // available, so opening the watch app gets an immediate
         // refresh instead of having to wait for the next state
-        // change on the phone. `watchSessionDiag` is a verbose
-        // diagnostic firehose — every WCSession delegate callback
-        // (activation / reachability / receive paths) emits one entry
-        // with full session state. JS turns each event into a
-        // `[wc-diag]` console.log line, visible in Console.app with
-        // the iPhone tethered (filter "ThalloWatch" or "wc-diag").
-        Events("command", "reachabilityChanged", "watchSessionDiag")
+        // change on the phone.
+        Events("command", "reachabilityChanged")
 
         OnCreate {
             self.sessionHolder.activate { [weak self] name, body in
@@ -189,10 +184,6 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         self.dispatchEvent = sendEvent
         guard WCSession.isSupported() else {
             os_log("[wc-bridge] WCSession not supported on this device", log: wcLog, type: .error)
-            sendEvent("watchSessionDiag", [
-                "event": "activate.unsupported",
-                "ts": Date().timeIntervalSince1970 * 1000,
-            ])
             return
         }
         let s = WCSession.default
@@ -228,25 +219,9 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         return result
     }
 
-    /// Emit a verbose diagnostic line. Captures full WCSession state at
-    /// the moment of every delegate callback (activationState, paired,
-    /// installed, reachable). JS forwards each entry to console.log
-    /// with a `[wc-diag]` prefix — visible via Console.app on Mac.
     private func logDiag(_ event: String, _ extra: [String: Any] = [:]) {
-        guard WCSession.isSupported() else { return }
-        let s = WCSession.default
-        var payload: [String: Any] = [
-            "event": event,
-            "ts": Date().timeIntervalSince1970 * 1000,
-            "activationState": s.activationState.rawValue,
-            "paired": s.isPaired,
-            "installed": s.isWatchAppInstalled,
-            "reachable": s.isReachable,
-        ]
-        for (k, v) in extra { payload[k] = v }
-        DispatchQueue.main.async { [weak self] in
-            self?.dispatchEvent?("watchSessionDiag", payload)
-        }
+        _ = event
+        _ = extra
     }
 
     private func stampUserId(_ dict: inout [String: Any]) {
@@ -291,19 +266,19 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
     @discardableResult
     private func sendContextActivated(_ cleaned: [String: Any], session s: WCSession, realtimeKind: String? = nil) -> Bool {
         return withOutboundLock {
+            var merged = mergedApplicationContext(for: s)
+            for (k, v) in cleaned { merged[k] = v }
+            if let progress = cleaned["progress"] as? [String: Any] {
+                rememberLatestProgress(progress)
+            } else {
+                preserveLatestProgress(in: &merged)
+            }
+            if let uid = userId, !uid.isEmpty {
+                merged["userId"] = uid
+            } else {
+                merged.removeValue(forKey: "userId")
+            }
             do {
-                var merged = mergedApplicationContext(for: s)
-                for (k, v) in cleaned { merged[k] = v }
-                if let progress = cleaned["progress"] as? [String: Any] {
-                    rememberLatestProgress(progress)
-                } else {
-                    preserveLatestProgress(in: &merged)
-                }
-                if let uid = userId, !uid.isEmpty {
-                    merged["userId"] = uid
-                } else {
-                    merged.removeValue(forKey: "userId")
-                }
                 try s.updateApplicationContext(merged)
                 latestApplicationContext = merged
                 logDiag("sendContext.updated", [
@@ -320,6 +295,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
                 }
                 return true
             } catch {
+                latestApplicationContext = merged
                 os_log("[wc-bridge] updateApplicationContext failed: %{public}@", log: wcLog, type: .error, "\(error)")
                 logDiag("sendContext.failed", [
                     "keys": cleaned.keys.sorted().joined(separator: ","),
@@ -328,7 +304,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
                 var fallback = cleaned
                 stampUserId(&fallback)
                 if s.isReachable {
-                    _ = sendMessageActivated(fallback, session: s)
+                    _ = sendMessageActivated(realtimeMessage(for: cleaned, kind: realtimeKind), session: s)
                     return true
                 }
                 s.transferUserInfo(fallback)

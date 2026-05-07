@@ -665,10 +665,6 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     /// receives, kicks off its own workout state, then mirrors progress
     /// back via `progress` messages.
     func sendCommand(_ command: String, payload: [String: Any] = [:]) {
-        // CRITICAL: only `print()` in here, never `wlog()`. `wlog()`
-        // calls back into `sendCommand("watch_log", ...)` which would
-        // recurse forever. The unified-log entries are still visible
-        // in Console.app — just not forwarded to the phone.
         guard let session else {
             print("[watch] sendCommand(\(command)) FAILED — WCSession unavailable")
             HeartRateStore.saveDiag("→ \(command) FAIL: unavailable")
@@ -683,14 +679,10 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         if let userId = currentUserId, !userId.isEmpty {
             body["userId"] = userId
         }
-        if command != "watch_log" {
-            body["commandId"] = "\(command)-\(Int(tsMs))-\(UUID().uuidString)"
-        }
+        body["commandId"] = "\(command)-\(Int(tsMs))-\(UUID().uuidString)"
         guard session.activationState == .activated else {
-            if command != "watch_log" {
-                print("[watch] sendCommand(\(command)) — not activated, queueing")
-                HeartRateStore.saveDiag("→ \(command) queued: not activated")
-            }
+            print("[watch] sendCommand(\(command)) — not activated, queueing")
+            HeartRateStore.saveDiag("→ \(command) queued: not activated")
             queuedCommands.append(body)
             session.activate()
             return
@@ -710,15 +702,11 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
 
     private func sendCommandBody(_ body: [String: Any], command: String, session: WCSession) {
         if session.isReachable {
-            // Skip the chatty per-message log for forwarded `watch_log`
-            // commands so the unified log doesn't double-up every line.
-            if command != "watch_log" {
-                print("[watch] sendCommand(\(command)) — reachable, sendMessage")
-                HeartRateStore.saveDiag("→ \(command) reach=Y")
-            }
+            print("[watch] sendCommand(\(command)) — reachable, sendMessage")
+            HeartRateStore.saveDiag("→ \(command) reach=Y")
             session.sendMessage(body, replyHandler: nil) { [weak self] err in
                 print("[watch] sendMessage(\(command)) error: \(err.localizedDescription)")
-                if command != "watch_log" && command != "pull_state" {
+                if command != "pull_state" {
                     session.transferUserInfo(body)
                     HeartRateStore.saveDiag("→ \(command) fallback transfer")
                 }
@@ -735,10 +723,8 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
                 HeartRateStore.saveDiag("→ \(command) reach=N (dropped)")
                 return
             }
-            if command != "watch_log" {
-                print("[watch] sendCommand(\(command)) — NOT reachable, queuing via transferUserInfo")
-                HeartRateStore.saveDiag("→ \(command) reach=N (queued)")
-            }
+            print("[watch] sendCommand(\(command)) — NOT reachable, queuing via transferUserInfo")
+            HeartRateStore.saveDiag("→ \(command) reach=N (queued)")
             session.transferUserInfo(body)
         }
     }
@@ -749,14 +735,6 @@ extension Notification.Name {
     static let watchWorkoutLaunch = Notification.Name("thallo.watchWorkoutLaunch")
 }
 
-/// Watch-side logger. Prints to the unified log (visible in Mac
-/// Console.app) AND forwards the line to the paired iPhone via
-/// WCSession, where the phone re-emits it via console.log so it
-/// shows up in the same Console.app stream. Use this instead of
-/// plain `print()` for
-/// anything you want to inspect from a TestFlight install without
-/// tethering the watch to a Mac.
 func wlog(_ msg: String) {
     print(msg)
-    ConnectivityStore.shared.sendCommand("watch_log", payload: ["msg": msg])
 }

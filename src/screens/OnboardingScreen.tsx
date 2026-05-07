@@ -143,6 +143,8 @@ interface FoodPreset {
   items: string[];
 }
 
+const BASE_FOODS_PER_CATEGORY = 12;
+
 const FOOD_PRESETS: FoodPreset[] = [
   {
     id: 'high_protein',
@@ -355,16 +357,57 @@ type StrengthBaselineInput = Record<StrengthBaselineLiftKey, { weightLbs: string
 const STRENGTH_BASELINE_LIFTS: Array<{
   key: StrengthBaselineLiftKey;
   label: string;
+  help: string;
   exerciseSlug: string;
   name: string;
   weightPlaceholder: string;
   repsPlaceholder: string;
 }> = [
-  { key: 'bench_press', label: 'Bench', exerciseSlug: 'barbell_bench_press', name: 'Barbell Bench Press', weightPlaceholder: '135', repsPlaceholder: '8' },
-  { key: 'squat', label: 'Squat', exerciseSlug: 'barbell_squat', name: 'Barbell Squat', weightPlaceholder: '185', repsPlaceholder: '5' },
-  { key: 'deadlift', label: 'Deadlift', exerciseSlug: 'deadlift', name: 'Deadlift', weightPlaceholder: '225', repsPlaceholder: '5' },
-  { key: 'overhead_press', label: 'Press', exerciseSlug: 'overhead_press', name: 'Overhead Press', weightPlaceholder: '95', repsPlaceholder: '6' },
-  { key: 'pull_up', label: 'Pull-ups', exerciseSlug: 'pullups', name: 'Pull-ups', weightPlaceholder: '', repsPlaceholder: '8' },
+  {
+    key: 'bench_press',
+    label: 'Barbell Bench Press',
+    help: 'Flat bench, barbell only. Use a recent set you could repeat cleanly.',
+    exerciseSlug: 'barbell_bench_press',
+    name: 'Barbell Bench Press',
+    weightPlaceholder: '135',
+    repsPlaceholder: '8',
+  },
+  {
+    key: 'squat',
+    label: 'Barbell Squat',
+    help: 'Back squat with a barbell. Use your normal working-set depth and stance.',
+    exerciseSlug: 'barbell_squat',
+    name: 'Barbell Squat',
+    weightPlaceholder: '185',
+    repsPlaceholder: '5',
+  },
+  {
+    key: 'deadlift',
+    label: 'Deadlift',
+    help: 'Use a recent controlled pull from the floor or your usual deadlift setup.',
+    exerciseSlug: 'deadlift',
+    name: 'Deadlift',
+    weightPlaceholder: '225',
+    repsPlaceholder: '5',
+  },
+  {
+    key: 'overhead_press',
+    label: 'Military Press',
+    help: 'Strict standing barbell press. No push press or leg drive.',
+    exerciseSlug: 'overhead_press',
+    name: 'Overhead Press',
+    weightPlaceholder: '95',
+    repsPlaceholder: '6',
+  },
+  {
+    key: 'pull_up',
+    label: 'Pull-Ups',
+    help: 'Bodyweight reps from a full hang. Leave blank if you do not train these yet.',
+    exerciseSlug: 'pullups',
+    name: 'Pull-ups',
+    weightPlaceholder: '',
+    repsPlaceholder: '8',
+  },
 ];
 
 const CARDIO_BASELINE_MODES = ['Run', 'Bike', 'Row', 'Swim', 'Stairs', 'Hike'];
@@ -2062,9 +2105,15 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     <View style={styles.stepContainer}>
       <Text style={styles.stepTitle}>Starting Point</Text>
       <Text style={styles.stepDescription}>
-        Optional recent working sets and cardio markers help Thallo pick safer first-week targets.
+        Optional recent working sets and cardio markers help Thallo choose safer first-week targets.
       </Text>
-      <Text style={styles.optionalBanner}>Skip anything you do not know.</Text>
+      <View style={styles.baselineWhyBox}>
+        <Ionicons name="information-circle-outline" size={18} color={colors.primary} />
+        <Text style={styles.baselineWhyText}>
+          A recent working set tells us where to start your weights, how fast to progress, and when to stay conservative. Use normal training sets, not maxes.
+        </Text>
+      </View>
+      <Text style={styles.optionalBanner}>Skip any lift you do not know.</Text>
 
       <View style={styles.fieldGroup}>
         <Text style={styles.fieldLabel}>Training experience</Text>
@@ -2095,7 +2144,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       <View style={styles.fieldGroup}>
         <Text style={styles.sectionHeading}>Strength starting weights</Text>
         <Text style={[styles.hint, { marginTop: -4, marginBottom: 10 }]}>
-          Enter a recent comfortable set, not a one-rep max.
+          Enter the weight you actually used and the reps you completed with good form.
         </Text>
         <View style={{ gap: 10 }}>
           {STRENGTH_BASELINE_LIFTS.map(lift => {
@@ -2111,35 +2160,42 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
                   borderRadius: radius.md,
                   padding: 12,
                 }}>
-                <Text style={{ fontSize: 13, fontWeight: '800', color: colors.textPrimary, marginBottom: 8 }}>
+                <Text style={styles.baselineLiftTitle}>
                   {lift.label}
                 </Text>
+                <Text style={styles.baselineLiftHelp}>{lift.help}</Text>
                 <View style={{ flexDirection: 'row', gap: 8 }}>
                   {!isPullUp && (
-                    <View style={[styles.inlineInput, { flex: 1 }]}>
-                      <TextInput
-                        style={[styles.input, { flex: 1, paddingVertical: 11 }]}
-                        placeholder={lift.weightPlaceholder}
-                        placeholderTextColor={colors.textMuted}
-                        keyboardType="decimal-pad"
-                        value={input.weightLbs}
-                        onChangeText={text => updateStrengthBaseline(lift.key, { weightLbs: text })}
-                        onFocus={scrollToInput}
-                      />
-                      <Text style={[styles.unit, { minWidth: 24 }]}>lb</Text>
+                    <View style={styles.baselineInputColumn}>
+                      <Text style={styles.baselineInputLabel}>Weight used</Text>
+                      <View style={styles.inlineInput}>
+                        <TextInput
+                          style={[styles.input, { flex: 1, paddingVertical: 11 }]}
+                          placeholder={lift.weightPlaceholder}
+                          placeholderTextColor={colors.textMuted}
+                          keyboardType="decimal-pad"
+                          value={input.weightLbs}
+                          onChangeText={text => updateStrengthBaseline(lift.key, { weightLbs: text })}
+                          onFocus={scrollToInput}
+                        />
+                        <Text style={[styles.unit, { minWidth: 24 }]}>lb</Text>
+                      </View>
                     </View>
                   )}
-                  <View style={[styles.inlineInput, { flex: isPullUp ? 1 : 0.72 }]}>
-                    <TextInput
-                      style={[styles.input, { flex: 1, paddingVertical: 11 }]}
-                      placeholder={lift.repsPlaceholder}
-                      placeholderTextColor={colors.textMuted}
-                      keyboardType="number-pad"
-                      value={input.reps}
-                      onChangeText={text => updateStrengthBaseline(lift.key, { reps: text })}
-                      onFocus={scrollToInput}
-                    />
-                    <Text style={[styles.unit, { minWidth: 34 }]}>reps</Text>
+                  <View style={[styles.baselineInputColumn, { flex: isPullUp ? 1 : 0.72 }]}>
+                    <Text style={styles.baselineInputLabel}>{isPullUp ? 'Bodyweight reps' : 'Reps completed'}</Text>
+                    <View style={styles.inlineInput}>
+                      <TextInput
+                        style={[styles.input, { flex: 1, paddingVertical: 11 }]}
+                        placeholder={lift.repsPlaceholder}
+                        placeholderTextColor={colors.textMuted}
+                        keyboardType="number-pad"
+                        value={input.reps}
+                        onChangeText={text => updateStrengthBaseline(lift.key, { reps: text })}
+                        onFocus={scrollToInput}
+                      />
+                      <Text style={[styles.unit, { minWidth: 34 }]}>reps</Text>
+                    </View>
                   </View>
                 </View>
               </View>
@@ -2249,15 +2305,15 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
     const foodSearchLower = foodSearchTerm.toLowerCase();
     const selectedFoodNameSet = new Set(foodsAvailable.map(f => f.toLowerCase()));
     const selectedKitchenGroups = groupKitchenFoodsByCategory(foodsAvailable, meta.foodCategories);
-    const filteredFoodCategories = foodSearchLower ? meta.foodCategories
+    const browseFoodCategories = meta.foodCategories
       .map(category => ({
         ...category,
         foods: category.foods.filter(food =>
           !selectedFoodNameSet.has(food.name.toLowerCase())
-          && food.name.toLowerCase().includes(foodSearchLower)
-        ),
+          && (!foodSearchLower || food.name.toLowerCase().includes(foodSearchLower))
+        ).slice(0, foodSearchLower ? undefined : BASE_FOODS_PER_CATEGORY),
       }))
-      .filter(category => category.foods.length > 0) : [];
+      .filter(category => category.foods.length > 0);
     const exactSearchKnown = meta.allFoods.some(f => f.name.toLowerCase() === foodSearchLower);
     const canAddSearchTerm = !!foodSearchTerm && !selectedFoodNameSet.has(foodSearchLower) && !exactSearchKnown;
     const visibleFoodCatalogResults = foodCatalogResults.filter(item => !selectedFoodNameSet.has(item.name.toLowerCase()));
@@ -2412,7 +2468,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
         })}
       </ScrollView>
 
-      <Text style={styles.sectionHeading}>Add food</Text>
+      <Text style={styles.sectionHeading}>Pick foods</Text>
       <View style={styles.searchRow}>
         <TextInput
           style={[styles.input, styles.searchInput, { flex: 1 }]}
@@ -2504,29 +2560,36 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               <Text style={[styles.foodChipText, { color: colors.primary, fontWeight: '700' }]}>Add "{foodSearchTerm}"</Text>
             </TouchableOpacity>
           )}
-          {foodSearchLower && filteredFoodCategories.length === 0 && !canAddSearchTerm ? (
+          {foodSearchLower && browseFoodCategories.length === 0 && !canAddSearchTerm ? (
             <Text style={[styles.hint, { marginTop: 0, marginBottom: 14 }]}>No matching foods.</Text>
           ) : null}
-          {filteredFoodCategories.map(category => (
-            <View key={category.key} style={styles.foodCategory}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={16} color={colors.textSecondary} /> : <Text style={{ fontSize: 16 }}>{category.icon}</Text>}
-                <Text style={styles.foodCategoryLabel}>{category.label}</Text>
-              </View>
-              <View style={styles.foodChips}>
-                {category.foods.map(food => (
-                    <TouchableOpacity
-                      key={food.name}
-                      style={styles.foodChip}
-                      onPress={() => addFoodToKitchen(food.name)}>
-                      <Text style={styles.foodChipText}>
-                        {food.name}
-                      </Text>
-                    </TouchableOpacity>
-                ))}
-              </View>
+          {browseFoodCategories.length > 0 ? (
+            <View style={{ marginBottom: 2 }}>
+              <Text style={[styles.foodCategoryLabel, { marginBottom: 12 }]}>
+                {foodSearchLower ? 'Matching Foods' : 'Common Foods'}
+              </Text>
+              {browseFoodCategories.map(category => (
+                <View key={category.key} style={styles.foodCategory}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    {category.icon.includes('-') ? <Ionicons name={category.icon as any} size={16} color={colors.textSecondary} /> : <Text style={{ fontSize: 16 }}>{category.icon}</Text>}
+                    <Text style={styles.foodCategoryLabel}>{category.label}</Text>
+                  </View>
+                  <View style={styles.foodChips}>
+                    {category.foods.map(food => (
+                      <TouchableOpacity
+                        key={food.name}
+                        style={styles.foodChip}
+                        onPress={() => addFoodToKitchen(food.name)}>
+                        <Text style={styles.foodChipText}>
+                          {food.name}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              ))}
             </View>
-          ))}
+          ) : null}
         </>
       )}
 
@@ -3016,6 +3079,45 @@ const styles = StyleSheet.create({
   fieldLabel: { fontSize: 14, fontWeight: '600', color: colors.textPrimary, marginBottom: 8 },
   optional: { fontWeight: '400', color: colors.textMuted },
   inlineInput: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  baselineWhyBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: 12,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.primary + '55',
+    backgroundColor: colors.primary + '12',
+    marginBottom: 12,
+  },
+  baselineWhyText: {
+    flex: 1,
+    fontSize: 13,
+    lineHeight: 18,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  baselineLiftTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    marginBottom: 4,
+  },
+  baselineLiftHelp: {
+    fontSize: 12,
+    lineHeight: 17,
+    color: colors.textMuted,
+    marginBottom: 10,
+  },
+  baselineInputColumn: {
+    flex: 1,
+    gap: 6,
+  },
+  baselineInputLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textSecondary,
+  },
   heightRow: { flexDirection: 'row', gap: 12 },
   input: {
     borderWidth: 1, borderColor: colors.border, borderRadius: radius.md,
