@@ -1367,7 +1367,11 @@ def patch_workout(
     current_user: User = Depends(require_pro_feature("Generated PlanWeeks")),
     db: Session = Depends(get_session),
 ) -> PlanDayResponse:
-    """Surgical single-day workout swap. Only works on unlocked days."""
+    """Surgical single-day workout swap.
+
+    Completed/skipped/started days stay protected. A manual-edit lock is
+    re-editable because it represents the user's own prior patch.
+    """
     pw = get_active_week(db, current_user.id)
     if not pw:
         raise HTTPException(status_code=404, detail="No active plan week")
@@ -1379,7 +1383,7 @@ def patch_workout(
     ).first()
     if not plan_day:
         raise HTTPException(status_code=404, detail=f"No plan day for {day_date}")
-    if plan_day.locked:
+    if plan_day.locked and plan_day.lock_reason != "manual_edit":
         raise HTTPException(status_code=409, detail=f"Day {day_date} is locked ({plan_day.lock_reason})")
 
     result = patch_day_workout(db, plan_day, body.workout_json)

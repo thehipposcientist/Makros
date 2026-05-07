@@ -2907,7 +2907,7 @@ function AccountInfoModal({
   const handleSupport = () => {
     const subject = encodeURIComponent('Thallo support');
     Linking.openURL(`mailto:${SUPPORT_EMAIL}?subject=${subject}`).catch(() => {
-      Alert.alert('Support', `Email ${SUPPORT_EMAIL} for help with your account, Watch sync, HealthKit, or app data.`);
+      Alert.alert('Support', `Email ${SUPPORT_EMAIL} for help with your account, ${Platform.OS === 'ios' ? 'Watch sync, HealthKit,' : 'Health Connect,'} or app data.`);
     });
   };
 
@@ -3156,17 +3156,19 @@ function AccountInfoModal({
 
           <ActionRow
             label="Help & Support"
-            desc={`Email ${SUPPORT_EMAIL} for account, Watch, HealthKit, or data help.`}
+            desc={`Email ${SUPPORT_EMAIL} for account, ${Platform.OS === 'ios' ? 'Watch, HealthKit,' : 'Health Connect,'} or data help.`}
             onPress={handleSupport}
             testID="account-help-support"
           />
 
-          <ActionRow
-            label="Apple Watch Sync"
-            desc={watchStatus}
-            onPress={() => Alert.alert('Apple Watch Sync', watchStatus)}
-            testID="account-watch-sync"
-          />
+          {Platform.OS === 'ios' && (
+            <ActionRow
+              label="Apple Watch Sync"
+              desc={watchStatus}
+              onPress={() => Alert.alert('Apple Watch Sync', watchStatus)}
+              testID="account-watch-sync"
+            />
+          )}
 
           <ActionRow
             label="Export Account Data"
@@ -3316,7 +3318,7 @@ function AccountInfoModal({
                 </TouchableOpacity>
               </View>
               <Text style={{ fontSize: 11, color: tc.textSecondary, marginTop: 8, lineHeight: 15 }}>
-                All guided planning, AI, readiness, and Watch features are unlocked during this beta.
+                All guided planning, AI, readiness, and {Platform.OS === 'ios' ? 'Watch' : 'Android phone'} features are unlocked during this beta.
               </Text>
             </View>
           ) : (

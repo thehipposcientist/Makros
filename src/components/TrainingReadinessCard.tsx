@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, LayoutAnimation, Platform, UIManager, Animated, Easing } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
+import { HEALTH_PLATFORM_LABEL, HEALTH_WEARABLE_LABEL } from '../constants/platformHealth';
 import { AppThemeName, HealthSummary } from '../types';
 import { scorePreparedness, PreparednessResult } from '../services/preparedness';
 import { loadPreparednessInputs } from '../services/preparednessLoader';
@@ -408,7 +409,9 @@ export default function TrainingReadinessCard({
       }}>
         <Ionicons name="flash-outline" size={16} color={tc.textMuted} />
         <Text style={{ flex: 1, fontSize: 12, color: tc.textSecondary }}>
-          {prep.insights[0] ?? 'Apple Health is optional. Readiness gets better with sleep, HRV, and meal data, but the plan still works without it.'}
+          {prep.insights[0] ?? (Platform.OS === 'android'
+            ? 'Health Connect support is coming soon. Readiness still uses workouts, nutrition, and recovery check-ins.'
+            : `${HEALTH_PLATFORM_LABEL} is optional. Readiness gets better with sleep, HRV, and meal data, but the plan still works without it.`)}
         </Text>
       </View>
     );
@@ -473,9 +476,9 @@ export default function TrainingReadinessCard({
   // Health" footer covers the same ground.
   const missingHkRows: Array<[string, string]> = [];
   if (hasAppleHealth) {
-    if (!isPresent('sleep')) missingHkRows.push(['Sleep', 'No sleep recorded last night — Apple Watch may not have synced.']);
-    if (!isPresent('hrv')) missingHkRows.push(['HRV', 'No HRV reading yet today — usually arrives after Watch sync.']);
-    if (!isPresent('rhr')) missingHkRows.push(['Resting HR', 'No resting HR reading today — Apple Watch may not have synced.']);
+    if (!isPresent('sleep')) missingHkRows.push(['Sleep', `No sleep recorded last night - ${HEALTH_WEARABLE_LABEL} may not have synced.`]);
+    if (!isPresent('hrv')) missingHkRows.push(['HRV', `No HRV reading yet today - usually arrives after ${HEALTH_WEARABLE_LABEL} sync.`]);
+    if (!isPresent('rhr')) missingHkRows.push(['Resting HR', `No resting HR reading today - ${HEALTH_WEARABLE_LABEL} may not have synced.`]);
   }
 
   const focusLabel = todaysFocus
@@ -642,7 +645,9 @@ export default function TrainingReadinessCard({
 
           {!hasAppleHealth && (
             <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6, fontStyle: 'italic' }}>
-              Apple Health is optional. Connect it anytime for sleep + HRV signals.
+              {Platform.OS === 'android'
+                ? 'Health Connect support is coming soon for sleep + HRV signals.'
+                : `${HEALTH_PLATFORM_LABEL} is optional. Connect it anytime for sleep + HRV signals.`}
             </Text>
           )}
           {prep.insights.length > 1 && (

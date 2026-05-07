@@ -8,12 +8,15 @@ from sqlmodel import Session
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from app.database import create_db_and_tables, engine  # noqa: E402
+from app.database import engine  # noqa: E402
 from app.e2e_seed import seed_e2e_data  # noqa: E402
 
 
 def main() -> int:
-    create_db_and_tables()
+    if os.getenv("E2E_SEED_RUN_MIGRATIONS", "0") == "1":
+        from app.database import create_db_and_tables
+
+        create_db_and_tables()
     with Session(engine) as session:
         summary = seed_e2e_data(session)
 

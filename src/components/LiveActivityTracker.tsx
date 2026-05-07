@@ -93,6 +93,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
   const liveActivityIdRef = useRef<string | null>(null);
   const liveActivityGenerationRef = useRef(0);
   const autoStartKeyRef = useRef<string | null>(null);
+  const canUseHealthKit = enableHealthKit && isHealthKitAvailable();
 
   const endWorkoutLiveActivity = useCallback(() => {
     liveActivityGenerationRef.current += 1;
@@ -156,7 +157,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
       }
     } catch { /* swallow — HR isn't required */ }
   }, []);
-  const shouldPollHr = phase === 'running' && enableHealthKit && isHealthKitAvailable();
+  const shouldPollHr = phase === 'running' && canUseHealthKit;
   useEffect(() => {
     if (!shouldPollHr) return;
     tickHeartRate();
@@ -286,7 +287,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
     // save the session.
     let avgHr: number | null = fallbackAvgHr;
     let kcal: number | null = null;
-    if (enableHealthKit) {
+    if (canUseHealthKit) {
       try {
         const hr = await getWorkoutHrSummary(startedAtMs, endedMs).catch(() => null);
         if (hr?.avgBpm) avgHr = Math.round(hr.avgBpm);
@@ -361,7 +362,7 @@ export default function LiveActivityTracker({ visible, onClose, themeName, onSav
                 <View style={styles.headerBtn} />
               </View>
               <Text style={{ fontSize: 12, color: tc.textMuted, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 4 }}>
-                {enableHealthKit
+                {canUseHealthKit
                   ? "Pick a type. We'll time it and sync HR from Apple Health."
                   : "Pick a type. We'll time it and save the activity to your log."}
               </Text>

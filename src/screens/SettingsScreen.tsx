@@ -25,6 +25,7 @@ import {
 import type { WeightUnit, DistanceUnit } from '../utils/units';
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import { SUPPORT_EMAIL } from '../constants/legal';
+import { HEALTH_PLATFORM_LABEL, HEALTH_PLATFORM_PRIVACY_COPY } from '../constants/platformHealth';
 
 interface Props {
   visible: boolean;
@@ -657,9 +658,9 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
           <View style={[styles.privacyBlock, { borderTopColor: tc.border, borderTopWidth: 1 }]}>
             <Ionicons name="heart-outline" size={18} color={tc.primary} />
             <View style={{ flex: 1 }}>
-              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Apple Health data</Text>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>{HEALTH_PLATFORM_LABEL} data</Text>
               <Text style={[styles.rowSub, { color: tc.textMuted }]}>
-                Optional. Used for readiness, sleep, heart-rate, activity, weight, cycle-aware guidance, and weekly check-in context when you choose to share it.
+                {HEALTH_PLATFORM_PRIVACY_COPY}
               </Text>
             </View>
           </View>
@@ -732,9 +733,11 @@ export default function SettingsScreen({ visible, profile, themeName, authToken,
             style={styles.row}
             onPress={openDeviceSettings}>
             <View style={{ flex: 1 }}>
-              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Open iOS Settings</Text>
+              <Text style={[styles.rowTitle, { color: tc.textPrimary }]}>Open {Platform.OS === 'ios' ? 'iOS' : 'Android'} Settings</Text>
               <Text style={[styles.rowSub, { color: tc.textMuted }]}>
-                Manage notifications, Apple Health, camera, microphone, and Face ID for Thallo.
+                {Platform.OS === 'ios'
+                  ? 'Manage notifications, Apple Health, camera, microphone, and Face ID for Thallo.'
+                  : 'Manage notifications, camera, microphone, biometrics, and app permissions for Thallo.'}
               </Text>
             </View>
             <Ionicons name="chevron-forward" size={18} color={tc.textMuted} />

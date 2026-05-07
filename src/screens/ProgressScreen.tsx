@@ -53,6 +53,7 @@ import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, sca
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { dynamicInputProps, dynamicTextProps } from '../utils/dynamicType';
+import { HEALTH_PLATFORM_LABEL, HEALTH_PLATFORM_PRO_COPY, HEALTH_PLATFORM_STATUS_COPY, HEALTH_WEARABLE_LABEL } from '../constants/platformHealth';
 import { aggregateDailyFromHistory, headlineLoggedCalories, macrosHeadlineFromAverages, macrosHeadlineFromDailyRows, selectDailyRows } from './progressData';
 import { tierOf } from '../utils/subscription';
 import { manualActivityFromCompletion, mergeCompletionIntoWorkoutSession } from '../utils/workoutCompletion';
@@ -1501,7 +1502,7 @@ function buildCardioGoalSignal(
     key: 'week-cardio',
     label: 'Cardio trend',
     value: 'Need logs',
-    detail: 'Log distance, pace, or wear Apple Watch for Zone 2.',
+    detail: `Log distance, pace, or use a ${HEALTH_WEARABLE_LABEL} for Zone 2.`,
     action: 'Log a short easy cardio session to start the trend.',
     icon: 'pulse-outline',
     color: tc.textMuted,
@@ -2006,8 +2007,8 @@ function buildTrainingSignals(
     detail: totalHrMinutes > 0
       ? `${Math.round(hrTotals[2] + hrTotals[3] + hrTotals[4])}m Z3+ across recent sessions`
       : healthKitAvailable
-        ? 'Connect Apple Health or wear Watch during workouts for zone trends.'
-        : 'Apple Health is unavailable here; workout scoring falls back to sets, duration, and completion.',
+        ? `Connect ${HEALTH_PLATFORM_LABEL} or use a ${HEALTH_WEARABLE_LABEL} during workouts for zone trends.`
+        : `${HEALTH_PLATFORM_LABEL} is unavailable here; workout scoring falls back to sets, duration, and completion.`,
     icon: 'pulse-outline',
     color: '#EF4444',
   });
@@ -5006,7 +5007,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <Ionicons name="lock-closed-outline" size={32} color={tc.textMuted} />
                 <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary, marginTop: 8 }}>Health insights are Pro</Text>
                 <Text style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6 }}>
-                  Free keeps manual weight, body, workout, and meal history. Pro adds Apple Health, readiness, sleep, and nutrition scoring.
+                  Free keeps manual weight, body, workout, and meal history. {HEALTH_PLATFORM_PRO_COPY}
                 </Text>
               </View>
             </FadeInView>
@@ -5016,12 +5017,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               <View style={{ alignItems: 'center', paddingVertical: 12 }}>
                 <Ionicons name="heart-outline" size={34} color={tc.textMuted} />
                 <Text {...dynamicTextProps} style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary, marginTop: 8 }}>
-                  Apple Health unavailable
+                  {HEALTH_PLATFORM_LABEL} unavailable
                 </Text>
                 <Text {...dynamicTextProps} style={{ fontSize: 12, color: tc.textSecondary, textAlign: 'center', lineHeight: 18, marginTop: 6 }}>
-                  {Platform.OS === 'ios'
-                    ? 'This build does not have HealthKit available. Thallo will keep using manual logs, in-app workouts, meal data, and recovery check-ins.'
-                    : 'Apple Health is iPhone-only. Thallo will keep using manual logs, in-app workouts, meal data, and recovery check-ins.'}
+                  {HEALTH_PLATFORM_STATUS_COPY}
                 </Text>
               </View>
             </View>
@@ -5361,7 +5360,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <Text style={{ fontSize: 11, fontWeight: '800', color: tc.textMuted, letterSpacing: 0.6 }}>UNAVAILABLE</Text>
               </View>
               <Text {...dynamicTextProps} style={{ fontSize: 13, color: tc.textSecondary, lineHeight: 18 }}>
-                No sleep stages were recorded for last night. Wear your Apple Watch overnight, then open Thallo after Apple Health syncs.
+                No sleep stages were recorded for last night. Use a sleep-capable {HEALTH_WEARABLE_LABEL} overnight, then open Thallo after {HEALTH_PLATFORM_LABEL} syncs.
               </Text>
             </View>
           )}

@@ -24,6 +24,7 @@ import {
   Animated,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
@@ -265,6 +266,8 @@ function StepView({ step, tc, styles }: { step: Step; tc: any; styles: any }) {
 // AI-features grid + watch integration.
 
 function buildSteps(tier: TutorialTier, tc: any): Step[] {
+  const healthLabel = Platform.OS === 'android' ? 'Health Connect' : 'Apple Health';
+  const watchLabel = Platform.OS === 'android' ? 'wearables' : 'Watch';
   const tabsStep: Step = {
     icon: 'apps-outline',
     title: 'Three tabs, all you need',
@@ -278,11 +281,13 @@ function buildSteps(tier: TutorialTier, tc: any): Step[] {
 
   const healthStep: Step = {
     icon: 'heart-outline',
-    title: 'Connect Apple Health',
-    body: 'Apple Health is optional. Connect it from Account when you want sleep, HRV, weight, and workout context inside Thallo.',
+    title: `Connect ${healthLabel}`,
+    body: Platform.OS === 'android'
+      ? 'Health Connect support is planned for Android. Until then, Thallo uses manual logs, in-app workouts, meal data, and recovery check-ins.'
+      : 'Apple Health is optional. Connect it from Account when you want sleep, HRV, weight, and workout context inside Thallo.',
     bullets: [
       { icon: 'moon-outline', text: 'Sleep tracking feeds your readiness score', tint: tc.primary },
-      { icon: 'fitness-outline', text: 'Workout calories from your Watch land in Progress', tint: tc.success },
+      { icon: 'fitness-outline', text: Platform.OS === 'android' ? 'Workout and activity imports are a Health Connect follow-up' : 'Workout calories from your Watch land in Progress', tint: tc.success },
       { icon: 'scale-outline', text: 'Weight trend updates without manual logging', tint: tc.warning },
     ],
   };
@@ -299,14 +304,14 @@ function buildSteps(tier: TutorialTier, tc: any): Step[] {
         icon: 'lock-closed-outline',
         iconColor: tc.warning,
         title: 'On Free, you have',
-        body: 'Everything you need to log consistently. The guided planning, scans, Apple Health readiness, and coaching surfaces unlock with Pro.',
+        body: `Everything you need to log consistently. The guided planning, scans, ${healthLabel} readiness, and coaching surfaces unlock with Pro.`,
         bullets: [
           { icon: 'checkmark-circle', text: 'Manual workouts and custom activity logging', tint: tc.success },
           { icon: 'checkmark-circle', text: 'Manual meals, hydration, saved meals, and meal routines', tint: tc.success },
           { icon: 'checkmark-circle', text: 'Weight, measurements, and basic history', tint: tc.success },
           { icon: 'sparkles-outline', text: 'Generated workout PlanWeeks and AI meal plans — Pro', tint: tc.warning },
           { icon: 'sparkles-outline', text: 'AI Trainer chat — Pro', tint: tc.warning },
-          { icon: 'sparkles-outline', text: 'Scans, readiness, Apple Health, and advanced insights — Pro', tint: tc.warning },
+          { icon: 'sparkles-outline', text: `Scans, readiness, ${healthLabel}, and advanced insights — Pro`, tint: tc.warning },
         ],
         upsell: true,
       },
@@ -345,13 +350,15 @@ function buildSteps(tier: TutorialTier, tc: any): Step[] {
       ],
     },
     {
-      icon: 'watch-outline',
-      title: 'Apple Health + Watch',
-      body: 'Apple Health and Watch sync are optional enhancements. Connect them when you want more sleep, heart-rate, and workout context in the app.',
+      icon: Platform.OS === 'android' ? 'pulse-outline' : 'watch-outline',
+      title: `${healthLabel} + ${watchLabel}`,
+      body: Platform.OS === 'android'
+        ? 'Android health integrations are a follow-up. For now, Thallo keeps the phone app useful with manual logs, in-app workouts, and recovery check-ins.'
+        : 'Apple Health and Watch sync are optional enhancements. Connect them when you want more sleep, heart-rate, and workout context in the app.',
       bullets: [
         { icon: 'heart-outline', text: 'Sleep, HRV, RHR feed readiness daily', tint: tc.primary },
-        { icon: 'fitness-outline', text: 'Watch tracks heart rate during sessions', tint: tc.warning },
-        { icon: 'phone-portrait-outline', text: 'Start workouts from your wrist', tint: tc.success },
+        { icon: 'fitness-outline', text: Platform.OS === 'android' ? 'Health Connect can later provide heart-rate and workout context' : 'Watch tracks heart rate during sessions', tint: tc.warning },
+        { icon: 'phone-portrait-outline', text: Platform.OS === 'android' ? 'Wear OS is separate from the first Android phone beta' : 'Start workouts from your wrist', tint: tc.success },
       ],
     },
   ];

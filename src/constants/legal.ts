@@ -1,7 +1,7 @@
 // Bump this whenever the body of any LEGAL_SECTIONS entry changes. The
 // frontend compares the active user's accepted version against this and
 // shows the LegalDisclosureModal on next launch when they differ.
-export const LEGAL_VERSION = '2026-05-06.2';
+export const LEGAL_VERSION = '2026-05-07.1';
 export const SUPPORT_EMAIL = 'thallosupport@gmail.com';
 
 export const LEGAL_SECTIONS = [
@@ -11,11 +11,11 @@ export const LEGAL_SECTIONS = [
   },
   {
     title: 'Privacy Policy',
-    body: 'Thallo stores account, profile, workout, nutrition, weight, recovery, supplement, social, photo-derived, and Apple Health-related data so the app can personalize your experience. Health and nutrition data should stay private unless you explicitly share workout-only social activity.',
+    body: 'Thallo stores account, profile, workout, nutrition, weight, recovery, supplement, social, photo-derived, and optional connected health-platform data so the app can personalize your experience. Health and nutrition data should stay private unless you explicitly share workout-only social activity.',
   },
   {
     title: 'Third-Party Services',
-    body: 'Thallo uses OpenAI to power meal parsing, coach chat, scans, classification, and workout feedback. Prompts may include relevant workout, nutrition, macro, recovery, supplement, Health summary, and photo-derived context needed for the feature; direct account identifiers such as your name or email are not required and are stripped from server-generated coach check-in payloads. Food nutrition data comes from the USDA FoodData Central database. Apple Health reads happen on your device, and daily summaries may sync to your account for trends and check-ins. We do not sell your data to advertisers, and calorie, macro, and weight data never crosses the social sharing boundary.',
+    body: 'Thallo uses OpenAI to power meal parsing, coach chat, scans, classification, and workout feedback. Prompts may include relevant workout, nutrition, macro, recovery, supplement, Health summary, and photo-derived context needed for the feature; direct account identifiers such as your name or email are not required and are stripped from server-generated coach check-in payloads. Food nutrition data comes from the USDA FoodData Central database. Optional connected health-platform reads happen on your device, and daily summaries may sync to your account for trends and check-ins. We do not sell your data to advertisers, and calorie, macro, and weight data never crosses the social sharing boundary.',
   },
   {
     title: 'Health And Fitness Disclaimer',

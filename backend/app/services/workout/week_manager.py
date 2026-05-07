@@ -417,7 +417,7 @@ def patch_day_workout(
     workout_json: dict,
 ) -> PlanDay:
     """Surgical single-day workout swap. Locks the day as 'edited'."""
-    if plan_day.locked:
+    if plan_day.locked and plan_day.lock_reason != "manual_edit":
         raise ValueError(f"Cannot edit locked day {plan_day.day_date} (reason={plan_day.lock_reason})")
     now = datetime.now(timezone.utc)
     if isinstance(workout_json, dict):

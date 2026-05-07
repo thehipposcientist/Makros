@@ -6,6 +6,8 @@ Last synced from app state: 2026-05-07
 
 Single source of truth for all Apple Health reads in the client.
 
+Android note: the equivalent integration is Health Connect. Keep Android work in a separate platform-health path; see `docs/architecture/android-health-connect.md`.
+
 **API:**
 - `getCachedHealthDataSummary()` — instant first paint from cache.
 - `refreshHealthDataSummary()` — force fresh read.

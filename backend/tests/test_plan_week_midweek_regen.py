@@ -446,6 +446,17 @@ def test_patch_unlocked_day_succeeds():
     assert pd.status == "edited"
 
 
+def test_patch_manual_edit_day_succeeds():
+    today = date.today()
+    pd = FakePlanDay(day_date=today, locked=True, lock_reason="manual_edit", status="edited",
+                     workout_json={"focus": "Saved Template", "exercises": []})
+    week_manager.patch_day_workout(FakeSession(), pd, {"focus": "Pull", "exercises": []})
+    assert pd.workout_json["focus"] == "Pull"
+    assert pd.locked is True
+    assert pd.lock_reason == "manual_edit"
+    assert pd.status == "edited"
+
+
 def test_patch_clears_is_rest():
     today = date.today()
     pd = FakePlanDay(day_date=today, is_rest=True, workout_json=None)

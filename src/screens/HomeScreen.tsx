@@ -99,6 +99,7 @@ import BirthdayBanner from '../components/BirthdayBanner';
 import RecipeModal from '../components/RecipeModal';
 import SearchInput from '../components/SearchInput';
 import { APP_THEMES, THEME_PICKER_ORDER, colors, elevations, getChromeColors, getContrastingTextColor, getTheme, isLightThemeName, radius, resolveThemeName, typography } from '../constants/theme';
+import { HEALTH_PLATFORM_LABEL, HEALTH_PLATFORM_PRO_COPY } from '../constants/platformHealth';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 // Inline-rendered tab content. Goals and Progress used to be modal
 // overlays via parent callbacks; they now mount inside the tab body
@@ -920,6 +921,20 @@ function bgIsDark(hex: string): boolean {
  * Lives in this file (not a shared component) because it's only used by
  * HomeScreen. Uses native driver — both transform and opacity qualify.
  */
+function AndroidHealthConnectRow({ themeColors }: { themeColors: any }) {
+  return (
+    <View style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Health Connect</Text>
+        <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
+          Android health sync is planned. Manual logs and in-app workouts still work.
+        </Text>
+      </View>
+      <Ionicons name="construct-outline" size={18} color={themeColors.textMuted} />
+    </View>
+  );
+}
+
 /** Apple Health connect/disconnect row — lives in the FEEDBACK &
  *  DEVICE settings group on the profile menu. Toggling ON triggers
  *  the HealthKit auth prompt and persists the enabled flag; OFF
@@ -1473,6 +1488,26 @@ function getScheduleFromPlanWeek(
 function planDayDate(dayDate: string): Date {
   const [y, m, d] = dayDate.split('-').map(Number);
   return new Date(y, (m ?? 1) - 1, d ?? 1);
+}
+
+function changeFocusStatusForPlanDay(
+  planDay: import('../services/api').PlanDayResponse | null | undefined,
+  targetDateISO: string,
+): 'completed' | 'started' | 'pending' | 'locked' | 'skipped' {
+  if (!planDay) return 'pending';
+  if (planDay.status === 'completed') return 'completed';
+  if (planDay.status === 'skipped') return 'skipped';
+  if (
+    planDay.status === 'in_progress'
+    || planDay.status === 'started'
+    || planDay.lock_reason === 'started'
+  ) return 'started';
+  if (planDay.locked) {
+    return planDay.lock_reason === 'manual_edit' && planDay.day_date === targetDateISO
+      ? 'pending'
+      : 'locked';
+  }
+  return 'pending';
 }
 
 function resolveTodayScheduleItem(
@@ -8008,6 +8043,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       ? workoutPlan.days.indexOf(item.workout as any)
                       : -1;
                     const dayIdx = recipeIdx >= 0 ? recipeIdx : i;
+                    const dateISO = dateKey(item.date);
 
                     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
                     import('../utils/feedback').then(f => f.hapticMedium()).catch(() => {});
@@ -8050,7 +8086,6 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       // so future regens don't blow it away.
                       if (authToken && planWeek?.days?.length) {
                         try {
-                          const dateISO = dateKey(item.date);
                           const { patchPlanDayWorkout } = await import('../services/api');
                           const updatedPlanDay = await patchPlanDayWorkout(authToken, dateISO, newDay);
                           // Mirror the server response into local planWeek
@@ -8093,14 +8128,23 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       // Build statuses in the same order as workoutPlan.days.
                       // With PlanWeek hydration this is calendar order, and
                       // the backend patches PlanDay.day_index accordingly.
-                      const dayStatuses: string[] = workoutPlan.days.map((_, rIdx) => {
-                        const si = scheduleRaw.find(s => s.workout && workoutPlan.days.indexOf(s.workout as any) === rIdx);
-                        if (!si) return 'pending';
-                        const dk = dateKey(si.date);
-                        if (completedDates.has(dk)) return 'completed';
-                        if (skippedDates.has(dk)) return 'skipped';
-                        return 'pending';
-                      });
+                      const dayStatuses: string[] = planWeek?.days?.length === workoutPlan.days.length
+                        ? workoutPlan.days.map((_, rIdx) => {
+                            const pd = planWeek.days.find(d => d.day_index === rIdx) ?? planWeek.days[rIdx];
+                            const baseStatus = changeFocusStatusForPlanDay(pd, dateISO);
+                            if (baseStatus !== 'pending') return baseStatus;
+                            if (completedDates.has(pd?.day_date ?? '')) return 'completed';
+                            if (skippedDates.has(pd?.day_date ?? '')) return 'skipped';
+                            return 'pending';
+                          })
+                        : workoutPlan.days.map((_, rIdx) => {
+                            const si = scheduleRaw.find(s => s.workout && workoutPlan.days.indexOf(s.workout as any) === rIdx);
+                            if (!si) return 'pending';
+                            const dk = dateKey(si.date);
+                            if (completedDates.has(dk)) return 'completed';
+                            if (skippedDates.has(dk)) return 'skipped';
+                            return 'pending';
+                          });
 
                       const { generateWorkoutWeek } = await import('../services/api');
                       await generateWorkoutWeek(authToken, {
@@ -12185,13 +12229,15 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     </View>
                   </View>
                   {!isFreeTier ? (
-                    <AppleHealthToggleRow themeColors={themeColors} userAge={userProfile.physicalStats?.age ?? null} />
+                    Platform.OS === 'ios'
+                      ? <AppleHealthToggleRow themeColors={themeColors} userAge={userProfile.physicalStats?.age ?? null} />
+                      : <AndroidHealthConnectRow themeColors={themeColors} />
                   ) : (
                     <View style={[styles.profileMenuItem, { justifyContent: 'space-between' }]}>
                       <View style={{ flex: 1 }}>
-                        <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>Apple Health</Text>
+                        <Text style={[styles.profileMenuLabel, { color: themeColors.textPrimary }]}>{HEALTH_PLATFORM_LABEL}</Text>
                         <Text style={{ fontSize: 11, color: themeColors.textMuted }}>
-                          Pro adds HealthKit sleep, HRV, heart-rate, weight, and workout context.
+                          {HEALTH_PLATFORM_PRO_COPY}
                         </Text>
                       </View>
                       <Ionicons name="lock-closed-outline" size={18} color={themeColors.textMuted} />

@@ -13,6 +13,7 @@ import { View, Text, TouchableOpacity, Platform, UIManager, Animated, Easing } f
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
+import { HEALTH_PLATFORM_LABEL } from '../constants/platformHealth';
 import { AppThemeName, HealthSummary } from '../types';
 import { scorePreparedness, PreparednessResult } from '../services/preparedness';
 import { loadSleepHistory, getCycleStatus } from '../services/appleHealth';
@@ -161,7 +162,9 @@ export default function PreparednessCard({
       }}>
         <Ionicons name="flash-outline" size={16} color={tc.textMuted} />
         <Text style={{ flex: 1, fontSize: 12, color: tc.textSecondary }}>
-          Apple Health is optional. Readiness gets better with sleep, HRV, and meal data, but your plan still works without it.
+          {Platform.OS === 'android'
+            ? 'Health Connect support is coming soon. Readiness still uses workouts, nutrition, and recovery check-ins.'
+            : `${HEALTH_PLATFORM_LABEL} is optional. Readiness gets better with sleep, HRV, and meal data, but your plan still works without it.`}
         </Text>
       </View>
     );
@@ -257,7 +260,7 @@ export default function PreparednessCard({
           )}
           {result.missing.length > 0 && (
             <Text style={{ fontSize: 10, color: tc.textMuted, marginTop: 6, fontStyle: 'italic' }}>
-              Missing: {result.missing.join(', ')} — Apple Health is optional, but it adds sleep and heart-rate context here.
+              Missing: {result.missing.join(', ')} - {Platform.OS === 'android' ? 'Health Connect can add sleep and heart-rate context once supported.' : `${HEALTH_PLATFORM_LABEL} is optional, but it adds sleep and heart-rate context here.`}
             </Text>
           )}
         </View>

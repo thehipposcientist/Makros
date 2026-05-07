@@ -5305,6 +5305,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       </View>
                     ) : null}
                     {(() => {
+                      if (Platform.OS !== 'ios') return null;
                       const paired = watchStatus?.paired ?? false;
                       const reachable = watchStatus?.reachable ?? false;
                       const watchText = paired

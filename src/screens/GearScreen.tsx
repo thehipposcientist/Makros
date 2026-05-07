@@ -697,7 +697,7 @@ function GearFormModal({
             autoCapitalize="none"
           />
           <Text style={[styles.hint, { color: tc.textMuted }]}>
-            Miles + sessions auto-accumulate from any workout (manual log or Apple Health import) whose focus or exercise names match these keywords. Items without a mile threshold track sessions only.
+            Miles + sessions auto-accumulate from any workout (manual log or connected health import) whose focus or exercise names match these keywords. Items without a mile threshold track sessions only.
           </Text>
 
           <Text style={[styles.fieldLabel, { color: tc.textSecondary }]}>NOTES (optional)</Text>

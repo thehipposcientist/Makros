@@ -1197,7 +1197,16 @@ def generate_full_week(
                         pd_row = training_days[recipe_idx]
                     else:
                         pd_row = None
-                    if not pd_row or pd_row.locked or pd_row.day_date < date.today():
+                    is_target_day = recipe_idx == body.pin_day_index
+                    if not pd_row or pd_row.day_date < date.today():
+                        continue
+                    if (
+                        pd_row.locked
+                        and not (
+                            is_target_day
+                            and pd_row.lock_reason == "manual_edit"
+                        )
+                    ):
                         continue
                     day_json = result_days[recipe_idx]
                     focus_norm = (day_json.get("focus") or "").lower().strip()
