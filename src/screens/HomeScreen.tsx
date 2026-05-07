@@ -6872,9 +6872,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         </Animated.View>
       ) : null}
 
-      {/* Switch Day full-week regen overlay — centered, prominent spinner
-          with the user's chosen focus displayed. Keeps the plan visible
-          underneath so there's visual continuity while each day rebuilds. */}
+      {/* Switch Day overlay — centered, prominent spinner with the user's
+          chosen focus displayed. Keeps the plan visible underneath so
+          there's visual continuity while the selected day updates. */}
       {regeneratingDayIdxs.size > 0 && !isWorkoutUpdating && !isNutritionUpdating ? (
         <View style={{
           position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
@@ -6891,15 +6891,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           }}>
             <ActivityIndicator size="large" color={themeColors.primary} />
             <Text style={{ fontSize: 16, fontWeight: '800', color: themeColors.textPrimary, marginTop: 14 }}>
-              Rebuilding your week
+              {regeneratingDayIdxs.size === 1 ? 'Updating this workout' : 'Rebuilding your week'}
             </Text>
             {regenSelectedFocus && (
               <Text style={{ fontSize: 12, color: themeColors.textSecondary, marginTop: 4 }}>
-                around <Text style={{ color: themeColors.primary, fontWeight: '700' }}>{regenSelectedFocus}</Text>
+                {regeneratingDayIdxs.size === 1 ? 'switching to ' : 'around '}
+                <Text style={{ color: themeColors.primary, fontWeight: '700' }}>{regenSelectedFocus}</Text>
               </Text>
             )}
             <Text style={{ fontSize: 11, color: themeColors.textMuted, marginTop: 10 }}>
-              {regeneratingDayIdxs.size} day{regeneratingDayIdxs.size === 1 ? '' : 's'} left
+              {regeneratingDayIdxs.size === 1
+                ? 'Only this day will change'
+                : `${regeneratingDayIdxs.size} days left`}
             </Text>
           </View>
         </View>
@@ -8115,8 +8118,9 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       if (!requirePro(userProfile, 'ai_day_regenerate')) return;
                     }
 
-                    // Show overlay
-                    setRegeneratingDayIdxs(new Set(Array.from({ length: workoutPlan.days.length }, (_, k) => k)));
+                    // Change Focus is a surgical edit: update the tapped
+                    // PlanDay and leave the rest of the active week intact.
+                    setRegeneratingDayIdxs(new Set([dayIdx]));
                     setRegenSelectedFocus(newFocus);
 
                     try {
@@ -8160,7 +8164,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         pin_day_index: dayIdx,
                         pin_focus: newFocus,
                         current_days: workoutPlan.days,
-                        change_mode: 'smart',
+                        change_mode: 'single',
                         day_statuses: dayStatuses,
                       });
 
@@ -8759,12 +8763,18 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         borderRadius: 14, borderWidth: 1,
                         borderColor: cardFullyLogged ? themeColors.success + '55' : themeColors.border,
                       }}>
-                        <TouchableOpacity
+                        <Pressable
                           testID={`meal-history-row-${historyIdx}`}
                           accessibilityLabel={`meal-history-row-${historyIdx}`}
-                          activeOpacity={0.85}
-                          onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setExpandedHistoryDate(isExpanded ? null : d); }}
-                          style={{ padding: 14 }}>
+                          accessibilityRole="button"
+                          accessibilityState={{ expanded: isExpanded }}
+                          onPress={() => {
+                            try {
+                              configureExpandAnimation(300);
+                            } catch {}
+                            setExpandedHistoryDate(isExpanded ? null : d);
+                          }}
+                          style={({ pressed }) => ({ padding: 14, opacity: pressed ? 0.85 : 1 })}>
                           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
                               <Text style={{ fontSize: 15, fontWeight: '700', color: themeColors.textPrimary }}>{label}</Text>
@@ -8795,7 +8805,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               {targets?.calories ? ` · target ${Math.round(targets.calories)} cal` : ''}
                             </Text>
                           )}
-                        </TouchableOpacity>
+                        </Pressable>
                         {isExpanded && meals.length > 0 && (
                           <View style={{ borderTopWidth: 1, borderTopColor: themeColors.border, padding: 12, gap: 8 }}>
                             {meals.map((m, i) => {

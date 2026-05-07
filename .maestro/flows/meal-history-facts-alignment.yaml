@@ -60,6 +60,26 @@ tags:
     timeout: 15000
 - tapOn:
     id: "meal-history-row-0"
+- waitForAnimationToEnd:
+    timeout: 1000
+- runFlow:
+    when:
+      notVisible:
+        id: "meal-history-row-0-meal-0"
+    commands:
+      - tapOn:
+          id: "meal-history-row-0"
+      - waitForAnimationToEnd:
+          timeout: 1000
+- runFlow:
+    when:
+      notVisible:
+        id: "meal-history-row-0-meal-0"
+    commands:
+      - tapOn:
+          point: 50%,52%
+      - waitForAnimationToEnd:
+          timeout: 1000
 - extendedWaitUntil:
     visible:
       id: "meal-history-row-0-meal-0"
