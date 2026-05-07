@@ -3,6 +3,7 @@ import type { ActivitySource, WorkoutSession } from '../types';
 
 const MANUAL_COMPLETION_CONTEXTS = new Set([
   'manual_activity',
+  'custom_strength',
   'apple_health',
   'watch',
   'coach_log',
@@ -22,7 +23,9 @@ export function manualActivityFromCompletion(completion: WorkoutCompletionRecord
   if (!completion.activity_category || !isManualActivityCompletion(completion)) return undefined;
   const context = normalizedContext(completion);
   const source = completion.activity_source
-    ?? (context === 'apple_health' ? 'apple_health' : undefined);
+    ?? (context === 'apple_health' ? 'apple_health'
+      : context === 'custom_strength' ? 'live_tracker'
+      : undefined);
   return {
     category: completion.activity_category as any,
     subtype: completion.activity_subtype ?? '',

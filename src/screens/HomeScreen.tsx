@@ -7738,10 +7738,27 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         const dateObj = new Date(session.date);
                         const dateLabel = dateObj.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
                         const duration = session.durationSeconds ? `${Math.round(session.durationSeconds / 60)}m` : '–';
-                        const focusLabel = session.manualActivity
-                          ? `${humanizeToken(session.manualActivity.category)}${session.manualActivity.subtype ? ' · ' + humanizeToken(session.manualActivity.subtype) : ''}${session.manualActivity.intensity ? ` (${session.manualActivity.intensity})` : ''}`
-                          : session.focus;
-                        const historyRowLabel = `workout-history-row-${i} ${focusLabel} ${dateLabel} ${exerciseCount} exercises ${totalSets} sets`;
+                        const activity = session.manualActivity;
+                        const activitySource = activity ? activitySourceLabel(activity.source as any) : null;
+                        const focusLabel = activity ? activityTitle(session) : session.focus;
+                        const activityCalories = activity?.caloriesBurned ?? summary?.caloriesBurned;
+                        const activityHeartRate = activity?.avgHeartRate ?? summary?.hrAvg;
+                        const activityMetaPieces = activity ? [
+                          activitySource,
+                          formatActivityDuration(session.durationSeconds),
+                          activity.distanceMiles ? formatDistance(activity.distanceMiles, distanceUnit) : null,
+                          activityCalories ? `${Math.round(activityCalories)} kcal` : null,
+                          activityHeartRate ? `${Math.round(activityHeartRate)} avg bpm` : null,
+                        ].filter(Boolean) : [];
+                        const workoutMetaPieces = [
+                          activitySource,
+                          `${exerciseCount} exercises`,
+                          `${totalSets} sets`,
+                          activityCalories ? `~${Math.round(activityCalories)} kcal` : null,
+                          activityHeartRate ? `${Math.round(activityHeartRate)} avg bpm` : null,
+                        ].filter(Boolean);
+                        const metaPieces = activity && exerciseCount === 0 ? activityMetaPieces : workoutMetaPieces;
+                        const historyRowLabel = `workout-history-row-${i} ${focusLabel} ${dateLabel} ${metaPieces.join(' ')}`;
                         return (
                           <TouchableOpacity
                             testID={`workout-history-row-${i}`}
@@ -7776,7 +7793,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               <View style={{ flex: 1 }}>
                                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                                   <Text style={{ fontSize: 15, fontWeight: '700', color: themeColors.textPrimary }}>{focusLabel}</Text>
-                                  {summary?.totalSets != null && summary.totalSets > 0 && (
+                                  {activitySource ? (
+                                    <View style={{ backgroundColor: activitySource === 'Imported' ? themeColors.primary + '18' : themeColors.surfaceRaised, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4, borderWidth: 1, borderColor: activitySource === 'Imported' ? themeColors.primary + '33' : themeColors.border }}>
+                                      <Text style={{ fontSize: 9, fontWeight: '700', color: activitySource === 'Imported' ? themeColors.primary : themeColors.textMuted }}>
+                                        {activitySource.toUpperCase()}
+                                      </Text>
+                                    </View>
+                                  ) : summary?.totalSets != null && summary.totalSets > 0 && (
                                     <View style={{ backgroundColor: themeColors.primary + '18', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 4 }}>
                                       <Text style={{ fontSize: 9, fontWeight: '700', color: themeColors.primary }}>
                                         {summary.totalSets > 25 ? 'VOLUME' : summary.totalSets < 15 ? 'STRENGTH' : 'HYPERTROPHY'}
@@ -7792,21 +7815,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                               <Ionicons name={isExpanded ? 'chevron-down' : 'chevron-forward'} size={14} color={themeColors.textMuted} style={{ marginLeft: 6 }} />
                             </View>
                             <View style={{ flexDirection: 'row', gap: 6, marginTop: 4 }}>
-                              <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{exerciseCount} exercises</Text>
-                              <Text style={{ fontSize: 11, color: themeColors.textMuted }}>·</Text>
-                              <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{totalSets} sets</Text>
-                              {summary && summary.caloriesBurned > 0 && (
-                                <>
-                                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>·</Text>
-                                  <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>~{summary.caloriesBurned} kcal</Text>
-                                </>
-                              )}
-                              {summary && summary.hrAvg && summary.hrAvg > 0 && (
-                                <>
-                                  <Text style={{ fontSize: 11, color: themeColors.textMuted }}>·</Text>
-                                  <Text style={{ fontSize: 11, color: themeColors.textSecondary }}>{summary.hrAvg} avg bpm</Text>
-                                </>
-                              )}
+                              {metaPieces.map((piece, idx) => (
+                                <React.Fragment key={`${piece}-${idx}`}>
+                                  {idx > 0 && <Text style={{ fontSize: 11, color: themeColors.textMuted }}>·</Text>}
+                                  <Text style={{ fontSize: 11, color: idx === 0 && activitySource ? themeColors.textMuted : themeColors.textSecondary }}>{piece}</Text>
+                                </React.Fragment>
+                              ))}
                             </View>
 
                             {isExpanded && (

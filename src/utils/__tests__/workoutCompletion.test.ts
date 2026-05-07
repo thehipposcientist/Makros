@@ -67,6 +67,25 @@ describe('workout completion hydration', () => {
     });
   });
 
+  it('hydrates custom strength completions as user-logged workouts', () => {
+    const custom = manualActivityFromCompletion({
+      ...plannedLegCompletion,
+      id: 3,
+      focus_label: 'Custom Upper',
+      source_context: 'custom_strength',
+      activity_category: 'strength',
+      activity_subtype: 'custom_upper',
+      activity_intensity: 'hard',
+    });
+
+    expect(custom).toEqual({
+      category: 'strength',
+      subtype: 'custom_upper',
+      intensity: 'hard',
+      source: 'live_tracker',
+    });
+  });
+
   it('only shows no-exercise manual activities as extra workout activity cards', () => {
     expect(isExtraWorkoutActivitySession({
       id: 'manual-run',
