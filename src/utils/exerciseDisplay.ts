@@ -27,16 +27,15 @@ const BODYWEIGHT_NAME_RE =
   /stretch|foam roll|cat.?cow|pigeon.?pose|child.?s pose|spinal twist|world.?s greatest|hip 90|thoracic|shoulder dislocate|downward dog|cobra|bird.?dog|dead bug|superman|glute bridge|clamshell|band pull.?apart|face pull|wall slide|butterfly|savasana|couch stretch|dead hang|hamstring stretch|calf stretch|quad stretch|forward fold|straddle|yoga|vinyasa|flow|mobility|pose\b/i;
 
 const GUIDE_NAME_RE =
-  /stretch|foam roll|cat.?cow|pigeon|child.?s pose|spinal twist|world.?s greatest|90.?90|hip 90|thoracic|shoulder dislocate|downward dog|cobra|butterfly|savasana|couch stretch|hamstring|calf|quad|forward fold|straddle|yoga|vinyasa|yin|flow|mobility|pose\b|breathwork|breathing|meditation/i;
+  /stretch|foam roll|cat.?cow|pigeon|child.?s pose|spinal twist|world.?s greatest|90.?90|hip 90|thoracic|shoulder dislocate|downward dog|cobra|butterfly|savasana|couch stretch|hamstring stretch|calf stretch|quad stretch|forward fold|straddle|yoga|vinyasa|yin|flow|mobility|pose\b|breathwork|breathing|meditation/i;
 
 /** Cardio modalities — treadmill, bike, rower, swimming, etc. No weight,
  *  reps are really a duration. */
 const CARDIO_NAME_RE =
   /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone ?2|tempo|steady state|long run|boxing|kickboxing|sparring|bag.?work|shadow.?box/i;
 
-/** Hold-for-time exercises (plank family, carries, wall sit, hollow
- *  hold, L-sit). Reps are a duration, weight sometimes relevant
- *  (farmer's carry), sometimes not (plank). */
+/** Hold-for-time exercises (plank family, wall sit, hollow hold, L-sit)
+ *  plus loaded carries where weight should stay visible. */
 const HOLD_NAME_RE =
   /plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|farmer.?carry|suitcase carry|loaded carry/i;
 
@@ -144,7 +143,7 @@ export function isGuideExercise(ex: any, workout?: any): boolean {
  *    - archetype is MOBILITY_FLOW / STRETCH_BLOCK / RECOVERY_EASY
  *    - training_type is 'mobility' / 'stretch' / 'recovery' / 'flow'
  *    - reps string is time-based ("60s", "3 min", "flow") AND the name
- *      isn't a loaded carry (farmer's walk carries weight but is timed)
+ *      isn't a loaded carry (carries still need their load input)
  */
 export function shouldHideWeight(ex: any): boolean {
   if (!ex) return false;

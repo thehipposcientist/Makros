@@ -2060,9 +2060,9 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
 
   const renderBaselineStep = () => (
     <View style={styles.stepContainer}>
-      <Text style={styles.stepTitle}>Performance Baseline</Text>
+      <Text style={styles.stepTitle}>Starting Point</Text>
       <Text style={styles.stepDescription}>
-        Optional recent working sets and cardio markers.
+        Optional recent working sets and cardio markers help Thallo pick safer first-week targets.
       </Text>
       <Text style={styles.optionalBanner}>Skip anything you do not know.</Text>
 
@@ -2093,7 +2093,10 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       </View>
 
       <View style={styles.fieldGroup}>
-        <Text style={styles.sectionHeading}>Strength</Text>
+        <Text style={styles.sectionHeading}>Strength starting weights</Text>
+        <Text style={[styles.hint, { marginTop: -4, marginBottom: 10 }]}>
+          Enter a recent comfortable set, not a one-rep max.
+        </Text>
         <View style={{ gap: 10 }}>
           {STRENGTH_BASELINE_LIFTS.map(lift => {
             const input = strengthBaselineInputs[lift.key] ?? { weightLbs: '', reps: '' };

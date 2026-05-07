@@ -40,6 +40,7 @@ const WATCH_SYNC_STATUS_KEY = 'watch_sync_status_v1';
 const WATCH_WORKOUT_SCHEMA_VERSION = 2 as const;
 let workoutRevisionSequence = 0;
 let progressRevisionSequence = 0;
+const lastPayloadSignatures = new Map<string, string>();
 
 export type WatchSyncSnapshot = {
   surface: string;
@@ -50,7 +51,41 @@ export type WatchSyncSnapshot = {
   detail?: string;
 };
 
-async function recordWatchSync(surface: string, ok: boolean, detail?: string): Promise<void> {
+function normalizeForSignature(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeForSignature);
+  if (!value || typeof value !== 'object') return value;
+  const normalized: Record<string, unknown> = {};
+  for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+    if (
+      key === 'syncedAtMs'
+      || key === 'sentAtMs'
+      || key === 'eventId'
+      || key === 'revision'
+      || key === 'progressRevision'
+    ) {
+      continue;
+    }
+    normalized[key] = normalizeForSignature((value as Record<string, unknown>)[key]);
+  }
+  return normalized;
+}
+
+function payloadSignature(payload: unknown): string {
+  try {
+    return JSON.stringify(normalizeForSignature(payload));
+  } catch {
+    return String(Date.now());
+  }
+}
+
+function shouldSkipUnchanged(surface: string, payload: unknown, force?: boolean): boolean {
+  const signature = payloadSignature(payload);
+  const previous = lastPayloadSignatures.get(surface);
+  lastPayloadSignatures.set(surface, signature);
+  return !force && previous === signature;
+}
+
+async function updateWatchSyncSnapshot(surface: string, ok: boolean, detail?: string): Promise<WatchSyncSnapshot> {
   const snapshot: WatchSyncSnapshot = {
     surface,
     ok,
@@ -60,6 +95,11 @@ async function recordWatchSync(surface: string, ok: boolean, detail?: string): P
     paired: WatchBridge.isAvailable() ? WatchBridge.isPaired() : false,
   };
   try { await AsyncStorage.setItem(WATCH_SYNC_STATUS_KEY, JSON.stringify(snapshot)); } catch {}
+  return snapshot;
+}
+
+async function recordWatchSync(surface: string, ok: boolean, detail?: string): Promise<void> {
+  const snapshot = await updateWatchSyncSnapshot(surface, ok, detail);
   recordTelemetryEvent('watch_sync_result', {
     surface,
     ok,
@@ -67,6 +107,10 @@ async function recordWatchSync(surface: string, ok: boolean, detail?: string): P
     paired: snapshot.paired,
     detail,
   });
+}
+
+async function recordWatchSyncUnchanged(surface: string): Promise<void> {
+  await updateWatchSyncSnapshot(surface, true, 'unchanged');
 }
 
 export async function getWatchSyncSnapshot(): Promise<WatchSyncSnapshot | null> {
@@ -102,7 +146,8 @@ function nullableString(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
 }
 
-const WATCH_TIMED_NAME_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone ?2|tempo|steady state|long run|\bwalk\b|walking|boxing|kickboxing|sparring|bag.?work|shadow.?box|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|farmer.?carry|suitcase carry|loaded carry/i;
+const WATCH_TIMED_NAME_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|zone ?2|tempo|steady state|long run|\bwalk\b|walking|boxing|kickboxing|sparring|bag.?work|shadow.?box|plank|dead hang|wall sit|hollow.?hold|l.?sit/i;
+const WATCH_DISTANCE_TARGET_RE = /\b\d+(?:\.\d+)?\s*(?:[-–—]\s*\d+(?:\.\d+)?)?\s*(?:yd|yds|yard|yards|m|meter|meters|metre|metres|ft|feet|km|mi|mile|miles)\b/i;
 
 function watchDurationPrefersMinutes(exercise: any): boolean {
   const name = String(exercise?.name ?? '').toLowerCase();
@@ -117,6 +162,7 @@ function watchDurationPrefersMinutes(exercise: any): boolean {
 function parseWatchDurationTargetSeconds(target: unknown, preferMinutes: boolean): number | null {
   const text = String(target ?? '').trim().toLowerCase();
   if (!text) return null;
+  if (WATCH_DISTANCE_TARGET_RE.test(text)) return null;
   const match = text.match(/(\d+(?:\.\d+)?)\s*(?:[-–—]\s*(\d+(?:\.\d+)?))?\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes)?/);
   if (!match) return null;
   if (!match[3] && /\b(rpm|watt|watts|bpm|mph|kph|km\/h|pace|resistance)\b/.test(text)) return null;
@@ -493,6 +539,7 @@ export async function pushWorkoutToWatch(
     warmupSteps?: string[];
     userId?: string | null;
     reason?: WatchWorkoutSyncReason;
+    force?: boolean;
   },
 ): Promise<boolean> {
   // Resolve userId: caller can pass it explicitly; otherwise fall back to
@@ -525,18 +572,36 @@ export async function pushWorkoutToWatch(
     bytes: payloadBytes,
     userId: userId?.slice(0, 4),
   });
+  const force = !!opts.force
+    || envelope.reason === 'reachability'
+    || envelope.reason === 'pull_state'
+    || envelope.reason === 'start_echo'
+    || envelope.reason === 'complete'
+    || envelope.reason === 'skip'
+    || envelope.reason === 'clear';
+  if (shouldSkipUnchanged('workout', envelope, force)) {
+    wsLog('pushWorkoutToWatch skipped unchanged', { status: opts.status, reason: envelope.reason });
+    await recordWatchSyncUnchanged('workout');
+    return true;
+  }
   const ok = await WatchBridge.syncWorkout(envelope);
+  if (!ok) lastPayloadSignatures.delete('workout');
   await recordWatchSync('workout', !!ok, `${envelope.reason}/${opts.status} ex=${payload.exercises?.length ?? 0} b=${payloadBytes}`);
   return ok;
 }
 
-export async function pushThemeToWatch(themeName: AppThemeName | undefined) {
+export async function pushThemeToWatch(themeName: AppThemeName | undefined, opts: { force?: boolean } = {}) {
   const latestThemeName = await getStoredThemePreference() ?? (themeName ? resolveThemeName(themeName) : undefined);
   const palette = buildWatchPalette(latestThemeName);
   if (!canPush()) { await recordWatchSync('theme', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
   wsLog('pushThemeToWatch', { theme: palette.themeName });
+  if (shouldSkipUnchanged('theme', palette, opts.force)) {
+    await recordWatchSyncUnchanged('theme');
+    return true;
+  }
   const ok = await WatchBridge.syncTheme(palette);
+  if (!ok) lastPayloadSignatures.delete('theme');
   await recordWatchSync('theme', !!ok, palette.themeName);
   return ok;
 }
@@ -564,6 +629,7 @@ export async function pushMealsToWatch(
   checkedMeals: Record<string, boolean> | null | undefined,
   dateISO?: string,
   score?: number | null,
+  opts: { force?: boolean } = {},
 ): Promise<boolean> {
   if (!plan) return false;
   if (!canPush()) { await recordWatchSync('meals', false, 'bridge_unavailable'); return false; }
@@ -614,7 +680,12 @@ export async function pushMealsToWatch(
     meals: items,
     syncedAtMs: Date.now(),
   };
+  if (shouldSkipUnchanged('meals', payload, opts.force)) {
+    await recordWatchSyncUnchanged('meals');
+    return true;
+  }
   const ok = await WatchBridge.syncMeals(payload);
+  if (!ok) lastPayloadSignatures.delete('meals');
   await recordWatchSync('meals', !!ok, `${items.length} meals`);
   return ok;
 }
@@ -626,6 +697,7 @@ export async function pushHydrationToWatch(opts: {
   dateISO?: string;
   ounces?: number | null;
   targetOunces?: number | null;
+  force?: boolean;
 }): Promise<boolean> {
   if (!canPush()) { await recordWatchSync('hydration', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
@@ -638,7 +710,12 @@ export async function pushHydrationToWatch(opts: {
     syncedAtMs: Date.now(),
   };
   wsLog('pushHydrationToWatch', { ounces: payload.ounces, target: payload.targetOunces });
+  if (shouldSkipUnchanged('hydration', payload, opts.force)) {
+    await recordWatchSyncUnchanged('hydration');
+    return true;
+  }
   const ok = await WatchBridge.syncHydration(payload);
+  if (!ok) lastPayloadSignatures.delete('hydration');
   await recordWatchSync('hydration', !!ok, `${payload.ounces}/${payload.targetOunces} oz`);
   return ok;
 }
@@ -647,7 +724,7 @@ export async function pushHydrationToWatch(opts: {
  *  Sleep tab on the watch — score + hours + RHR + HRV + a short
  *  coach-style summary line. Built from the phone's sleepScore
  *  service so the watch + phone stay consistent. */
-export async function pushSleepToWatch(opts: WatchSleepInput): Promise<boolean> {
+export async function pushSleepToWatch(opts: WatchSleepInput & { force?: boolean }): Promise<boolean> {
   if (!canPush()) { await recordWatchSync('sleep', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
   const payload: WatchSleepPayload = {
@@ -663,7 +740,12 @@ export async function pushSleepToWatch(opts: WatchSleepInput): Promise<boolean> 
     syncedAtMs: Date.now(),
   };
   wsLog('pushSleepToWatch', { score: payload.score, hours: payload.hoursLastNight });
+  if (shouldSkipUnchanged('sleep', payload, opts.force)) {
+    await recordWatchSyncUnchanged('sleep');
+    return true;
+  }
   const ok = await WatchBridge.syncSleep(payload);
+  if (!ok) lastPayloadSignatures.delete('sleep');
   await recordWatchSync('sleep', !!ok);
   return ok;
 }
@@ -684,6 +766,7 @@ export async function pushReadinessToWatch(opts: {
   summary?: string | null;
   factors?: WatchReadinessFactor[];
   syncedAtMs?: number;
+  force?: boolean;
 }): Promise<boolean> {
   if (!canPush()) { await recordWatchSync('readiness', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
@@ -695,7 +778,12 @@ export async function pushReadinessToWatch(opts: {
     syncedAtMs: opts.syncedAtMs ?? Date.now(),
   };
   wsLog('pushReadinessToWatch', { score: payload.score });
+  if (shouldSkipUnchanged('readiness', payload, opts.force)) {
+    await recordWatchSyncUnchanged('readiness');
+    return true;
+  }
   const ok = await WatchBridge.syncReadiness(payload);
+  if (!ok) lastPayloadSignatures.delete('readiness');
   await recordWatchSync('readiness', !!ok);
   return ok;
 }
@@ -708,6 +796,7 @@ export async function pushWeightToWatch(opts: {
   daysSinceLastLog?: number | null;
   emaLbs?: number | null;
   slopeLbsPerWeek?: number | null;
+  force?: boolean;
 }): Promise<boolean> {
   if (!canPush()) { await recordWatchSync('weight', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
@@ -719,7 +808,12 @@ export async function pushWeightToWatch(opts: {
     syncedAtMs: Date.now(),
   };
   wsLog('pushWeightToWatch', { latest: payload.latestLbs });
+  if (shouldSkipUnchanged('weight', payload, opts.force)) {
+    await recordWatchSyncUnchanged('weight');
+    return true;
+  }
   const ok = await WatchBridge.syncWeight(payload);
+  if (!ok) lastPayloadSignatures.delete('weight');
   await recordWatchSync('weight', !!ok);
   return ok;
 }
@@ -796,6 +890,7 @@ export async function pushSupplementsToWatch(
     skipped?: boolean;
   }>,
   dateISO?: string,
+  opts: { force?: boolean } = {},
 ): Promise<boolean> {
   if (!canPush()) { await recordWatchSync('supplements', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();
@@ -812,7 +907,12 @@ export async function pushSupplementsToWatch(
     syncedAtMs: Date.now(),
   };
   wsLog('pushSupplementsToWatch', { count: items.length });
+  if (shouldSkipUnchanged('supplements', payload, opts.force)) {
+    await recordWatchSyncUnchanged('supplements');
+    return true;
+  }
   const ok = await WatchBridge.syncSupplements(payload);
+  if (!ok) lastPayloadSignatures.delete('supplements');
   await recordWatchSync('supplements', !!ok, `${items.length} items`);
   return ok;
 }

@@ -575,14 +575,17 @@ export function applyRoutines(
     inplace.push({ ...m, isRoutine: false });
   }
 
-  // Append any routines that weren't already in the plan (newly pinned).
-  const appended: MealSuggestion[] = activeRoutines
+  // Place any routines that weren't already in the plan ahead of generated
+  // meals. Routines are the user's repeat-eating template, so when they are
+  // inserted into a new day they should occupy the first slots rather than
+  // trailing after generated filler.
+  const inserted: MealSuggestion[] = activeRoutines
     .filter(r => !placedRoutineIds.has(r.id))
     .map(r => ({ ...mealFromRoutine(r), _routineId: r.id }) as MealSuggestion);
 
   return {
     ...incoming,
-    meals: [...inplace, ...appended],
+    meals: [...inserted, ...inplace],
   };
 }
 

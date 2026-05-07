@@ -361,6 +361,7 @@ CHEST = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "default_tracking_mode": "reps",
         "description": "Protract and retract the scapula at the bottom of a push-up position — improves shoulder health",
         "equipment": [],
     },
@@ -612,6 +613,7 @@ BACK = [
         "description": "Rear delt and rotator cuff health with cable rope",
         "equipment": [
             {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "rope_attachment", "role": "support", "required": True},
         ],
     },
     {
@@ -667,6 +669,7 @@ BACK = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "default_tracking_mode": "reps",
         "description": "Controlled rotation drill for thoracic spine mobility",
         "equipment": [],
     },
@@ -930,6 +933,7 @@ SHOULDERS = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "default_tracking_mode": "reps",
         "description": "Overhead wall slide drill for shoulder mobility and stability",
         "equipment": [],
     },
@@ -1125,6 +1129,7 @@ TRICEPS = [
         "description": "Cable rope pushdown for full lockout and flare",
         "equipment": [
             {"slug": "cable_machine", "role": "primary", "required": True},
+            {"slug": "rope_attachment", "role": "support", "required": True},
         ],
     },
     {
@@ -2016,6 +2021,7 @@ PREHAB = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": True,
+        "default_tracking_mode": "reps",
         "description": "Band external rotation for rotator cuff health",
         "equipment": [
             {"slug": "resistance_bands", "role": "primary", "required": True},
@@ -2032,6 +2038,7 @@ PREHAB = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": True,
+        "default_tracking_mode": "reps",
         "description": "Band internal rotation drill for shoulder balance",
         "equipment": [
             {"slug": "resistance_bands", "role": "primary", "required": True},
@@ -2048,6 +2055,7 @@ PREHAB = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "default_tracking_mode": "reps",
         "description": "Prone scapular control drill — Y, T, and W positions",
         "equipment": [],
     },
@@ -2062,6 +2070,7 @@ PREHAB = [
         "is_compound": False,
         "is_machine": False,
         "is_unilateral": False,
+        "default_tracking_mode": "reps",
         "description": "External rotation to overhead press combo for shoulder prehab",
         "equipment": [
             {"slug": "dumbbells", "role": "primary", "required": True},
@@ -2572,7 +2581,7 @@ POWER = [
         "equipment_bucket": "dumbbells",
         "movement_pattern": "carry",
         "exercise_type": "strength",
-        "default_tracking_mode": "time",
+        "default_tracking_mode": "distance",
         "is_compound": True,
         "is_machine": False,
         "is_unilateral": False,
@@ -3189,6 +3198,7 @@ _NEW_2026_04_13_PASS_2 = [
         "is_compound": False, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
         "substitution_group": "shoulder_prehab",
+        "default_tracking_mode": "reps",
         "description": "Light dumbbell or band Y-pattern raise for lower-trap and rear-delt prehab",
         "equipment": [
             {"slug": "dumbbells",        "role": "primary", "required": False},
@@ -4306,7 +4316,7 @@ _NEW_2026_04_27 = [
         "difficulty": "beginner",
         "substitution_group": "horizontal_press_bodyweight",
         "description": "Easier push-up variation with hands elevated on bench or box",
-        "equipment": [{"slug": "flat_bench", "role": "support", "required": False}],
+        "equipment": [{"slug": "flat_bench", "role": "support", "required": True}],
     },
     {
         "slug": "deficit_pushup",
@@ -4731,6 +4741,7 @@ _NEW_2026_04_27 = [
         "difficulty": "beginner",
         "substitution_group": "bicep_curl_machine",
         "description": "Preacher pad machine curl — great for beginners and drop sets",
+        # TODO(equipment): replace with preacher_curl_machine when that equipment slug exists.
         "equipment": [{"slug": "preacher_bench", "role": "primary", "required": True}],
     },
     {
@@ -4793,7 +4804,7 @@ _NEW_2026_04_27 = [
         "difficulty": "beginner",
         "substitution_group": "dip",
         "description": "Plate-loaded dip machine — safer for shoulder-compromised users",
-        "equipment": [{"slug": "chest_press_machine", "role": "primary", "required": True}],
+        "equipment": [{"slug": "assisted_pullup_machine", "role": "primary", "required": True}],
     },
     {
         "slug": "cable_skull_crusher",
@@ -4924,7 +4935,7 @@ _NEW_2026_04_27 = [
         "difficulty": "beginner",
         "default_tracking_mode": "time",
         "description": "Pinch two plates between thumb and fingers for grip isolation",
-        "equipment": [{"slug": "barbell", "role": "primary", "required": False}],
+        "equipment": [{"slug": "weight_plates", "role": "primary", "required": True}],
     },
     {
         "slug": "farmer_hold",
@@ -5332,6 +5343,7 @@ _NEW_2026_04_27 = [
         "difficulty": "beginner",
         "substitution_group": "glute_kickback",
         "description": "Lever kickback machine — targeted glute isolation at peak contraction",
+        # TODO(equipment): replace with glute_kickback_machine when that equipment slug exists.
         "equipment": [{"slug": "hip_abduction_machine", "role": "primary", "required": True}],
     },
 
@@ -5569,7 +5581,7 @@ _NEW_2026_04_27 = [
         "is_compound": False, "is_machine": False, "is_unilateral": False,
         "laterality": "bilateral",
         "difficulty": "intermediate",
-        "default_tracking_mode": "time",
+        "default_tracking_mode": "reps",
         "substitution_group": "core_anti_extension",
         "description": "Forearms on ball, draw small circles — advanced stability plank",
         "equipment": [{"slug": "swiss_ball", "role": "primary", "required": True}],
@@ -5648,7 +5660,7 @@ _NEW_2026_04_27 = [
         "difficulty": "intermediate",
         "substitution_group": "core_flexion",
         "description": "Sit-up holding a plate or dumbbell at chest for added resistance",
-        "equipment": [{"slug": "dumbbells", "role": "primary", "required": False}],
+        "equipment": [{"slug": "dumbbells", "role": "primary", "required": True}],
     },
     {
         "slug": "cable_pallof_hold",

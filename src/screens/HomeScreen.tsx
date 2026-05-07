@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue } from 'react';
-import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager, Easing, FlatList } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, TouchableOpacity, Pressable, Modal, ActivityIndicator, Alert, TextInput, KeyboardAvoidingView, Platform, Linking, Image, Dimensions, Keyboard, Animated, Switch, LayoutAnimation, UIManager, Easing, FlatList, AppState } from 'react-native';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -45,6 +45,26 @@ type WatchSyncUiSnapshot = {
   available?: boolean;
   detail?: string;
 };
+
+function calorieAdjustmentLine(target: import('../services/api').AdjustedDailyTarget): string {
+  const base = Math.round(target.base_daily_target);
+  const adjusted = Math.round(target.adjusted_calories);
+  const totalDelta = Math.round(target.adjustment_applied);
+  const weeklyDelta = Math.round(target.weekly_adjustment_applied ?? 0);
+  const activityDelta = Math.round(target.activity_adjustment_applied ?? 0);
+  const parts: string[] = [];
+  if (activityDelta !== 0) {
+    parts.push(`${activityDelta > 0 ? '+' : '-'}${Math.abs(activityDelta)} activity`);
+  }
+  if (weeklyDelta !== 0) {
+    parts.push(`${weeklyDelta > 0 ? '+' : '-'}${Math.abs(weeklyDelta)} weekly budget`);
+  }
+  if (parts.length === 0 && totalDelta !== 0) {
+    parts.push(`${totalDelta > 0 ? '+' : '-'}${Math.abs(totalDelta)} adjustment`);
+  }
+  const reason = parts.length > 0 ? ` (${parts.join(', ')})` : '';
+  return `Target ${adjusted} kcal today${reason}, base ${base}`;
+}
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
 import { UserProfile, WorkoutPlan, DailyNutritionPlan, WorkoutDay, WorkoutSession, SupplementItem, InjuryEntry, MealRoutineEntry, MealRoutineFood, SavedWorkoutTemplate } from '../types';
@@ -2340,6 +2360,40 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const [friendCount, setFriendCount] = useState(0);
   const [socialUnreadCount, setSocialUnreadCount] = useState(0);
 
+  const refreshSocialCounts = useCallback(async () => {
+    if (!authToken) return;
+    try {
+      const { listFriends, listSocialNotifications } = await import('../services/api');
+      const [list, notifications] = await Promise.all([
+        listFriends(authToken),
+        listSocialNotifications(authToken),
+      ]);
+      setFriendCount(list.friends.length);
+      setPendingFriendCount(list.pending.filter(p => p.direction === 'incoming').length);
+      setSocialUnreadCount(notifications.unread_count);
+    } catch {
+      // Social badges are advisory chrome; the Friends tab can retry.
+    }
+  }, [authToken]);
+
+  useEffect(() => {
+    if (!authToken) return;
+    let alive = true;
+    const poll = () => {
+      if (alive && AppState.currentState === 'active') refreshSocialCounts();
+    };
+    poll();
+    const id = setInterval(poll, 60_000);
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') poll();
+    });
+    return () => {
+      alive = false;
+      clearInterval(id);
+      sub.remove();
+    };
+  }, [authToken, refreshSocialCounts]);
+
   // Next-day unlogged-meals prompt. Populated once per day when yesterday
   // had a plan with unchecked meals and the dismissal flag isn't set.
   const [unloggedPrompt, setUnloggedPrompt] = useState<{
@@ -3264,9 +3318,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 readiness: s.readinessScore?.score ?? null,
                 readinessLabel: s.readinessScore?.label ?? null,
                 reason: 'reachability',
+                force: true,
               }).catch(() => {});
             }
-            await pushThemeToWatch(s.themePreference).catch(() => {});
+            await pushThemeToWatch(s.themePreference, { force: true }).catch(() => {});
             const todayPlan = s.nutritionPlansByDate[todayISO]
               ?? (Object.values(s.nutritionPlansByDate)[0] as any);
             await pushMealsToWatch(
@@ -3274,6 +3329,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               s.checkedMealsByDate[todayISO],
               todayISO,
               s.nutritionScoreData?.score ?? null,
+              { force: true },
             ).catch(() => {});
             let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
             if (!hydrationSnapshot && authToken) {
@@ -3283,6 +3339,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               dateISO: hydrationSnapshot?.date ?? todayISO,
               ounces: hydrationSnapshot?.ounces ?? 0,
               targetOunces: hydrationSnapshot?.target_ounces ?? 64,
+              force: true,
             }).catch(() => {});
           })();
 
@@ -3294,7 +3351,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             try {
               const { getHealthDataSummary } = await import('../services/healthDataSummary');
               const cached = await getHealthDataSummary({ age: s.profileAge ?? null });
-              await pushSleepToWatch(buildWatchSleepPayloadFromSummary(cached));
+              await pushSleepToWatch({ ...buildWatchSleepPayloadFromSummary(cached), force: true });
             } catch { /* non-fatal */ }
           })();
           // Readiness push: always go through the server's
@@ -3333,6 +3390,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 summary: serverResp.summary,
                 factors: serverResp.factors as any,
                 syncedAtMs: serverResp.computed_at_ms,
+                force: true,
               } as any);
             } catch { /* non-fatal */ }
           })();
@@ -3351,6 +3409,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     taken: !!(sup.logs_today || []).find(l => !l.skipped),
                     skipped: !!(sup.logs_today || []).find(l => l.skipped),
                   })),
+                  undefined,
+                  { force: true },
                 );
               }
             } catch { /* non-fatal */ }
@@ -3380,7 +3440,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   slope = (ema - oldEma);
                 }
               }
-              await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope });
+              await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope, force: true });
             } catch { /* non-fatal */ }
           })();
         });
@@ -3575,9 +3635,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     readiness: s.readinessScore?.score ?? null,
                     readinessLabel: s.readinessScore?.label ?? null,
                     reason: 'pull_state',
+                    force: true,
                   }).catch(() => {});
                 }
-                await pushThemeToWatch(s.themePreference).catch(() => {});
+                await pushThemeToWatch(s.themePreference, { force: true }).catch(() => {});
                 const todayPlan = s.nutritionPlansByDate[todayISO]
                   ?? (Object.values(s.nutritionPlansByDate)[0] as any);
                 await pushMealsToWatch(
@@ -3585,6 +3646,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   s.checkedMealsByDate[todayISO],
                   todayISO,
                   s.nutritionScoreData?.score ?? null,
+                  { force: true },
                 ).catch(() => {});
                 let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
                 if (!hydrationSnapshot && authToken) {
@@ -3594,6 +3656,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   dateISO: hydrationSnapshot?.date ?? todayISO,
                   ounces: hydrationSnapshot?.ounces ?? 0,
                   targetOunces: hydrationSnapshot?.target_ounces ?? 64,
+                  force: true,
                 }).catch(() => {});
                 // push_state also sends the full data set that the
                 // reachability listener sends, so a manual sync is
@@ -3602,7 +3665,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   try {
                     const { getHealthDataSummary } = await import('../services/healthDataSummary');
                     const cached = await getHealthDataSummary({ age: s.profileAge ?? null }).catch(() => null);
-                    await pushSleepToWatch(buildWatchSleepPayloadFromSummary(cached));
+                    await pushSleepToWatch({ ...buildWatchSleepPayloadFromSummary(cached), force: true });
                   } catch { /* non-fatal */ }
                 })();
                 (async () => {
@@ -3617,7 +3680,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         timing: sup.timing ?? null,
                         taken: !!(sup.logs_today || []).find((l: any) => !l.skipped),
                         skipped: !!(sup.logs_today || []).find((l: any) => l.skipped),
-                      })));
+                      })), undefined, { force: true });
                     }
                   } catch { /* non-fatal */ }
                 })();
@@ -3637,7 +3700,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       const old = entries.slice(-14, -7);
                       if (old.length > 0) slope = ema - old.reduce((acc: number, e: any) => acc + Number(e.weight_lbs), 0) / old.length;
                     }
-                    await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope });
+                    await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope, force: true });
                   } catch { /* non-fatal */ }
                 })();
               } catch { /* bridge optional */ }
@@ -4702,7 +4765,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           const preservedMeals = meals.filter(m => !(m as any)._routineId && !!(m as any)._localId);
           const regularMeals = meals.filter(m => !(m as any)._routineId && !(m as any)._localId);
           const slotsLeft = Math.max(0, expectedCount - routineMeals.length - preservedMeals.length);
-          const trimmed = [...regularMeals.slice(0, slotsLeft), ...preservedMeals, ...routineMeals];
+          const trimmed = [...routineMeals, ...preservedMeals, ...regularMeals.slice(0, slotsLeft)];
           picked = { ...picked, meals: trimmed };
         } else if (countBeforeOverlay !== undefined) {
           console.log(
@@ -6922,7 +6985,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               activeOpacity={0.85}
               accessibilityRole="button"
               accessibilityLabel={`Apple Watch sync ${watchSyncPillLabel}`}>
-              <View style={[styles.watchSyncDot, { backgroundColor: watchSyncColor }]} />
+              <Ionicons name="watch-outline" size={15} color={watchSyncColor} />
               {!compactWatchSyncPill && (
                 <Text style={[styles.watchSyncText, { color: watchSyncColor }]} numberOfLines={1}>
                   {watchSyncPillLabel}
@@ -8453,9 +8516,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         authToken={authToken}
                         onAfterImport={async (sessionDate) => {
                           try {
-                            const { history, summaries } = await loadWorkoutHistoryBundle();
-                            setWorkoutHistoryList(history);
-                            setWorkoutHistorySummaries(summaries);
+                            const [freshHistory, freshSummaries] = await Promise.all([
+                              loadWorkoutHistory(),
+                              loadWorkoutSummaries(),
+                            ]);
+                            setWorkoutHistoryList(freshHistory);
+                            setWorkoutHistorySummaries(freshSummaries);
                           } catch {}
                           await refreshNutritionAfterActivity(sessionDate ?? todayKey()).catch(() => {});
                           loadDayStatus();
@@ -9050,12 +9116,14 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               const mealWeekItems: WeekStripItem[] = _weekMealDays.map(day => {
                 const checks = checkedMealsByDate[day.key] ?? {};
                 const checkedCount = Object.values(checks).filter(Boolean).length;
+                const backendLoggedCount = backendMealDailyByDate.get(day.key)?.meal_count ?? 0;
+                const loggedCount = Math.max(checkedCount, backendLoggedCount);
                 const isPast = day.date < new Date(new Date().setHours(0, 0, 0, 0));
                 return {
                   key: day.key,
                   date: day.date,
                   title: day.key === todayKey() ? 'Today’s meals' : `${DAY_NAMES[day.date.getDay()]} meals`,
-                  state: checkedCount > 0 ? 'logged' : isPast ? 'skipped' : day.key === todayKey() ? 'today' : 'planned',
+                  state: loggedCount > 0 ? 'logged' : isPast ? 'skipped' : day.key === todayKey() ? 'today' : 'planned',
                 };
               });
               return (
@@ -9109,8 +9177,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               // "Logged" past day: any meal checked on that date (or all checked).
               const dayChecks = checkedMealsByDate[d.key] ?? {};
               const checkedCount = Object.values(dayChecks).filter(Boolean).length;
-              const isPastLogged = isPast && checkedCount > 0;
-              const isPastSkipped = isPast && checkedCount === 0;
+              const backendLoggedCount = backendMealDailyByDate.get(d.key)?.meal_count ?? 0;
+              const displayLoggedCount = Math.max(checkedCount, backendLoggedCount);
+              const isPastLogged = isPast && displayLoggedCount > 0;
+              const isPastSkipped = isPast && displayLoggedCount === 0;
               const authoritativeNutritionScore = projectedNutritionScoreByDate.get(d.key);
               const removedSet = new Set(plan.removedMealIds ?? []);
               const meals = (plan.meals ?? []).filter((_, i) => !removedSet.has(`meal_${i}`));
@@ -9230,7 +9300,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                             paddingVertical: 1,
                           }}>
                             <Text style={{ fontSize: 9, fontWeight: '800', color: MEALS_ACCENT, letterSpacing: 0.4 }}>
-                              ✓ {checkedCount} LOGGED
+                              ✓ {displayLoggedCount} LOGGED
                             </Text>
                           </View>
                         )}
@@ -9271,8 +9341,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                           when the shift is >15 kcal so on-target days are quiet. */}
                       {isToday && adjustedDailyTarget && Math.abs(adjustedDailyTarget.adjustment_applied) > 15 && (
                         <Text testID="today-nutrition-target-adjustment" style={{ fontSize: 10, color: adjustedDailyTarget.adjustment_applied > 0 ? themeColors.success : themeColors.warning, marginTop: 2, fontWeight: '600' }}>
-                          {adjustedDailyTarget.adjustment_applied > 0 ? '↑' : '↓'}{' '}
-                          {Math.abs(Math.round(adjustedDailyTarget.adjustment_applied))} kcal {((adjustedDailyTarget.activity_adjustment_applied ?? 0) > 0) ? 'today adjustment' : 'weekly adjustment'}
+                          {calorieAdjustmentLine(adjustedDailyTarget)}
                           {adjustedDailyTarget.note ? ` · ${adjustedDailyTarget.note}` : ''}
                         </Text>
                       )}
@@ -13080,6 +13149,7 @@ function HydrationTodayPanel({
   const previousOunces = useRef(ounces);
   const [manualOunces, setManualOunces] = useState(String(ounces || ''));
   const [burstLabel, setBurstLabel] = useState('');
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     setManualOunces(String(ounces || ''));
@@ -13188,7 +13258,17 @@ function HydrationTodayPanel({
         borderColor: MEALS_ACCENT + '33',
       },
     ]}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+      <TouchableOpacity
+        activeOpacity={0.78}
+        onPress={() => {
+          configureExpandAnimation(260);
+          setExpanded(v => !v);
+        }}
+        style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        accessibilityLabel="Hydration details"
+      >
         <Animated.View style={{
           width: 32, height: 32, borderRadius: 16,
           backgroundColor: MEALS_ACCENT + '18',
@@ -13213,7 +13293,31 @@ function HydrationTodayPanel({
           </Text>
         </View>
         {loading && <ActivityIndicator size="small" color={MEALS_ACCENT} />}
-      </View>
+        {!expanded && !loading ? (
+          <TouchableOpacity
+            testID="hydration-collapsed-add"
+            onPress={(e) => {
+              e.stopPropagation();
+              onDelta(HYDRATION_QUICK_ADD_OUNCES[0] ?? 16);
+            }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={{
+              minHeight: 28,
+              paddingHorizontal: 9,
+              borderRadius: 999,
+              backgroundColor: MEALS_ACCENT + '18',
+              borderWidth: 1,
+              borderColor: MEALS_ACCENT + '44',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}>
+            <Text style={{ fontSize: 10, fontWeight: '900', color: MEALS_ACCENT }}>
+              {formatHydrationQuickAddLabel(HYDRATION_QUICK_ADD_OUNCES[0] ?? 16)}
+            </Text>
+          </TouchableOpacity>
+        ) : null}
+        <ExpandingChevron expanded={expanded} color={colors.textMuted} size={15} />
+      </TouchableOpacity>
       <View style={{ position: 'relative' }}>
         <Animated.View pointerEvents="none" style={{
           position: 'absolute',
@@ -13234,110 +13338,112 @@ function HydrationTodayPanel({
           <Animated.View style={{ width: fillWidth, height: '100%', backgroundColor: MEALS_ACCENT }} />
         </View>
       </View>
-      {guidanceMessage ? (
-        <View style={{
-          marginTop: 10,
-          flexDirection: 'row',
-          alignItems: 'flex-start',
-          gap: 6,
-          paddingVertical: 7,
-          paddingHorizontal: 8,
-          borderRadius: 8,
-          backgroundColor: guidanceTone + '12',
-          borderWidth: 1,
-          borderColor: guidanceTone + '2E',
-        }}>
-          <Ionicons name="information-circle-outline" size={13} color={guidanceTone} style={{ marginTop: 1 }} />
-          <Text testID="hydration-guidance-message" style={{ flex: 1, fontSize: 10.5, lineHeight: 15, color: colors.textSecondary, fontWeight: '600' }}>
-            {guidanceMessage}
-          </Text>
-        </View>
-      ) : null}
-      <View style={{ gap: 8, marginTop: 10 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+      <AnimatedCollapsible visible={expanded} duration={260} slideDistance={8}>
+        {guidanceMessage ? (
           <View style={{
-            flex: 1,
-            minHeight: 32,
-            borderRadius: 10,
-            backgroundColor: colors.surface,
-            borderWidth: 1,
-            borderColor: colors.border,
+            marginTop: 10,
             flexDirection: 'row',
-            alignItems: 'center',
+            alignItems: 'flex-start',
+            gap: 6,
+            paddingVertical: 7,
             paddingHorizontal: 8,
+            borderRadius: 8,
+            backgroundColor: guidanceTone + '12',
+            borderWidth: 1,
+            borderColor: guidanceTone + '2E',
           }}>
-            <TextInput
-              testID="hydration-ounces-input"
-              value={manualOunces}
-              onChangeText={setManualOunces}
-              onSubmitEditing={submitManual}
-              keyboardType="decimal-pad"
-              returnKeyType="done"
-              editable={!loading}
-              selectTextOnFocus
-              style={{
-                flex: 1,
-                minWidth: 0,
-                paddingVertical: 5,
-                fontSize: 12,
-                fontWeight: '900',
-                color: colors.textPrimary,
-              }}
-            />
-            <Text style={{ fontSize: 9, fontWeight: '800', color: colors.textMuted }}>oz</Text>
+            <Ionicons name="information-circle-outline" size={13} color={guidanceTone} style={{ marginTop: 1 }} />
+            <Text testID="hydration-guidance-message" style={{ flex: 1, fontSize: 10.5, lineHeight: 15, color: colors.textSecondary, fontWeight: '600' }}>
+              {guidanceMessage}
+            </Text>
           </View>
-          <PressableScale
-            testID="hydration-set"
-            onPress={submitManual}
-            disabled={loading}
-            scaleDown={0.94}
-            style={{
+        ) : null}
+        <View style={{ gap: 8, marginTop: 10 }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <View style={{
+              flex: 1,
               minHeight: 32,
-              paddingHorizontal: 10,
               borderRadius: 10,
-              backgroundColor: MEALS_ACCENT,
+              backgroundColor: colors.surface,
+              borderWidth: 1,
+              borderColor: colors.border,
+              flexDirection: 'row',
               alignItems: 'center',
-              justifyContent: 'center',
-              opacity: loading ? 0.55 : 1,
+              paddingHorizontal: 8,
             }}>
-            <Text style={{ fontSize: 10, fontWeight: '900', color: '#fff' }}>Set</Text>
-          </PressableScale>
-        </View>
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-        {HYDRATION_QUICK_ADD_OUNCES.map(oz => (
+              <TextInput
+                testID="hydration-ounces-input"
+                value={manualOunces}
+                onChangeText={setManualOunces}
+                onSubmitEditing={submitManual}
+                keyboardType="decimal-pad"
+                returnKeyType="done"
+                editable={!loading}
+                selectTextOnFocus
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  paddingVertical: 5,
+                  fontSize: 12,
+                  fontWeight: '900',
+                  color: colors.textPrimary,
+                }}
+              />
+              <Text style={{ fontSize: 9, fontWeight: '800', color: colors.textMuted }}>oz</Text>
+            </View>
             <PressableScale
-              key={oz}
-              testID={`hydration-quick-add-${oz}`}
-              onPress={() => onDelta(oz)}
+              testID="hydration-set"
+              onPress={submitManual}
               disabled={loading}
               scaleDown={0.94}
               style={{
-                flex: 1,
-                flexBasis: '18%',
-                minWidth: 54,
                 minHeight: 32,
-                paddingVertical: 7,
-                paddingHorizontal: 6,
+                paddingHorizontal: 10,
                 borderRadius: 10,
-                backgroundColor: colors.surface,
-                borderWidth: 1,
-                borderColor: MEALS_ACCENT + '3D',
+                backgroundColor: MEALS_ACCENT,
                 alignItems: 'center',
                 justifyContent: 'center',
                 opacity: loading ? 0.55 : 1,
               }}>
-              <Text
-                style={{ fontSize: 10, fontWeight: '900', color: MEALS_ACCENT }}
-                numberOfLines={1}
-                adjustsFontSizeToFit
-                minimumFontScale={0.85}
-              >
-                {formatHydrationQuickAddLabel(oz)}
-              </Text>
+              <Text style={{ fontSize: 10, fontWeight: '900', color: '#fff' }}>Set</Text>
             </PressableScale>
-          ))}
+          </View>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+          {HYDRATION_QUICK_ADD_OUNCES.map(oz => (
+              <PressableScale
+                key={oz}
+                testID={`hydration-quick-add-${oz}`}
+                onPress={() => onDelta(oz)}
+                disabled={loading}
+                scaleDown={0.94}
+                style={{
+                  flex: 1,
+                  flexBasis: '18%',
+                  minWidth: 54,
+                  minHeight: 32,
+                  paddingVertical: 7,
+                  paddingHorizontal: 6,
+                  borderRadius: 10,
+                  backgroundColor: colors.surface,
+                  borderWidth: 1,
+                  borderColor: MEALS_ACCENT + '3D',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  opacity: loading ? 0.55 : 1,
+                }}>
+                <Text
+                  style={{ fontSize: 10, fontWeight: '900', color: MEALS_ACCENT }}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.85}
+                >
+                  {formatHydrationQuickAddLabel(oz)}
+                </Text>
+              </PressableScale>
+            ))}
+          </View>
         </View>
-      </View>
+      </AnimatedCollapsible>
     </View>
   );
 }
@@ -14755,7 +14861,6 @@ const styles = StyleSheet.create({
     borderRadius: radius.full,
     borderWidth: 1,
   },
-  watchSyncDot: { width: 7, height: 7, borderRadius: 4 },
   watchSyncText: { fontSize: 11, fontWeight: '900', letterSpacing: 0.2 },
   headerLogoWrap: { height: 70, justifyContent: 'center', alignItems: 'flex-start' },
   headerLogo: { width: 280, height: 70 },

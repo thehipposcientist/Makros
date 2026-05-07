@@ -9,6 +9,7 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
+  AppState,
   LayoutAnimation,
   Share,
 } from 'react-native';
@@ -184,6 +185,21 @@ export default function FriendsModal({
   useEffect(() => {
     if (!visible && !inline) return;
     refresh();
+  }, [visible, inline, refresh]);
+
+  useEffect(() => {
+    if (!visible && !inline) return;
+    const poll = () => {
+      if (AppState.currentState === 'active') refresh();
+    };
+    const id = setInterval(poll, 45_000);
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') refresh();
+    });
+    return () => {
+      clearInterval(id);
+      sub.remove();
+    };
   }, [visible, inline, refresh]);
 
   // Search debounce
@@ -488,6 +504,97 @@ export default function FriendsModal({
       );
     }
   }
+  const myProfileFriend = me
+    ? {
+        user_id: me.user_id,
+        username: me.username,
+        display_name: me.display_name ?? me.username,
+        avatar_url: me.avatar_url ?? null,
+        goal: null,
+        share_enabled: true,
+        sessions: digest?.you.sessions ?? 0,
+        streak: digest?.you.streak ?? 0,
+        last_active_within_48h: (digest?.you.sessions ?? 0) > 0,
+      }
+    : null;
+
+  const addFriendsSection = (
+    <View style={styles.section}>
+      <Text style={styles.sectionLabel}>ADD FRIENDS</Text>
+      {me?.username ? (
+        <View style={styles.inviteCard}>
+          <View style={styles.inviteIcon}>
+            <Ionicons name="person-add-outline" size={18} color={colors.primary} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.inviteTitle}>Invite by username</Text>
+            <Text style={styles.inviteHandle}>@{me.username}</Text>
+            <Text style={styles.inviteBody}>
+              Friends can search this handle, or you can share it directly.
+            </Text>
+          </View>
+          <TouchableOpacity style={styles.inviteButton} onPress={onShareInvite} activeOpacity={0.78}>
+            <Ionicons name="share-outline" size={15} color={getContrastingTextColor(colors.primary)} />
+            <Text style={styles.btnPrimaryText}>Share</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
+      <View style={[styles.searchRow, searchFocused && { borderColor: colors.primary, borderWidth: 1.5 }]}>
+        <Ionicons name="search" size={16} color={searchFocused ? colors.primary : colors.textMuted} />
+        <TextInput
+          style={styles.searchInput}
+          placeholder="Search by username"
+          placeholderTextColor={colors.textMuted}
+          autoCapitalize="none"
+          autoCorrect={false}
+          value={search}
+          onChangeText={setSearch}
+          onFocus={() => setSearchFocused(true)}
+          onBlur={() => setSearchFocused(false)}
+        />
+        {searching ? <ActivityIndicator size="small" color={colors.textMuted} /> : null}
+      </View>
+      {search.trim().length >= 2 && hits.length === 0 && !searching ? (
+        <Text style={styles.empty}>No users found.</Text>
+      ) : null}
+      {hits.map((h) => {
+        const alreadyFriend = friends.some((f) => f.user_id === h.user_id);
+        const alreadyPending = (list?.pending ?? []).some((p) => p.user_id === h.user_id);
+        return (
+          <View key={h.user_id} style={styles.friendRow}>
+            <SocialAvatar
+              avatarUrl={h.avatar_url}
+              name={h.display_name}
+              username={h.username}
+              size={36}
+              backgroundColor={colors.primary + '22'}
+              borderColor={colors.primary + '55'}
+              textColor={colors.primary}
+            />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.friendName}>{h.display_name ?? h.username}</Text>
+              <Text style={styles.friendMeta}>@{h.username}</Text>
+            </View>
+            {alreadyFriend ? (
+              <Text style={styles.tag}>Friends</Text>
+            ) : alreadyPending ? (
+              <Text style={styles.tag}>Pending</Text>
+            ) : (
+              <TouchableOpacity
+                style={styles.btnPrimary}
+                disabled={requestPending === h.username}
+                onPress={() => onRequest(h.username)}
+              >
+                <Text style={styles.btnPrimaryText}>
+                  {requestPending === h.username ? 'Sending...' : 'Add'}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        );
+      })}
+    </View>
+  );
 
   const content = (
     <>
@@ -596,20 +703,23 @@ export default function FriendsModal({
             <View style={[styles.tabIndicator, activeTab === 'friends' && styles.tabIndicatorActive]} />
           </TouchableOpacity>
         </View>
-        {hasUnreadSocial || notificationTrayOpen ? (
-          <TouchableOpacity
-            testID="social-notifications-toggle"
-            accessibilityLabel={`${unreadNotifications} unread social notification${unreadNotifications === 1 ? '' : 's'}`}
-            accessibilityRole="button"
-            accessibilityState={{ expanded: notificationTrayOpen }}
-            onPress={() => setNotificationTrayOpen(v => !v)}
-            style={[styles.notificationDotButton, notificationTrayOpen && styles.notificationDotButtonActive]}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            activeOpacity={0.75}
-          >
-            <View style={[styles.notificationStatusDot, !hasUnreadSocial && styles.notificationStatusDotMuted]} />
-          </TouchableOpacity>
-        ) : null}
+        <TouchableOpacity
+          testID="social-notifications-toggle"
+          accessibilityLabel={`${unreadNotifications} unread social notification${unreadNotifications === 1 ? '' : 's'}`}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: notificationTrayOpen }}
+          onPress={() => setNotificationTrayOpen(v => !v)}
+          style={[styles.notificationDotButton, notificationTrayOpen && styles.notificationDotButtonActive]}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          activeOpacity={0.75}
+        >
+          <Ionicons
+            name={hasUnreadSocial ? 'notifications' : 'notifications-outline'}
+            size={17}
+            color={hasUnreadSocial || notificationTrayOpen ? colors.primary : colors.textMuted}
+          />
+          {hasUnreadSocial ? <View style={styles.notificationBadgeDot} /> : null}
+        </TouchableOpacity>
       </View>
 
       <FadeInView key={activeTab} duration={240} slideDistance={8} style={{ flex: 1 }}>
@@ -677,6 +787,33 @@ export default function FriendsModal({
                 </View>
               </View>
 
+              {myProfileFriend ? (
+                <TouchableOpacity
+                  testID="social-my-profile-card"
+                  accessibilityLabel="social-my-profile-card"
+                  style={styles.selfProfileCard}
+                  activeOpacity={0.78}
+                  onPress={() => onViewFriend?.(myProfileFriend.user_id, myProfileFriend.display_name, myProfileFriend)}
+                >
+                  <SocialAvatar
+                    avatarUrl={myProfileFriend.avatar_url}
+                    name={myProfileFriend.display_name}
+                    username={myProfileFriend.username}
+                    size={44}
+                    backgroundColor={colors.primary + '22'}
+                    borderColor={colors.primary + '55'}
+                    textColor={colors.primary}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.selfProfileTitle}>My profile</Text>
+                    <Text style={styles.selfProfileMeta}>
+                      @{myProfileFriend.username} · {myProfileFriend.sessions} session{myProfileFriend.sessions === 1 ? '' : 's'} this week
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+                </TouchableOpacity>
+              ) : null}
+
               {/* Sharing toggle reminder if disabled */}
               {me && !me.share_activity_enabled && friends.length > 0 ? (
                 <TouchableOpacity
@@ -690,6 +827,8 @@ export default function FriendsModal({
                   </Text>
                 </TouchableOpacity>
               ) : null}
+
+              {addFriendsSection}
 
               {/* Incoming requests */}
               {incoming.length > 0 ? (
@@ -737,54 +876,54 @@ export default function FriendsModal({
                     </Text>
                   </View>
                 ) : (
-                  friends.map((f) => (
-                    <TouchableOpacity
-                      key={f.user_id}
-                      testID={`social-friend-row-${e2eId(f.username)}`}
-                      accessibilityLabel={`social-friend-row-${e2eId(f.username)}`}
-                      style={styles.friendRow}
-                      activeOpacity={0.7}
-                      onPress={() => {
-                        if (onViewFriend) {
-                          const df = digest?.friends.find((d) => d.user_id === f.user_id);
-                          const digestFriend = df ?? {
-                            user_id: f.user_id, username: f.username,
-                            display_name: f.display_name ?? f.username,
-                            avatar_url: f.avatar_url ?? null,
-                            goal: f.goal, share_enabled: true,
-                            sessions: 0, streak: f.streak,
-                            last_active_within_48h: f.last_active_within_48h,
-                          };
-                          onViewFriend(f.user_id, f.display_name ?? f.username, digestFriend);
-                        }
-                      }}
-                      onLongPress={() => onFriendOptions(f)}
-                    >
-                      <SocialAvatar
-                        avatarUrl={f.avatar_url}
-                        name={f.display_name}
-                        username={f.username}
-                        size={36}
-                        backgroundColor={colors.primary + '22'}
-                        borderColor={colors.primary + '55'}
-                        textColor={colors.primary}>
-                        <View
-                          style={[
-                            styles.activeDot,
-                            { backgroundColor: f.last_active_within_48h ? colors.success : colors.border },
-                          ]}
-                        />
-                      </SocialAvatar>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.friendName}>{f.display_name ?? f.username}</Text>
-                        <Text style={styles.friendMeta}>
-                          {goalLabel(f.goal) || '—'}
-                          {f.streak >= 2 ? `  ·  ${f.streak}-day streak` : ''}
+                  <View style={styles.friendGrid}>
+                    {friends.map((f) => (
+                      <TouchableOpacity
+                        key={f.user_id}
+                        testID={`social-friend-row-${e2eId(f.username)}`}
+                        accessibilityLabel={`social-friend-row-${e2eId(f.username)}`}
+                        style={styles.friendCircleCard}
+                        activeOpacity={0.72}
+                        onPress={() => {
+                          if (onViewFriend) {
+                            const df = digest?.friends.find((d) => d.user_id === f.user_id);
+                            const digestFriend = df ?? {
+                              user_id: f.user_id, username: f.username,
+                              display_name: f.display_name ?? f.username,
+                              avatar_url: f.avatar_url ?? null,
+                              goal: f.goal, share_enabled: true,
+                              sessions: 0, streak: f.streak,
+                              last_active_within_48h: f.last_active_within_48h,
+                            };
+                            onViewFriend(f.user_id, f.display_name ?? f.username, digestFriend);
+                          }
+                        }}
+                        onLongPress={() => onFriendOptions(f)}
+                      >
+                        <SocialAvatar
+                          avatarUrl={f.avatar_url}
+                          name={f.display_name}
+                          username={f.username}
+                          size={58}
+                          backgroundColor={colors.primary + '22'}
+                          borderColor={colors.primary + '55'}
+                          textColor={colors.primary}>
+                          <View
+                            style={[
+                              styles.activeDot,
+                              { backgroundColor: f.last_active_within_48h ? colors.success : colors.border },
+                            ]}
+                          />
+                        </SocialAvatar>
+                        <Text style={styles.friendCircleName} numberOfLines={1}>
+                          {f.display_name ?? f.username}
                         </Text>
-                      </View>
-                      <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
-                    </TouchableOpacity>
-                  ))
+                        <Text style={styles.friendCircleHandle} numberOfLines={1}>
+                          @{f.username}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
                 )}
               </View>
 
@@ -815,82 +954,6 @@ export default function FriendsModal({
                 </View>
               ) : null}
 
-              {/* Add friends */}
-              <View style={styles.section}>
-                <Text style={styles.sectionLabel}>ADD FRIENDS</Text>
-                {me?.username ? (
-                  <View style={styles.inviteCard}>
-                    <View style={styles.inviteIcon}>
-                      <Ionicons name="person-add-outline" size={18} color={colors.primary} />
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.inviteTitle}>Invite by username</Text>
-                      <Text style={styles.inviteHandle}>@{me.username}</Text>
-                      <Text style={styles.inviteBody}>
-                        Friends can search this handle, or you can share it directly.
-                      </Text>
-                    </View>
-                    <TouchableOpacity style={styles.inviteButton} onPress={onShareInvite} activeOpacity={0.78}>
-                      <Ionicons name="share-outline" size={15} color={getContrastingTextColor(colors.primary)} />
-                      <Text style={styles.btnPrimaryText}>Share</Text>
-                    </TouchableOpacity>
-                  </View>
-                ) : null}
-                <View style={[styles.searchRow, searchFocused && { borderColor: colors.primary, borderWidth: 1.5 }]}>
-                  <Ionicons name="search" size={16} color={searchFocused ? colors.primary : colors.textMuted} />
-                  <TextInput
-                    style={styles.searchInput}
-                    placeholder="Search by username"
-                    placeholderTextColor={colors.textMuted}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    value={search}
-                    onChangeText={setSearch}
-                    onFocus={() => setSearchFocused(true)}
-                    onBlur={() => setSearchFocused(false)}
-                  />
-                  {searching ? <ActivityIndicator size="small" color={colors.textMuted} /> : null}
-                </View>
-                {search.trim().length >= 2 && hits.length === 0 && !searching ? (
-                  <Text style={styles.empty}>No users found.</Text>
-                ) : null}
-                {hits.map((h) => {
-                  const alreadyFriend = friends.some((f) => f.user_id === h.user_id);
-                  const alreadyPending = (list?.pending ?? []).some((p) => p.user_id === h.user_id);
-                  return (
-                    <View key={h.user_id} style={styles.friendRow}>
-                      <SocialAvatar
-                        avatarUrl={h.avatar_url}
-                        name={h.display_name}
-                        username={h.username}
-                        size={36}
-                        backgroundColor={colors.primary + '22'}
-                        borderColor={colors.primary + '55'}
-                        textColor={colors.primary}
-                      />
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.friendName}>{h.display_name ?? h.username}</Text>
-                        <Text style={styles.friendMeta}>@{h.username}</Text>
-                      </View>
-                      {alreadyFriend ? (
-                        <Text style={styles.tag}>Friends</Text>
-                      ) : alreadyPending ? (
-                        <Text style={styles.tag}>Pending</Text>
-                      ) : (
-                        <TouchableOpacity
-                          style={styles.btnPrimary}
-                          disabled={requestPending === h.username}
-                          onPress={() => onRequest(h.username)}
-                        >
-                          <Text style={styles.btnPrimaryText}>
-                            {requestPending === h.username ? 'Sending…' : 'Add'}
-                          </Text>
-                        </TouchableOpacity>
-                      )}
-                    </View>
-                  );
-                })}
-              </View>
             </ScrollView>
           )}
       </FadeInView>
@@ -1019,14 +1082,16 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
     notificationDotButtonActive: {
       backgroundColor: colors.error + '12',
     },
-    notificationStatusDot: {
-      width: 9,
-      height: 9,
-      borderRadius: 5,
+    notificationBadgeDot: {
+      position: 'absolute',
+      top: 4,
+      right: 4,
+      width: 7,
+      height: 7,
+      borderRadius: 4,
       backgroundColor: colors.error,
-    },
-    notificationStatusDotMuted: {
-      backgroundColor: colors.textMuted,
+      borderWidth: 1,
+      borderColor: colors.background,
     },
     notificationPanel: {
       backgroundColor: colors.surface,
@@ -1162,6 +1227,28 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       borderTopColor: colors.border,
     },
     privacyText: { flex: 1, fontSize: 11, color: colors.textSecondary, lineHeight: 15, fontWeight: '600' },
+    selfProfileCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: colors.surface,
+      borderColor: colors.border,
+      borderWidth: 1,
+      borderRadius: radius.md,
+      padding: spacing.md,
+      marginBottom: spacing.md,
+    },
+    selfProfileTitle: {
+      fontSize: 13,
+      fontWeight: '900',
+      color: colors.textPrimary,
+    },
+    selfProfileMeta: {
+      fontSize: 11,
+      fontWeight: '700',
+      color: colors.textMuted,
+      marginTop: 2,
+    },
     section: { marginBottom: spacing.lg },
     sectionLabel: {
       fontSize: 11,
@@ -1182,6 +1269,19 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
       marginBottom: spacing.xs,
       gap: spacing.sm,
     },
+    friendGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      rowGap: spacing.md,
+      marginHorizontal: -4,
+    },
+    friendCircleCard: {
+      width: '33.333%',
+      alignItems: 'center',
+      paddingHorizontal: 4,
+      paddingVertical: 4,
+      minHeight: 104,
+    },
     activeDot: {
       position: 'absolute',
       bottom: -1,
@@ -1194,6 +1294,22 @@ const createStyles = (colors: ReturnType<typeof getTheme>['colors']) =>
     },
     friendName: { fontSize: 14, fontWeight: '700', color: colors.textPrimary },
     friendMeta: { fontSize: 11, color: colors.textSecondary, marginTop: 2 },
+    friendCircleName: {
+      width: '100%',
+      marginTop: 7,
+      fontSize: 12,
+      fontWeight: '800',
+      color: colors.textPrimary,
+      textAlign: 'center',
+    },
+    friendCircleHandle: {
+      width: '100%',
+      marginTop: 2,
+      fontSize: 10,
+      fontWeight: '700',
+      color: colors.textMuted,
+      textAlign: 'center',
+    },
     btnPrimary: {
       backgroundColor: colors.primary,
       paddingHorizontal: spacing.md,

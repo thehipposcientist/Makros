@@ -16,6 +16,20 @@ import type { GearItem } from '../services/api';
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
+
+function configureLiveLayoutAnimation() {
+  try {
+    LayoutAnimation.configureNext(
+      LayoutAnimation.create(
+        120,
+        LayoutAnimation.Types.easeInEaseOut,
+        LayoutAnimation.Properties.opacity,
+      ),
+    );
+  } catch {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+  }
+}
 // Lazy reference — keeps expo-image-picker out of the cold-start parse pass.
 // First ImagePicker.X access triggers require(); cached after. Every callsite
 // is already async (camera/library picks always are).
@@ -475,21 +489,44 @@ const ActiveExercisePickerRow = React.memo(function ActiveExercisePickerRow({
   swapMode,
   stylesRef,
   onPress,
+  onPreview,
 }: {
   item: SmartSwapItem;
   swapMode: boolean;
   stylesRef: ReturnType<typeof createStyles>;
   onPress: (item: ExerciseLibraryItem) => void;
+  onPreview?: (item: ExerciseLibraryItem) => void;
 }) {
   const fitPercent = swapMode ? item._overlap : item._alignment;
   const fitLabel = swapMode ? 'overlap' : 'alignment';
   const noteColor = exerciseAlignmentColor(fitPercent) ?? '#22C55E';
+  const thumbUri = exerciseThumbSmall(item as any);
+  const showPreview = swapMode && !!onPreview;
   return (
     <TouchableOpacity
       style={stylesRef.addExerciseItem}
       testID={exercisePickerTestId(item)}
       accessibilityLabel={`${swapMode ? 'Swap to' : 'Add'} ${item.name}${fitPercent != null ? `, ${fitPercent}% ${fitLabel}` : ''}`}
       onPress={() => onPress(item)}>
+      {showPreview && (
+        <TouchableOpacity
+          activeOpacity={0.85}
+          style={stylesRef.addExercisePreview}
+          onPress={() => onPreview?.(item)}
+          accessibilityRole="button"
+          accessibilityLabel={`Preview ${item.name} form video`}>
+          {thumbUri ? (
+            <Image source={{ uri: thumbUri }} style={stylesRef.addExercisePreviewImage} resizeMode="cover" />
+          ) : (
+            <View style={stylesRef.addExercisePreviewFallback}>
+              <Ionicons name="videocam-outline" size={16} color="#6B7280" />
+            </View>
+          )}
+          <View pointerEvents="none" style={stylesRef.addExercisePreviewBadge}>
+            <Ionicons name="play" size={9} color="#fff" style={{ marginLeft: 1 }} />
+          </View>
+        </TouchableOpacity>
+      )}
       <View style={{ flex: 1 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <Text style={stylesRef.addExerciseName}>{item.name}</Text>
@@ -609,8 +646,9 @@ function AnimatedBarFill({ pct, color, delay = 0 }: { pct: number; color: string
   );
 }
 
-const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|farmer.?walk|\bwalk\b|walking|carry|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/i;
+const TIMED_EXERCISE_RE = /treadmill|stationary bike|elliptical|rowing machine|stair climber|assault bike|battle ropes|jump rope|sprint|jogging|running|cycling|swimming|hiit|intervals|mountain climber|hill sprint|cardio|plank|dead hang|wall sit|hollow.?hold|l.?sit|\bwalk\b|walking|boxing|kickboxing|sparring|bag.?work|shadow.?box|yoga|vinyasa|hot.?yoga|power.?yoga|yin.?yoga|mobility.?flow|stretching/i;
 const TIMED_REPS_RE = /\b\d+(?:\.\d+)?\s*(?:[-–—]\s*\d+(?:\.\d+)?)?\s*(?:s|sec|secs|second|seconds|min|mins|minute|minutes)\b/i;
+const DISTANCE_REPS_RE = /\b\d+(?:\.\d+)?\s*(?:[-–—]\s*\d+(?:\.\d+)?)?\s*(?:yd|yds|yard|yards|m|meter|meters|metre|metres|ft|feet|km|mi|mile|miles)\b/i;
 // `isBodyweightOnly` name-regex was replaced by the richer
 // `shouldHideWeight(ex)` predicate in `utils/exerciseDisplay.ts`,
 // which also checks equipment / archetype / training_type / reps
@@ -618,11 +656,12 @@ const TIMED_REPS_RE = /\b\d+(?:\.\d+)?\s*(?:[-–—]\s*\d+(?:\.\d+)?)?\s*(?:s|s
 
 function isTimedExercise(name: string, targetReps?: string | number): boolean {
   if (isGuideExercise({ name, reps: targetReps, targetReps })) return true;
-  if (TIMED_EXERCISE_RE.test(name)) return true;
   // Detect time-based rep schemes like "30s", "30-60s", "45 sec", "60 seconds",
   // "25 min", "20-30 min". Coerce to string — AI plans occasionally return
   // reps as a number ("reps": 12) which crashed .trim() before this guard.
   const reps = targetReps == null ? '' : String(targetReps).trim();
+  if (reps && DISTANCE_REPS_RE.test(reps)) return false;
+  if (TIMED_EXERCISE_RE.test(name)) return true;
   if (reps && TIMED_REPS_RE.test(reps)) return true;
   return false;
 }
@@ -760,7 +799,8 @@ function coreCircuitTargetReps(item: ExerciseLibraryItem): string {
   const name = normalizeSwapText(item.name);
   const tracking = normalizeSwapText((item as any).default_tracking_mode);
   if (/side plank|copenhagen/.test(name)) return '30s each side';
-  if (/plank|hollow|carry/.test(name) || tracking === 'time') return '30s';
+  if (tracking === 'distance' || /carry/.test(name)) return '30-40m';
+  if (/plank|hollow/.test(name) || tracking === 'time') return '30s';
   if (/dead bug|bird dog|pallof/.test(name)) return '10/side';
   if (/woodchop|wood chop|russian twist/.test(name)) return '12/side';
   return '12';
@@ -1319,6 +1359,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // the deterministic template while the AI call is in flight or if
     // it fails. See backend: POST /ai/warmup.
     const [warmupSteps, setWarmupSteps] = useState<string[]>(() => buildWarmupPlan(workout));
+    const [warmupLoading, setWarmupLoading] = useState(false);
     // Mirror warmupSteps into a ref so the once-mounted watch-sync
     // effect can always send the freshest steps (AI warmup resolves
     // async after the initial push).
@@ -1389,11 +1430,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       return backendWorkoutHistoryRef.current;
     }, [authToken]);
     useEffect(() => {
-      if (showStartCountdown) return;
+      if (showStartCountdown) {
+        setWarmupLoading(false);
+        return;
+      }
       let cancelled = false;
       const loadWarmup = async () => {
-        if (!authToken) return;
-        if (!(await cachedProfileIsPro())) return;
+        if (!authToken) {
+          setWarmupLoading(false);
+          return;
+        }
+        setWarmupLoading(true);
+        if (!(await cachedProfileIsPro())) {
+          if (!cancelled) setWarmupLoading(false);
+          return;
+        }
         const today = dateKey(new Date());
         const dayKey = (workout.day || workout.focus || 'session').replace(/\s+/g, '_');
         const cacheKey = `ai-warmup:${today}:${dayKey}`;
@@ -1403,6 +1454,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             const parsed = JSON.parse(cached);
             if (Array.isArray(parsed?.steps) && parsed.steps.length > 0 && !cancelled) {
               setWarmupSteps(parsed.steps);
+              setWarmupLoading(false);
               return;
             }
           }
@@ -1434,6 +1486,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           }
         } catch {
           // keep deterministic fallback already in state
+        } finally {
+          if (!cancelled) setWarmupLoading(false);
         }
       };
       loadWarmup();
@@ -1451,6 +1505,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const [watchSessionHydrated, setWatchSessionHydrated] = useState(false);
   const [activeWorkoutStateRestored, setActiveWorkoutStateRestored] = useState(false);
   const watchWorkoutEndedRef = useRef(false);
+  const cancelingWorkoutRef = useRef(false);
+  const [cancelingWorkout, setCancelingWorkout] = useState(false);
   const buildWatchWorkoutSnapshotRef = useRef<() => any>(() => workout as any);
   // Persist start time so elapsed timer survives app restart
   useEffect(() => {
@@ -2122,6 +2178,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const activeExIdxRef = useRef(activeExIdx);
   useEffect(() => { activeExIdxRef.current = activeExIdx; }, [activeExIdx]);
   const [formVideoExerciseName, setFormVideoExerciseName] = useState<string | null>(null);
+  const [formVideoContext, setFormVideoContext] = useState<{
+    equipment?: string | null;
+    primaryMuscle?: string | null;
+    movementPattern?: string | null;
+  }>({});
+  const openFormVideoForExercise = useCallback((exercise: {
+    name?: string | null;
+    equipment?: string | null;
+    primaryMuscle?: string | null;
+    primary_muscle?: string | null;
+    movementPattern?: string | null;
+    movement_pattern?: string | null;
+  } | null | undefined) => {
+    if (!exercise?.name) return;
+    setFormVideoContext({
+      equipment: exercise.equipment ?? null,
+      primaryMuscle: exercise.primaryMuscle ?? exercise.primary_muscle ?? null,
+      movementPattern: exercise.movementPattern ?? exercise.movement_pattern ?? null,
+    });
+    setFormVideoExerciseName(exercise.name);
+  }, []);
   // When the user hits or exceeds the top of the target rep range, prompt
   // them for RIR (reps in reserve) so the progression engine knows how
   // much more intensity to push next session. Only shown on over-target
@@ -2188,6 +2265,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     recommendedReps: string;
     confidence: 'high' | 'medium' | 'low';
   }>>({});
+  const [preSetLoadingIdx, setPreSetLoadingIdx] = useState<number | null>(null);
 
   // Fetch a pre-set recommendation the first time a given exercise
   // card is in focus with no sets logged yet. Deterministic endpoint
@@ -2195,10 +2273,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // Skips if already cached. Uses last session data looked up via
   // getLastSetsForExercise to ground the opening weight suggestion.
   useEffect(() => {
-    if (showStartCountdown) return;
+    if (showStartCountdown) {
+      setPreSetLoadingIdx(null);
+      return;
+    }
     const ex = exercises[activeExIdx];
-    if (!ex || !authToken) return;
+    if (!ex || !authToken) {
+      setPreSetLoadingIdx(prev => prev === activeExIdx ? null : prev);
+      return;
+    }
     if (isGuideExercise(ex, workout)) {
+      setPreSetLoadingIdx(prev => prev === activeExIdx ? null : prev);
       setPreSetHints(prev => {
         if (!prev[activeExIdx]) return prev;
         const next = { ...prev };
@@ -2207,9 +2292,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       });
       return;
     }
-    if (ex.sets.length > 0) return;
-    if (preSetHints[activeExIdx]) return;
+    if (ex.sets.length > 0 || preSetHints[activeExIdx]) {
+      setPreSetLoadingIdx(prev => prev === activeExIdx ? null : prev);
+      return;
+    }
     let cancelled = false;
+    setPreSetLoadingIdx(activeExIdx);
     (async () => {
       try {
         const lastSets = await loadLastSetsForExerciseAnySource(ex, loadBackendWorkoutHistory, {
@@ -2243,10 +2331,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         }));
       } catch {
         // silent — hint is additive, absence is fine
+      } finally {
+        if (!cancelled) {
+          setPreSetLoadingIdx(prev => prev === activeExIdx ? null : prev);
+        }
       }
     })();
     return () => { cancelled = true; };
-  }, [activeExIdx, exercises, authToken, goal, weightLbs, workout.focus, workout.stimulus, loadBackendWorkoutHistory, showStartCountdown]);
+  }, [activeExIdx, exercises, authToken, goal, weightLbs, workout.focus, workout.stimulus, preSetHints, loadBackendWorkoutHistory, showStartCountdown]);
 
   // Inline set inputs: keyed by "exIdx-setSlot" (0-based slot index)
   const [setInputs, setSetInputs] = useState<Record<string, { weight: string; reps: string; duration: string }>>({});
@@ -2918,6 +3010,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   // user can write a custom question + attach a photo in one turn.
   const [coachPendingPhoto, setCoachPendingPhoto] = useState<{ base64: string; mime: string } | null>(null);
   const [addExerciseModalVisible, setAddExerciseModalVisible] = useState(false);
+  const [returnToExercisePickerAfterVideo, setReturnToExercisePickerAfterVideo] = useState(false);
   const [exerciseSearch, setExerciseSearch] = useState('');
   const deferredExerciseSearch = useDeferredValue(exerciseSearch);
   const [exerciseLibraryLoading, setExerciseLibraryLoading] = useState(false);
@@ -3515,7 +3608,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // Auto-advance to next incomplete exercise when all effective sets are done
     let nextExIdx = exIdx;
     if (cleanSets.length >= effectiveTotal) {
-      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+      configureLiveLayoutAnimation();
       const nextIdx = updatedExercises.findIndex((e, i) => i > exIdx && e.sets.length < getTargetSetCount(e.targetSets));
       setActiveExIdx(nextIdx >= 0 ? nextIdx : -1);
       nextExIdx = nextIdx >= 0 ? nextIdx : exIdx;
@@ -3627,6 +3720,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     if (exerciseLibraryRef.current.length > 0) return;
     await ensureExerciseLibrary().catch(() => undefined);
   }, [ensureExerciseLibrary]);
+
+  const previewExerciseFromPicker = useCallback((item: ExerciseLibraryItem) => {
+    setReturnToExercisePickerAfterVideo(addExerciseModalVisible);
+    setAddExerciseModalVisible(false);
+    setTimeout(() => openFormVideoForExercise(item), 260);
+  }, [addExerciseModalVisible, openFormVideoForExercise]);
 
   const handleAddExercise = useCallback((item: ExerciseLibraryItem) => {
     const timed = isTimedExercise(item.name);
@@ -4192,7 +4291,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   const handleReorderExercise = useCallback((fromIdx: number, direction: 'up' | 'down') => {
     const toIdx = direction === 'up' ? fromIdx - 1 : fromIdx + 1;
     if (toIdx < 0 || toIdx >= exercises.length) return;
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    configureLiveLayoutAnimation();
     import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
     setPreSetHints({});
     setExercises(prev => {
@@ -4557,7 +4656,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     if (finishedSession) onFinish(finishedSession);
   };
 
-  const cancelActiveWorkoutFromWatch = useCallback(() => {
+  const cancelWorkoutSession = useCallback(() => {
+    if (cancelingWorkoutRef.current) return;
+    cancelingWorkoutRef.current = true;
+    setCancelingWorkout(true);
     watchWorkoutEndedRef.current = true;
     clearRestState({ endAllLiveActivities: true });
     setActiveWatchSessionId(null);
@@ -4573,8 +4675,17 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         reason: 'skip',
       }).catch(() => {}))
       .catch(() => {});
-    onCancel();
-  }, [clearRestState, onCancel, workout]);
+    const leaveWorkout = () => onCancel();
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(leaveWorkout);
+    } else {
+      setTimeout(leaveWorkout, 0);
+    }
+  }, [clearRestState, onCancel]);
+
+  const cancelActiveWorkoutFromWatch = useCallback(() => {
+    cancelWorkoutSession();
+  }, [cancelWorkoutSession]);
 
   // Kept in sync on every render so the watch command listener always
   // dispatches to the current finish / cancel closures.
@@ -5389,11 +5500,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       swapMode={swapTargetIdx != null}
       stylesRef={styles}
       onPress={handleAddExercise}
+      onPreview={previewExerciseFromPicker}
     />
-  ), [handleAddExercise, styles, swapTargetIdx]);
+  ), [handleAddExercise, previewExerciseFromPicker, styles, swapTargetIdx]);
   const exercisePickerKeyExtractor = useCallback((item: ExerciseLibraryItem) => String(item.id ?? item.name), []);
 
   const confirmCancelWorkout = useCallback(() => {
+    if (cancelingWorkoutRef.current) return;
     Alert.alert(
       'Cancel Workout',
       'Your progress will be lost.',
@@ -5402,27 +5515,11 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         {
           text: 'Cancel',
           style: 'destructive',
-          onPress: () => {
-            watchWorkoutEndedRef.current = true;
-            clearRestState({ endAllLiveActivities: true });
-            AsyncStorage.removeItem('activeWorkoutSets').catch(() => {});
-            AsyncStorage.removeItem('activeWorkoutStartTime').catch(() => {});
-            AsyncStorage.removeItem('activeWorkoutRest').catch(() => {});
-            AsyncStorage.removeItem('activeWatchSessionId').catch(() => {});
-            import('../utils/watchSync')
-              .then(({ pushWorkoutToWatch }) => pushWorkoutToWatch(buildWatchWorkoutSnapshotRef.current(), {
-                dateISO: dateKey(new Date()),
-                status: 'skipped',
-                sessionId: watchSessionId.current,
-                reason: 'skip',
-              }).catch(() => {}))
-              .catch(() => {});
-            onCancel();
-          },
+          onPress: cancelWorkoutSession,
         },
       ],
     );
-  }, [clearRestState, onCancel, workout]);
+  }, [cancelWorkoutSession]);
 
   return (
     <View
@@ -5443,6 +5540,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             {liveHR != null && liveHR > 0 && currentLiveHRZone ? (
               <View style={[
                 styles.headerWorkoutTimer,
+                styles.headerHrChip,
                 {
                   backgroundColor: hrZoneColorHex(currentLiveHRZone.zone, workoutPalette.strong) + '18',
                   borderColor: hrZoneColorHex(currentLiveHRZone.zone, workoutPalette.strong) + '66',
@@ -5451,9 +5549,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 <Ionicons name="heart" size={12} color={hrZoneColorHex(currentLiveHRZone.zone, workoutPalette.strong)} />
                 <Text style={[
                   styles.headerWorkoutTimerText,
+                  styles.headerHrChipText,
                   { color: hrZoneColorHex(currentLiveHRZone.zone, workoutPalette.strong) },
-                ]}>
-                  Z{currentLiveHRZone.zone} {liveHR}
+                ]} numberOfLines={1}>
+                  Z{currentLiveHRZone.zone} · {liveHR} bpm
                 </Text>
               </View>
             ) : null}
@@ -5466,8 +5565,12 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               </Text>
             </View>
             <View style={styles.headerActionRow}>
-              <TouchableOpacity style={styles.cancelBtn} onPress={confirmCancelWorkout}>
-                <Text style={styles.cancelBtnText}>Cancel</Text>
+              <TouchableOpacity style={styles.cancelBtn} onPress={confirmCancelWorkout} disabled={cancelingWorkout}>
+                {cancelingWorkout ? (
+                  <ActivityIndicator size="small" color={themeColors.textSecondary} />
+                ) : (
+                  <Text style={styles.cancelBtnText}>Cancel</Text>
+                )}
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.coachBtn, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }]}
@@ -5485,6 +5588,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
             const ringProgress = Math.max(0, Math.min(1, restRemaining / ringTotal));
             const ringOffset = ringCircumference * (1 - ringProgress);
             const recommendation = [restNextTarget, restCue].filter(Boolean).join(' · ');
+            const restRecommendationLoading = aiLoadingIdx != null
+              && restForExercise != null
+              && exercises[aiLoadingIdx]?.name === restForExercise;
             return (
               <View style={[styles.headerRestPanel, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong + '33' }]}>
                 <View style={styles.headerRestMainRow}>
@@ -5520,10 +5626,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                   </View>
                   <View style={styles.headerRestCopy}>
                     {restForExercise ? <Text style={styles.headerRestExercise} numberOfLines={1}>{restForExercise}</Text> : null}
-                    {recommendation ? (
+                    {recommendation || restRecommendationLoading ? (
                       <View style={styles.headerRestRecommendation}>
-                        <Text style={styles.headerRestInfoLabel}>Recommendation</Text>
-                        <Text style={[styles.headerRestTarget, { color: workoutPalette.strong }]}>{recommendation}</Text>
+                        <View style={styles.headerRestInfoRow}>
+                          <Text style={styles.headerRestInfoLabel}>Recommendation</Text>
+                          {restRecommendationLoading && (
+                            <ActivityIndicator size="small" color={workoutPalette.strong} />
+                          )}
+                        </View>
+                        {recommendation ? (
+                          <Text style={[styles.headerRestTarget, { color: workoutPalette.strong }]}>{recommendation}</Text>
+                        ) : (
+                          <Text style={[styles.headerRestTarget, { color: themeColors.textSecondary }]}>Updating next set...</Text>
+                        )}
                       </View>
                     ) : null}
                     {showRestRecommendationTutorial && recommendation ? (
@@ -5586,11 +5701,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       {!warmupDone && (
         <View style={[styles.warmupCard, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }]}>
           <Text style={[styles.warmupTitle, { color: workoutPalette.text }]}>Warm-Up For Today</Text>
-          {warmupSteps.map((step, index) => (
-            <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
-          ))}
+          {warmupLoading ? (
+            <View style={styles.inlineLoadingRow}>
+              <ActivityIndicator size="small" color={workoutPalette.strong} />
+              <Text style={[styles.inlineLoadingText, { color: workoutPalette.text }]}>Preparing warm-up...</Text>
+            </View>
+          ) : (
+            warmupSteps.map((step, index) => (
+              <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
+            ))
+          )}
           <View style={styles.warmupActions}>
-            <TouchableOpacity style={[styles.warmupDoneBtn, { backgroundColor: workoutPalette.strong, flex: 1 }]} onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setWarmupDone(true); setWarmupExpanded(false); }}>
+            <TouchableOpacity style={[styles.warmupDoneBtn, { backgroundColor: workoutPalette.strong, flex: 1 }]} onPress={() => { configureLiveLayoutAnimation(); setWarmupDone(true); setWarmupExpanded(false); }}>
               <Text style={styles.warmupDoneBtnText}>Start Workout</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.warmupCoachBtn, { borderColor: workoutPalette.strong }]} onPress={() => { setCoachInput('Can you modify my warm-up based on today\'s workout focus?'); setCoachModalVisible(true); }}>
@@ -5603,7 +5725,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
       {false && warmupDone && (
         <TouchableOpacity
           activeOpacity={0.85}
-          onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setWarmupExpanded(v => !v); }}
+          onPress={() => { configureLiveLayoutAnimation(); setWarmupExpanded(v => !v); }}
           style={[
             styles.warmupCollapsed,
             { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong },
@@ -5613,14 +5735,21 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               Warm-Up <Ionicons name={warmupExpanded ? 'chevron-down' : 'chevron-forward'} size={12} />
             </Text>
             <Text style={[styles.warmupCollapsedHint, { color: workoutPalette.text }]}>
-              {warmupExpanded ? 'Tap to hide' : `${warmupSteps.length} steps · tap to view`}
+              {warmupLoading ? 'Preparing...' : warmupExpanded ? 'Tap to hide' : `${warmupSteps.length} steps · tap to view`}
             </Text>
           </View>
           {warmupExpanded && (
             <View style={{ marginTop: 8 }}>
-              {warmupSteps.map((step, index) => (
-                <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
-              ))}
+              {warmupLoading ? (
+                <View style={styles.inlineLoadingRow}>
+                  <ActivityIndicator size="small" color={workoutPalette.strong} />
+                  <Text style={[styles.inlineLoadingText, { color: workoutPalette.text }]}>Preparing warm-up...</Text>
+                </View>
+              ) : (
+                warmupSteps.map((step, index) => (
+                  <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
+                ))
+              )}
             </View>
           )}
         </TouchableOpacity>
@@ -5660,21 +5789,28 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         {warmupDone && warmupSteps.length > 0 && (
           <TouchableOpacity
             activeOpacity={0.85}
-            onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); setWarmupExpanded(v => !v); }}
+            onPress={() => { configureLiveLayoutAnimation(); setWarmupExpanded(v => !v); }}
             style={[styles.warmupCollapsed, { backgroundColor: workoutPalette.soft, borderColor: workoutPalette.strong }]}>
             <View style={styles.warmupCollapsedHeader}>
               <Text style={[styles.warmupCollapsedTitle, { color: workoutPalette.text }]}>
                 Warm-Up <Ionicons name={warmupExpanded ? 'chevron-down' : 'chevron-forward'} size={12} />
               </Text>
               <Text style={[styles.warmupCollapsedHint, { color: workoutPalette.text }]}>
-                {warmupExpanded ? 'Tap to hide' : `${warmupSteps.length} steps`}
+                {warmupLoading ? 'Preparing...' : warmupExpanded ? 'Tap to hide' : `${warmupSteps.length} steps`}
               </Text>
             </View>
             {warmupExpanded && (
               <View style={{ marginTop: 8 }}>
-                {warmupSteps.map((step, index) => (
-                  <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
-                ))}
+                {warmupLoading ? (
+                  <View style={styles.inlineLoadingRow}>
+                    <ActivityIndicator size="small" color={workoutPalette.strong} />
+                    <Text style={[styles.inlineLoadingText, { color: workoutPalette.text }]}>Preparing warm-up...</Text>
+                  </View>
+                ) : (
+                  warmupSteps.map((step, index) => (
+                    <Text key={index} style={styles.warmupStep}>{index + 1}. {step}</Text>
+                  ))
+                )}
               </View>
             )}
           </TouchableOpacity>
@@ -5748,7 +5884,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
               {/* ── Header row: tap to expand/collapse ── */}
               <TouchableOpacity
                 style={styles.exerciseHeader}
-                onPress={() => { LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut); import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {}); setActiveExIdx(isActive ? -1 : i); }}
+                onPress={() => { configureLiveLayoutAnimation(); setActiveExIdx(isActive ? -1 : i); import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {}); }}
                 activeOpacity={0.7}>
                 {(() => {
                   const thumbUri = exerciseThumbSmall(ex as any);
@@ -5760,7 +5896,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       // when the user wants the form video.
                       onPress={() => {
                         import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-                        setFormVideoExerciseName(ex.name);
+                        openFormVideoForExercise(ex);
                       }}
                       style={{
                         width: 46, height: 46, borderRadius: 10, marginRight: 10,
@@ -5820,9 +5956,14 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     if (!zone) return null;
                     const zoneColor = hrZoneColorHex(zone.zone, themeColors.primary);
                     return (
-                      <Text style={{ fontSize: 11, color: zoneColor, fontWeight: '700', marginTop: 1 }}>
-                        Target: Z{zone.zone} {zone.label} ({zone.low}–{zone.high} bpm)
-                      </Text>
+                      <View style={styles.targetZoneRow}>
+                        <View style={[styles.targetZoneBadge, { backgroundColor: zoneColor + '18', borderColor: zoneColor + '66' }]}>
+                          <Text style={[styles.targetZoneBadgeText, { color: zoneColor }]}>Z{zone.zone}</Text>
+                        </View>
+                        <Text style={[styles.targetZoneText, { color: zoneColor }]} numberOfLines={1}>
+                          {zone.label} · {zone.low}-{zone.high} bpm
+                        </Text>
+                      </View>
                     );
                   })()}
                   {bestLastSet && bestLastSet.weightLbs > 0 && !isDone && (
@@ -5962,13 +6103,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     <View
                       testID={`pre-set-recommended-weight-card-${i}`}
                       accessibilityLabel={`pre-set-recommended-weight-card-${i}`}
-                      style={{
-                      borderLeftWidth: 3,
-                      borderLeftColor: workoutPalette.strong,
-                      backgroundColor: workoutPalette.strong + '14',
-                      paddingHorizontal: 12, paddingVertical: 10,
-                      borderRadius: 8, marginTop: 8, marginBottom: 4,
-                    }}>
+                      style={[styles.preSetHintCard, {
+                        borderLeftColor: workoutPalette.strong,
+                        backgroundColor: workoutPalette.strong + '14',
+                      }]}>
                       <Text style={{ fontSize: 10, fontWeight: '700', color: themeColors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 }}>
                         {isDumbbellLoadExercise(ex) ? 'Recommended weight (each)' : 'Recommended weight'}
                       </Text>
@@ -5985,11 +6123,27 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       </Text>
                     </View>
                   )}
+                  {!guide && ex.sets.length === 0 && preSetLoadingIdx === i && !preSetHints[i] && (
+                    <View
+                      testID={`pre-set-recommendation-loading-${i}`}
+                      accessibilityLabel={`pre-set-recommendation-loading-${i}`}
+                      style={[styles.preSetHintCard, {
+                        borderLeftColor: workoutPalette.strong,
+                        backgroundColor: workoutPalette.strong + '10',
+                      }]}>
+                      <View style={styles.inlineLoadingRow}>
+                        <ActivityIndicator size="small" color={workoutPalette.strong} />
+                        <Text style={[styles.inlineLoadingText, { color: themeColors.textSecondary }]}>
+                          Loading recommendation...
+                        </Text>
+                      </View>
+                    </View>
+                  )}
 
                   {/* ── Form video link ── */}
                   <TouchableOpacity
                     style={styles.formVideoLink}
-                    onPress={() => setFormVideoExerciseName(ex.name)}
+                    onPress={() => openFormVideoForExercise(ex)}
                     activeOpacity={0.7}>
                     <Text style={styles.formVideoLinkText}>▶ Form Video</Text>
                   </TouchableOpacity>
@@ -6677,6 +6831,13 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         )}
       </ScrollView>
 
+      {cancelingWorkout && (
+        <View style={styles.cancelOverlay} pointerEvents="auto">
+          <ActivityIndicator size="small" color={workoutPalette.strong} />
+          <Text style={[styles.cancelOverlayText, { color: themeColors.textSecondary }]}>Canceling workout...</Text>
+        </View>
+      )}
+
       {/* Full-screen timer modal for timed exercises. Opens when the
           user taps Start on a timed set row. Reads from the same
           activeTimers state so the wall-clock calculation stays in
@@ -6726,7 +6887,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                       onPress={() => {
                         if (!mEx?.name) return;
                         import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
-                        setFormVideoExerciseName(mEx.name);
+                        openFormVideoForExercise(mEx);
                       }}
                       style={{
                         width: 70, height: 70, borderRadius: 16, marginBottom: 12,
@@ -7634,7 +7795,18 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         exerciseName={formVideoExerciseName ?? ''}
         authToken={authToken}
         themeName={themeName}
-        onClose={() => setFormVideoExerciseName(null)}
+        equipment={formVideoContext.equipment}
+        primaryMuscle={formVideoContext.primaryMuscle}
+        movementPattern={formVideoContext.movementPattern}
+        onClose={() => {
+          const shouldReturnToPicker = returnToExercisePickerAfterVideo;
+          setFormVideoExerciseName(null);
+          setFormVideoContext({});
+          setReturnToExercisePickerAfterVideo(false);
+          if (shouldReturnToPicker) {
+            setTimeout(() => setAddExerciseModalVisible(true), 260);
+          }
+        }}
       />
 
       {/* PR celebration — fires after handleFinish when the backend returns
@@ -7742,6 +7914,8 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   warmupDoneBtnText: { color: tc.background, fontWeight: '700', fontSize: 15 },
   warmupCoachBtn: { borderWidth: 1.5, borderRadius: radius.md, paddingHorizontal: 16, paddingVertical: 14, alignItems: 'center', justifyContent: 'center' },
   warmupCoachBtnText: { fontSize: 13, fontWeight: '700' },
+  inlineLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 22 },
+  inlineLoadingText: { fontSize: 12, fontWeight: '700' },
   container: { flex: 1, backgroundColor: tc.background },
 
   header: { paddingHorizontal: 16, paddingTop: 48, paddingBottom: 6 },
@@ -7769,6 +7943,8 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     flexShrink: 0,
   },
   headerWorkoutTimerText: { fontSize: 12, fontWeight: '900', fontVariant: ['tabular-nums'] as any },
+  headerHrChip: { maxWidth: 96 },
+  headerHrChipText: { flexShrink: 1 },
   headerTitleBlock: { flex: 1, minWidth: 0 },
   focusLabel:   { fontSize: 13, fontWeight: '800', color: tc.textPrimary, marginBottom: 0 },
   headerMetaText: { fontSize: 10, color: tc.textMuted, fontWeight: '700' },
@@ -7805,6 +7981,7 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     borderWidth: 1,
     borderColor: tc.border + '66',
   },
+  headerRestInfoRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 1 },
   headerRestInfoLabel: { fontSize: 8, color: tc.textMuted, fontWeight: '900', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 1 },
   headerRestTarget: { fontSize: 12, fontWeight: '900', lineHeight: 16 },
   headerRestTutorial: {
@@ -7890,6 +8067,10 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   exerciseName:     { fontSize: 16, lineHeight: 20, fontWeight: '800', color: tc.textPrimary, marginBottom: 3 },
   exerciseNameDone: { color: tc.textSecondary, textDecorationLine: 'line-through' },
   exerciseMeta:     { fontSize: 12, lineHeight: 16, color: tc.textMuted },
+  targetZoneRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4, minWidth: 0 },
+  targetZoneBadge: { borderWidth: 1, borderRadius: radius.full, paddingHorizontal: 7, paddingVertical: 2 },
+  targetZoneBadgeText: { fontSize: 10, fontWeight: '900' },
+  targetZoneText: { flex: 1, minWidth: 0, fontSize: 12, lineHeight: 16, fontWeight: '800' },
 
   setsBadge:        { backgroundColor: tc.surfaceRaised, borderRadius: radius.full, paddingHorizontal: 10, paddingVertical: 4, borderWidth: 1, borderColor: tc.border, marginTop: 3 },
   setsBadgeDone:    { backgroundColor: tc.primary, borderColor: tc.primary },
@@ -7958,6 +8139,14 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     borderLeftColor: tc.warning,
   },
   warmupNoteText: { fontSize: 12, color: tc.textPrimary, lineHeight: 18 },
+  preSetHintCard: {
+    borderLeftWidth: 3,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: radius.md,
+    marginTop: 8,
+    marginBottom: 4,
+  },
 
   // Form video link within exercise card
   formVideoLink: {
@@ -8114,6 +8303,19 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   finishBtnDisabled: { borderColor: tc.border, backgroundColor: tc.surfaceRaised, opacity: 0.55, shadowOpacity: 0, elevation: 0 },
   finishBtnText:     { fontSize: 16, fontWeight: '900', color: tc.background },
   finishBtnTextDisabled: { color: tc.textMuted },
+  cancelOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: tc.background + 'CC',
+    zIndex: 20,
+  },
+  cancelOverlayText: { fontSize: 12, fontWeight: '800' },
 
   modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
   logModal: {
@@ -8566,6 +8768,34 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
     borderRadius: radius.md,
     backgroundColor: tc.surfaceRaised,
     padding: 12,
+  },
+  addExercisePreview: {
+    width: 52,
+    height: 52,
+    borderRadius: radius.md,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: tc.surface,
+    borderWidth: 1,
+    borderColor: tc.border,
+  },
+  addExercisePreviewImage: { width: '100%', height: '100%' },
+  addExercisePreviewFallback: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: tc.background,
+  },
+  addExercisePreviewBadge: {
+    position: 'absolute',
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0,0,0,0.62)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   addExerciseName: { fontSize: 13, fontWeight: '700', color: tc.textPrimary, marginBottom: 2 },
   addExerciseMeta: { fontSize: 12, color: tc.textSecondary },

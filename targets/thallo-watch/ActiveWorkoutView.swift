@@ -1559,18 +1559,22 @@ private struct HeartRateTab: View {
                             .tracking(0.8)
                             .foregroundColor(zoneColor)
                         Text(zoneLabel(z))
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(theme.textPrimary)
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(zoneColor)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
                         if let range = hr.currentZoneDefinition {
                             Text("\(range.low)-\(range.high) bpm")
                                 .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(theme.textSecondary)
                                 .monospacedDigit()
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                         }
                     }
                     .padding(.vertical, 6)
-                    .padding(.horizontal, 12)
-                    .background(zoneColor.opacity(0.22))
+                    .padding(.horizontal, 10)
+                    .background(zoneColor.opacity(0.28))
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
                             .stroke(zoneColor.opacity(0.6), lineWidth: 1),

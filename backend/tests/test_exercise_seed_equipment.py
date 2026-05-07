@@ -82,6 +82,98 @@ def test_required_equipment_preserves_multi_gear_requirements() -> None:
     _ok("stability_ball_chest_press requires both dumbbells + swiss_ball")
 
 
+def test_seed_tracking_modes_are_valid_and_regressed() -> None:
+    print("\n[test] seed exercise tracking modes stay intentional")
+    from app.seed_exercises_data import SEED_EXERCISES, hydrated_exercise
+
+    by_slug = {e["slug"]: hydrated_exercise(e) for e in SEED_EXERCISES}
+    invalid = [
+        (slug, row.get("default_tracking_mode"))
+        for slug, row in by_slug.items()
+        if row.get("default_tracking_mode") not in {"reps", "time", "distance"}
+    ]
+    assert not invalid, f"invalid tracking modes: {invalid[:20]}"
+
+    expected = {
+        "prone_ytw": "reps",
+        "scap_pushup": "reps",
+        "thoracic_rotation": "reps",
+        "cuban_press": "reps",
+        "external_rotation_band": "reps",
+        "internal_rotation_band": "reps",
+        "wall_slide": "reps",
+        "y_raise": "reps",
+        "stir_the_pot": "reps",
+        "seated_calf_raise": "reps",
+        "seated_hamstring_curl": "reps",
+        "farmer_carry": "distance",
+        "plank": "time",
+        "side_plank": "time",
+        "dead_hang": "time",
+        "wall_sit": "time",
+        "childs_pose": "time",
+        "downward_dog": "time",
+        "foam_roller_lat_release": "time",
+        "foam_roller_t_spine_extension": "reps",
+        "sled_push": "distance",
+        "sled_drag": "distance",
+        "suitcase_carry": "distance",
+        "sandbag_carry": "distance",
+        "bear_crawl": "distance",
+        "toe_walks": "distance",
+        "heel_walks": "distance",
+        "rucking": "distance",
+    }
+    for slug, mode in expected.items():
+        assert by_slug[slug]["default_tracking_mode"] == mode, (
+            slug,
+            by_slug[slug]["default_tracking_mode"],
+            mode,
+        )
+    _ok(f"{len(expected)} targeted tracking modes verified")
+
+
+def test_seed_equipment_corrections_are_regressed() -> None:
+    print("\n[test] corrected exercise equipment mappings stay canonical")
+    from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
+
+    valid_equipment = {e["slug"] for e in SEED_EQUIPMENT}
+    by_slug = {e["slug"]: e for e in SEED_EXERCISES}
+
+    def required(slug: str) -> set[str]:
+        return {
+            gear["slug"]
+            for gear in by_slug[slug].get("equipment", [])
+            if gear.get("required", True)
+        }
+
+    assert required("plate_pinch") == {"weight_plates"}
+    assert required("rope_pushdown") == {"cable_machine", "rope_attachment"}
+    assert required("face_pull") == {"cable_machine", "rope_attachment"}
+
+    preacher_expected = (
+        {"preacher_curl_machine"}
+        if "preacher_curl_machine" in valid_equipment
+        else {"preacher_bench"}
+    )
+    assert required("machine_preacher_curl") == preacher_expected
+
+    tricep_dip_expected = (
+        {"dip_machine"}
+        if "dip_machine" in valid_equipment
+        else {"assisted_pullup_machine"}
+    )
+    assert required("machine_tricep_dip") == tricep_dip_expected
+
+    glute_expected = (
+        {"glute_kickback_machine"}
+        if "glute_kickback_machine" in valid_equipment
+        else {"hip_abduction_machine"}
+    )
+    assert required("glute_kickback_machine") == glute_expected
+    _ok("plate, rope, face-pull, and machine equipment mappings verified")
+
+
 def test_cardio_backfill_equipment_is_concrete() -> None:
     print("\n[test] cardio backfill exercises use concrete equipment slugs")
     from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
@@ -326,12 +418,14 @@ def test_support_dependent_moves_require_support_equipment() -> None:
     bodyweight_only = {"bodyweight", "yoga_mat"}
     required_support = {
         "chair_step_up": {"sturdy_chair"},
+        "incline_pushup": {"flat_bench"},
         "nordic_curl": {"nordic_anchor"},
         "reverse_nordic_curl": {"nordic_anchor"},
         "slider_hamstring_curl": {"slider_discs"},
         "hanging_knee_raise": {"pull_up_bar"},
         "weighted_pushup": {"weighted_vest"},
         "weighted_plank": {"weight_plates"},
+        "weighted_situp": {"dumbbells"},
     }
     for slug, owned in required_support.items():
         assert not _equipment_satisfied(by_slug[slug], bodyweight_only), f"{slug} should not be no-equipment eligible"
@@ -506,6 +600,8 @@ cases = [
     test_seed_exercise_equipment_references_are_canonical,
     test_wger_import_equipment_map_uses_seed_slugs,
     test_required_equipment_preserves_multi_gear_requirements,
+    test_seed_tracking_modes_are_valid_and_regressed,
+    test_seed_equipment_corrections_are_regressed,
     test_cardio_backfill_equipment_is_concrete,
     test_generate_cardio_day_uses_seeded_names,
     test_generate_cardio_day_60_min_uses_explicit_blocks,

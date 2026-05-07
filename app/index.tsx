@@ -1557,6 +1557,18 @@ export default function Index() {
       // a proper wipe) rather than arriving without a userId key at all.
       WatchBridge.setUserId(null);
     } catch { /* watch bridge optional */ }
+    try {
+      const [{ cancelWorkoutReminders }, { cancelMealReminder }, Notifications] = await Promise.all([
+        import('../src/utils/workoutReminders'),
+        import('../src/utils/mealReminders'),
+        import('expo-notifications'),
+      ]);
+      await raceTimeout(Promise.all([
+        cancelWorkoutReminders().catch(() => {}),
+        cancelMealReminder().catch(() => {}),
+        Notifications.cancelAllScheduledNotificationsAsync().catch(() => {}),
+      ]), 1500);
+    } catch { /* notification cleanup is best-effort */ }
     await clearUserScopedStorage({ preserveKeys: [TUTORIAL_COMPLETED_KEY] });
     try { await AsyncStorage.removeItem('pending_plan_job'); } catch {}
     await clearAuthToken();

@@ -79,7 +79,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
   const maestroTestAccount = __DEV__ && email.trim().endsWith('@test.thallo');
   const showSocialSignIn = mode === 'login' || mode === 'signup';
   const showAppleSignIn = Platform.OS === 'ios' && showSocialSignIn;
-  const socialVerb = mode === 'signup' ? 'Sign up' : 'Log in';
+  const socialVerb = mode === 'signup' ? 'Create account' : 'Sign in';
   const googleClientId = GOOGLE_OAUTH.webClientId
     ?? GOOGLE_OAUTH.iosClientId
     ?? GOOGLE_OAUTH.androidClientId
@@ -365,14 +365,14 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               activeOpacity={0.75}
               style={[styles.toggleButton, mode === 'login' && styles.toggleButtonActive]}
               onPress={() => switchMode('login')}>
-              <Text style={[styles.toggleText, mode === 'login' && styles.toggleTextActive]}>Log In</Text>
+              <Text style={[styles.toggleText, mode === 'login' && styles.toggleTextActive]}>Sign In</Text>
             </TouchableOpacity>
             <TouchableOpacity
               testID="auth-mode-signup"
               activeOpacity={0.75}
               style={[styles.toggleButton, mode === 'signup' && styles.toggleButtonActive]}
               onPress={() => switchMode('signup')}>
-              <Text style={[styles.toggleText, mode === 'signup' && styles.toggleTextActive]}>Sign Up</Text>
+              <Text style={[styles.toggleText, mode === 'signup' && styles.toggleTextActive]}>Create Account</Text>
             </TouchableOpacity>
           </View>
 
@@ -666,12 +666,12 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               ? <ActivityIndicator color={colors.background} />
               : <Text style={styles.submitText}>
                   {mode === 'login'
-                    ? 'Log In'
+                    ? 'Sign In'
                     : mode === 'reset_email'
                       ? 'Next'
                       : mode === 'reset_answer'
                         ? 'Reset Password'
-                        : 'Get Started'}
+                        : 'Create Account'}
                 </Text>
             }
           </TouchableOpacity>
@@ -691,7 +691,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               accessibilityLabel="auth-back-to-login"
               onPress={() => switchMode('login')}
               style={styles.forgotBtn}>
-              <Text style={styles.forgotText}>Already have an account? Log in</Text>
+              <Text style={styles.forgotText}>Already have an account? Sign in</Text>
             </TouchableOpacity>
           )}
           {(mode === 'reset_email' || mode === 'reset_answer') && (
@@ -700,7 +700,7 @@ export default function AuthScreen({ onAuthenticated }: AuthScreenProps) {
               accessibilityLabel="auth-back-to-login"
               onPress={() => switchMode('login')}
               style={styles.forgotBtn}>
-              <Text style={styles.forgotText}>Back to log in</Text>
+              <Text style={styles.forgotText}>Back to sign in</Text>
             </TouchableOpacity>
           )}
         </View>
