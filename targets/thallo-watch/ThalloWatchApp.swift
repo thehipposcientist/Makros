@@ -14,7 +14,7 @@ struct ThalloWatchApp: App {
             ContentView()
                 .environmentObject(conn)
                 .environmentObject(theme)
-                .preferredColorScheme(theme.preferredColorScheme)
+                .preferredColorScheme(.dark)
                 .onAppear { theme.palette = conn.theme }
                 .onReceive(conn.$theme) { palette in theme.palette = palette }
         }

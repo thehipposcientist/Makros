@@ -80,32 +80,4 @@ final class ThemeStore: ObservableObject {
     var success:       Color { Color(hex: palette.success) }
     var warning:       Color { Color(hex: palette.warning) }
     var error:         Color { Color(hex: palette.error) }
-    var preferredColorScheme: ColorScheme? {
-        guard let luminance = Self.relativeLuminance(hex: palette.background) else { return .dark }
-        return luminance > 0.58 ? .light : .dark
-    }
-
-    private static func relativeLuminance(hex: String) -> Double? {
-        let trimmed = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        let normalized: String
-        if trimmed.count == 3 {
-            normalized = trimmed.map { "\($0)\($0)" }.joined()
-        } else {
-            normalized = trimmed.count == 8 ? String(trimmed.suffix(6)) : trimmed
-        }
-        guard normalized.count == 6 else { return nil }
-        var int: UInt64 = 0
-        guard Scanner(string: normalized).scanHexInt64(&int) else { return nil }
-        let r = linearized(Double((int >> 16) & 0xFF) / 255)
-        let g = linearized(Double((int >> 8) & 0xFF) / 255)
-        let b = linearized(Double(int & 0xFF) / 255)
-        return 0.2126 * r + 0.7152 * g + 0.0722 * b
-    }
-
-    private static func linearized(_ value: Double) -> Double {
-        if value <= 0.03928 {
-            return value / 12.92
-        }
-        return pow((value + 0.055) / 1.055, 2.4)
-    }
 }
