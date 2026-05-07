@@ -80,7 +80,11 @@ const STALE_AFTER_MS = 30 * 60 * 1000;   // 30 min
 let _inflight: Promise<HealthDataSummary | null> | null = null;
 
 function cacheableSummary(summary: HealthDataSummary): HealthDataSummary {
-  return { ...summary, raw: null };
+  const sleepScore = summary.raw?.sleepScore ?? (summary.raw as any)?.sleepScore ?? null;
+  return {
+    ...summary,
+    raw: sleepScore ? ({ sleepScore } as any) : null,
+  };
 }
 
 function localDateISO(date: Date = new Date()): string {
@@ -111,7 +115,8 @@ export async function getCachedHealthDataSummary(): Promise<HealthDataSummary | 
     const raw = await AsyncStorage.getItem(CACHE_KEY);
     if (!raw) return null;
     const parsed: HealthDataSummary = JSON.parse(raw);
-    if (parsed?.raw) {
+    const parsedRaw = parsed?.raw as any;
+    if (parsedRaw && Object.keys(parsedRaw).some(k => k !== 'sleepScore')) {
       const minimized = cacheableSummary(parsed);
       AsyncStorage.setItem(CACHE_KEY, JSON.stringify(minimized)).catch(() => {});
       return minimized;

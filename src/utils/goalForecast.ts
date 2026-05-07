@@ -11,6 +11,7 @@ export type GoalForecastProfile = {
     pace?: string | null;
     targetWeightLbs?: number | null;
     startWeightLbs?: number | null;
+    goalStartedAt?: string | null;
   } | null;
   physicalStats?: { weightLbs?: number | null } | null;
   daysPerWeek?: number | null;
@@ -109,6 +110,7 @@ export type BuildGoalForecastInput = {
   paceHistory?: GoalForecastPacePoint[] | null;
   oneRepMaxLifts?: GoalForecastLift[] | null;
   bodyScanHistory?: GoalForecastBodyScan[] | null;
+  vo2Max?: number | null;
   weightUnit?: WeightUnit;
   distanceUnit?: DistanceUnit;
   today?: Date;
@@ -120,6 +122,7 @@ const MI_PER_KM = 0.6213711922;
 const RECENT_DAYS = 14;
 const WEIGHT_TREND_DAYS = 42;
 const WINDOW_WEEKS = 6;
+const MAX_TARGET_ETA_WEEKS = 104;
 
 const FAT_LOSS_GOALS = new Set(['lose_fat', 'fat_loss', 'get_lean', 'cut', 'preserve_muscle_cutting', 'tone', 'get_toned', 'toning']);
 const MUSCLE_GOALS = new Set([
@@ -152,6 +155,7 @@ const RECOMP_FAT_LOSS_LBS_PER_WEEK: Record<string, [number, number]> = {
   aggressive: [0.1, 0.3],
 };
 const STRENGTH_GAIN_PCT_6W: Record<string, number> = { conservative: 2.0, moderate: 3.5, aggressive: 5.0 };
+const VO2_GAIN_6W: Record<string, number> = { conservative: 0.35, moderate: 0.65, aggressive: 0.95 };
 
 function finite(value: unknown): number | null {
   const n = Number(value);
@@ -220,6 +224,46 @@ function signedPct(value: number): string {
 
 function formatRange(low: number, high: number, precision = 1): string {
   return `${low.toFixed(precision).replace(/\.0$/, '')}-${high.toFixed(precision).replace(/\.0$/, '')}`;
+}
+
+function formatWeeks(weeks: number): string {
+  const rounded = Math.max(1, Math.round(weeks));
+  return rounded === 1 ? '1 week' : `${rounded} weeks`;
+}
+
+function goalTiming(profile: GoalForecastProfile, today: Date): {
+  projectionWeeks: number;
+  startedLabel: string;
+} {
+  const todayMs = dayMs(dateKey(today));
+  const startedMs = dayMs(profile.goalDetails?.goalStartedAt);
+  if (!startedMs || !todayMs || startedMs > todayMs) {
+    return { projectionWeeks: WINDOW_WEEKS, startedLabel: 'New goal' };
+  }
+
+  const elapsedDays = Math.max(0, Math.round((todayMs - startedMs) / DAY_MS));
+  const elapsedWeeks = elapsedDays / 7;
+  const weeksIntoBlock = elapsedWeeks % WINDOW_WEEKS;
+  const projectionWeeks = Math.max(1, Math.ceil(WINDOW_WEEKS - weeksIntoBlock));
+  const startedLabel = elapsedDays === 0
+    ? 'Started today'
+    : elapsedDays < 14
+      ? `Started ${elapsedDays} day${elapsedDays === 1 ? '' : 's'} ago`
+      : `Started ${Math.round(elapsedWeeks)} week${Math.round(elapsedWeeks) === 1 ? '' : 's'} ago`;
+  return { projectionWeeks, startedLabel };
+}
+
+function etaWeeks(remaining: number, weeklyRate: number): number | null {
+  if (!Number.isFinite(remaining) || !Number.isFinite(weeklyRate) || remaining <= 0 || weeklyRate <= 0) {
+    return null;
+  }
+  return clamp(Math.ceil(remaining / weeklyRate), 1, MAX_TARGET_ETA_WEEKS);
+}
+
+function signedVo2(value: number): string {
+  const rounded = round1(value);
+  const prefix = rounded > 0 ? '+' : rounded < 0 ? '-' : '';
+  return `${prefix}${Math.abs(rounded).toFixed(1).replace(/\.0$/, '')}`;
 }
 
 function resolveBucket(profile: GoalForecastProfile): GoalForecastBucket {
@@ -400,6 +444,8 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
   const profile = input.profile;
   const bucket = resolveBucket(profile);
   const pace = paceKey(profile.goalDetails?.pace);
+  const timing = goalTiming(profile, today);
+  const projectionWeeks = timing.projectionWeeks;
   const history = input.history ?? [];
   const summaries = input.summaries ?? [];
   const workoutDays14 = countRecentWorkoutDays(history, summaries, today);
@@ -436,15 +482,15 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
   const confidenceScore = (workoutDays14 >= 2 ? 1 : 0) + (meals.days >= 4 ? 2 : meals.days >= 2 ? 1 : 0) + (bodySignal ? 1 : 0);
   const confidence: GoalForecastConfidence = confidenceScore >= 4 ? 'high' : confidenceScore >= 2 ? 'medium' : 'low';
   const tone: GoalForecastTone = execution >= 0.78 ? 'success' : execution < 0.58 ? 'warning' : 'neutral';
-  const assumption = 'Assumes the next 6 weeks look like your current plan execution.';
+  const assumption = `Assumes the next ${formatWeeks(projectionWeeks)} look like your current plan execution.`;
   const updateReason = limiters.length > 0
     ? `Estimate adjusted down because ${limiters[0]}.`
     : 'Estimate held because training and nutrition are supporting the goal.';
 
-  let headline = `Estimated ${Math.round(workoutDays14 * 3 * execution)} training days in ${WINDOW_WEEKS} weeks`;
-  let subheadline = 'General fitness estimate uses current training and nutrition consistency.';
+  let headline = `At current pace: ${Math.round((workoutDays14 / 2) * projectionWeeks * execution)} training days in ${formatWeeks(projectionWeeks)}`;
+  let subheadline = `${timing.startedLabel}; current training and nutrition set this estimate.`;
   let metricLabel = 'Consistency';
-  let metricValue = `${Math.round(workoutDays14 * 3 * execution)} days`;
+  let metricValue = `${Math.round((workoutDays14 / 2) * projectionWeeks * execution)} days`;
   let metricDetail = `${executionPct}% current execution`;
   let progressPct = execution;
 
@@ -453,66 +499,108 @@ export function buildGoalForecast(input: BuildGoalForecastInput): GoalForecastMo
     const observed = weights.slopeLbsPerWeek != null && weights.slopeLbsPerWeek < 0
       ? Math.min(base, Math.abs(weights.slopeLbsPerWeek) * 0.55 + base * 0.45)
       : base;
-    let loss = round1(observed * WINDOW_WEEKS * execution);
+    const weeklyLoss = Math.max(0.1, observed * execution);
+    let loss = round1(weeklyLoss * projectionWeeks);
     if (targetWeight != null && currentWeight != null && currentWeight > targetWeight) {
-      loss = Math.min(loss, currentWeight - targetWeight);
+      const remaining = currentWeight - targetWeight;
+      const weeksToTarget = etaWeeks(remaining, weeklyLoss);
+      loss = Math.min(loss, remaining);
       progressPct = clamp(1 - ((currentWeight - targetWeight) / Math.max(1, Math.abs((profile.goalDetails?.startWeightLbs ?? currentWeight) - targetWeight))), 0, 1);
+      if (weeksToTarget != null) {
+        metricValue = formatWeeks(weeksToTarget);
+        metricLabel = 'ETA';
+        metricDetail = `${signedWeight(-round1(weeklyLoss), weightUnit)}/wk estimated`;
+        headline = `At current pace: ${formatWeight(targetWeight, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} in ${formatWeeks(weeksToTarget)}`;
+        subheadline = `${timing.startedLabel}; ${formatWeight(remaining, weightUnit, { precision: weightUnit === 'kg' ? 1 : 1 })} to goal weight.`;
+      }
+    } else if (targetWeight != null && currentWeight != null && currentWeight <= targetWeight) {
+      metricValue = 'Reached';
+      metricLabel = 'ETA';
+      metricDetail = `${formatWeight(currentWeight, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} now`;
+      headline = 'At current pace: goal weight is reached';
+      subheadline = `${timing.startedLabel}; hold the habits that got you here.`;
     }
-    metricValue = signedWeight(-loss, weightUnit);
-    metricLabel = 'Projected scale';
-    metricDetail = `${executionPct}% current execution`;
-    headline = `Estimated ${metricValue} in ${WINDOW_WEEKS} weeks`;
-    subheadline = 'Fat-loss forecast blends goal pace, nutrition execution, training adherence, and weight trend.';
+    if (metricLabel !== 'ETA') {
+      metricValue = signedWeight(-loss, weightUnit);
+      metricLabel = 'Projected scale';
+      metricDetail = `${executionPct}% current execution`;
+      headline = `At current pace: ${metricValue} in ${formatWeeks(projectionWeeks)}`;
+      subheadline = `${timing.startedLabel}; estimate blends goal pace, nutrition, training, and weight trend.`;
+    }
   } else if (bucket === 'muscle_gain') {
-    const gain = round1(MUSCLE_GAIN_LBS_PER_WEEK[pace] * WINDOW_WEEKS * execution);
-    metricValue = signedWeight(gain, weightUnit);
-    metricLabel = 'Lean-mass pace';
-    metricDetail = `${executionPct}% current execution`;
-    headline = `Estimated ${metricValue} lean-gain pace in ${WINDOW_WEEKS} weeks`;
-    subheadline = 'Lean gain is capped by training consistency, protein, and calorie execution.';
+    const weeklyGain = Math.max(0.05, MUSCLE_GAIN_LBS_PER_WEEK[pace] * execution);
+    const gain = round1(weeklyGain * projectionWeeks);
+    if (targetWeight != null && currentWeight != null && currentWeight < targetWeight) {
+      const remaining = targetWeight - currentWeight;
+      const weeksToTarget = etaWeeks(remaining, weeklyGain);
+      if (weeksToTarget != null) {
+        metricValue = formatWeeks(weeksToTarget);
+        metricLabel = 'ETA';
+        metricDetail = `${signedWeight(round1(weeklyGain), weightUnit)}/wk estimated`;
+        headline = `At current pace: ${formatWeight(targetWeight, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} in ${formatWeeks(weeksToTarget)}`;
+        subheadline = `${timing.startedLabel}; ${formatWeight(remaining, weightUnit, { precision: weightUnit === 'kg' ? 1 : 1 })} to goal weight.`;
+      }
+    } else if (targetWeight != null && currentWeight != null && currentWeight >= targetWeight) {
+      metricValue = 'Reached';
+      metricLabel = 'ETA';
+      metricDetail = `${formatWeight(currentWeight, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} now`;
+      headline = 'At current pace: goal weight is reached';
+      subheadline = `${timing.startedLabel}; hold training quality while weight stabilizes.`;
+    }
+    if (metricLabel !== 'ETA') {
+      metricValue = signedWeight(gain, weightUnit);
+      metricLabel = 'Lean-mass pace';
+      metricDetail = `${executionPct}% current execution`;
+      headline = `At current pace: ${metricValue} lean mass in ${formatWeeks(projectionWeeks)}`;
+      subheadline = `${timing.startedLabel}; lean gain depends on training, protein, and calorie execution.`;
+    }
   } else if (bucket === 'body_recomp') {
     const [low, high] = RECOMP_FAT_LOSS_LBS_PER_WEEK[pace];
-    const fatLow = round1(low * WINDOW_WEEKS * execution);
-    const fatHigh = round1(high * WINDOW_WEEKS * execution);
+    const fatLow = round1(low * projectionWeeks * execution);
+    const fatHigh = round1(high * projectionWeeks * execution);
+    const fatMid = round1(((fatLow + fatHigh) / 2));
+    metricValue = signedWeight(-fatMid, weightUnit);
     if (currentWeight && currentWeight > 0) {
       const bfLow = round1((fatLow / currentWeight) * 100);
       const bfHigh = round1((fatHigh / currentWeight) * 100);
-      metricValue = `-${formatRange(bfLow, bfHigh)}%`;
-      headline = `Estimated -${formatRange(bfLow, bfHigh)} body-fat points in ${WINDOW_WEEKS} weeks`;
+      metricDetail = `About -${formatRange(bfLow, bfHigh)} body-fat points if scale stays stable`;
     } else {
-      metricValue = `${formatWeight(fatLow, weightUnit, { precision: 1 })}-${formatWeight(fatHigh, weightUnit, { precision: 1 })}`;
-      headline = `Estimated ${metricValue} fat loss in ${WINDOW_WEEKS} weeks`;
+      metricDetail = `${formatWeight(fatLow, weightUnit, { precision: 1 })} to ${formatWeight(fatHigh, weightUnit, { precision: 1 })} likely range`;
     }
-    metricLabel = 'Body-fat estimate';
-    metricDetail = `${formatWeight(fatLow, weightUnit, { precision: 1 })}-${formatWeight(fatHigh, weightUnit, { precision: 1 })} fat-loss equivalent`;
+    metricLabel = 'Fat estimate';
+    headline = `At current pace: ${metricValue} fat in ${formatWeeks(projectionWeeks)}`;
     subheadline = bodyScan
-      ? `Latest scan ${bodyScan.bodyFatPct}% body fat; forecast assumes scale stays mostly stable.`
-      : 'Recomp assumes scale stays mostly stable while strength and protein stay consistent.';
+      ? `${timing.startedLabel}; latest scan ${bodyScan.bodyFatPct}% body fat.`
+      : `${timing.startedLabel}; assumes scale stays mostly stable while strength and protein stay consistent.`;
   } else if (bucket === 'strength') {
-    const pct = round1(STRENGTH_GAIN_PCT_6W[pace] * execution);
+    const pct = round1(STRENGTH_GAIN_PCT_6W[pace] * (projectionWeeks / WINDOW_WEEKS) * execution);
     const topLift = (input.oneRepMaxLifts ?? []).find(lift => finite(lift.oneRepMaxLbs) != null);
     metricValue = signedPct(pct);
     metricLabel = 'Strength marker';
     metricDetail = topLift ? `${topLift.name}: ${formatWeight(topLift.oneRepMaxLbs, weightUnit)} e1RM now` : `${executionPct}% current execution`;
-    headline = `Estimated ${metricValue} strength marker change in ${WINDOW_WEEKS} weeks`;
-    subheadline = 'Strength forecast uses lifting adherence, nutrition support, and recovery consistency.';
+    headline = `At current pace: ${metricValue} strength marker in ${formatWeeks(projectionWeeks)}`;
+    subheadline = `${timing.startedLabel}; estimate uses lifting adherence, nutrition, and recovery consistency.`;
   } else if (bucket === 'endurance' || bucket === 'hyrox') {
-    const projectedMiles = cardioMiles14 > 0 ? cardioMiles14 * 3 * Math.max(0.65, execution) : 0;
-    const projectedMinutes = Math.round(cardioMinutes14 * 3 * Math.max(0.65, execution));
-    metricValue = projectedMiles > 0 ? formatDistance(projectedMiles, distanceUnit) : `${projectedMinutes} min`;
-    metricLabel = bucket === 'hyrox' ? 'Hybrid volume' : 'Aerobic volume';
-    metricDetail = cardioMiles14 > 0 ? 'projected distance' : 'projected logged cardio';
-    headline = projectedMiles > 0
-      ? `Estimated ${metricValue} cardio volume in ${WINDOW_WEEKS} weeks`
-      : `Estimated ${projectedMinutes} cardio minutes in ${WINDOW_WEEKS} weeks`;
-    subheadline = 'Cardio estimate updates from logged endurance work and weekly nutrition support.';
+    const cardioExecution = clamp(trainingExecution * 0.65 + nutrition.score * 0.20 + 0.15, 0.35, 1.1);
+    const vo2Gain = Math.max(0.1, round1(VO2_GAIN_6W[pace] * (projectionWeeks / WINDOW_WEEKS) * cardioExecution));
+    const projectedMiles = cardioMiles14 > 0 ? (cardioMiles14 / 2) * projectionWeeks * Math.max(0.65, execution) : 0;
+    const projectedMinutes = Math.round((cardioMinutes14 / 2) * projectionWeeks * Math.max(0.65, execution));
+    metricValue = signedVo2(vo2Gain);
+    metricLabel = bucket === 'hyrox' ? 'Hybrid VO2 estimate' : 'VO2 estimate';
+    metricDetail = input.vo2Max != null
+      ? `${round1(input.vo2Max)} ml/kg/min now`
+      : projectedMiles > 0
+        ? `${formatDistance(projectedMiles, distanceUnit)} projected cardio volume`
+        : `${projectedMinutes} projected cardio minutes`;
+    headline = `At current pace: ${metricValue} VO2 Max in ${formatWeeks(projectionWeeks)}`;
+    subheadline = `${timing.startedLabel}; estimate updates from logged cardio and training consistency.`;
   } else if (bucket === 'athletic') {
-    const projectedDays = Math.round(workoutDays14 * 3 * Math.max(0.65, execution));
+    const projectedDays = Math.round((workoutDays14 / 2) * projectionWeeks * Math.max(0.65, execution));
     metricValue = `${projectedDays} days`;
     metricLabel = 'Performance prep';
     metricDetail = `${executionPct}% current execution`;
-    headline = `Estimated ${projectedDays} performance sessions in ${WINDOW_WEEKS} weeks`;
-    subheadline = 'Performance estimate blends lifting, conditioning, and nutrition consistency.';
+    headline = `At current pace: ${projectedDays} performance sessions in ${formatWeeks(projectionWeeks)}`;
+    subheadline = `${timing.startedLabel}; estimate blends lifting, conditioning, and nutrition consistency.`;
   }
 
   const stats: GoalForecastStat[] = [

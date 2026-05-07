@@ -7,11 +7,12 @@
 // the plan (AsyncStorage + backend).
 
 import { useMemo } from 'react';
-import { View, Text, Modal, TouchableOpacity, ScrollView, Platform } from 'react-native';
+import { View, Text, Modal, TouchableOpacity, ScrollView, Platform, Image } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getTheme, radius } from '../constants/theme';
 import { AppThemeName } from '../types';
 import { exerciseEquipmentLabel, rankSwapCandidates, ExerciseLibraryItem } from '../utils/swapScoring';
+import { exerciseThumbSmall } from '../utils/exerciseThumb';
 
 interface Props {
   visible: boolean;
@@ -21,10 +22,11 @@ interface Props {
   themeName?: AppThemeName;
   onClose: () => void;
   onSelect: (next: ExerciseLibraryItem) => void;
+  onPreview?: (next: ExerciseLibraryItem) => void;
 }
 
 export default function PlanSwapExerciseModal({
-  visible, baseExerciseName, library, ownedEquipment, themeName, onClose, onSelect,
+  visible, baseExerciseName, library, ownedEquipment, themeName, onClose, onSelect, onPreview,
 }: Props) {
   const theme = getTheme(themeName);
   const tc = theme.colors;
@@ -101,25 +103,72 @@ export default function PlanSwapExerciseModal({
             <Text style={{ fontSize: 11, color: tc.textMuted, marginBottom: 6 }}>
               Ranked by muscle + movement pattern overlap.
             </Text>
-            {candidates.map(c => (
-              <TouchableOpacity
+            {candidates.map(c => {
+              const thumbUri = exerciseThumbSmall(c as any);
+              const equipment = exerciseEquipmentLabel(c);
+              return (
+              <View
                 key={c.name}
-                activeOpacity={0.8}
-                onPress={() => { onSelect(c); onClose(); }}
                 style={{
                   flexDirection: 'row', alignItems: 'center', gap: 10,
                   padding: 12, borderRadius: radius.md,
                   backgroundColor: tc.surface, borderWidth: 1, borderColor: tc.border,
                 }}
               >
-                <View style={{ flex: 1 }}>
+                {onPreview ? (
+                  <TouchableOpacity
+                    activeOpacity={0.85}
+                    onPress={() => onPreview(c)}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Preview ${c.name} form video`}
+                    style={{
+                      width: 52,
+                      height: 52,
+                      borderRadius: 12,
+                      overflow: 'hidden',
+                      backgroundColor: tc.surfaceRaised,
+                      borderWidth: 1,
+                      borderColor: tc.border,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    {thumbUri ? (
+                      <Image source={{ uri: thumbUri }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+                    ) : (
+                      <Ionicons name="videocam-outline" size={19} color={tc.textMuted} />
+                    )}
+                    <View
+                      pointerEvents="none"
+                      style={{
+                        position: 'absolute',
+                        width: 22,
+                        height: 22,
+                        borderRadius: 11,
+                        backgroundColor: 'rgba(0,0,0,0.62)',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <Ionicons name="play" size={11} color="#fff" style={{ marginLeft: 1 }} />
+                    </View>
+                  </TouchableOpacity>
+                ) : null}
+
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => { onSelect(c); onClose(); }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Swap to ${c.name}, ${c._overlap}% overlap`}
+                  style={{ flex: 1, minWidth: 0 }}
+                >
                   <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary }} numberOfLines={1}>
                     {c.name}
                   </Text>
                   <Text style={{ fontSize: 11, color: tc.textMuted, marginTop: 2 }} numberOfLines={1}>
-                    {c.primary_muscle}{exerciseEquipmentLabel(c) ? ` · ${exerciseEquipmentLabel(c)}` : ''}
+                    {c.primary_muscle}{equipment ? ` · ${equipment}` : ''}
                   </Text>
-                </View>
+                </TouchableOpacity>
                 <View style={{ alignItems: 'flex-end' }}>
                   <Text style={{ fontSize: 16, fontWeight: '900', color: overlapColor(c._overlap) }}>
                     {c._overlap}%
@@ -128,8 +177,18 @@ export default function PlanSwapExerciseModal({
                     OVERLAP
                   </Text>
                 </View>
-              </TouchableOpacity>
-            ))}
+                <TouchableOpacity
+                  activeOpacity={0.8}
+                  onPress={() => { onSelect(c); onClose(); }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Confirm swap to ${c.name}`}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                >
+                  <Ionicons name="swap-horizontal" size={20} color={tc.primary} />
+                </TouchableOpacity>
+              </View>
+            );
+            })}
           </ScrollView>
         )}
       </View>

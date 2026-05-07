@@ -12,6 +12,7 @@ import os.log
 private let wcLog = OSLog(subsystem: "com.thallo.app.watchbridge", category: "WC")
 private let staleWorkoutCommandWindowMs: Double = 4 * 60 * 60 * 1000
 private let staleQueuedCommandWindowMs: Double = 24 * 60 * 60 * 1000
+private let stalePullStateCommandWindowMs: Double = 2 * 60 * 1000
 private let pullStateDispatchCooldownMs: Double = 3 * 1000
 private let maxQueuedCommandEvents = 50
 
@@ -63,6 +64,10 @@ public class ThalloWatchBridgeModule: Module {
         Function("isReachable") { () -> Bool in
             guard WCSession.isSupported() else { return false }
             return WCSession.default.isReachable
+        }
+        Function("isWatchAppInstalled") { () -> Bool in
+            guard WCSession.isSupported() else { return false }
+            return WCSession.default.isWatchAppInstalled
         }
 
         AsyncFunction("syncWorkout") { (payload: [String: Any]) -> Bool in
@@ -620,6 +625,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             "take_all_supplements",
             "log_weight",
             "confirm_meal_speech",
+            "pull_state",
         ]
     }
 
@@ -631,7 +637,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             else { return false }
             let payload = event["payload"] as? [String: Any]
             guard let tsMs = numericMs(payload?["tsMs"]) else { return true }
-            let window = isWorkoutCommand(command) ? staleWorkoutCommandWindowMs : staleQueuedCommandWindowMs
+            let window = staleWindowMs(for: command)
             return nowMs - tsMs <= window
         }
         if deduped.count > maxQueuedCommandEvents {
@@ -658,7 +664,7 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
         guard let tsMs = numericMs(msg["tsMs"]) else { return false }
 
         let ageMs = Date().timeIntervalSince1970 * 1000 - tsMs
-        let window = isWorkoutCommand(command) ? staleWorkoutCommandWindowMs : staleQueuedCommandWindowMs
+        let window = staleWindowMs(for: command)
         guard ageMs > window else { return false }
         os_log("[wc-bridge] stale command ignored=%{public}@ ageMs=%.0f", log: wcLog, type: .default, command, ageMs)
         logDiag("dispatchCommand.staleDropped", [
@@ -695,6 +701,11 @@ private class _SessionHolder: NSObject, WCSessionDelegate {
             "end_workout",
             "cancel_workout",
         ].contains(command)
+    }
+
+    private func staleWindowMs(for command: String) -> Double {
+        if command == "pull_state" { return stalePullStateCommandWindowMs }
+        return isWorkoutCommand(command) ? staleWorkoutCommandWindowMs : staleQueuedCommandWindowMs
     }
 
     private func numericMs(_ value: Any?) -> Double? {

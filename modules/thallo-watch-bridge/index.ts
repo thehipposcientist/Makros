@@ -227,6 +227,7 @@ export const WatchBridge = {
   isAvailable: (): boolean => !!native?.isAvailable?.(),
   isPaired:    (): boolean => !!native?.isPaired?.(),
   isReachable: (): boolean => !!native?.isReachable?.(),
+  isWatchAppInstalled: (): boolean => !!native?.isWatchAppInstalled?.(),
 
   setUserId(id: string | null): void {
     if (!native) return;

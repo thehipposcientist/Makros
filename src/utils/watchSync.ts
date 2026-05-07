@@ -48,6 +48,7 @@ export type WatchSyncSnapshot = {
   atMs: number;
   reachable: boolean;
   paired: boolean;
+  installed: boolean;
   detail?: string;
 };
 
@@ -94,6 +95,7 @@ async function updateWatchSyncSnapshot(surface: string, ok: boolean, detail?: st
     atMs: Date.now(),
     reachable: WatchBridge.isAvailable() ? WatchBridge.isReachable() : false,
     paired: WatchBridge.isAvailable() ? WatchBridge.isPaired() : false,
+    installed: WatchBridge.isAvailable() ? WatchBridge.isWatchAppInstalled() : false,
   };
   try { await AsyncStorage.setItem(WATCH_SYNC_STATUS_KEY, JSON.stringify(snapshot)); } catch {}
   return snapshot;

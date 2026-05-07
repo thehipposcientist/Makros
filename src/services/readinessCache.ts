@@ -32,13 +32,14 @@ export async function getCachedReadinessToday(
 ): Promise<ReadinessTodayResponse> {
   const key = readinessKey(token, signals);
   const now = Date.now();
+  const useCache = ttlMs > 0;
   const cached = readinessCache.get(key);
-  if (cached && cached.expiresAt > now) return cached.value;
+  if (useCache && cached && cached.expiresAt > now) return cached.value;
   const existing = readinessInflight.get(key);
   if (existing) return existing;
   const promise = getReadinessToday(token, signals)
     .then(value => {
-      readinessCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+      if (useCache) readinessCache.set(key, { value, expiresAt: Date.now() + ttlMs });
       return value;
     })
     .finally(() => {

@@ -2883,7 +2883,7 @@ function AccountInfoModal({
             : WatchBridge.isReachable()
               ? 'reachable'
               : WatchBridge.isPaired()
-                ? 'paired, waiting'
+                ? (WatchBridge.isWatchAppInstalled() ? 'paired, waiting' : 'paired, app not installed')
                 : 'not paired';
           applyIfMounted(() => {
             if (!snap) {

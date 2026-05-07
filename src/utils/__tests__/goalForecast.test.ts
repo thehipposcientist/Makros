@@ -9,7 +9,7 @@ describe('goalForecast', () => {
       weightUnit: 'lbs',
       profile: {
         goal: 'body_recomp',
-        goalDetails: { pace: 'moderate' },
+        goalDetails: { pace: 'moderate', goalStartedAt: '2026-04-21T12:00:00.000Z' },
         physicalStats: { weightLbs: 180 },
         daysPerWeek: 4,
       },
@@ -31,8 +31,9 @@ describe('goalForecast', () => {
       bodyScanHistory: [{ date: '2026-05-01', bodyFatPct: 22.5, weightLbs: 180 }],
     });
 
-    expect(result.headline).toContain('body-fat points');
-    expect(result.metricValue).toContain('%');
+    expect(result.headline).toContain('fat in 4 weeks');
+    expect(result.metricValue).toContain('lbs');
+    expect(result.metricDetail).toContain('body-fat points');
     expect(result.tone).toBe('success');
     expect(result.drivers.join(' ')).toContain('nutrition');
   });
@@ -64,7 +65,7 @@ describe('goalForecast', () => {
       },
     });
 
-    expect(result.headline).toContain('Estimated');
+    expect(result.headline).toContain('At current pace');
     expect(result.limiters.join(' ')).toContain('nutrition');
     expect(result.updateReason).toContain('adjusted down');
     expect(result.executionPct < 75).toBe(true);
@@ -98,5 +99,37 @@ describe('goalForecast', () => {
     expect(result.metricLabel).toBe('Strength marker');
     expect(result.headline).toContain('strength marker');
     expect(result.metricDetail).toContain('Back Squat');
+  });
+
+  it('uses the current goal block for cardio VO2 estimates', () => {
+    const result = buildGoalForecast({
+      today,
+      profile: {
+        goal: 'improve_vo2',
+        goalSelection: { category: 'cardio_endurance' },
+        goalDetails: { pace: 'moderate', goalStartedAt: '2026-04-28T12:00:00.000Z' },
+        physicalStats: { weightLbs: 170 },
+        daysPerWeek: 4,
+      },
+      summaries: [
+        { date: '2026-04-24', totalSets: 0, durationSeconds: 2400 },
+        { date: '2026-04-27', totalSets: 0, durationSeconds: 2600 },
+        { date: '2026-04-30', totalSets: 0, durationSeconds: 2500 },
+        { date: '2026-05-03', totalSets: 0, durationSeconds: 2500 },
+      ],
+      nutritionScoreWeekly: {
+        window_days: 7,
+        days_with_data: 5,
+        avg_score: 78,
+        days_hit_protein: 4,
+        days_hit_calories: 4,
+      },
+      vo2Max: 42.4,
+    });
+
+    expect(result.headline).toContain('VO2 Max');
+    expect(result.headline).toContain('5 weeks');
+    expect(result.metricLabel).toBe('VO2 estimate');
+    expect(result.metricDetail).toContain('42.4');
   });
 });

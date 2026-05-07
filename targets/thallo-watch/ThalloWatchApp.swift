@@ -20,7 +20,7 @@ struct ThalloWatchApp: App {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
-                conn.requestPull()
+                conn.requestPullOnWake()
             }
         }
     }

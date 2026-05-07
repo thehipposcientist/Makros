@@ -44,6 +44,7 @@ type WatchSyncUiSnapshot = {
   atMs: number;
   reachable: boolean;
   paired: boolean;
+  installed: boolean;
   available?: boolean;
   detail?: string;
 };
@@ -112,24 +113,33 @@ async function readWatchWorkoutActivityState(): Promise<WatchWorkoutActivityStat
   return { isActive: true, sessionId };
 }
 
-function calorieAdjustmentLine(target: import('../services/api').AdjustedDailyTarget): string {
+function calorieAdjustmentSummary(target: import('../services/api').AdjustedDailyTarget): string {
+  const totalDelta = Math.round(target.adjustment_applied);
+  if (totalDelta > 0) return `Added ${Math.abs(totalDelta)} cal`;
+  if (totalDelta < 0) return `Reduced ${Math.abs(totalDelta)} cal`;
+  return 'No calorie change';
+}
+
+function calorieAdjustmentExplanation(target: import('../services/api').AdjustedDailyTarget): string {
   const base = Math.round(target.base_daily_target);
   const adjusted = Math.round(target.adjusted_calories);
   const totalDelta = Math.round(target.adjustment_applied);
   const weeklyDelta = Math.round(target.weekly_adjustment_applied ?? 0);
   const activityDelta = Math.round(target.activity_adjustment_applied ?? 0);
-  const parts: string[] = [];
+  const parts = [`Today's target is ${adjusted} cal. Base target: ${base} cal.`, `Total change: ${totalDelta > 0 ? '+' : ''}${totalDelta} cal.`];
   if (activityDelta !== 0) {
-    parts.push(`${activityDelta > 0 ? '+' : '-'}${Math.abs(activityDelta)} activity`);
+    parts.push(`${activityDelta > 0 ? 'Added' : 'Reduced'} ${Math.abs(activityDelta)} cal from logged activity.`);
   }
   if (weeklyDelta !== 0) {
-    parts.push(`${weeklyDelta > 0 ? '+' : '-'}${Math.abs(weeklyDelta)} weekly budget`);
+    parts.push(`${weeklyDelta > 0 ? 'Added' : 'Reduced'} ${Math.abs(weeklyDelta)} cal from weekly budget balancing.`);
   }
-  if (parts.length === 0 && totalDelta !== 0) {
-    parts.push(`${totalDelta > 0 ? '+' : '-'}${Math.abs(totalDelta)} adjustment`);
+  if (target.note) {
+    parts.push(target.note);
   }
-  const reason = parts.length > 0 ? ` (${parts.join(', ')})` : '';
-  return `Target ${adjusted} kcal today${reason}, base ${base}`;
+  if (target.activity_note && target.activity_note !== target.note) {
+    parts.push(target.activity_note);
+  }
+  return parts.join('\n\n');
 }
 import { StatusBar } from 'expo-status-bar';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -1634,6 +1644,57 @@ function resolveTodayScheduleItem(
     : null;
 }
 
+async function pushWatchRecoverySignals(opts: {
+  authToken?: string | null;
+  age?: number | null;
+  plannedFocus?: string | null;
+  force?: boolean;
+  refreshHealth?: boolean;
+}): Promise<void> {
+  const { pushSleepToWatch, pushReadinessToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
+  const healthData = await import('../services/healthDataSummary');
+  const health = opts.refreshHealth
+    ? await healthData.refreshHealthDataSummary({ age: opts.age ?? null }).catch(() => null)
+    : await healthData.getHealthDataSummary({ age: opts.age ?? null }).catch(() => null);
+
+  if (health) {
+    const sleepPayload = buildWatchSleepPayloadFromSummary(health);
+    const hasSleepData = sleepPayload.score != null
+      || sleepPayload.hoursLastNight != null
+      || sleepPayload.asleepMin != null
+      || sleepPayload.restingHr != null
+      || sleepPayload.hrvMs != null
+      || sleepPayload.label != null
+      || sleepPayload.summary != null;
+    if (hasSleepData) {
+      await pushSleepToWatch({ ...sleepPayload, force: opts.force }).catch(() => {});
+    }
+  }
+
+  if (!opts.authToken) return;
+  const { getCachedReadinessToday } = await import('../services/readinessCache');
+  const { getCycleStatus } = await import('../services/appleHealth');
+  const cycle = await getCycleStatus().catch(() => null);
+  const sleepHours = health?.sleepMinutes != null ? health.sleepMinutes / 60 : null;
+  const serverResp = await getCachedReadinessToday(opts.authToken, {
+    avgSleepHours: sleepHours,
+    avgRestingHr: health?.restingHeartRate ?? null,
+    avgHrvMs: health?.hrv ?? null,
+    lastNightSleepScore: (health?.raw as any)?.sleepScore?.score ?? null,
+    plannedFocus: opts.plannedFocus ?? null,
+    cyclePhase: cycle?.phase ?? null,
+    dayOfCycle: cycle?.dayOfCycle ?? null,
+  }, opts.force || opts.refreshHealth ? 0 : undefined);
+  await pushReadinessToWatch({
+    score: serverResp.score,
+    label: serverResp.label,
+    summary: serverResp.summary,
+    factors: serverResp.factors as any,
+    syncedAtMs: serverResp.computed_at_ms,
+    force: opts.force,
+  } as any).catch(() => {});
+}
+
 // humanizeToken and buildExerciseGuide imported from '../utils/exerciseGuide'
 
 function compactGoalProgressText(
@@ -1851,10 +1912,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           atMs: Date.now(),
           reachable: !!WatchBridge?.isReachable?.(),
           paired: !!WatchBridge?.isPaired?.(),
+          installed: !!WatchBridge?.isWatchAppInstalled?.(),
           available,
           detail: 'waiting',
         };
-        if (alive) setWatchSyncStatus({ ...(stored ?? fallback), available });
+        if (alive) setWatchSyncStatus({
+          ...fallback,
+          ...(stored ?? {}),
+          installed: stored?.installed ?? fallback.installed,
+          available,
+        });
       } catch {
         if (alive) setWatchSyncStatus(null);
       }
@@ -1871,6 +1938,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             atMs: Date.now(),
             reachable: info.reachable,
             paired: info.paired,
+            installed: info.installed,
             available: true,
             detail: info.reachable ? 'reachable' : 'queued',
           }));
@@ -3216,30 +3284,16 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
             }
           }
         } catch { /* non-fatal */ }
-        // Sleep snapshot for the watch's Sleep tab. Use the REAL
-        // phone-computed sleep score (pillars-based) instead of the
-        // old simplified hours-based proxy. Sources from the same
-        // healthDataSummary the phone Progress tab reads, so watch
-        // and phone always show the same number.
+        // Sleep + readiness snapshot for the watch. Both use one
+        // HealthDataSummary read so readiness cannot race ahead with
+        // stale/missing sleep while the sleep tab refreshes separately.
         try {
-          const { pushSleepToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
-          const { getHealthDataSummary } = await import('../services/healthDataSummary');
-          // Use the fresh-fetcher (cache + auto-refresh if stale) so the
-          // watch gets the same sleep score the phone's Progress card
-          // sees, not whatever was last cached. Otherwise watch stays on
-          // a stale value while phone refreshes silently in the background.
-          const cached = await getHealthDataSummary({ age: userProfile?.physicalStats?.age ?? null });
-          await pushSleepToWatch(buildWatchSleepPayloadFromSummary(cached));
+          await pushWatchRecoverySignals({
+            authToken,
+            age: userProfile?.physicalStats?.age ?? null,
+            plannedFocus: todayItem?.workout?.focus ?? todayWorkout?.focus ?? null,
+          });
         } catch { /* non-fatal */ }
-        // Readiness payload is owned by `TrainingReadinessCard`'s
-        // `pushReadinessToWatch` call. Routing all readiness writes
-        // through one site eliminates the score race we used to see
-        // (HomeScreen + the card pushing seconds apart, sometimes with
-        // empty factors clobbering full ones). The watch's Today chip
-        // now reads `conn.readiness?.score` first, so it shares the
-        // exact same value as the Readiness tab — both surfaces always
-        // show one number. The reachability re-push below still seeds
-        // readiness on cold-wake, when the card hasn't mounted yet.
         // Weight summary for the quick-log tab. Reads the weight
         // history utility so the EMA + slope match the phone's
         // weight chart.
@@ -3334,8 +3388,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         const watchSync = await import('../utils/watchSync');
         const {
           onWatchReachabilityChange, pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
-          pushHydrationToWatch, pushSleepToWatch, pushSupplementsToWatch, pushWeightToWatch,
-          buildWatchSleepPayloadFromSummary,
+          pushHydrationToWatch, pushSupplementsToWatch, pushWeightToWatch,
         } = watchSync;
         const unsub = onWatchReachabilityChange((info) => {
           if (!info.reachable) return;
@@ -3384,7 +3437,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 reason: 'reachability',
               }).catch(() => {});
             }
-            await pushThemeToWatch(s.themePreference).catch(() => {});
+            await pushThemeToWatch(s.themePreference, { force: true }).catch(() => {});
             const todayPlan = s.nutritionPlansByDate[todayISO]
               ?? (Object.values(s.nutritionPlansByDate)[0] as any);
             if (s.showMealsSurface) {
@@ -3393,6 +3446,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 s.checkedMealsByDate[todayISO],
                 todayISO,
                 s.nutritionScoreData?.score ?? null,
+                { force: true },
               ).catch(() => {});
             }
             let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
@@ -3403,57 +3457,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
               dateISO: hydrationSnapshot?.date ?? todayISO,
               ounces: hydrationSnapshot?.ounces ?? 0,
               targetOunces: hydrationSnapshot?.target_ounces ?? 64,
+              force: true,
             }).catch(() => {});
           })();
 
-          // Sleep uses the canonical health summary fetcher: cached when
-          // warm, refreshed only when stale/missing. That keeps watch-open
-          // sync aligned with the Progress card without hammering HK.
-          // Supplements pull from the API when authToken is present.
           (async () => {
             try {
-              const { getHealthDataSummary } = await import('../services/healthDataSummary');
-              const cached = await getHealthDataSummary({ age: s.profileAge ?? null });
-              await pushSleepToWatch(buildWatchSleepPayloadFromSummary(cached));
-            } catch { /* non-fatal */ }
-          })();
-          // Readiness push: always go through the server's
-          // /readiness/today endpoint and stamp the watch payload with
-          // the server's `computed_at_ms`. A locally-computed score
-          // pushed with `Date.now()` would beat the server's older
-          // timestamp in the watch's ordering check, silently rejecting
-          // the authoritative value (the phone↔watch drift bug).
-          // TrainingReadinessCard pushes the same way — both surfaces
-          // share one source of truth. No fallback: when the server
-          // call fails, leave the watch's last-known reading in place
-          // rather than overwriting it with a drifting local value.
-          (async () => {
-            try {
-              if (!authToken) return;
-              const { pushReadinessToWatch } = watchSync;
-              const { getCachedReadinessToday } = await import('../services/readinessCache');
-              const { getCachedHealthDataSummary } = await import('../services/healthDataSummary');
-              const { getCycleStatus } = await import('../services/appleHealth');
-              const cached = await getCachedHealthDataSummary().catch(() => null);
-              const sleepHours = cached?.sleepMinutes != null ? cached.sleepMinutes / 60 : null;
-              const cycle = await getCycleStatus().catch(() => null);
-              const serverResp = await getCachedReadinessToday(authToken, {
-                avgSleepHours: sleepHours,
-                avgRestingHr: cached?.restingHeartRate ?? null,
-                avgHrvMs: cached?.hrv ?? null,
-                lastNightSleepScore: cached?.raw?.sleepScore?.score ?? null,
+              await pushWatchRecoverySignals({
+                authToken,
+                age: s.profileAge ?? null,
                 plannedFocus: todayItem?.workout?.focus ?? todayWorkout?.focus ?? null,
-                cyclePhase: cycle?.phase ?? null,
-                dayOfCycle: cycle?.dayOfCycle ?? null,
-              }).catch(() => null);
-              if (!serverResp) return;
-              await pushReadinessToWatch({
-                score: serverResp.score,
-                label: serverResp.label,
-                summary: serverResp.summary,
-                factors: serverResp.factors as any,
-                syncedAtMs: serverResp.computed_at_ms,
-              } as any);
+                force: true,
+                refreshHealth: true,
+              });
             } catch { /* non-fatal */ }
           })();
           (async () => {
@@ -3472,6 +3488,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     skipped: !!(sup.logs_today || []).find(l => l.skipped),
                   })),
                   undefined,
+                  { force: true },
                 );
               }
             } catch { /* non-fatal */ }
@@ -3501,7 +3518,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   slope = (ema - oldEma);
                 }
               }
-              await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope });
+              await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope, force: true });
             } catch { /* non-fatal */ }
           })();
         });
@@ -3642,6 +3659,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           if (command === 'pull_state') {
             const forcePull = payload?.force === true;
             if (!claimHomeFullWatchSync('pull_state', forcePull)) return;
+            const forceSnapshot = true;
             // Watch explicitly asked for a fresh snapshot — push
             // workout + meals + theme via the same path the
             // reachability listener uses. Bypasses stale
@@ -3652,8 +3670,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 const watchSync = await import('../utils/watchSync');
                 const {
                   pushWorkoutToWatch, pushThemeToWatch, pushMealsToWatch,
-                  pushHydrationToWatch, pushSleepToWatch, pushSupplementsToWatch, pushWeightToWatch,
-                  buildWatchSleepPayloadFromSummary,
+                  pushHydrationToWatch, pushSupplementsToWatch, pushWeightToWatch,
                 } = watchSync;
                 const s = rePushStateRef.current;
                 const todayISO = todayKey();
@@ -3688,10 +3705,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     readiness: s.readinessScore?.score ?? null,
                     readinessLabel: s.readinessScore?.label ?? null,
                     reason: 'pull_state',
-                    force: forcePull,
+                    force: forceSnapshot,
                   }).catch(() => {});
                 }
-                await pushThemeToWatch(s.themePreference, { force: forcePull }).catch(() => {});
+                await pushThemeToWatch(s.themePreference, { force: forceSnapshot }).catch(() => {});
                 const todayPlan = s.nutritionPlansByDate[todayISO]
                   ?? (Object.values(s.nutritionPlansByDate)[0] as any);
                 if (s.showMealsSurface) {
@@ -3700,7 +3717,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     s.checkedMealsByDate[todayISO],
                     todayISO,
                     s.nutritionScoreData?.score ?? null,
-                    { force: forcePull },
+                    { force: forceSnapshot },
                   ).catch(() => {});
                 }
                 let hydrationSnapshot: HydrationSummary | null = s.hydrationByDate?.[todayISO] ?? s.hydration ?? null;
@@ -3711,16 +3728,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                   dateISO: hydrationSnapshot?.date ?? todayISO,
                   ounces: hydrationSnapshot?.ounces ?? 0,
                   targetOunces: hydrationSnapshot?.target_ounces ?? 64,
-                  force: forcePull,
+                  force: forceSnapshot,
                 }).catch(() => {});
-                // push_state also sends the full data set that the
-                // reachability listener sends, so a manual sync is
-                // equivalent to re-opening the watch app.
                 (async () => {
                   try {
-                    const { getHealthDataSummary } = await import('../services/healthDataSummary');
-                    const cached = await getHealthDataSummary({ age: s.profileAge ?? null }).catch(() => null);
-                    await pushSleepToWatch({ ...buildWatchSleepPayloadFromSummary(cached), force: forcePull });
+                    await pushWatchRecoverySignals({
+                      authToken,
+                      age: s.profileAge ?? null,
+                      plannedFocus: todayItem?.workout?.focus ?? todayWorkout?.focus ?? null,
+                      force: forceSnapshot,
+                      refreshHealth: true,
+                    });
                   } catch { /* non-fatal */ }
                 })();
                 (async () => {
@@ -3735,7 +3753,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         timing: sup.timing ?? null,
                         taken: !!(sup.logs_today || []).find((l: any) => !l.skipped),
                         skipped: !!(sup.logs_today || []).find((l: any) => l.skipped),
-                      })), undefined, { force: forcePull });
+                      })), undefined, { force: forceSnapshot });
                     }
                   } catch { /* non-fatal */ }
                 })();
@@ -3755,7 +3773,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       const old = entries.slice(-14, -7);
                       if (old.length > 0) slope = ema - old.reduce((acc: number, e: any) => acc + Number(e.weight_lbs), 0) / old.length;
                     }
-                    await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope, force: forcePull });
+                    await pushWeightToWatch({ latestLbs: latest, daysSinceLastLog: daysSince, emaLbs: ema, slopeLbsPerWeek: slope, force: forceSnapshot });
                   } catch { /* non-fatal */ }
                 })();
               } catch { /* bridge optional */ }
@@ -6992,21 +7010,24 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     : [chromeColors.surface + 'F4', chromeColors.muted + 'E8'];
   const watchSyncAgeMs = watchSyncStatus ? Date.now() - watchSyncStatus.atMs : null;
   const watchSyncFresh = watchSyncAgeMs != null && watchSyncAgeMs < 2 * 60_000;
+  const watchSyncHasWatch = !!watchSyncStatus?.paired || !!watchSyncStatus?.installed || !!watchSyncStatus?.reachable;
   const watchSyncColor = watchSyncStatus?.reachable
     ? themeColors.success
-    : watchSyncStatus?.paired && watchSyncStatus?.ok && watchSyncFresh
+    : watchSyncStatus?.installed && watchSyncStatus?.ok && watchSyncFresh
       ? themeColors.primary
-      : watchSyncStatus?.paired
+      : watchSyncStatus?.paired || watchSyncStatus?.installed
         ? themeColors.warning
         : themeColors.error;
   const watchSyncPillLabel = watchSyncStatus?.reachable
     ? 'Live'
-    : watchSyncStatus?.paired && watchSyncStatus?.ok && watchSyncFresh
+    : watchSyncStatus?.paired && !watchSyncStatus?.installed
+      ? 'Setup'
+      : watchSyncStatus?.installed && watchSyncStatus?.ok && watchSyncFresh
       ? 'Sent'
-      : watchSyncStatus?.paired
+      : watchSyncStatus?.paired || watchSyncStatus?.installed
         ? 'Queued'
         : 'Setup';
-  const showWatchSyncPill = Platform.OS === 'ios' && !!watchSyncStatus?.available;
+  const showWatchSyncPill = Platform.OS === 'ios' && !!watchSyncStatus?.available && watchSyncHasWatch;
   const compactWatchSyncPill = SCREEN_W < 370;
 
   return (
@@ -9433,10 +9454,19 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                       {/* Weekly budget adjustment — only on today's card, only
                           when the shift is >15 kcal so on-target days are quiet. */}
                       {isToday && adjustedDailyTarget && Math.abs(adjustedDailyTarget.adjustment_applied) > 15 && (
-                        <Text testID="today-nutrition-target-adjustment" style={{ fontSize: 10, color: adjustedDailyTarget.adjustment_applied > 0 ? themeColors.success : themeColors.warning, marginTop: 2, fontWeight: '600' }}>
-                          {calorieAdjustmentLine(adjustedDailyTarget)}
-                          {adjustedDailyTarget.note ? ` · ${adjustedDailyTarget.note}` : ''}
-                        </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: 4, marginTop: 2 }}>
+                          <Text testID="today-nutrition-target-adjustment" style={{ fontSize: 10, color: adjustedDailyTarget.adjustment_applied > 0 ? themeColors.success : themeColors.warning, fontWeight: '700' }}>
+                            {calorieAdjustmentSummary(adjustedDailyTarget)}
+                          </Text>
+                          <TouchableOpacity
+                            accessibilityRole="button"
+                            accessibilityLabel="Explain calorie adjustment"
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            onPress={() => Alert.alert('Why calories changed', calorieAdjustmentExplanation(adjustedDailyTarget))}
+                          >
+                            <Ionicons name="information-circle-outline" size={13} color={themeColors.textMuted} />
+                          </TouchableOpacity>
+                        </View>
                       )}
                       {isToday && authToken && !isFreeTier ? (
                         <View style={{ marginTop: 7 }}>
@@ -10234,6 +10264,11 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         ownedEquipment={(userProfile as any)?.equipmentOwned ?? (userProfile as any)?.equipment ?? []}
         themeName={userProfile.themePreference}
         onClose={() => setSwapExerciseState(null)}
+        onPreview={(next) => openExerciseVideo(next.name, {
+          equipment: exerciseEquipmentLabel(next) ?? next.equipment ?? null,
+          primary_muscle: next.primary_muscle ?? null,
+          movement_pattern: next.movement_pattern ?? null,
+        })}
         onSelect={async (next) => {
           const target = swapExerciseState;
           if (!target) return;

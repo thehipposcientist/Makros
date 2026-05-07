@@ -52,6 +52,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     private let pullRequestCooldownSeconds: TimeInterval = 5
     private var queuedCommands: [[String: Any]] = []
     private var lastPullRequestAt: Date = .distantPast
+    private var wakePullRetryItems: [DispatchWorkItem] = []
 
     private override init() {
         self.session = WCSession.isSupported() ? WCSession.default : nil
@@ -157,7 +158,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             // may be stale by minutes or hours if the phone's state
             // has moved on since the last push. Phone responds by
             // re-pushing workout + meals + theme.
-            self.requestPull()
+            self.requestPullOnWake()
         }
     }
 
@@ -169,32 +170,55 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             // idempotent, closes the "wife's watch not pulling meals"
             // gap directly.
             if session.isReachable {
-                self.requestPull()
+                self.requestPullOnWake()
             }
         }
+    }
+
+    /// Opening the watch app can report `.active` a beat before
+    /// WCSession flips to reachable. Retry a couple of times so a
+    /// normal app open behaves like tapping the refresh strip.
+    func requestPullOnWake() {
+        cancelWakePullRetries()
+        if requestPull() { return }
+        for delay in [1.0, 3.0] {
+            let item = DispatchWorkItem { [weak self] in
+                self?.requestPull()
+            }
+            wakePullRetryItems.append(item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
+    }
+
+    private func cancelWakePullRetries() {
+        for item in wakePullRetryItems { item.cancel() }
+        wakePullRetryItems.removeAll()
     }
 
     /// Explicitly ask the phone to re-push all state. Called on
     /// WC activation, on reachability → true, and whenever the watch
     /// app becomes visible again (see `ThalloWatchApp` scene phase).
-    func requestPull(force: Bool = false) {
+    @discardableResult
+    func requestPull(force: Bool = false) -> Bool {
         guard let session else {
             HeartRateStore.saveDiag("pull_state skipped: unavailable")
-            return
+            return false
         }
         absorbContext(session.receivedApplicationContext)
         guard session.isReachable else {
             HeartRateStore.saveDiag("pull_state skipped: phone not reachable")
-            return
+            return false
         }
         let now = Date()
         if !force && now.timeIntervalSince(lastPullRequestAt) < pullRequestCooldownSeconds {
             HeartRateStore.saveDiag("pull_state skipped: cooldown")
-            return
+            return false
         }
         lastPullRequestAt = now
         let payload: [String: Any] = force ? ["force": true] : [:]
+        cancelWakePullRetries()
         sendCommand("pull_state", payload: payload)
+        return true
     }
 
     func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
