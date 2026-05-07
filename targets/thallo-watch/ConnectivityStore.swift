@@ -6,6 +6,10 @@
 //   { kind: "workout",         payload: <WatchWorkout JSON> } // legacy
 //   { kind: "theme",    payload: <WatchPalette JSON> }
 //   { kind: "hydration", payload: <WatchHydrationDay JSON> }
+//   { kind: "supplements", payload: <WatchSupplementsDay JSON> }
+//   { kind: "sleep", payload: <WatchSleepSnapshot JSON> }
+//   { kind: "readiness", payload: <WatchReadinessSnapshot JSON> }
+//   { kind: "weight", payload: <WatchWeightSnapshot JSON> }
 //   { kind: "progress", set: Int, restRemainingSec: Int?,
 //                       progressRevision: Double?, sessionId: String?,
 //                       heartRate: Int?, recommendation: String? }
@@ -515,6 +519,22 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         case "hydration":
             if let payload = msg["payload"] as? [String: Any] {
                 absorbContext(ctxWith("hydration", payload))
+            }
+        case "supplements":
+            if let payload = msg["payload"] as? [String: Any] {
+                absorbContext(ctxWith("supplements", payload))
+            }
+        case "sleep":
+            if let payload = msg["payload"] as? [String: Any] {
+                absorbContext(ctxWith("sleep", payload))
+            }
+        case "readiness":
+            if let payload = msg["payload"] as? [String: Any] {
+                absorbContext(ctxWith("readiness", payload))
+            }
+        case "weight":
+            if let payload = msg["payload"] as? [String: Any] {
+                absorbContext(ctxWith("weight", payload))
             }
         case "theme":
             if let payload = msg["payload"] as? [String: Any] {
