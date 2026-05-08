@@ -174,6 +174,7 @@ function parseWatchDurationTargetSeconds(target: unknown, preferMinutes: boolean
   if (!Number.isFinite(first) || !Number.isFinite(second)) return null;
   const planned = (first + second) / 2;
   const unit = match[3] ?? '';
+  if (!unit && !preferMinutes) return null;
   const minutes = /^m/.test(unit) || (!unit && preferMinutes);
   const seconds = Math.round(minutes ? planned * 60 : planned);
   return seconds > 0 ? seconds : null;

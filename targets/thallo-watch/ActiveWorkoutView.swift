@@ -612,6 +612,7 @@ private struct ExerciseTab: View {
 
     private func isTimedExercise(_ ex: WatchExercise) -> Bool {
         if ex.isTimed == true { return true }
+        if ex.isTimed == false { return false }
         return plannedDurationSeconds(for: ex) != nil
     }
 

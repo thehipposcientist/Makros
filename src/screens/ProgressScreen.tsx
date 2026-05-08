@@ -2271,6 +2271,12 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
   const healthLiveLoadedRef = useRef(false);
   const [sleepHistoryCount, setSleepHistoryCount] = useState<number>(0);
+  // Last 30 nights cached locally — `night` (YYYY-MM-DD) + `sleepHours`
+  // is enough to render the history-dots ribbon. We don't store per-
+  // night scores; duration is the most-recognizable rhythm signal and
+  // the data we already persist via Apple Health sync.
+  const [sleepHistory, setSleepHistory] = useState<Array<{ night: string; sleepHours: number | null }>>([]);
+  const [sleepHistoryOpen, setSleepHistoryOpen] = useState(false);
   const [healthEnabled, setHealthEnabled] = useState<boolean>(false);
   const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
@@ -2848,7 +2854,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           const { pushSleepToWatch, buildWatchSleepPayloadFromSummary } = await import('../utils/watchSync');
           await pushSleepToWatch(buildWatchSleepPayloadFromSummary(fresh as any));
         } catch { /* watch may be unavailable */ }
-        try { setSleepHistoryCount((await loadSleepHistory()).length); } catch {}
+        try {
+          const hist = await loadSleepHistory();
+          setSleepHistoryCount(hist.length);
+          // Slice + map to the minimum we render in the dots ribbon.
+          // Sorted newest-first; UI renders chronologically.
+          const recent = hist
+            .slice(-30)
+            .map(n => ({ night: n.night, sleepHours: n.sleepHours }));
+          setSleepHistory(recent);
+        } catch {}
       } catch {}
     })();
     return () => { cancelled = true; };
@@ -3161,11 +3176,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
       <FadeInView key={tab} duration={260} slideDistance={8} style={{ flex: 1 }}>
       {tab === 'today' ? (
         <ScrollView contentContainerStyle={styles.content}>
+          {/* Collapsed today card — just the headline + percent pill +
+              "Details" affordance. The full subtitle / action / signal
+              breakdown lives in the bottom sheet that opens on tap. */}
           <AnimatedPressable
             testID="progress-today-status-card"
             style={[styles.todayStatusCard, { borderColor: todayTrack.color + '66' }]}
             accessibilityRole="button"
-            accessibilityLabel={`${todayTrack.title}. ${todayTrack.subtitle}. View details.`}
+            accessibilityLabel={`${todayTrack.title}. Tap for details.`}
             onPress={() => {
               import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
               setQuickDetailSheet('today');
@@ -3176,26 +3194,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 <Ionicons name={todayTrack.icon} size={22} color={todayTrack.color} />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.todayStatusEyebrow}>
-                  TODAY · {todayTrack.goalLabel.toUpperCase()}
-                </Text>
-                <Text style={styles.todayStatusDate}>
-                  {progressWeekWindow.source === 'plan_week' ? 'PlanWeek' : 'Week'} {progressWeekWindow.label}
-                </Text>
+                <Text style={styles.todayStatusTitle} numberOfLines={2}>{todayTrack.title}</Text>
               </View>
               <View style={[styles.todayStatusPill, { borderColor: todayTrack.color + '77', backgroundColor: todayTrack.color + '14' }]}>
                 <Text style={[styles.todayStatusPillText, { color: todayTrack.color }]}>{todayTrack.progressPct}%</Text>
               </View>
             </View>
-            <Text style={styles.todayStatusTitle} numberOfLines={2}>{todayTrack.title}</Text>
-            <Text style={styles.todayStatusSubtitle} numberOfLines={2}>{todayTrack.subtitle}</Text>
-            <View style={styles.todayActionRow}>
-              <Ionicons name="arrow-forward-circle-outline" size={17} color={todayTrack.color} />
-              <Text style={styles.todayActionText} numberOfLines={2}>{todayTrack.action}</Text>
-              <View style={styles.quickDetailHint}>
-                <Text style={styles.quickDetailHintText}>Details</Text>
-                <Ionicons name="chevron-forward" size={14} color={tc.textMuted} />
-              </View>
+            <View style={styles.quickDetailHint}>
+              <Text style={styles.quickDetailHintText}>Tap for details</Text>
+              <Ionicons name="chevron-forward" size={14} color={tc.textMuted} />
             </View>
           </AnimatedPressable>
 
@@ -5161,10 +5168,27 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
 
             return (
               <View testID="sleep-score-card" style={[styles.vitalsCard, { marginTop: 0 }]}>
-                {/* Header: icon + title + score (score is the hero metric). */}
+                {/* Header: icon + title + history pill + score (score is the hero metric). */}
                 <View style={[styles.vitalsHeader, { marginBottom: 8 }]}>
                   <Ionicons name="moon-outline" size={16} color="#818CF8" />
                   <Text style={[styles.vitalsTitle, { color: tc.textPrimary, flex: 1 }]}>Sleep Score</Text>
+                  {sleepHistory.length > 0 && (
+                    <TouchableOpacity
+                      accessibilityLabel="Show sleep history"
+                      onPress={() => {
+                        import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                        setSleepHistoryOpen(true);
+                      }}
+                      hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                      style={{
+                        flexDirection: 'row', alignItems: 'center', gap: 4,
+                        paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999,
+                        backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border,
+                      }}>
+                      <Ionicons name="time-outline" size={11} color={tc.textSecondary} />
+                      <Text style={{ fontSize: 10, fontWeight: '800', letterSpacing: 0.4, color: tc.textSecondary }}>HISTORY</Text>
+                    </TouchableOpacity>
+                  )}
                   <Text style={{ fontSize: 28, fontWeight: '900', color: scoreColor, lineHeight: 32 }}>{ss.score}</Text>
                 </View>
 
@@ -5330,10 +5354,11 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
               </TouchableOpacity>
 
-              {nutritionGutExpanded && <>
-              {/* Averages over actual logged days (adaptive, up to 14). */}
+              {/* Top-row averages render BEFORE expansion — gives a
+                  glanceable snapshot (Fiber, Added sugar, Plants) so the
+                  card has visible content even when collapsed. */}
               {gutHealthWindow && gutHealthWindow.days_with_data > 0 && (
-                <View style={{ marginBottom: 14 }}>
+                <View style={{ marginBottom: nutritionGutExpanded ? 14 : 0 }}>
                   <Text style={{ fontSize: 10, fontWeight: '700', color: tc.textSecondary, letterSpacing: 0.5, marginBottom: 8 }}>
                     {gutHealthWindow.days_with_data}-DAY AVERAGES
                   </Text>
@@ -5356,6 +5381,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
               )}
 
+              {nutritionGutExpanded && <>
               {/* Nutrition macros — logged-day average first, with the
                   calendar-window average called out separately when it differs. */}
               {mealAverages && (() => {
@@ -7029,6 +7055,106 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </>
               );
             })()}
+          </View>
+        </View>
+      </Modal>
+      {/* Sleep history — last 30 nights as colored circles. Each
+          circle's color encodes total sleep hours; tapping a circle
+          shows its date + hours. Visualization-only; we don't have
+          per-night sleep scores in cache so duration is the proxy. */}
+      <Modal
+        visible={sleepHistoryOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSleepHistoryOpen(false)}>
+        <View style={styles.quickDetailBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setSleepHistoryOpen(false)}
+          />
+          <View style={styles.quickDetailSheet}>
+            <View style={styles.quickDetailHandle} />
+            <View style={styles.quickDetailHeader}>
+              <View style={[styles.quickDetailIcon, { backgroundColor: '#818CF8' + '20' }]}>
+                <Ionicons name="moon-outline" size={18} color="#818CF8" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.quickDetailEyebrow}>SLEEP HISTORY</Text>
+                <Text style={styles.quickDetailTitle} numberOfLines={2}>
+                  Last {sleepHistory.length} night{sleepHistory.length === 1 ? '' : 's'}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setSleepHistoryOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                <Ionicons name="close" size={20} color={tc.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
+              <Text style={styles.quickDetailBody}>
+                Each circle is a night, oldest on the left. Color encodes
+                total sleep — green is 7.5h or more, amber is 6.5–7.5h,
+                orange is 6–6.5h, red is under 6h, and a dotted ring is
+                a night without recorded sleep.
+              </Text>
+              <View style={styles.quickDetailSection}>
+                <Text style={styles.quickDetailSectionTitle}>Nights</Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
+                  {sleepHistory.map((n, i) => {
+                    const h = n.sleepHours ?? null;
+                    const fill =
+                      h == null ? null
+                      : h >= 7.5 ? '#22C55E'
+                      : h >= 6.5 ? '#84CC16'
+                      : h >= 6.0 ? '#F59E0B'
+                      : '#EF4444';
+                    return (
+                      <View key={`${n.night}-${i}`} style={{ alignItems: 'center', gap: 3 }}>
+                        <View style={{
+                          width: 26, height: 26, borderRadius: 13,
+                          backgroundColor: fill ?? 'transparent',
+                          borderWidth: fill ? 0 : 1,
+                          borderColor: tc.border,
+                          borderStyle: fill ? undefined : 'dashed' as any,
+                          alignItems: 'center', justifyContent: 'center',
+                        }}>
+                          {h != null && (
+                            <Text style={{ fontSize: 9, fontWeight: '900', color: '#FFFFFF' }} numberOfLines={1}>
+                              {Math.round(h * 10) / 10}
+                            </Text>
+                          )}
+                        </View>
+                        <Text style={{ fontSize: 8, color: tc.textMuted, fontVariant: ['tabular-nums'] as any }} numberOfLines={1}>
+                          {n.night.slice(5).replace('-', '/')}
+                        </Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              </View>
+              <View style={styles.quickDetailSection}>
+                <Text style={styles.quickDetailSectionTitle}>Legend</Text>
+                <View style={styles.quickDetailRow}>
+                  <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#22C55E', marginRight: 8 }} />
+                  <Text style={styles.quickDetailRowLabel}>7.5+ hours</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: '#22C55E' }]}>Excellent</Text>
+                </View>
+                <View style={styles.quickDetailRow}>
+                  <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#84CC16', marginRight: 8 }} />
+                  <Text style={styles.quickDetailRowLabel}>6.5–7.5 hours</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: '#84CC16' }]}>Good</Text>
+                </View>
+                <View style={styles.quickDetailRow}>
+                  <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#F59E0B', marginRight: 8 }} />
+                  <Text style={styles.quickDetailRowLabel}>6.0–6.5 hours</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: '#F59E0B' }]}>Short</Text>
+                </View>
+                <View style={styles.quickDetailRow}>
+                  <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#EF4444', marginRight: 8 }} />
+                  <Text style={styles.quickDetailRowLabel}>Under 6 hours</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: '#EF4444' }]}>Restricted</Text>
+                </View>
+              </View>
+            </ScrollView>
           </View>
         </View>
       </Modal>

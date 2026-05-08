@@ -25,11 +25,152 @@ export interface ExerciseEquipmentMatchInput {
 
 const EQUIPMENT_IMAGE_ALIASES: Array<{ keys: string[]; source: ImageSourcePropType }> = [
   {
+    keys: ['smith_machine', 'smith machine'],
+    source: require('../../assets/images/equipment/smith_machine.png'),
+  },
+  {
     keys: [
-      'smith_machine',
-      'smith machine',
+      'plate_loaded_chest_press_machine',
+      'plate loaded chest press machine',
+      'plate loaded incline press machine',
+      'iso lateral incline press',
+      'iso lateral chest press',
+      'hammer strength incline press',
+      'hammer strength chest press',
+      'leverage chest press machine',
+      'incline chest press machine',
     ],
-    source: require('../../ChatGPT Image May 8, 2026, 03_48_05 AM (1).png'),
+    source: require('../../assets/images/equipment/plate_loaded_chest_press_machine.png'),
+  },
+  {
+    keys: ['barbell', 'olympic barbell'],
+    source: require('../../assets/images/equipment/barbell.png'),
+  },
+  {
+    keys: ['weight_plates', 'weight plates', 'plates', 'bumper plates'],
+    source: require('../../assets/images/equipment/weight_plates.png'),
+  },
+  {
+    keys: ['ez_curl_bar', 'ez curl bar', 'ez bar'],
+    source: require('../../assets/images/equipment/ez_curl_bar.png'),
+  },
+  {
+    keys: ['trap_bar', 'trap bar', 'hex bar'],
+    source: require('../../assets/images/equipment/trap_bar.png'),
+  },
+  {
+    keys: ['kettlebell', 'kettlebells'],
+    source: require('../../assets/images/equipment/kettlebell.png'),
+  },
+  {
+    keys: ['medicine_ball', 'medicine ball', 'wall ball'],
+    source: require('../../assets/images/equipment/medicine_ball.png'),
+  },
+  {
+    keys: ['rope_attachment', 'cable rope attachment', 'tricep rope', 'rope handle'],
+    source: require('../../assets/images/equipment/cable_rope_attachment.png'),
+  },
+  {
+    keys: ['straight_bar_attachment', 'cable straight bar', 'straight bar attachment'],
+    source: require('../../assets/images/equipment/cable_straight_bar_attachment.png'),
+  },
+  {
+    keys: ['d_handle', 'cable d handle', 'single handle', 'stirrup handle'],
+    source: require('../../assets/images/equipment/cable_d_handle_attachment.png'),
+  },
+  {
+    keys: ['v_bar_attachment', 'cable v bar', 'triangle handle', 'v bar attachment'],
+    source: require('../../assets/images/equipment/cable_v_bar_attachment.png'),
+  },
+  {
+    keys: ['ankle_strap', 'cable ankle strap', 'ankle cuff'],
+    source: require('../../assets/images/equipment/cable_ankle_strap.png'),
+  },
+  {
+    keys: ['heavy_bag', 'heavy bag', 'boxing bag'],
+    source: require('../../assets/images/equipment/heavy_bag.png'),
+  },
+  {
+    keys: ['treadmill', 'treadmill run', 'treadmill walk'],
+    source: require('../../assets/images/equipment/treadmill.png'),
+  },
+  {
+    keys: ['stationary_bike', 'stationary bike', 'spin bike', 'bike zone 2'],
+    source: require('../../assets/images/equipment/stationary_bike.png'),
+  },
+  {
+    keys: ['elliptical', 'elliptical machine'],
+    source: require('../../assets/images/equipment/elliptical.png'),
+  },
+  {
+    keys: ['rowing_machine', 'rowing machine', 'rower', 'erg rower'],
+    source: require('../../assets/images/equipment/rowing_machine.png'),
+  },
+  {
+    keys: ['stair_climber', 'stair climber', 'stairmaster'],
+    source: require('../../assets/images/equipment/stair_climber.png'),
+  },
+  {
+    keys: ['assault_bike', 'assault bike', 'air bike', 'fan bike'],
+    source: require('../../assets/images/equipment/assault_bike.png'),
+  },
+  {
+    keys: ['skierg', 'ski erg', 'ski machine'],
+    source: require('../../assets/images/equipment/skierg.png'),
+  },
+  {
+    keys: ['versaclimber', 'versa climber'],
+    source: require('../../assets/images/equipment/versaclimber.png'),
+  },
+  {
+    keys: ['standing_calf_raise_machine', 'standing calf raise machine'],
+    source: require('../../assets/images/equipment/standing_calf_raise_machine.png'),
+  },
+  {
+    keys: ['flat_bench', 'flat bench', 'bench'],
+    source: require('../../assets/images/equipment/flat_bench.png'),
+  },
+  {
+    keys: ['adjustable_bench', 'adjustable bench', 'fid bench'],
+    source: require('../../assets/images/equipment/adjustable_bench.png'),
+  },
+  {
+    keys: ['incline_bench', 'incline bench'],
+    source: require('../../assets/images/equipment/incline_bench.png'),
+  },
+  {
+    keys: ['decline_bench', 'decline bench'],
+    source: require('../../assets/images/equipment/decline_bench.png'),
+  },
+  {
+    keys: ['squat_rack', 'squat rack', 'half rack'],
+    source: require('../../assets/images/equipment/squat_rack.png'),
+  },
+  {
+    keys: ['power_rack', 'power rack', 'power cage'],
+    source: require('../../assets/images/equipment/power_rack.png'),
+  },
+  {
+    keys: ['landmine_attachment', 'landmine attachment', 'landmine'],
+    source: require('../../assets/images/equipment/landmine_attachment.png'),
+  },
+  {
+    keys: ['adjustable_dumbbells', 'adjustable dumbbells'],
+    source: require('../../assets/images/equipment/adjustable_dumbbells.png'),
+  },
+  {
+    keys: ['dumbbells', 'dumbbell', 'dbs'],
+    source: require('../../assets/images/equipment/dumbbells.png'),
+  },
+  {
+    keys: [
+      'assisted_pullup_machine',
+      'assisted pull up dip machine',
+      'assisted pullup machine',
+      'assisted dip machine',
+      'dip assist machine',
+    ],
+    source: require('../../assets/images/equipment/assisted_pullup_machine.png'),
   },
   {
     keys: [
@@ -44,21 +185,99 @@ const EQUIPMENT_IMAGE_ALIASES: Array<{ keys: string[]; source: ImageSourcePropTy
       'pec dec',
       'pectoral fly',
     ],
-    source: require('../../Pec Dec Machine.png'),
+    source: require('../../assets/images/equipment/pec_deck_machine.png'),
   },
   {
-    keys: [
-      'plate_loaded_chest_press_machine',
-      'plate loaded chest press machine',
-      'plate loaded incline press machine',
-      'iso lateral incline press',
-      'iso lateral chest press',
-      'hammer strength incline press',
-      'hammer strength chest press',
-      'leverage chest press machine',
-      'incline chest press machine',
-    ],
-    source: require('../../ChatGPT Image May 8, 2026, 04_11_24 AM (1).png'),
+    keys: ['machine_row_station', 'plate loaded row machine', 'seated_row_machine', 'seated row machine', 'iso lateral row'],
+    source: require('../../assets/images/equipment/plate_loaded_row_machine.png'),
+  },
+  {
+    keys: ['captain_chair', 'captain chair', 'captains chair', 'vertical knee raise'],
+    source: require('../../assets/images/equipment/captain_chair.png'),
+  },
+  {
+    keys: ['ghd', 'glute ham developer', 'glute-ham developer'],
+    source: require('../../assets/images/equipment/ghd.png'),
+  },
+  {
+    keys: ['leverage_machines', 'leverage machines', 'plate loaded shoulder press machine'],
+    source: require('../../assets/images/equipment/leverage_shoulder_press_machine.png'),
+  },
+  {
+    keys: ['belt_squat_machine', 'belt squat machine'],
+    source: require('../../assets/images/equipment/belt_squat_machine.png'),
+  },
+  {
+    keys: ['leg_extension_machine', 'leg extension machine'],
+    source: require('../../assets/images/equipment/leg_extension_machine.png'),
+  },
+  {
+    keys: ['lat_pulldown_machine', 'lat pulldown', 'lat pull down machine'],
+    source: require('../../assets/images/equipment/lat_pulldown_machine.png'),
+  },
+  {
+    keys: ['hack_squat_machine', 'hack squat machine'],
+    source: require('../../assets/images/equipment/hack_squat_machine.png'),
+  },
+  {
+    keys: ['v_squat_machine', 'v squat machine', 'vertical squat machine', 'plate loaded v squat'],
+    source: require('../../assets/images/equipment/v_squat_machine.png'),
+  },
+  {
+    keys: ['leg_curl_machine', 'leg curl machine', 'seated hamstring curl machine'],
+    source: require('../../assets/images/equipment/leg_curl_machine.png'),
+  },
+  {
+    keys: ['shoulder_press_machine', 'shoulder press machine', 'machine shoulder press'],
+    source: require('../../assets/images/equipment/shoulder_press_machine.png'),
+  },
+  {
+    keys: ['leg_press_machine', 'leg press machine', '45 degree leg press'],
+    source: require('../../assets/images/equipment/leg_press_machine.png'),
+  },
+  {
+    keys: ['hip_abduction_machine', 'hip abduction machine', 'abductor machine'],
+    source: require('../../assets/images/equipment/hip_abduction_machine.png'),
+  },
+  {
+    keys: ['hip_adduction_machine', 'hip adduction machine', 'adductor machine'],
+    source: require('../../assets/images/equipment/hip_adduction_machine.png'),
+  },
+  {
+    keys: ['cable_machine', 'cable machine', 'functional trainer', 'dual adjustable pulley'],
+    source: require('../../assets/images/equipment/cable_machine.png'),
+  },
+  {
+    keys: ['hyperextension_bench', 'hyperextension bench', 'back extension bench', 'roman chair'],
+    source: require('../../assets/images/equipment/hyperextension_bench.png'),
+  },
+  {
+    keys: ['pullover_machine', 'pullover machine', 'machine pullover'],
+    source: require('../../assets/images/equipment/pullover_machine.png'),
+  },
+  {
+    keys: ['high_row_machine', 'high row machine', 'iso lateral high row', 'plate loaded high row'],
+    source: require('../../assets/images/equipment/high_row_machine.png'),
+  },
+  {
+    keys: ['rotary_torso_machine', 'rotary torso machine', 'torso rotation machine', 'rotary trunk machine'],
+    source: require('../../assets/images/equipment/rotary_torso_machine.png'),
+  },
+  {
+    keys: ['glute_kickback_machine', 'glute kickback machine', 'kickback machine'],
+    source: require('../../assets/images/equipment/glute_kickback_machine.png'),
+  },
+  {
+    keys: ['preacher_curl_machine', 'preacher curl machine', 'machine preacher curl'],
+    source: require('../../assets/images/equipment/preacher_curl_machine.png'),
+  },
+  {
+    keys: ['chest_press_machine', 'chest press machine', 'machine chest press', 'selectorized chest press'],
+    source: require('../../assets/images/equipment/chest_press_machine.png'),
+  },
+  {
+    keys: ['hip_thrust_machine', 'hip thrust machine', 'glute drive machine'],
+    source: require('../../assets/images/equipment/hip_thrust_machine.png'),
   },
 ];
 
