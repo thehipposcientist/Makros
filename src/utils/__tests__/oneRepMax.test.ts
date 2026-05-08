@@ -1,137 +1,123 @@
-// Tests for the averaged Epley+Brzycki 1RM estimator. Pure helper, no
-// async. Verifies the formula matches the literature reference values
-// + the rep-count cap is enforced + RIR adjustment works.
+// Tests for the centralized set-level e1RM helper. Pure function, no
+// async. Locks down: Epley math, category-aware rep windows, RIR
+// adjustment, and the categorizer that maps exercise flags / names
+// onto the three category buckets.
 
-import { estimate1RM, estimate1RMOrZero, formatEstimated1RM, ONE_RM_REP_LIMIT } from '../oneRepMax.ts';
+import {
+  estimate1RM,
+  estimate1RMOrZero,
+  formatEstimated1RM,
+  setE1RM,
+  ONE_RM_REP_LIMIT,
+  REP_LIMIT_BY_CATEGORY,
+  categorizeExercise,
+} from '../oneRepMax.ts';
 
-describe('estimate1RM — single-rep case', () => {
-  it('returns the exact lifted weight when reps = 1', () => {
-    expect(estimate1RM(225, 1)).toBe(225);
+describe('setE1RM — pure Epley', () => {
+  it('matches Epley exactly: 200 × 5 = 233.33 (rounded to 2dp)', () => {
+    // Epley: 200 * (1 + 5/30) = 233.333…
+    expect(setE1RM(200, 5, null)).toBe(233.33);
   });
 
-  it('handles fractional weights', () => {
-    expect(estimate1RM(187.5, 1)).toBe(187.5);
-  });
-});
-
-describe('estimate1RM — averaged Epley + Brzycki', () => {
-  it('matches literature reference: 200 lb × 5 reps → ~232 lb', () => {
-    // Epley:   200 × (1 + 5/30) = 233.33
-    // Brzycki: 200 × 36 / 32    = 225
-    // Avg:     ~229.17
-    const result = estimate1RM(200, 5);
-    expect(result).toBe(229.17);
+  it('matches Epley exactly: 135 × 8 = 171', () => {
+    // 135 * (1 + 8/30) = 171.0
+    expect(setE1RM(135, 8, null)).toBe(171);
   });
 
-  it('matches literature reference: 135 lb × 8 reps → ~166 lb', () => {
-    // Epley:   135 × (1 + 8/30) = 171
-    // Brzycki: 135 × 36 / 29    = 167.59
-    // Avg:     169.29
-    const result = estimate1RM(135, 8);
-    expect(result).toBe(169.29);
+  it('matches Epley exactly: 315 × 3 = 346.5', () => {
+    expect(setE1RM(315, 3, null)).toBe(346.5);
   });
 
-  it('matches literature reference: 315 lb × 3 reps → ~336 lb', () => {
-    // Epley:   315 × (1 + 3/30) = 346.5
-    // Brzycki: 315 × 36 / 34    = 333.53
-    // Avg:     ~340.01
-    const result = estimate1RM(315, 3);
-    expect(result).toBe(340.01);
+  it('1-rep short-circuit returns the lifted weight unchanged', () => {
+    expect(setE1RM(225, 1, null)).toBe(225);
+    expect(setE1RM(187.5, 1, null)).toBe(187.5);
   });
 
-  it('produces monotonically larger 1RMs as reps increase (same weight)', () => {
-    const r1 = estimate1RM(100, 1)!;
-    const r5 = estimate1RM(100, 5)!;
-    const r10 = estimate1RM(100, 10)!;
-    expect(r1 < r5).toBe(true);
-    expect(r5 < r10).toBe(true);
+  it('rejects invalid inputs', () => {
+    expect(setE1RM(0, 5, null)).toBe(null);
+    expect(setE1RM(-100, 5, null)).toBe(null);
+    expect(setE1RM(100, 0, null)).toBe(null);
+    expect(setE1RM(100, -1, null)).toBe(null);
+    expect(setE1RM(null, 5, null)).toBe(null);
+    expect(setE1RM(NaN, 5, null)).toBe(null);
   });
 
-  it('produces monotonically larger 1RMs as weight increases (same reps)', () => {
-    const w100 = estimate1RM(100, 5)!;
-    const w200 = estimate1RM(200, 5)!;
-    // Doubling weight should double the estimate (within 1¢ — both
-    // values are independently rounded so we can't expect exact
-    // equality across every input).
-    expect(Math.abs(w200 - w100 * 2) < 0.02).toBe(true);
-    expect(w200 > w100).toBe(true);
+  it('adds RIR onto reps before applying Epley', () => {
+    // 200 × 5 with 2 RIR → effective 7 reps → 200 × (1 + 7/30) = 246.66
+    expect(setE1RM(200, 5, 2)).toBe(246.67);
+  });
+
+  it('clamps negative RIR to 0 (negative reps in reserve isn\'t a thing)', () => {
+    expect(setE1RM(200, 5, -3)).toBe(setE1RM(200, 5, 0));
   });
 });
 
-describe('estimate1RM — rep cap', () => {
-  it('refuses to estimate for reps > 10', () => {
-    expect(estimate1RM(100, 11)).toBe(null);
-    expect(estimate1RM(100, 15)).toBe(null);
-    expect(estimate1RM(100, 100)).toBe(null);
+describe('estimate1RM — category windows', () => {
+  it('main_compound accepts 1–10 reps', () => {
+    expect(estimate1RM(225, 1, { category: 'main_compound' })).toBe(225);
+    expect(estimate1RM(225, 10, { category: 'main_compound' })! > 0).toBe(true);
   });
 
-  it('exposes the rep limit for callers to display matching copy', () => {
+  it('main_compound rejects 11+ reps', () => {
+    expect(estimate1RM(135, 11, { category: 'main_compound' })).toBe(null);
+    expect(estimate1RM(135, 15, { category: 'main_compound' })).toBe(null);
+  });
+
+  it('machine_compound accepts 3–12 reps', () => {
+    expect(estimate1RM(225, 3, { category: 'machine_compound' })! > 0).toBe(true);
+    expect(estimate1RM(225, 12, { category: 'machine_compound' })! > 0).toBe(true);
+  });
+
+  it('machine_compound rejects 1–2 reps (machines are noisy at heavy singles)', () => {
+    expect(estimate1RM(225, 1, { category: 'machine_compound' })).toBe(null);
+    expect(estimate1RM(225, 2, { category: 'machine_compound' })).toBe(null);
+  });
+
+  it('machine_compound rejects 13+ reps', () => {
+    expect(estimate1RM(225, 13, { category: 'machine_compound' })).toBe(null);
+  });
+
+  it('isolation always returns null regardless of reps', () => {
+    expect(estimate1RM(50, 5, { category: 'isolation' })).toBe(null);
+    expect(estimate1RM(50, 8, { category: 'isolation' })).toBe(null);
+    expect(estimate1RM(50, 12, { category: 'isolation' })).toBe(null);
+  });
+
+  it('default category is main_compound (preserves behavior of existing call sites)', () => {
+    // No category passed → 11 reps should reject
+    expect(estimate1RM(135, 11)).toBe(null);
+    // 8 reps still scores
+    expect(estimate1RM(135, 8)! > 0).toBe(true);
+  });
+
+  it('exposes window constants for callers to inspect', () => {
+    expect(REP_LIMIT_BY_CATEGORY.main_compound!.min).toBe(1);
+    expect(REP_LIMIT_BY_CATEGORY.main_compound!.max).toBe(10);
+    expect(REP_LIMIT_BY_CATEGORY.machine_compound!.min).toBe(3);
+    expect(REP_LIMIT_BY_CATEGORY.machine_compound!.max).toBe(12);
+    expect(REP_LIMIT_BY_CATEGORY.isolation).toBe(null);
     expect(ONE_RM_REP_LIMIT).toBe(10);
   });
-
-  it('still estimates exactly at the boundary (10 reps)', () => {
-    const result = estimate1RM(100, 10);
-    expect(result != null && result > 0).toBe(true);
-  });
 });
 
-describe('estimate1RM — invalid inputs', () => {
-  it('returns null for zero weight', () => {
-    expect(estimate1RM(0, 5)).toBe(null);
-  });
-
-  it('returns null for negative weight', () => {
-    expect(estimate1RM(-10, 5)).toBe(null);
-  });
-
-  it('returns null for zero reps', () => {
-    expect(estimate1RM(100, 0)).toBe(null);
-  });
-
-  it('returns null for negative reps', () => {
-    expect(estimate1RM(100, -1)).toBe(null);
-  });
-
-  it('returns null for null / undefined inputs', () => {
-    expect(estimate1RM(null, 5)).toBe(null);
-    expect(estimate1RM(100, null)).toBe(null);
-    expect(estimate1RM(undefined, 5)).toBe(null);
-    expect(estimate1RM(100, undefined)).toBe(null);
-  });
-
-  it('returns null for NaN', () => {
-    expect(estimate1RM(NaN, 5)).toBe(null);
-    expect(estimate1RM(100, NaN)).toBe(null);
-  });
-});
-
-describe('estimate1RM — RIR adjustment', () => {
-  it('adds RIR to effective reps before estimating', () => {
-    // 200 × 5 with 2 RIR → effective 7 reps (could have done 7 to failure)
-    const noRir = estimate1RM(200, 5)!;
-    const withRir = estimate1RM(200, 5, { rir: 2 })!;
-    expect(withRir > noRir).toBe(true);
-    // Should equal the same as 200 × 7 reps with no RIR.
-    expect(withRir).toBe(estimate1RM(200, 7));
-  });
-
-  it('treats negative RIR as 0 (lifter went past failure)', () => {
-    expect(estimate1RM(200, 5, { rir: -2 })).toBe(estimate1RM(200, 5));
-  });
-
-  it('treats RIR=0 the same as no RIR', () => {
-    expect(estimate1RM(200, 5, { rir: 0 })).toBe(estimate1RM(200, 5));
-  });
-
-  it('returns null when reps + RIR exceeds the cap', () => {
-    // 200 × 8 with 5 RIR → effective 13 reps → past the cap.
+describe('estimate1RM — RIR effective rep window', () => {
+  it('RIR pushes effective reps past the cap → null', () => {
+    // 200 × 8, RIR 5 → effective 13 reps, past main_compound cap.
     expect(estimate1RM(200, 8, { rir: 5 })).toBe(null);
   });
 
-  it('handles fractional RIR (rare but possible)', () => {
-    const a = estimate1RM(100, 5, { rir: 1 })!;
-    const b = estimate1RM(100, 5, { rir: 1.5 })!;
-    expect(b > a).toBe(true);
+  it('RIR within the window is fine', () => {
+    // 200 × 5, RIR 2 → effective 7 → in 1–10 → ok
+    const r = estimate1RM(200, 5, { rir: 2 })!;
+    expect(r > 0).toBe(true);
+  });
+
+  it('treats null/undefined RIR the same as 0', () => {
+    const a = estimate1RM(200, 5);
+    const b = estimate1RM(200, 5, { rir: null });
+    const c = estimate1RM(200, 5, { rir: undefined });
+    expect(a).toBe(b);
+    expect(b).toBe(c);
   });
 });
 
@@ -140,6 +126,10 @@ describe('estimate1RMOrZero', () => {
     expect(estimate1RMOrZero(0, 5)).toBe(0);
     expect(estimate1RMOrZero(100, 100)).toBe(0);
     expect(estimate1RMOrZero(null, null)).toBe(0);
+  });
+
+  it('returns 0 for isolation category', () => {
+    expect(estimate1RMOrZero(100, 5, { category: 'isolation' })).toBe(0);
   });
 
   it('returns the estimate for valid inputs', () => {
@@ -157,5 +147,59 @@ describe('formatEstimated1RM', () => {
     expect(formatEstimated1RM(null)).toBe('—');
     expect(formatEstimated1RM(0)).toBe('—');
     expect(formatEstimated1RM(-1)).toBe('—');
+  });
+});
+
+describe('categorizeExercise — flag-based', () => {
+  it('isCompound=true + isMachine=false → main_compound', () => {
+    expect(categorizeExercise({ isCompound: true, isMachine: false })).toBe('main_compound');
+  });
+
+  it('isCompound=true + isMachine=true → machine_compound', () => {
+    expect(categorizeExercise({ isCompound: true, isMachine: true })).toBe('machine_compound');
+  });
+
+  it('isCompound=false → isolation', () => {
+    expect(categorizeExercise({ isCompound: false })).toBe('isolation');
+    expect(categorizeExercise({ isCompound: false, isMachine: true })).toBe('isolation');
+  });
+
+  it('accepts snake_case fields (legacy data shape)', () => {
+    expect(categorizeExercise({ is_compound: true, is_machine: true } as any)).toBe('machine_compound');
+  });
+});
+
+describe('categorizeExercise — name fallback', () => {
+  it('main_compound name patterns', () => {
+    expect(categorizeExercise({ name: 'Barbell Back Squat' })).toBe('main_compound');
+    expect(categorizeExercise({ name: 'Bench Press' })).toBe('main_compound');
+    expect(categorizeExercise({ name: 'Romanian Deadlift' })).toBe('main_compound');
+    expect(categorizeExercise({ name: 'Overhead Press' })).toBe('main_compound');
+  });
+
+  it('machine_compound name patterns', () => {
+    expect(categorizeExercise({ name: 'Lat Pulldown' })).toBe('machine_compound');
+    expect(categorizeExercise({ name: 'Leg Press' })).toBe('machine_compound');
+    expect(categorizeExercise({ name: 'Hack Squat' })).toBe('machine_compound');
+    expect(categorizeExercise({ name: 'Smith Bench Press' })).toBe('machine_compound');
+  });
+
+  it('isolation name patterns', () => {
+    expect(categorizeExercise({ name: 'Dumbbell Bicep Curl' })).toBe('isolation');
+    expect(categorizeExercise({ name: 'Lateral Raise' })).toBe('isolation');
+    expect(categorizeExercise({ name: 'Leg Extension' })).toBe('isolation');
+    expect(categorizeExercise({ name: 'Pec Deck Fly' })).toBe('isolation');
+  });
+
+  it('falls back to isolation for empty / unknown names', () => {
+    expect(categorizeExercise({})).toBe('isolation');
+    expect(categorizeExercise({ name: '' })).toBe('isolation');
+    expect(categorizeExercise({ name: 'wibble wobble' })).toBe('isolation');
+  });
+
+  it('explicit flag wins over name heuristic', () => {
+    // "lat pulldown" name suggests machine_compound, but explicit
+    // isCompound=false should override → isolation.
+    expect(categorizeExercise({ name: 'Lat Pulldown', isCompound: false })).toBe('isolation');
   });
 });

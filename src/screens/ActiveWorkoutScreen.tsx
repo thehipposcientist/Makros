@@ -5914,6 +5914,10 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           const circuitRestSeconds = isCircuitItem
             ? Math.max(...circuitRun.map(idx => Number(exercises[idx]?.targetRestSeconds) || 0))
             : 0;
+          const libraryItem = exerciseLibraryByName.get(ex.name.toLowerCase());
+          const gear = libraryItem?.gear?.[0] ?? null;
+          const fallbackEquipment = formatEquipmentLabel(ex.equipment);
+          const exerciseEquipmentVisual = gear ?? (fallbackEquipment ? { name: fallbackEquipment } : null);
           return (
             <Fragment key={i}>
               {isFirstCircuitItem && (
@@ -6065,6 +6069,19 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 )}
               </TouchableOpacity>
 
+              {isActive && exerciseEquipmentVisual ? (
+                <View style={styles.exerciseEquipmentPreview}>
+                  <EquipmentImageCard
+                    equipment={exerciseEquipmentVisual}
+                    label={exerciseEquipmentVisual.name}
+                    subtitle="Equipment setup"
+                    themeColors={themeColors}
+                    accentColor={workoutPalette.strong}
+                    compact
+                  />
+                </View>
+              ) : null}
+
               {isActive && (
                 <View style={styles.exerciseToolbar}>
                   {!isDone && (
@@ -6213,24 +6230,6 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     activeOpacity={0.7}>
                     <Text style={styles.formVideoLinkText}>▶ Form Video</Text>
                   </TouchableOpacity>
-
-                  {(() => {
-                    const libraryItem = exerciseLibraryByName.get(ex.name.toLowerCase());
-                    const gear = libraryItem?.gear?.[0] ?? null;
-                    const fallbackEquipment = formatEquipmentLabel(ex.equipment);
-                    const equipment = gear ?? (fallbackEquipment ? { name: fallbackEquipment } : null);
-                    if (!equipment) return null;
-                    return (
-                      <EquipmentImageCard
-                        equipment={equipment}
-                        label={equipment.name}
-                        subtitle="Equipment setup"
-                        themeColors={themeColors}
-                        accentColor={workoutPalette.strong}
-                        compact
-                      />
-                    );
-                  })()}
 
                   {/* ── RIR prompt — shown after an over-target set ── */}
                   {!guide && pendingRir && pendingRir.exIdx === i && (
@@ -8163,6 +8162,9 @@ function createStyles(tc: ReturnType<typeof getTheme>['colors']) { return StyleS
   setsBadgeText:    { fontSize: 12, fontWeight: '700', color: tc.textSecondary },
   setsBadgeTextDone:{ color: tc.background },
 
+  exerciseEquipmentPreview: {
+    marginTop: 12,
+  },
   exerciseToolbar: {
     flexDirection: 'row',
     flexWrap: 'wrap',

@@ -1,61 +1,122 @@
-// Single source of truth for per-set 1RM estimation across the app.
+// Single source of truth for set-level e1RM across the app.
 //
-// Why this exists: prior to this helper, the PR card on Progress used a
-// raw Epley inline calc, the showcase tile used a backend Epley result,
-// and the rolling e1RM chart used a smoothed RIR-weighted estimate.
-// Three numbers, three sources, the user could see them disagree.
+// Formula — pure Epley with RIR adjustment:
 //
-// Formula choice — averaged Epley + Brzycki, capped at 10 reps:
+//   e1RM = weight × (1 + (reps + rir) / 30)
 //
-//   Epley:    1RM = w × (1 + r / 30)
-//   Brzycki:  1RM = w × 36 / (37 − r)
-//   Estimate: (Epley + Brzycki) / 2     for 1 ≤ r ≤ 10
+// Why Epley alone (and not the older averaged Epley + Brzycki blend
+// the file used to ship):
 //
-// Validation studies — LeSuer (1997), Reynolds (2006), Mayhew (2008),
-// Wood (2002) — converge on the same finding: Epley overestimates at
-// higher reps, Brzycki underestimates, and their average sits closest
-// to a tested 1RM across the 1–10 rep range. Above 10 reps, every
-// published equation's error climbs past ±10% and the intra-individual
-// scatter exceeds the formula difference; returning `null` is more
-// honest than rendering a confident-looking number.
+//  • This same Epley equation is what `backend/app/services/workout/
+//    rolling_e1rm.py` uses for every set inside its weighted-median
+//    rolling estimator. Sharing the math means the displayed per-set
+//    1RM, the rolling chart, and the prescribed working-weight engine
+//    all read off the same physics. Mixing in Brzycki on the client
+//    only made the surfaces drift apart.
+//  • Brzycki's term `36 / (37 − r)` blows up near r=10 and was the
+//    main reason the legacy averaged value started to lie at higher
+//    rep counts — exactly where lifters most want a believable read.
+//
+// Category-aware rep windows (set-level validity, NOT rolling-window
+// filtering — rolling has its own additional filters in
+// `rolling_e1rm.py`):
+//
+//   main_compound      → 1–10 reps    (barbell big lifts; singles are
+//                                       the most informative data)
+//   machine_compound   → 3–12 reps    (smith / hack squat / pulldown
+//                                       cluster; singles on machines
+//                                       are noisy because the bar
+//                                       path is fixed and you can't
+//                                       miss-grind to true failure)
+//   isolation          → not scored   (lateral raise, curl, calf, fly
+//                                       etc — Epley overshoots
+//                                       wildly because these are
+//                                       tendon-bound, not strength-
+//                                       limited; we surface "best
+//                                       set / rep PR / volume trend"
+//                                       instead in the UI)
 //
 // RIR support — when a set was performed with reps in reserve, the
-// effective failure-reps is `actualReps + rir`. Pass `rir` to estimate
-// what the lifter could have done, not what they actually did.
+// effective failure-reps is `reps + rir`. Pass `rir` to estimate what
+// the lifter could have done, not what they actually did.
 
-/** Pure helper. Returns null when inputs are invalid OR reps exceed
- *  the precision window (10) since the literature stops being usable
- *  beyond that. Callers should check for null and either suppress the
- *  display or fall back to "—". Never returns a guess for high reps —
- *  silently wrong is worse than silent. */
-export function estimate1RM(
+export type LiftCategory = 'main_compound' | 'machine_compound' | 'isolation';
+
+/** Inclusive rep window per category. `null` means we refuse to score
+ *  this category at all. Exposed so the recommendation engine and any
+ *  client-side validators read off the same numbers. */
+export const REP_LIMIT_BY_CATEGORY: Record<LiftCategory, { min: number; max: number } | null> = {
+  main_compound: { min: 1, max: 10 },
+  machine_compound: { min: 3, max: 12 },
+  isolation: null,
+};
+
+/** Loose hard cap exported for legacy callers that don't yet pass a
+ *  category. Equal to the upper bound of `main_compound` since that's
+ *  the most common 1RM-bearing surface (PR cards, trend chart). */
+export const ONE_RM_REP_LIMIT = REP_LIMIT_BY_CATEGORY.main_compound!.max;
+
+/** Pure Epley over a single set. No category checks — call
+ *  `estimate1RM` instead when display correctness matters. Exported
+ *  primarily for tests and for any caller (e.g. server-bridge utils)
+ *  that has already done its own validity check.
+ *
+ *  Returns null only on impossible inputs (zero / negative / NaN). */
+export function setE1RM(
   weightLbs: number | null | undefined,
   reps: number | null | undefined,
-  options?: { rir?: number | null },
+  rir: number | null | undefined,
 ): number | null {
   const w = Number(weightLbs);
   const baseReps = Number(reps);
   if (!Number.isFinite(w) || !Number.isFinite(baseReps)) return null;
   if (w <= 0 || baseReps <= 0) return null;
 
-  // Apply RIR adjustment if provided. RIR < 0 (negative reps in
-  // reserve, i.e. failed reps) clamps to 0 — a negative effective rep
-  // count would make the formulas misbehave.
-  const rirRaw = Number(options?.rir);
-  const rir = Number.isFinite(rirRaw) && rirRaw > 0 ? rirRaw : 0;
-  const effectiveReps = baseReps + rir;
+  // Negative reps-in-reserve doesn't physically mean "failed reps" in
+  // a way Epley can handle — clamp to 0 so the formula stays sane.
+  const rirRaw = Number(rir);
+  const rirSafe = Number.isFinite(rirRaw) && rirRaw > 0 ? rirRaw : 0;
+  const effectiveReps = baseReps + rirSafe;
 
-  // Hard cap. Brzycki numerically blows up at r=37; Epley is unbounded
-  // but unreliable. Both are unreliable past 10.
-  if (effectiveReps > 10) return null;
-
-  // For r = 1, both formulas resolve to w (1RM = weight) — short-circuit
-  // to avoid floating-point noise.
+  // r = 1 short-circuit. The formula gives 1.033× weight, which is
+  // technically correct (a single lifted at 100% has 1RM ≈ 100), but
+  // displaying "232 lb 1RM" off a 225 single is jarring. Return the
+  // tested weight directly so 1-rep PRs read as PRs.
   if (effectiveReps === 1) return Math.round(w * 100) / 100;
 
-  const epley = w * (1 + effectiveReps / 30);
-  const brzycki = w * 36 / (37 - effectiveReps);
-  return Math.round(((epley + brzycki) / 2) * 100) / 100;
+  return Math.round((w * (1 + effectiveReps / 30)) * 100) / 100;
+}
+
+/** Display-grade per-set 1RM. Returns null when the set is outside
+ *  the category's rep window OR the category is `isolation`. Callers
+ *  should treat null as "don't render a 1RM here" — never substitute
+ *  a 0 or fall back silently to a different formula.
+ *
+ *  Backwards compat: when `options.category` is omitted we assume
+ *  `main_compound`. Existing call sites (PR cards, local trend chart)
+ *  already filter to compounds upstream, so the default keeps them
+ *  honest without requiring a code change at every site. */
+export function estimate1RM(
+  weightLbs: number | null | undefined,
+  reps: number | null | undefined,
+  options?: { rir?: number | null; category?: LiftCategory },
+): number | null {
+  const category: LiftCategory = options?.category ?? 'main_compound';
+  const window = REP_LIMIT_BY_CATEGORY[category];
+  if (!window) return null;  // isolation — refuse
+
+  const w = Number(weightLbs);
+  const baseReps = Number(reps);
+  if (!Number.isFinite(w) || !Number.isFinite(baseReps)) return null;
+  if (w <= 0 || baseReps <= 0) return null;
+
+  const rirRaw = Number(options?.rir);
+  const rirSafe = Number.isFinite(rirRaw) && rirRaw > 0 ? rirRaw : 0;
+  const effectiveReps = baseReps + rirSafe;
+
+  if (effectiveReps < window.min || effectiveReps > window.max) return null;
+
+  return setE1RM(w, baseReps, rirSafe);
 }
 
 /** Convenience wrapper that returns 0 instead of null. Use ONLY where
@@ -65,18 +126,58 @@ export function estimate1RM(
 export function estimate1RMOrZero(
   weightLbs: number | null | undefined,
   reps: number | null | undefined,
-  options?: { rir?: number | null },
+  options?: { rir?: number | null; category?: LiftCategory },
 ): number {
   return estimate1RM(weightLbs, reps, options) ?? 0;
 }
-
-/** Hard rep limit beyond which estimation is refused. Exported so UI
- *  can show consistent copy ("3-rep set, est. 1RM…" vs "12-rep set —
- *  est. 1RM not shown"). */
-export const ONE_RM_REP_LIMIT = 10;
 
 /** Format an estimated 1RM for display. Rounds to nearest pound. */
 export function formatEstimated1RM(estimate: number | null): string {
   if (estimate == null || estimate <= 0) return '—';
   return `${Math.round(estimate)} lb`;
+}
+
+/** Map an exercise's structured flags to a category. The data model
+ *  carries `is_compound` + `is_machine` (snake) or `isCompound` +
+ *  `isMachine` (camel) depending on where it came from — accept both.
+ *  Returns 'main_compound' as the most common case when flags are
+ *  ambiguous, but only on a positive `is_compound` signal. Otherwise
+ *  defaults to 'isolation' so we don't incorrectly score a curl.
+ *
+ *  Heuristic name matcher used as a last-resort tiebreaker for old
+ *  history rows that pre-date the structured flags. */
+export function categorizeExercise(input: {
+  isCompound?: boolean | null;
+  is_compound?: boolean | null;
+  isMachine?: boolean | null;
+  is_machine?: boolean | null;
+  name?: string | null;
+}): LiftCategory {
+  const isCompound = input.isCompound ?? input.is_compound ?? null;
+  const isMachine = input.isMachine ?? input.is_machine ?? null;
+
+  if (isCompound === true) {
+    return isMachine === true ? 'machine_compound' : 'main_compound';
+  }
+  if (isCompound === false) return 'isolation';
+
+  // Flags missing — fall back to a name heuristic so legacy rows still
+  // get classified. Conservative on the isolation side; we only mark
+  // something as a compound when the name clearly is one.
+  const n = String(input.name ?? '').toLowerCase();
+  if (!n) return 'isolation';
+
+  // Machine-y compound first — a "lat pulldown" or "leg press" is a
+  // machine_compound, not a main_compound, even if both regexes would
+  // match.
+  if (/leg press|hack squat|smith\b|lat pull[-\s]?down|pull[-\s]?down|chest press machine|seated row machine/.test(n)) {
+    return 'machine_compound';
+  }
+  if (
+    /\b(squat|deadlift|bench press|overhead press|shoulder press|barbell row|pendlay row|bent[-\s]?over row|romanian deadlift|rdl|front squat|push[-\s]?press|clean|snatch|hip thrust|chin[-\s]?up|pull[-\s]?up|dip)\b/.test(n)
+    && !/(curl|fly|raise|extension|kickback|crunch|skullcrusher|crossover|pec\s*deck|leg\s*curl|leg\s*extension)/.test(n)
+  ) {
+    return 'main_compound';
+  }
+  return 'isolation';
 }

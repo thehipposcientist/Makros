@@ -1021,12 +1021,16 @@ def _u(weight, reps, rir, days_ago, set_type="working", target_rir=None, today=N
 
 
 def test_e1rm_rep_band_compound_lower_bound_3_excludes_2():
-    print("\n[test] compound rep band [3, 10] — 2 reps excluded as outlier (single-rep PR)")
+    print("\n[test] compound rep band [1, 10] — 1-rep singles now ACCEPTED")
+    # Post-refactor (2026-05-08), the main_compound rep window widened
+    # from [3,10] to [1,10] so heavy singles — the most informative
+    # data point a strong lifter can produce — actually feed the
+    # rolling estimator. This test pins the new behavior.
     today = date(2026, 4, 26)
-    sets = [_u(225, 2, 0, d, today=today) for d in range(3)]  # all 2-rep singles
+    sets = [_u(315, 1, 0, d, today=today) for d in range(3)]  # 1-rep singles
     out = compute_rolling_e1rm(sets, role="primary", today=today)
-    assert out is None
-    _ok("2-rep PR set excluded → not enough usable")
+    assert out is not None, "1-rep singles should now be usable for main_compound"
+    _ok(f"1-rep singles usable: e1rm={out.e1rm_lbs:.1f}")
 
 
 def test_e1rm_rep_band_compound_upper_bound_10_excludes_15_rep_finisher():
@@ -1039,12 +1043,18 @@ def test_e1rm_rep_band_compound_upper_bound_10_excludes_15_rep_finisher():
 
 
 def test_e1rm_isolation_band_includes_15_rep_curls():
-    print("\n[test] isolation rep band [6, 15] — 15-rep curls usable")
+    print("\n[test] isolation role refuses rolling e1RM entirely")
+    # Post-refactor (2026-05-08), isolation lifts no longer feed the
+    # rolling estimator at all. Epley overshoots tendon-bound
+    # movements (curls, lateral raises, leg extensions) by enough that
+    # the recommender + Strength Score were lying when they used
+    # those numbers. Isolations now surface as best-set / volume
+    # trends in the UI — never an Epley 1RM.
     today = date(2026, 4, 26)
-    sets = [_u(30, 15, 1, d, today=today) for d in range(4)]
+    sets = [_u(30, 10, 1, d, today=today) for d in range(4)]
     out = compute_rolling_e1rm(sets, role="isolation", today=today)
-    assert out is not None
-    _ok(f"iso 15-rep curls usable: e1rm={out.e1rm_lbs:.1f}")
+    assert out is None, "isolation role should refuse rolling e1RM"
+    _ok("isolation refuses → caller falls back to best-set surface")
 
 
 def test_e1rm_excludes_zero_weight_bodyweight_sets():

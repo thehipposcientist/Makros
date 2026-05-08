@@ -31,6 +31,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutSession, UserProfile, StoredWorkoutSummary, GoalHistoryEntry, PlanChangeEntry, BodyScanEntry, HealthSummary, HealthScoreResult } from '../types';
 import { loadWorkoutHistory, derivePersonalRecords, PR, loadWorkoutSummaries, loadGoalHistory, loadPlanChanges, loadHealthSummary, loadHealthScore, deleteWorkoutSession, deleteWorkoutSummary, deletePlanChange, saveWorkoutSession, dateKey, saveHealthSummary, isAppleHealthEnabled } from '../utils/workoutHistory';
 import { APPLE_HEALTH_PERMISSION_COPY, readHealthSummary, isHealthKitAvailable, requestHealthPermissions, getLastHealthKitError, loadSleepHistory } from '../services/appleHealth';
+import { scoreSleep } from '../services/sleepScore';
 import DetectedWorkoutsCard from '../components/DetectedWorkoutsCard';
 import BodyMeasurementsModal from '../components/BodyMeasurementsModal';
 import Zone2TargetCard from '../components/Zone2TargetCard';
@@ -47,7 +48,7 @@ import { getGoalEstimate, getRecompProjection } from '../utils/goalEstimate';
 import { buildGoalForecast } from '../utils/goalForecast';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
-import { estimate1RM } from '../utils/oneRepMax';
+import { estimate1RM, categorizeExercise, type LiftCategory } from '../utils/oneRepMax';
 import { computeStrengthScore, strengthBandLabel } from '../utils/strengthScore';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord, listWorkoutSessions, WorkoutSessionRecord, getWeightEntries, saveWeightEntryAPI, deleteWeightEntryAPI, clearWeightEntriesAPI } from '../services/api';
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
@@ -60,6 +61,7 @@ import { manualActivityFromCompletion, mergeCompletionIntoWorkoutSession } from 
 import { formatDistance, formatWeight, lbsToUnit, resolveDistanceUnit, resolveWeightUnit, unitToLbs, type DistanceUnit, type WeightUnit } from '../utils/units';
 import {
   buildExerciseTrendMap,
+  buildLocalBestSetHistory,
   buildLocalE1RMHistory,
   inferChartMuscleFromName,
   type E1RMTrendPoint,
@@ -972,11 +974,21 @@ function strengthIndexDelta(history: WorkoutSession[]): { value: string; detail:
       for (const exercise of session.exercises ?? []) {
         const key = exercise.name?.trim().toLowerCase();
         if (!key) continue;
+        // Per-exercise category determines whether a 1RM read is
+        // valid here at all. Isolations skip — they don't feed any
+        // strength surface and should never compete in
+        // bestByExercise comparisons.
+        const cat = categorizeExercise({
+          isCompound: (exercise as any).isCompound ?? (exercise as any).is_compound ?? null,
+          isMachine: (exercise as any).isMachine ?? (exercise as any).is_machine ?? null,
+          name: exercise.name,
+        });
+        if (cat === 'isolation') continue;
         for (const set of exercise.sets ?? []) {
           const weight = Number((set as any).weightLbs ?? (set as any).weight_lbs ?? (set as any).actual_weight_lbs);
           const reps = Number((set as any).reps ?? (set as any).actual_reps);
           const rir = Number((set as any).rir ?? (set as any).actual_rir);
-          const e1rm = estimate1RM(weight, reps, { rir: Number.isFinite(rir) ? rir : null });
+          const e1rm = estimate1RM(weight, reps, { rir: Number.isFinite(rir) ? rir : null, category: cat });
           if (e1rm == null || e1rm <= 0) continue;
           out.set(key, Math.max(out.get(key) ?? 0, e1rm));
         }
@@ -2271,11 +2283,25 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [healthSummary, setHealthSummary] = useState<HealthSummary | null>(null);
   const healthLiveLoadedRef = useRef(false);
   const [sleepHistoryCount, setSleepHistoryCount] = useState<number>(0);
-  // Last 30 nights cached locally — `night` (YYYY-MM-DD) + `sleepHours`
-  // is enough to render the history-dots ribbon. We don't store per-
-  // night scores; duration is the most-recognizable rhythm signal and
-  // the data we already persist via Apple Health sync.
-  const [sleepHistory, setSleepHistory] = useState<Array<{ night: string; sleepHours: number | null }>>([]);
+  // Last 30 nights cached locally. We carry the recovery-marker fields
+  // (hrv / restingHr / respiratoryRate / spo2Percent / bedtimeMinutes)
+  // alongside `sleepHours` so the history ribbon can run each night
+  // through the same `scoreSleep` function the today-card uses. This
+  // keeps the ribbon's color/score in lock-step with the user-visible
+  // sleep score instead of being a separate hours-only band. Stage
+  // detail (deep / REM / inBed) isn't persisted per night, so the
+  // score is unavoidably an approximation — pillars that depend on
+  // stages get neutral fallbacks inside scoreSleep — but it's far
+  // closer than the prior "duration only" coloring.
+  const [sleepHistory, setSleepHistory] = useState<Array<{
+    night: string;
+    sleepHours: number | null;
+    hrv: number | null;
+    restingHr: number | null;
+    respiratoryRate: number | null;
+    spo2Percent: number | null;
+    bedtimeMinutes: number | null;
+  }>>([]);
   const [sleepHistoryOpen, setSleepHistoryOpen] = useState(false);
   const [healthEnabled, setHealthEnabled] = useState<boolean>(false);
   const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
@@ -2367,13 +2393,43 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
     () => selectedExercise ? (exerciseTrendMap[selectedExercise.toLowerCase()] ?? []) : [],
     [exerciseTrendMap, selectedExercise],
   );
+  // Resolve the selected exercise's category (main / machine / isolation)
+  // off whatever flags the history has stamped. Drives both the
+  // chart series choice and the "Estimated 1RM Trend" vs "Best Set
+  // Trend" label swap below — Epley is unreliable for isolations so
+  // we don't pretend otherwise.
+  const selectedExerciseCategory = useMemo<LiftCategory>(() => {
+    if (!selectedExercise) return 'main_compound';
+    const target = selectedExercise.toLowerCase().trim();
+    for (const session of history) {
+      for (const exercise of session.exercises ?? []) {
+        if (String(exercise.name ?? '').toLowerCase().trim() === target) {
+          return categorizeExercise({
+            isCompound: (exercise as any).isCompound ?? (exercise as any).is_compound ?? null,
+            isMachine: (exercise as any).isMachine ?? (exercise as any).is_machine ?? null,
+            name: exercise.name,
+          });
+        }
+      }
+    }
+    return categorizeExercise({ name: selectedExercise });
+  }, [history, selectedExercise]);
+  const selectedExerciseIsIsolation = selectedExerciseCategory === 'isolation';
   const localSelectedE1rmHistory = useMemo(
-    () => buildLocalE1RMHistory(history, selectedExercise, estimate1RM),
-    [history, selectedExercise],
+    () => selectedExerciseIsIsolation
+      ? buildLocalBestSetHistory(history, selectedExercise)
+      : buildLocalE1RMHistory(history, selectedExercise, (w, r, opts) =>
+          estimate1RM(w, r, { ...opts, category: selectedExerciseCategory }),
+        ),
+    [history, selectedExercise, selectedExerciseCategory, selectedExerciseIsIsolation],
   );
   const selectedE1rmHistory = useMemo(
-    () => e1rmHistory.length >= 2 ? e1rmHistory : localSelectedE1rmHistory,
-    [e1rmHistory, localSelectedE1rmHistory],
+    // Server-side e1RM only applies to compound lifts; for isolation
+    // we always use the locally-computed best-set trend.
+    () => selectedExerciseIsIsolation
+      ? localSelectedE1rmHistory
+      : (e1rmHistory.length >= 2 ? e1rmHistory : localSelectedE1rmHistory),
+    [e1rmHistory, localSelectedE1rmHistory, selectedExerciseIsIsolation],
   );
   const cardioInsightsMemo = useMemo(() => showWorkoutProgress ? buildCardioInsights(paceHistory, distanceUnit) : [], [distanceUnit, paceHistory, showWorkoutProgress]);
   const paceExerciseGroups = useMemo(() => {
@@ -2861,7 +2917,15 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           // Sorted newest-first; UI renders chronologically.
           const recent = hist
             .slice(-30)
-            .map(n => ({ night: n.night, sleepHours: n.sleepHours }));
+            .map(n => ({
+              night: n.night,
+              sleepHours: n.sleepHours,
+              hrv: n.hrv ?? null,
+              restingHr: n.restingHr ?? null,
+              respiratoryRate: n.respiratoryRate ?? null,
+              spo2Percent: n.spo2Percent ?? null,
+              bedtimeMinutes: n.bedtimeMinutes ?? null,
+            }));
           setSleepHistory(recent);
         } catch {}
       } catch {}
@@ -3660,11 +3724,17 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                             </AnimatedPressable>
                           )}
                           <AnimatedPressable style={[styles.chartModeBtn, styles.chartModeBtnActive]} onPress={() => {}} scaleDown={0.94}>
-                            <Text style={[styles.chartModeBtnText, styles.chartModeBtnTextActive]}>Est. 1RM</Text>
+                            <Text style={[styles.chartModeBtnText, styles.chartModeBtnTextActive]}>
+                              {selectedExerciseIsIsolation ? 'Best Set' : 'Est. 1RM'}
+                            </Text>
                           </AnimatedPressable>
                         </View>
                       </View>
-                      <Text style={styles.graphSubtitle}>Estimated 1-rep max ({weightUnit}) over time</Text>
+                      <Text style={styles.graphSubtitle}>
+                        {selectedExerciseIsIsolation
+                          ? `Heaviest working set (${weightUnit}) over time — Estimated 1RM isn't shown for isolation exercises`
+                          : `Estimated 1-rep max (${weightUnit}) over time`}
+                      </Text>
                       <View style={{ alignItems: 'center', marginVertical: 8 }}>
                         <Svg width={chartW} height={chartH}>
                           {gridVals.map((gv, gi) => {
@@ -7091,67 +7161,103 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             </View>
             <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
               <Text style={styles.quickDetailBody}>
-                Each circle is a night, oldest on the left. Color encodes
-                total sleep — green is 7.5h or more, amber is 6.5–7.5h,
-                orange is 6–6.5h, red is under 6h, and a dotted ring is
-                a night without recorded sleep.
+                Each circle is a night, oldest on the left. The number is
+                the sleep score (same scoring used on the today card).
+                Green is 80+ (Excellent / Good), amber is 60–79 (Fair),
+                red is under 60 (Poor). Grey "—" means we didn't have
+                enough data for that night.
               </Text>
               <View style={styles.quickDetailSection}>
                 <Text style={styles.quickDetailSectionTitle}>Nights</Text>
                 <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 }}>
-                  {sleepHistory.map((n, i) => {
-                    const h = n.sleepHours ?? null;
-                    const fill =
-                      h == null ? null
-                      : h >= 7.5 ? '#22C55E'
-                      : h >= 6.5 ? '#84CC16'
-                      : h >= 6.0 ? '#F59E0B'
-                      : '#EF4444';
-                    return (
-                      <View key={`${n.night}-${i}`} style={{ alignItems: 'center', gap: 3 }}>
-                        <View style={{
-                          width: 26, height: 26, borderRadius: 13,
-                          backgroundColor: fill ?? 'transparent',
-                          borderWidth: fill ? 0 : 1,
-                          borderColor: tc.border,
-                          borderStyle: fill ? undefined : 'dashed' as any,
-                          alignItems: 'center', justifyContent: 'center',
-                        }}>
-                          {h != null && (
-                            <Text style={{ fontSize: 9, fontWeight: '900', color: '#FFFFFF' }} numberOfLines={1}>
-                              {Math.round(h * 10) / 10}
+                  {(() => {
+                    // Build rolling baselines from the loaded history so
+                    // each night's score uses the personalized HRV /
+                    // bedtime baseline when 14+ nights are available.
+                    const ageForScore = userProfile?.physicalStats?.age ?? null;
+                    const hrvHistory = sleepHistory.map(n => n.hrv).filter((v): v is number => typeof v === 'number' && v > 0);
+                    const rhrHistory = sleepHistory.map(n => n.restingHr).filter((v): v is number => typeof v === 'number' && v > 0);
+                    const respHistory = sleepHistory.map(n => n.respiratoryRate).filter((v): v is number => typeof v === 'number' && v > 0);
+                    const spo2History = sleepHistory.map(n => n.spo2Percent).filter((v): v is number => typeof v === 'number' && v > 0);
+                    const bedtimeHistory = sleepHistory.map(n => n.bedtimeMinutes).filter((v): v is number => typeof v === 'number' && v >= 0);
+
+                    return sleepHistory.map((n, i) => {
+                      const score = (n.sleepHours != null && n.sleepHours >= 0.5) ? scoreSleep({
+                        totalSleepHours: n.sleepHours,
+                        // Stage / inBed detail isn't persisted per night.
+                        // scoreSleep applies neutral fallbacks for these,
+                        // and the score caps still penalize short or
+                        // recovery-flagged nights so the ribbon's color
+                        // tracks the today-card's logic as closely as
+                        // the persisted data allows.
+                        inBedMinutes: null,
+                        deepSleepHours: null,
+                        remSleepHours: null,
+                        hrvMs: n.hrv,
+                        restingHeartRate: n.restingHr,
+                        spo2Percent: n.spo2Percent,
+                        respiratoryRate: n.respiratoryRate,
+                        age: ageForScore,
+                        hrvHistory,
+                        rhrHistory,
+                        respiratoryRateHistory: respHistory,
+                        spo2History,
+                        bedtimeHistory,
+                      }) : null;
+                      // No score → grey "—" circle. Mirrors the user's
+                      // ask: "if there is no data or not enough data
+                      // leave grey circle n/a".
+                      const fill = score == null
+                        ? null
+                        : score.score >= 80 ? '#22C55E'
+                        : score.score >= 60 ? '#F59E0B'
+                        : '#EF4444';
+                      return (
+                        <View key={`${n.night}-${i}`} style={{ alignItems: 'center', gap: 3 }}>
+                          <View style={{
+                            width: 26, height: 26, borderRadius: 13,
+                            backgroundColor: fill ?? tc.surfaceRaised,
+                            borderWidth: fill ? 0 : 1,
+                            borderColor: tc.border,
+                            alignItems: 'center', justifyContent: 'center',
+                          }}>
+                            <Text style={{
+                              fontSize: 9, fontWeight: '900',
+                              color: fill ? '#FFFFFF' : tc.textMuted,
+                            }} numberOfLines={1}>
+                              {score ? score.score : '—'}
                             </Text>
-                          )}
+                          </View>
+                          <Text style={{ fontSize: 8, color: tc.textMuted, fontVariant: ['tabular-nums'] as any }} numberOfLines={1}>
+                            {n.night.slice(5).replace('-', '/')}
+                          </Text>
                         </View>
-                        <Text style={{ fontSize: 8, color: tc.textMuted, fontVariant: ['tabular-nums'] as any }} numberOfLines={1}>
-                          {n.night.slice(5).replace('-', '/')}
-                        </Text>
-                      </View>
-                    );
-                  })}
+                      );
+                    });
+                  })()}
                 </View>
               </View>
               <View style={styles.quickDetailSection}>
                 <Text style={styles.quickDetailSectionTitle}>Legend</Text>
                 <View style={styles.quickDetailRow}>
                   <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#22C55E', marginRight: 8 }} />
-                  <Text style={styles.quickDetailRowLabel}>7.5+ hours</Text>
-                  <Text style={[styles.quickDetailRowValue, { color: '#22C55E' }]}>Excellent</Text>
-                </View>
-                <View style={styles.quickDetailRow}>
-                  <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#84CC16', marginRight: 8 }} />
-                  <Text style={styles.quickDetailRowLabel}>6.5–7.5 hours</Text>
-                  <Text style={[styles.quickDetailRowValue, { color: '#84CC16' }]}>Good</Text>
+                  <Text style={styles.quickDetailRowLabel}>80+</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: '#22C55E' }]}>Excellent / Good</Text>
                 </View>
                 <View style={styles.quickDetailRow}>
                   <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#F59E0B', marginRight: 8 }} />
-                  <Text style={styles.quickDetailRowLabel}>6.0–6.5 hours</Text>
-                  <Text style={[styles.quickDetailRowValue, { color: '#F59E0B' }]}>Short</Text>
+                  <Text style={styles.quickDetailRowLabel}>60–79</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: '#F59E0B' }]}>Fair</Text>
                 </View>
                 <View style={styles.quickDetailRow}>
                   <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: '#EF4444', marginRight: 8 }} />
-                  <Text style={styles.quickDetailRowLabel}>Under 6 hours</Text>
-                  <Text style={[styles.quickDetailRowValue, { color: '#EF4444' }]}>Restricted</Text>
+                  <Text style={styles.quickDetailRowLabel}>Under 60</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: '#EF4444' }]}>Poor</Text>
+                </View>
+                <View style={styles.quickDetailRow}>
+                  <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: tc.surfaceRaised, borderWidth: 1, borderColor: tc.border, marginRight: 8 }} />
+                  <Text style={styles.quickDetailRowLabel}>—</Text>
+                  <Text style={[styles.quickDetailRowValue, { color: tc.textMuted }]}>No data</Text>
                 </View>
               </View>
             </ScrollView>

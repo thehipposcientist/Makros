@@ -559,8 +559,31 @@ export async function getLatestHeartRate(): Promise<number | null> {
 // and minutes-in-zone. Prefer the exact server-computed zone boundaries already
 // used for live phone/watch display; fallback mirrors the backend's HRR default.
 
-function fallbackHrZones(age: number | null, restingHeartRate: number | null): HRZone[] {
-  const maxHR = age && age > 0 ? 220 - age : 190;
+/** Cap on how much real time a single HR sample can claim in zoneMinutes.
+ *  Without this, sparse HealthKit sampling (e.g. a 4-minute gap during a
+ *  rest period) lets one outlier dominate the zone breakdown. 2 minutes
+ *  matches passive HK's typical sampling cadence during exercise. */
+const MAX_HR_SAMPLE_GAP_MINUTES = 2;
+
+/** Estimated max HR. Uses the Tanaka formula `208 - 0.7 * age` (more
+ *  accurate than `220 - age` across age ranges). 190 fallback when no
+ *  age is available — equivalent to a ~26 year-old default. */
+function estimateMaxHr(age: number | null): number {
+  return age && age > 0 ? Math.round(208 - 0.7 * age) : 190;
+}
+
+/** Resolves the max HR to use for zone math. A user-provided override
+ *  (future profile/settings field) wins over the age-based estimate so
+ *  athletes whose true MHR diverges from population means aren't
+ *  forced into the wrong zones. Override is read defensively from any
+ *  shape the future field might land in. */
+function resolveMaxHr(age: number | null, override: number | null | undefined): number {
+  const ov = Number(override);
+  if (Number.isFinite(ov) && ov > 0) return Math.round(ov);
+  return estimateMaxHr(age);
+}
+
+function fallbackHrZones(maxHR: number, restingHeartRate: number | null): HRZone[] {
   const rhr = restingHeartRate && restingHeartRate > 0 && restingHeartRate < maxHR
     ? restingHeartRate
     : 60;
@@ -576,7 +599,7 @@ function fallbackHrZones(age: number | null, restingHeartRate: number | null): H
 
 function workoutHrZones(
   explicitZones: HRZone[] | null | undefined,
-  age: number | null,
+  maxHR: number,
   restingHeartRate: number | null,
 ): HRZone[] {
   const zones = Array.isArray(explicitZones)
@@ -585,14 +608,25 @@ function workoutHrZones(
       Number.isFinite(Number(z.low)) &&
       Number.isFinite(Number(z.high)))
     : [];
-  return zones.length > 0 ? zones : fallbackHrZones(age, restingHeartRate);
+  return zones.length > 0 ? zones : fallbackHrZones(maxHR, restingHeartRate);
 }
+
+export type HrConfidence = 'high' | 'medium' | 'low';
 
 export interface WorkoutHrSummary {
   avgBpm: number;
   maxBpm: number;
   samples: number;
   zoneMinutes: [number, number, number, number, number]; // Z1..Z5
+  /** Max HR used to derive zone boundaries — either the user override
+   *  (when set in profile/settings) or the Tanaka age estimate. */
+  maxHrUsed: number;
+  /** Fraction of the workout window covered by HR samples (after the
+   *  per-sample gap cap). 1.0 = every minute had a sample within
+   *  MAX_HR_SAMPLE_GAP_MINUTES; lower values mean sparse data. */
+  hrCoverageRatio: number;
+  /** "high" >= 0.75 coverage, "medium" >= 0.4, "low" otherwise. */
+  hrConfidence: HrConfidence;
 }
 
 export async function getWorkoutHrSummary(
@@ -601,16 +635,23 @@ export async function getWorkoutHrSummary(
   age: number | null = null,
   restingHeartRate: number | null = null,
   explicitZones: HRZone[] | null = null,
+  /** Optional profile/settings object that may carry a user-provided
+   *  max HR override. Read defensively so this stays a no-op until the
+   *  override field is actually wired up in the profile model. */
+  profile?: { maxHeartRate?: number | null; max_heart_rate?: number | null } | null,
 ): Promise<WorkoutHrSummary | null> {
   const mod = getModule();
   if (!mod || typeof mod.getHeartRate !== 'function') return null;
   try {
     const samples = await mod.getHeartRate(startMs, endMs, 500);
     if (!Array.isArray(samples) || samples.length === 0) return null;
-    const zoneDefinitions = workoutHrZones(explicitZones, age, restingHeartRate);
+    const maxHrOverride = profile?.maxHeartRate ?? profile?.max_heart_rate ?? null;
+    const maxHrUsed = resolveMaxHr(age, maxHrOverride);
+    const zoneDefinitions = workoutHrZones(explicitZones, maxHrUsed, restingHeartRate);
 
     let sum = 0;
     let max = 0;
+    let coveredMinutes = 0;
     const zones: [number, number, number, number, number] = [0, 0, 0, 0, 0];
     const sorted = samples
       .map((s: any) => ({ v: Number(s.value), t: new Date(s.startDate).getTime() }))
@@ -622,18 +663,35 @@ export async function getWorkoutHrSummary(
       const { v, t } = sorted[i];
       sum += v;
       if (v > max) max = v;
-      // Assign the gap until next sample (or end) to this zone.
+      // Assign the gap until next sample (or end) to this zone — but
+      // cap at MAX_HR_SAMPLE_GAP_MINUTES so a single sparse sample
+      // can't claim a multi-minute gap.
       const nextT = i + 1 < sorted.length ? sorted[i + 1].t : endMs;
-      const minutes = Math.max(0, (nextT - t) / 60000);
+      const rawGapMinutes = Math.max(0, (nextT - t) / 60000);
+      const minutes = Math.min(rawGapMinutes, MAX_HR_SAMPLE_GAP_MINUTES);
       const zone = zoneForHeartRate(v, zoneDefinitions);
       const zIdx = Math.max(0, Math.min(4, Math.round(Number(zone?.zone ?? 1)) - 1));
       zones[zIdx] += minutes;
+      coveredMinutes += minutes;
     }
+
+    const workoutMinutes = Math.max(0, (endMs - startMs) / 60000);
+    const hrCoverageRatio = workoutMinutes > 0
+      ? Math.max(0, Math.min(1, coveredMinutes / workoutMinutes))
+      : 0;
+    const hrConfidence: HrConfidence =
+      hrCoverageRatio >= 0.75 ? 'high'
+      : hrCoverageRatio >= 0.4 ? 'medium'
+      : 'low';
+
     return {
       avgBpm: Math.round(sum / sorted.length),
       maxBpm: Math.round(max),
       samples: sorted.length,
       zoneMinutes: zones.map(m => Math.round(m * 10) / 10) as [number, number, number, number, number],
+      maxHrUsed,
+      hrCoverageRatio: Math.round(hrCoverageRatio * 1000) / 1000,
+      hrConfidence,
     };
   } catch {
     return null;

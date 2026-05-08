@@ -127,6 +127,10 @@ const EQUIPMENT_IMAGE_ALIASES: Array<{ keys: string[]; source: ImageSourcePropTy
     source: require('../../assets/images/equipment/standing_calf_raise_machine.png'),
   },
   {
+    keys: ['seated_calf_raise_machine', 'seated calf raise machine'],
+    source: require('../../assets/images/equipment/seated_calf_raise_machine.png'),
+  },
+  {
     keys: ['flat_bench', 'flat bench', 'bench'],
     source: require('../../assets/images/equipment/flat_bench.png'),
   },
@@ -161,6 +165,66 @@ const EQUIPMENT_IMAGE_ALIASES: Array<{ keys: string[]; source: ImageSourcePropTy
   {
     keys: ['dumbbells', 'dumbbell', 'dbs'],
     source: require('../../assets/images/equipment/dumbbells.png'),
+  },
+  {
+    keys: ['pull_up_bar', 'pull up bar', 'pull-up bar', 'chin up bar'],
+    source: require('../../assets/images/equipment/pull_up_bar.png'),
+  },
+  {
+    keys: ['resistance_bands', 'resistance bands', 'resistance bands tube', 'tube bands'],
+    source: require('../../assets/images/equipment/resistance_bands.png'),
+  },
+  {
+    keys: ['yoga_mat', 'yoga mat', 'exercise mat'],
+    source: require('../../assets/images/equipment/yoga_mat.png'),
+  },
+  {
+    keys: ['jump_rope', 'jump rope', 'skipping rope'],
+    source: require('../../assets/images/equipment/jump_rope.png'),
+  },
+  {
+    keys: ['foam_roller', 'foam roller'],
+    source: require('../../assets/images/equipment/foam_roller.png'),
+  },
+  {
+    keys: ['ab_wheel', 'ab wheel', 'ab roller'],
+    source: require('../../assets/images/equipment/ab_wheel.png'),
+  },
+  {
+    keys: ['dip_bars', 'dip bars', 'parallel bars'],
+    source: require('../../assets/images/equipment/dip_bars.png'),
+  },
+  {
+    keys: ['suspension_trainer', 'suspension trainer', 'trx'],
+    source: require('../../assets/images/equipment/suspension_trainer.png'),
+  },
+  {
+    keys: ['sturdy_chair', 'sturdy chair', 'low surface', 'chair'],
+    source: require('../../assets/images/equipment/sturdy_chair.png'),
+  },
+  {
+    keys: ['nordic_anchor', 'nordic strap', 'foot anchor', 'nordic curl strap'],
+    source: require('../../assets/images/equipment/nordic_anchor.png'),
+  },
+  {
+    keys: ['mini_band', 'mini band', 'loop band', 'glute band'],
+    source: require('../../assets/images/equipment/mini_band.png'),
+  },
+  {
+    keys: ['swiss_ball', 'swiss ball', 'stability ball', 'exercise ball'],
+    source: require('../../assets/images/equipment/swiss_ball.png'),
+  },
+  {
+    keys: ['slider_discs', 'slider discs', 'sliders', 'gliding discs'],
+    source: require('../../assets/images/equipment/slider_discs.png'),
+  },
+  {
+    keys: ['wrist_roller', 'wrist roller'],
+    source: require('../../assets/images/equipment/wrist_roller.png'),
+  },
+  {
+    keys: ['slant_board', 'slant board'],
+    source: require('../../assets/images/equipment/slant_board.png'),
   },
   {
     keys: [
@@ -210,6 +274,10 @@ const EQUIPMENT_IMAGE_ALIASES: Array<{ keys: string[]; source: ImageSourcePropTy
   {
     keys: ['leg_extension_machine', 'leg extension machine'],
     source: require('../../assets/images/equipment/leg_extension_machine.png'),
+  },
+  {
+    keys: ['lateral_raise_machine', 'lateral raise machine', 'machine lateral raise'],
+    source: require('../../assets/images/equipment/lateral_raise_machine.png'),
   },
   {
     keys: ['lat_pulldown_machine', 'lat pulldown', 'lat pull down machine'],
@@ -264,6 +332,10 @@ const EQUIPMENT_IMAGE_ALIASES: Array<{ keys: string[]; source: ImageSourcePropTy
     source: require('../../assets/images/equipment/rotary_torso_machine.png'),
   },
   {
+    keys: ['ab_crunch_machine', 'ab crunch machine', 'crunch machine', 'seated crunch machine'],
+    source: require('../../assets/images/equipment/ab_crunch_machine.png'),
+  },
+  {
     keys: ['glute_kickback_machine', 'glute kickback machine', 'kickback machine'],
     source: require('../../assets/images/equipment/glute_kickback_machine.png'),
   },
@@ -272,12 +344,36 @@ const EQUIPMENT_IMAGE_ALIASES: Array<{ keys: string[]; source: ImageSourcePropTy
     source: require('../../assets/images/equipment/preacher_curl_machine.png'),
   },
   {
+    keys: ['preacher_bench', 'preacher curl bench', 'preacher bench'],
+    source: require('../../assets/images/equipment/preacher_bench.png'),
+  },
+  {
     keys: ['chest_press_machine', 'chest press machine', 'machine chest press', 'selectorized chest press'],
     source: require('../../assets/images/equipment/chest_press_machine.png'),
   },
   {
     keys: ['hip_thrust_machine', 'hip thrust machine', 'glute drive machine'],
     source: require('../../assets/images/equipment/hip_thrust_machine.png'),
+  },
+  {
+    keys: ['tibialis_raise_machine', 'tibialis raise machine', 'tib raise machine'],
+    source: require('../../assets/images/equipment/tibialis_raise_machine.png'),
+  },
+  {
+    keys: ['swimming_pool', 'swimming pool', 'pool'],
+    source: require('../../assets/images/equipment/swimming_pool.png'),
+  },
+  {
+    keys: ['battle_ropes', 'battle ropes'],
+    source: require('../../assets/images/equipment/battle_ropes.png'),
+  },
+  {
+    keys: ['outdoor_bike', 'outdoor bike', 'bicycle'],
+    source: require('../../assets/images/equipment/outdoor_bike.png'),
+  },
+  {
+    keys: ['ruck_pack', 'ruck pack', 'ruck backpack'],
+    source: require('../../assets/images/equipment/ruck_pack.png'),
   },
 ];
 

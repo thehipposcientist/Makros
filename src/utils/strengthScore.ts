@@ -1,17 +1,24 @@
 // Comprehensive strength score derived from estimated 1RMs across the
-// canonical compound + accessory lifts. Each lift's score is its 1RM
-// expressed as a percentage of an "intermediate trainee" bodyweight
-// ratio, capped at 130 so very strong lifters get headroom without
-// running away with the average. The aggregate score is the unweighted
-// mean of available lifts — users only get scored on what they've
-// actually logged.
+// canonical compound + machine-compound lifts. Each lift's score is
+// its 1RM expressed as a percentage of an "intermediate trainee"
+// bodyweight ratio, capped at 130 so very strong lifters get headroom
+// without running away with the average. The aggregate score is the
+// unweighted mean of available lifts — users only get scored on what
+// they've actually logged.
+//
+// Category contract — ONLY `main_compound` and `machine_compound`
+// lifts feed this score. Isolation lifts (curls, lateral raises, leg
+// extensions, etc.) are intentionally excluded because Epley
+// overshoots wildly on tendon-bound movements; including them would
+// lie about overall strength. The tile + detail modal stay honest by
+// missing list of the canonical 8 lifts the user hasn't logged yet
+// rather than substituting an isolation in.
 //
 // Why this and not a Wilks / DOTS coefficient: those are powerlifting
-// total scores (squat + bench + deadlift only) and miss accessory
-// patterns. We want a "well-rounded strength" read that includes
-// pulling, pressing, and posterior-chain work the user actually
-// programs, so the bodyweight-ratio average covers more ground while
-// still being intuitive.
+// total scores (squat + bench + deadlift only) and miss broader
+// pulling, overhead, and posterior-chain capacity. The bodyweight-
+// ratio average covers more ground while staying intuitive ("am I
+// hitting 1.5× squat?").
 
 export type StrengthLiftKey =
   | 'squat'
@@ -26,6 +33,10 @@ export type StrengthLiftKey =
 interface LiftDef {
   key: StrengthLiftKey;
   display: string;
+  /** Category this lift falls into. Used as a sanity tag — every entry
+   *  in `STRENGTH_LIFTS` must be `main_compound` or `machine_compound`.
+   *  Isolation lifts intentionally don't appear here. */
+  category: 'main_compound' | 'machine_compound';
   /** Intermediate trainee target as a multiple of bodyweight. Sources:
    *  StrengthLevel.com / ExRx aggregate norms for a male intermediate
    *  trainee. Female norms run ~80% of these; we apply a single
@@ -44,18 +55,21 @@ export const STRENGTH_LIFTS: readonly LiftDef[] = [
   {
     key: 'squat',
     display: 'Back Squat',
+    category: 'main_compound',
     bwRatioTarget: 1.5,
     patterns: { positive: ['back squat'], negative: ['front'] },
   },
   {
     key: 'bench',
     display: 'Bench Press',
+    category: 'main_compound',
     bwRatioTarget: 1.25,
     patterns: { positive: ['bench press', 'bench'] },
   },
   {
     key: 'deadlift',
     display: 'Deadlift',
+    category: 'main_compound',
     bwRatioTarget: 2.0,
     // Conventional / sumo / barbell deadlift — but NOT romanian.
     patterns: { positive: ['deadlift'], negative: ['romanian', 'rdl', 'stiff'] },
@@ -63,6 +77,7 @@ export const STRENGTH_LIFTS: readonly LiftDef[] = [
   {
     key: 'overhead_press',
     display: 'Shoulder Press',
+    category: 'main_compound',
     bwRatioTarget: 0.75,
     patterns: {
       positive: ['overhead press', 'shoulder press', 'standing press', 'military press', 'ohp'],
@@ -74,6 +89,7 @@ export const STRENGTH_LIFTS: readonly LiftDef[] = [
   {
     key: 'row',
     display: 'Barbell Row',
+    category: 'main_compound',
     bwRatioTarget: 1.0,
     patterns: {
       positive: ['barbell row', 'pendlay row', 'bent over row', 'bent-over row'],
@@ -83,18 +99,21 @@ export const STRENGTH_LIFTS: readonly LiftDef[] = [
   {
     key: 'front_squat',
     display: 'Front Squat',
+    category: 'main_compound',
     bwRatioTarget: 1.25,
     patterns: { positive: ['front squat'] },
   },
   {
     key: 'romanian_deadlift',
     display: 'Romanian Deadlift',
+    category: 'main_compound',
     bwRatioTarget: 1.5,
     patterns: { positive: ['romanian deadlift', 'romanian dl', 'rdl'] },
   },
   {
     key: 'lat_pulldown',
     display: 'Lat Pulldown',
+    category: 'machine_compound',
     bwRatioTarget: 1.0,
     patterns: { positive: ['lat pulldown', 'lat pull-down', 'lat pull down', 'pulldown'] },
   },

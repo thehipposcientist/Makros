@@ -92,16 +92,38 @@ def test_filters_warmups():
 
 
 def test_role_aware_rep_band():
-    print("[test] isolation role allows higher rep bands")
-    # Compound role rejects 14-rep sets (band is 3-10).
-    iso_set = make_set(days_ago=1, w=30, reps=14, rir=1.0)
-    out_compound = compute_rolling_e1rm([iso_set, iso_set, iso_set], role="primary")
-    assert out_compound is None, "compound role should reject 14-rep sets"
-    print("  ✓ compound role rejects 14-rep")
-    # Isolation role accepts (band is 6-15).
+    print("[test] role-aware rep windows: main / machine / isolation")
+    # Main compound: 1–10 reps. 1-rep singles are now valid.
+    single = make_set(days_ago=1, w=315, reps=1, rir=0.0)
+    out_single = compute_rolling_e1rm([single, single, single], role="primary")
+    assert out_single is not None, "main_compound should accept 1-rep singles"
+    print("  ✓ main_compound accepts 1-rep singles")
+
+    # Main compound rejects 11+ reps.
+    eleven = make_set(days_ago=1, w=185, reps=11, rir=1.0)
+    out_eleven = compute_rolling_e1rm([eleven, eleven, eleven], role="primary")
+    assert out_eleven is None, "main_compound should reject 11-rep sets"
+    print("  ✓ main_compound rejects 11+ reps")
+
+    # Machine compound: 3–12. Accepts 12, rejects 1.
+    twelve = make_set(days_ago=1, w=225, reps=12, rir=1.0)
+    out_machine_12 = compute_rolling_e1rm([twelve, twelve, twelve], role="machine_compound")
+    assert out_machine_12 is not None, "machine_compound should accept 12-rep sets"
+    print("  ✓ machine_compound accepts 12-rep")
+
+    machine_single = make_set(days_ago=1, w=225, reps=1, rir=0.0)
+    out_machine_1 = compute_rolling_e1rm([machine_single] * 3, role="machine_compound")
+    assert out_machine_1 is None, "machine_compound should reject 1-rep singles"
+    print("  ✓ machine_compound rejects 1-rep singles")
+
+    # Isolation: refuses entirely. Epley overshoots tendon-bound lifts;
+    # the recommender / Strength Score must not see these.
+    iso_set = make_set(days_ago=1, w=30, reps=10, rir=1.0)
     out_iso = compute_rolling_e1rm([iso_set, iso_set, iso_set], role="isolation")
-    assert out_iso is not None, "isolation role should accept 14-rep"
-    print("  ✓ isolation role accepts 14-rep")
+    assert out_iso is None, "isolation role should refuse rolling e1RM entirely"
+    out_finisher = compute_rolling_e1rm([iso_set, iso_set, iso_set], role="finisher")
+    assert out_finisher is None, "finisher role (alias) should refuse"
+    print("  ✓ isolation / finisher roles refuse e1RM entirely")
 
 
 def test_rir_fallback_to_target():

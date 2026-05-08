@@ -157,3 +157,44 @@ export function buildLocalE1RMHistory(
   }
   return points.slice(-10);
 }
+
+/** Best-set trend for isolation exercises. We don't show estimated
+ *  1RM for curls / lateral raises / cable kickbacks because Epley
+ *  overshoots wildly on tendon-bound movements. Instead, we plot the
+ *  heaviest working set per session as a "are you progressing on
+ *  this lift?" surface. The point shape mirrors `E1RMTrendPoint` so
+ *  the chart consumer can treat both identically — only the label /
+ *  axis text need to flip in the parent. */
+export function buildLocalBestSetHistory(
+  history: WorkoutSession[],
+  exerciseName: string | null | undefined,
+): E1RMTrendPoint[] {
+  const target = normalizedExerciseName(exerciseName);
+  if (!target) return [];
+
+  const points: E1RMTrendPoint[] = [];
+  const sorted = [...history].sort((a, b) => +new Date(a.date) - +new Date(b.date));
+  for (const session of sorted) {
+    if (!session.completed || session.skipped) continue;
+    let bestWeight: number | null = null;
+    let setCount = 0;
+    for (const exercise of session.exercises ?? []) {
+      if (normalizedExerciseName(exercise.name) !== target || !isTrackableStrengthExercise(exercise)) continue;
+      for (const set of loadedStrengthSets(exercise)) {
+        const w = Number(set.weightLbs ?? 0);
+        if (!Number.isFinite(w) || w <= 0) continue;
+        setCount += 1;
+        if (bestWeight == null || w > bestWeight) bestWeight = w;
+      }
+    }
+    if (bestWeight != null) {
+      points.push({
+        date: session.date,
+        e1rm_lbs: Math.round(bestWeight * 10) / 10,
+        confidence: setCount >= 3 ? 'med' : 'low',
+        sample_count: setCount,
+      });
+    }
+  }
+  return points.slice(-10);
+}
