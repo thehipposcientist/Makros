@@ -2183,9 +2183,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           detail: 'waiting',
         };
         if (alive) setWatchSyncStatus({
-          ...fallback,
-          ...(stored ?? {}),
-          installed: stored?.installed ?? fallback.installed,
+          surface: stored?.surface ?? fallback.surface,
+          ok: stored?.ok ?? fallback.ok,
+          atMs: stored?.atMs ?? fallback.atMs,
+          detail: stored?.detail ?? fallback.detail,
+          reachable: fallback.reachable,
+          paired: fallback.paired,
+          installed: fallback.installed,
           available,
         });
       } catch {

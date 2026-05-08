@@ -3402,10 +3402,24 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
             // 1RMs against intermediate-trainee bodyweight ratios across
             // squat / bench / deadlift / OHP / row / front squat / RDL /
             // lat pulldown, then averages. Tap → per-lift breakdown.
+            //
+            // Bodyweight resolution: prefer the most recently logged
+            // weight entry (the user's actual current weight) and fall
+            // back to the onboarding/profile snapshot. Profile snapshot
+            // can drift as the user gains/loses; logged entries are
+            // truth.
+            const latestLoggedWeight = weightEntries.length > 0
+              ? weightEntries[weightEntries.length - 1]?.weightLbs
+              : null;
+            const userWeightLbs = (Number.isFinite(latestLoggedWeight) && (latestLoggedWeight ?? 0) > 0
+              ? latestLoggedWeight
+              : null)
+              ?? userProfile.physicalStats?.weightLbs
+              ?? null;
             const strength = computeStrengthScore({
               bulkE1RMMap,
               showcase: oneRepMaxLifts,
-              bodyweightLbs: weightLbs,
+              bodyweightLbs: userWeightLbs,
             });
             const tileColor =
               strength.band === 'elite' ? '#22C55E'
@@ -3440,7 +3454,7 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                     </Text>
                     <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 4 }} numberOfLines={2}>
                       {empty
-                        ? (weightLbs && weightLbs > 0
+                        ? (userWeightLbs && userWeightLbs > 0
                           ? 'Log a few key compound lifts to unlock your score.'
                           : 'Set your bodyweight in Settings to unlock your score.')
                         : `${strength.liftsCovered}/${strength.liftsTotal} lifts · tap for breakdown`}
@@ -6902,10 +6916,20 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
           />
           <View style={styles.quickDetailSheet}>
             {(() => {
+              // Same bodyweight resolution as the tile — prefer most
+              // recent logged entry, fall back to profile snapshot.
+              const latestLoggedWeight = weightEntries.length > 0
+                ? weightEntries[weightEntries.length - 1]?.weightLbs
+                : null;
+              const detailWeightLbs = (Number.isFinite(latestLoggedWeight) && (latestLoggedWeight ?? 0) > 0
+                ? latestLoggedWeight
+                : null)
+                ?? userProfile.physicalStats?.weightLbs
+                ?? null;
               const detail = computeStrengthScore({
                 bulkE1RMMap,
                 showcase: oneRepMaxLifts,
-                bodyweightLbs: weightLbs,
+                bodyweightLbs: detailWeightLbs,
               });
               const headerColor =
                 detail.band === 'elite' ? '#22C55E'
@@ -6935,10 +6959,10 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                   <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
                     <Text style={styles.quickDetailBody}>
                       {detail.band === 'unknown'
-                        ? (weightLbs && weightLbs > 0
+                        ? (detailWeightLbs && detailWeightLbs > 0
                           ? 'Log a few key compound lifts (squat, bench, deadlift, OHP, row) and your score will appear here.'
                           : 'Set your bodyweight in Settings — strength is scored relative to it.')
-                        : `Each lift is scored as the ratio of your estimated 1RM to a typical "intermediate trainee" target for your bodyweight (${weightLbs ? Math.round(weightLbs) : 0} lb), capped at 130. The overall score is the average of every lift you've logged.`}
+                        : `Each lift is scored as the ratio of your estimated 1RM to a typical "intermediate trainee" target for your bodyweight (${detailWeightLbs ? Math.round(detailWeightLbs) : 0} lb), capped at 130. The overall score is the average of every lift you've logged.`}
                     </Text>
                     {detail.rows.length > 0 && (
                       <View style={styles.quickDetailSection}>

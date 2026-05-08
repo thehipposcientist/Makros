@@ -330,7 +330,9 @@ export const WatchBridge = {
     cb: (info: { reachable: boolean; paired: boolean; installed: boolean }) => void,
   ): () => void {
     if (!native) return () => {};
+    let removed = false;
     const handler = (evt: { reachable?: boolean; paired?: boolean; installed?: boolean }) => {
+      if (removed) return;
       cb({
         reachable: !!evt?.reachable,
         paired: !!evt?.paired,
@@ -338,7 +340,18 @@ export const WatchBridge = {
       });
     };
     const sub = native.addListener('reachabilityChanged', handler);
+    const emitCurrent = () => {
+      try {
+        handler({
+          reachable: !!native?.isReachable?.(),
+          paired: !!native?.isPaired?.(),
+          installed: !!native?.isWatchAppInstalled?.(),
+        });
+      } catch {}
+    };
+    setTimeout(emitCurrent, 0);
     return () => {
+      removed = true;
       try { sub?.remove?.(); } catch { /* no-op */ }
     };
   },
