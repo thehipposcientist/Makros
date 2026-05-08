@@ -72,6 +72,7 @@ import { getContrastingTextColor, getTheme, radius } from '../constants/theme';
 import * as Notifications from 'expo-notifications';
 import SearchInput from '../components/SearchInput';
 import FormVideoModal from '../components/FormVideoModal';
+import EquipmentImageCard from '../components/EquipmentImageCard';
 import StartCountdownOverlay from '../components/StartCountdownOverlay';
 import WorkoutTimerModal, { TimerResult } from '../components/WorkoutTimerModal';
 import { isWatchReachable } from '../utils/watchSync';
@@ -5483,10 +5484,16 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
   }, [activeExIdx, authToken, coachInput, exercises]);
 
   const swapTargetExerciseName = swapTargetIdx != null ? exercises[swapTargetIdx]?.name : null;
+  const exerciseLibraryByName = useMemo(() => {
+    const map = new Map<string, ExerciseLibraryItem>();
+    for (const item of exerciseLibrary) {
+      map.set(item.name.toLowerCase(), item);
+    }
+    return map;
+  }, [exerciseLibrary]);
   const currentWorkoutAddContext = useMemo<ExerciseLibraryItem[]>(() => {
-    const libraryByName = new Map(exerciseLibrary.map(item => [item.name.toLowerCase(), item]));
     return exercises.map(ex => {
-      const libraryItem = libraryByName.get(ex.name.toLowerCase());
+      const libraryItem = exerciseLibraryByName.get(ex.name.toLowerCase());
       return {
         name: ex.name,
         equipment: ex.equipment ?? libraryItem?.equipment ?? null,
@@ -5497,7 +5504,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         movement_pattern: libraryItem?.movement_pattern ?? null,
       };
     });
-  }, [exerciseLibrary, exercises]);
+  }, [exerciseLibraryByName, exercises]);
   const filteredExerciseLibrary: SmartSwapItem[] = useMemo(() => {
     const q = deferredExerciseSearch.trim().toLowerCase();
     if (swapTargetIdx != null) {
@@ -6206,6 +6213,24 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                     activeOpacity={0.7}>
                     <Text style={styles.formVideoLinkText}>▶ Form Video</Text>
                   </TouchableOpacity>
+
+                  {(() => {
+                    const libraryItem = exerciseLibraryByName.get(ex.name.toLowerCase());
+                    const gear = libraryItem?.gear?.[0] ?? null;
+                    const fallbackEquipment = formatEquipmentLabel(ex.equipment);
+                    const equipment = gear ?? (fallbackEquipment ? { name: fallbackEquipment } : null);
+                    if (!equipment) return null;
+                    return (
+                      <EquipmentImageCard
+                        equipment={equipment}
+                        label={equipment.name}
+                        subtitle="Equipment setup"
+                        themeColors={themeColors}
+                        accentColor={workoutPalette.strong}
+                        compact
+                      />
+                    );
+                  })()}
 
                   {/* ── RIR prompt — shown after an over-target set ── */}
                   {!guide && pendingRir && pendingRir.exIdx === i && (

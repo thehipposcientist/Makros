@@ -28,8 +28,10 @@ export interface FoodCategoryGroup {
 }
 
 export interface EquipmentItem {
+  slug?: string;
   name: string;
   icon: string;
+  category?: string;
   aliases?: string[];
 }
 
@@ -160,7 +162,7 @@ export function useMetaData(): MetaData {
         const equipByCat: Record<string, EquipmentItem[]> = {};
         for (const e of rawEquipment as any[]) {
           if (!equipByCat[e.category]) equipByCat[e.category] = [];
-          equipByCat[e.category].push({ name: e.name, icon: e.icon, aliases: e.aliases ?? [] });
+          equipByCat[e.category].push({ slug: e.slug, name: e.name, icon: e.icon, category: e.category, aliases: e.aliases ?? [] });
         }
         const categoryIcons: Record<string, string> = {
           'Bodyweight & Home': 'home-outline',

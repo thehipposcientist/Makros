@@ -188,6 +188,12 @@ import PlanSwapExerciseModal from '../components/PlanSwapExerciseModal';
 import { exerciseEquipmentLabel } from '../utils/swapScoring';
 import ExerciseVideoCard from '../components/ExerciseVideoCard';
 import { exerciseThumbSmall, primeThumbnailIndex } from '../utils/exerciseThumb';
+import EquipmentImageCard from '../components/EquipmentImageCard';
+import {
+  equipmentMatchesExercise,
+  matchesEquipmentSearch,
+  type EquipmentVisualInput,
+} from '../utils/equipmentImages';
 import { configureExpandAnimation } from '../utils/layoutAnim';
 import { chooseSocialWorkoutFeedItem, compactSocialSetSummaries, formatSocialDistance, formatSocialDuration, socialWorkoutDateKey } from '../utils/socialWorkoutDetails';
 import AnimatedCollapsible from '../components/AnimatedCollapsible';
@@ -390,6 +396,16 @@ interface ExerciseLibraryItem {
   aliases?: string[] | null;
 }
 
+interface EquipmentLibraryItem {
+  slug?: string;
+  name: string;
+  icon?: string;
+  category?: string;
+  aliases?: string[];
+  exerciseCount?: number;
+  planCount?: number;
+}
+
 const ExerciseLibraryRow = React.memo(function ExerciseLibraryRow({
   item,
   themeColors,
@@ -454,6 +470,17 @@ const ExerciseLibraryRow = React.memo(function ExerciseLibraryRow({
     </TouchableOpacity>
   );
 });
+
+function libraryEquipmentKey(item: EquipmentLibraryItem | EquipmentVisualInput): string {
+  if (!item) return '';
+  if (typeof item === 'string') return humanizeToken(item).toLowerCase();
+  return String(item.slug || item.name || '').toLowerCase();
+}
+
+function dayLabelForLibrary(day: WorkoutDay, index: number): string {
+  const raw = (day as any).day || (day as any).dayLabel || (day as any).date;
+  return raw ? String(raw) : `Day ${index + 1}`;
+}
 
 const DAY_NAMES   = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -2466,8 +2493,12 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   const exerciseLibraryLoadPromiseRef = useRef<Promise<ExerciseLibraryItem[]> | null>(null);
   const ensureExerciseLibraryRef = useRef<(() => Promise<ExerciseLibraryItem[]>) | null>(null);
   const [selectedExercise, setSelectedExercise] = useState<ExerciseLibraryItem | null>(null);
+  const [libraryMode, setLibraryMode] = useState<'exercises' | 'equipment'>('exercises');
+  const [selectedEquipment, setSelectedEquipment] = useState<EquipmentLibraryItem | null>(null);
   const [exerciseSearch, setExerciseSearch] = useState('');
+  const [equipmentSearch, setEquipmentSearch] = useState('');
   const deferredExerciseSearch = useDeferredValue(exerciseSearch);
+  const deferredEquipmentSearch = useDeferredValue(equipmentSearch);
   // AI exercise search state — mirrors the food search flow. Results live
   // next to the local library list so users can fall through to AI when
   // the local library doesn't have what they want.
@@ -5354,6 +5385,134 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     return matchesSearch && matchesMuscle && matchesEquipment;
   }), [exerciseLibrary, deferredExerciseSearch, exerciseMuscleFilter, exerciseEquipmentFilter]);
 
+  const exerciseLibraryByName = useMemo(() => {
+    const map = new Map<string, ExerciseLibraryItem>();
+    for (const item of exerciseLibrary) {
+      map.set(item.name.toLowerCase(), item);
+    }
+    return map;
+  }, [exerciseLibrary]);
+
+  const equipmentLibrary = useMemo<EquipmentLibraryItem[]>(() => {
+    const byKey = new Map<string, EquipmentLibraryItem>();
+    const upsert = (item: EquipmentLibraryItem) => {
+      const name = item.name?.trim();
+      if (!name) return;
+      const key = libraryEquipmentKey(item);
+      if (!key) return;
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, {
+          ...item,
+          aliases: item.aliases ?? [],
+        });
+        return;
+      }
+      byKey.set(key, {
+        ...existing,
+        ...item,
+        aliases: Array.from(new Set([...(existing.aliases ?? []), ...(item.aliases ?? [])])),
+      });
+    };
+
+    for (const group of meta.equipmentCategories ?? []) {
+      for (const item of group.items ?? []) {
+        upsert({
+          slug: item.slug,
+          name: item.name,
+          icon: item.icon,
+          category: item.category ?? group.label,
+          aliases: item.aliases ?? [],
+        });
+      }
+    }
+
+    for (const exercise of exerciseLibrary) {
+      for (const gear of exercise.gear ?? []) {
+        upsert({
+          slug: gear.slug,
+          name: gear.name,
+          category: gear.category,
+        });
+      }
+    }
+
+    return Array.from(byKey.values())
+      .map(item => {
+        const exerciseCount = exerciseLibrary.filter(ex => equipmentMatchesExercise(item, ex)).length;
+        const planCount = (workoutPlan?.days ?? []).reduce((total, day) => {
+          const matches = (day.exercises ?? []).filter(ex => {
+            const libraryItem = exerciseLibraryByName.get(String(ex.name ?? '').toLowerCase());
+            return equipmentMatchesExercise(item, {
+              name: ex.name,
+              equipment: (ex as any).equipment ?? libraryItem?.equipment ?? null,
+              gear: libraryItem?.gear ?? null,
+            });
+          }).length;
+          return total + matches;
+        }, 0);
+        return { ...item, exerciseCount, planCount };
+      })
+      .sort((a, b) => {
+        const cat = String(a.category ?? '').localeCompare(String(b.category ?? ''));
+        return cat || a.name.localeCompare(b.name);
+      });
+  }, [exerciseLibrary, exerciseLibraryByName, meta.equipmentCategories, workoutPlan?.days]);
+
+  const filteredEquipmentLibrary = useMemo(
+    () => equipmentLibrary.filter(item => matchesEquipmentSearch(item, deferredEquipmentSearch)),
+    [deferredEquipmentSearch, equipmentLibrary],
+  );
+
+  const selectedEquipmentExercises = useMemo(() => {
+    if (!selectedEquipment) return [] as ExerciseLibraryItem[];
+    return exerciseLibrary
+      .filter(ex => equipmentMatchesExercise(selectedEquipment, ex))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [exerciseLibrary, selectedEquipment]);
+
+  const selectedEquipmentPlanUsage = useMemo(() => {
+    if (!selectedEquipment || !workoutPlan?.days?.length) return [] as Array<{ dayLabel: string; focus: string; exercise: ExerciseLibraryItem }>;
+    const usage: Array<{ dayLabel: string; focus: string; exercise: ExerciseLibraryItem }> = [];
+    workoutPlan.days.forEach((day, dayIndex) => {
+      for (const ex of day.exercises ?? []) {
+        const libraryItem = exerciseLibraryByName.get(String(ex.name ?? '').toLowerCase());
+        const matchInput = {
+          name: ex.name,
+          equipment: (ex as any).equipment ?? libraryItem?.equipment ?? null,
+          gear: libraryItem?.gear ?? null,
+        };
+        if (!equipmentMatchesExercise(selectedEquipment, matchInput)) continue;
+        usage.push({
+          dayLabel: dayLabelForLibrary(day, dayIndex),
+          focus: day.focus ?? 'Workout',
+          exercise: {
+            ...(libraryItem ?? {}),
+            name: ex.name,
+            equipment: (ex as any).equipment ?? libraryItem?.equipment,
+            primary_muscle: (ex as any).primary_muscle ?? libraryItem?.primary_muscle,
+            secondary_muscles: (ex as any).secondary_muscles ?? libraryItem?.secondary_muscles,
+            gear: libraryItem?.gear,
+          } as ExerciseLibraryItem,
+        });
+      }
+    });
+    return usage;
+  }, [exerciseLibraryByName, selectedEquipment, workoutPlan?.days]);
+
+  const selectedExerciseEquipment = useMemo(() => {
+    if (!selectedExercise) return [] as EquipmentLibraryItem[];
+    const direct = (selectedExercise.gear ?? []).map(gear => {
+      const found = equipmentLibrary.find(item => (
+        (gear.slug && item.slug === gear.slug)
+        || item.name.toLowerCase() === gear.name.toLowerCase()
+      ));
+      return found ?? { slug: gear.slug, name: gear.name, category: gear.category };
+    });
+    if (direct.length > 0) return direct;
+    return equipmentLibrary.filter(item => equipmentMatchesExercise(item, selectedExercise)).slice(0, 4);
+  }, [equipmentLibrary, selectedExercise]);
+
   const summarizeTrainerUpdate = useCallback((
     prevWorkout: WorkoutPlan | null,
     nextWorkout: WorkoutPlan | null,
@@ -6954,7 +7113,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     [],
   );
   const openLibraryExercise = useCallback((item: ExerciseLibraryItem) => {
+    setSelectedEquipment(null);
     setSelectedExercise(item);
+  }, []);
+  const openLibraryEquipment = useCallback((item: EquipmentLibraryItem) => {
+    setSelectedExercise(null);
+    setSelectedEquipment(item);
+    setLibraryMode('equipment');
   }, []);
   const playLibraryExerciseVideo = useCallback((item: ExerciseLibraryItem) => {
     openExerciseVideo(item.name, {
@@ -6973,6 +7138,20 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     />
   ), [openLibraryExercise, playLibraryExerciseVideo, themeColors, workoutPalette]);
   const exerciseLibraryKeyExtractor = useCallback((item: ExerciseLibraryItem) => String(item.id ?? item.name), []);
+  const renderEquipmentLibraryItem = useCallback(({ item }: { item: EquipmentLibraryItem }) => (
+    <View style={{ marginBottom: 8 }}>
+      <EquipmentImageCard
+        equipment={item}
+        label={item.name}
+        subtitle={`${item.category ?? 'Equipment'} · ${item.exerciseCount ?? 0} exercise${item.exerciseCount === 1 ? '' : 's'}${(item.planCount ?? 0) > 0 ? ` · ${item.planCount} in plan` : ''}`}
+        themeColors={themeColors}
+        accentColor={workoutPalette.strong}
+        compact
+        onPress={() => openLibraryEquipment(item)}
+      />
+    </View>
+  ), [openLibraryEquipment, themeColors, workoutPalette.strong]);
+  const equipmentLibraryKeyExtractor = useCallback((item: EquipmentLibraryItem) => String(item.slug ?? item.name), []);
 
   // MUST be called BEFORE any conditional return — hooks have to fire
   // in the same order every render. The previous version sat below
@@ -7481,10 +7660,10 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           end={{ x: 0, y: 1 }}
           style={[styles.fixedSubTabBar, { top: insets.top + 68, borderBottomColor: 'transparent' }]}>
           <View style={[styles.segmentedWrap, { backgroundColor: themeColors.surface, borderColor: isLightTheme ? themeColors.border + '88' : themeColors.border, borderWidth: isLightTheme ? StyleSheet.hairlineWidth : 1 }]}>
-            <SubTabBtn testID="workout-subtab-plan" label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
-            <SubTabBtn testID="workout-subtab-library" label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setSelectedExercise(null); setShowExerciseLibrary(true); ensureExerciseLibrary().catch(() => {}); }} />
-            <SubTabBtn testID="workout-subtab-settings" label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); }} />
-            <SubTabBtn testID="workout-subtab-history" label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); requestAnimationFrame(() => { loadWorkoutHistoryBundle().then(({ history, summaries }) => { setWorkoutHistoryList(history); setWorkoutHistorySummaries(summaries); }).catch(() => {}); }); }} />
+            <SubTabBtn testID="workout-subtab-plan" label="Plan"     active={workoutSubTab === 'plan'}      tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('plan'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedEquipment(null); }} />
+            <SubTabBtn testID="workout-subtab-library" label="Library"  active={workoutSubTab === 'library'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('library'); setSelectedExercise(null); setSelectedEquipment(null); setShowExerciseLibrary(true); ensureExerciseLibrary().catch(() => {}); }} />
+            <SubTabBtn testID="workout-subtab-settings" label="Settings" active={workoutSubTab === 'equipment'} tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('equipment'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedEquipment(null); }} />
+            <SubTabBtn testID="workout-subtab-history" label="History"  active={workoutSubTab === 'history'}   tint={workoutPalette.strong} mutedColor={themeColors.textSecondary} onPress={() => { setWorkoutSubTab('history'); setShowExerciseLibrary(false); setSelectedExercise(null); setSelectedEquipment(null); requestAnimationFrame(() => { loadWorkoutHistoryBundle().then(({ history, summaries }) => { setWorkoutHistoryList(history); setWorkoutHistorySummaries(summaries); }).catch(() => {}); }); }} />
           </View>
         </LinearGradient>
       )}
@@ -11135,13 +11314,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
           <View style={[styles.librarySheet, { backgroundColor: themeColors.surface }]}>
 
             {/* Back header — only when drilled into a detail view. */}
-            {selectedExercise && (
+            {(selectedExercise || selectedEquipment) && (
               <View style={styles.libraryHeader}>
-                <TouchableOpacity onPress={() => setSelectedExercise(null)}>
+                <TouchableOpacity onPress={() => { setSelectedExercise(null); setSelectedEquipment(null); }}>
                   <Text style={[styles.libraryClose, { color: themeColors.primary }]}>← Back</Text>
                 </TouchableOpacity>
                 <Text style={[styles.libraryTitle, { color: themeColors.textPrimary, marginLeft: 12, flex: 1 }]}>
-                  {selectedExercise.name}
+                  {selectedExercise?.name ?? selectedEquipment?.name}
                 </Text>
               </View>
             )}
@@ -11276,6 +11455,33 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                         </View>
                       </View>
 
+                      {selectedExerciseEquipment.length > 0 && (
+                        <CollapsibleSection
+                          title="Equipment"
+                          defaultExpanded
+                          surfaceColor={themeColors.surfaceRaised}
+                          borderColor={themeColors.border}
+                          textPrimary={themeColors.textPrimary}
+                          textMuted={themeColors.textMuted}
+                          accentColor={workoutPalette.strong}
+                        >
+                          <View style={{ gap: 8 }}>
+                            {selectedExerciseEquipment.map(item => (
+                              <EquipmentImageCard
+                                key={item.slug ?? item.name}
+                                equipment={item}
+                                label={item.name}
+                                subtitle={item.category ?? 'Required setup'}
+                                themeColors={themeColors}
+                                accentColor={workoutPalette.strong}
+                                compact
+                                onPress={() => openLibraryEquipment(item)}
+                              />
+                            ))}
+                          </View>
+                        </CollapsibleSection>
+                      )}
+
                       {/* How To Do It — single collapsible covering the
                           three previously-separate sections (How To
                           Perform It / Setup / Movement Cue) which were
@@ -11366,9 +11572,164 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                 })()}
               </ScrollView>
 
+            /* ── EQUIPMENT DETAIL ────────────────────────────────────────────── */
+            ) : selectedEquipment ? (
+              <ScrollView contentContainerStyle={styles.detailContent}>
+                <EquipmentImageCard
+                  equipment={selectedEquipment}
+                  label={selectedEquipment.name}
+                  subtitle={[
+                    selectedEquipment.category,
+                    `${selectedEquipmentExercises.length} exercise${selectedEquipmentExercises.length === 1 ? '' : 's'}`,
+                    selectedEquipmentPlanUsage.length > 0 ? `${selectedEquipmentPlanUsage.length} in current plan` : null,
+                  ].filter(Boolean).join(' · ')}
+                  themeColors={themeColors}
+                  accentColor={workoutPalette.strong}
+                  hero
+                />
+
+                {selectedEquipmentPlanUsage.length > 0 && (
+                  <CollapsibleSection
+                    title="In Current Plan"
+                    defaultExpanded
+                    surfaceColor={themeColors.surfaceRaised}
+                    borderColor={themeColors.border}
+                    textPrimary={themeColors.textPrimary}
+                    textMuted={themeColors.textMuted}
+                    accentColor={workoutPalette.strong}
+                  >
+                    <View style={{ gap: 8 }}>
+                      {selectedEquipmentPlanUsage.slice(0, 8).map((usage, idx) => (
+                        <TouchableOpacity
+                          key={`${usage.dayLabel}-${usage.exercise.name}-${idx}`}
+                          activeOpacity={0.82}
+                          onPress={() => openLibraryExercise(usage.exercise)}
+                          style={{ flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 6 }}
+                        >
+                          <View style={{ width: 34, height: 34, borderRadius: 10, backgroundColor: workoutPalette.soft, alignItems: 'center', justifyContent: 'center' }}>
+                            <Ionicons name="calendar-outline" size={16} color={workoutPalette.strong} />
+                          </View>
+                          <View style={{ flex: 1, minWidth: 0 }}>
+                            <Text style={{ fontSize: 13, fontWeight: '800', color: themeColors.textPrimary }} numberOfLines={1}>
+                              {usage.exercise.name}
+                            </Text>
+                            <Text style={{ fontSize: 11, color: themeColors.textMuted }} numberOfLines={1}>
+                              {usage.dayLabel} · {usage.focus}
+                            </Text>
+                          </View>
+                          <Ionicons name="chevron-forward" size={15} color={themeColors.textMuted} />
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  </CollapsibleSection>
+                )}
+
+                <CollapsibleSection
+                  title="Exercises"
+                  defaultExpanded
+                  surfaceColor={themeColors.surfaceRaised}
+                  borderColor={themeColors.border}
+                  textPrimary={themeColors.textPrimary}
+                  textMuted={themeColors.textMuted}
+                  accentColor={workoutPalette.strong}
+                >
+                  {selectedEquipmentExercises.length > 0 ? (
+                    <View style={{ gap: 8 }}>
+                      {selectedEquipmentExercises.slice(0, 30).map(item => (
+                        <ExerciseLibraryRow
+                          key={String(item.id ?? item.name)}
+                          item={item}
+                          themeColors={themeColors}
+                          workoutPalette={workoutPalette}
+                          onOpen={openLibraryExercise}
+                          onPlayVideo={playLibraryExerciseVideo}
+                        />
+                      ))}
+                    </View>
+                  ) : (
+                    <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
+                      No exercises are currently tied to this equipment.
+                    </Text>
+                  )}
+                </CollapsibleSection>
+
+                {selectedEquipment.aliases?.length ? (
+                  <CollapsibleSection
+                    title="Also Called"
+                    surfaceColor={themeColors.surfaceRaised}
+                    borderColor={themeColors.border}
+                    textPrimary={themeColors.textPrimary}
+                    textMuted={themeColors.textMuted}
+                  >
+                    <Text style={[styles.detailSectionText, { color: themeColors.textSecondary }]}>
+                      {selectedEquipment.aliases.join(' · ')}
+                    </Text>
+                  </CollapsibleSection>
+                ) : null}
+              </ScrollView>
+
             /* ── EXERCISES LIST ──────────────────────────────────────────────── */
             ) : (
-              exerciseLibraryLoading ? (
+              <>
+                <View style={[styles.libTabBar, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border }]}>
+                  <TouchableOpacity
+                    style={[styles.libTab, libraryMode === 'exercises' && { backgroundColor: workoutPalette.strong + '16', borderBottomColor: workoutPalette.strong }]}
+                    onPress={() => setLibraryMode('exercises')}
+                    accessibilityRole="button"
+                    accessibilityLabel="Show exercise library">
+                    <Text style={[styles.libTabText, { color: libraryMode === 'exercises' ? workoutPalette.strong : themeColors.textSecondary }]}>Exercises</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.libTab, libraryMode === 'equipment' && { backgroundColor: workoutPalette.strong + '16', borderBottomColor: workoutPalette.strong }]}
+                    onPress={() => setLibraryMode('equipment')}
+                    accessibilityRole="button"
+                    accessibilityLabel="Show equipment library">
+                    <Text style={[styles.libTabText, { color: libraryMode === 'equipment' ? workoutPalette.strong : themeColors.textSecondary }]}>Equipment</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {libraryMode === 'equipment' ? (
+                  <FlatList
+                    style={styles.libraryVirtualList}
+                    contentContainerStyle={styles.libraryList}
+                    data={filteredEquipmentLibrary}
+                    keyExtractor={equipmentLibraryKeyExtractor}
+                    renderItem={renderEquipmentLibraryItem}
+                    keyboardShouldPersistTaps="handled"
+                    initialNumToRender={14}
+                    maxToRenderPerBatch={10}
+                    windowSize={7}
+                    removeClippedSubviews={Platform.OS !== 'web'}
+                    ListHeaderComponent={(
+                      <>
+                        <SearchInput
+                          value={equipmentSearch}
+                          onChangeText={setEquipmentSearch}
+                          placeholder="Search equipment or machine names"
+                          placeholderTextColor={themeColors.textMuted}
+                          style={[styles.librarySearchInput, { backgroundColor: themeColors.background, borderColor: themeColors.border, color: themeColors.textPrimary }]}
+                          returnKeyType="search"
+                        />
+                        <View style={styles.libraryResultRow}>
+                          <Text style={[styles.libraryResultText, { color: themeColors.textMuted }]}>
+                            {filteredEquipmentLibrary.length} item{filteredEquipmentLibrary.length === 1 ? '' : 's'}
+                          </Text>
+                          {equipmentSearch ? (
+                            <TouchableOpacity
+                              accessibilityRole="button"
+                              accessibilityLabel="Clear equipment search"
+                              onPress={() => setEquipmentSearch('')}>
+                              <Text style={[styles.libraryResultClear, { color: workoutPalette.strong }]}>Clear</Text>
+                            </TouchableOpacity>
+                          ) : null}
+                        </View>
+                      </>
+                    )}
+                    ListEmptyComponent={(
+                      <Text style={[styles.libraryEmptyText, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textMuted }]}>No equipment matches the current search.</Text>
+                    )}
+                  />
+                ) : exerciseLibraryLoading ? (
                 <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} />
               ) : (
                 <FlatList
@@ -11521,7 +11882,8 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
                     <Text style={[styles.libraryEmptyText, { backgroundColor: themeColors.surfaceRaised, borderColor: themeColors.border, color: themeColors.textMuted }]}>No exercises match the current search and filters.</Text>
                   )}
                 />
-              )
+              )}
+              </>
             )}
           </View>
         </View>
