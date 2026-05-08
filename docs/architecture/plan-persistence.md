@@ -97,7 +97,7 @@ Three functions, each matching a domain by substring pattern:
 - `clearAllPlanCache()` — both domains.
 
 `PRESERVED_KEYS` safelist: auth tokens, userProfile, weightEntries,
-workoutHistory, themePreference, metaData_v1.
+workoutHistory, themePreference, metaData_v1, metaData_v4.
 
 `applyPlanResult` calls the appropriate clear **before** writing the new
 plan, so a workout-only regen doesn't wipe meal state.

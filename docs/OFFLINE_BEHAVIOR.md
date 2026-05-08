@@ -49,7 +49,7 @@ The active week is server-authoritative (`PlanWeek` + 7 dated `PlanDay` rows), a
 The old fresh-day-on-open call is gone. A PlanWeek is stable for its full 7-day window unless the user explicitly edits a current/future day through Change Focus, Swap, Skip/Unskip, or a template/manual patch.
 
 ### Exercise Library
-Fetched from `/meta/exercises` and cached for 24h in `exercise_library_cache_v1` (AsyncStorage). After first load, the library works offline for a full day.
+Fetched from `/meta/exercises` and cached for 24h in `exercise_library_cache_v4` (AsyncStorage). After first load, the library works offline for a full day.
 
 ### Exercise Images
 Cached in `exercise_image_map_v1` (AsyncStorage). Image URLs are stored locally; the actual images are cached by React Native's built-in HTTP image cache. After first render, images show offline.

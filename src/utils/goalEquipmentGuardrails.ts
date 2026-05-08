@@ -32,7 +32,8 @@ const lowerStrengthNeedles = [
   'dumbbell', 'barbell', 'kettlebell', 'trap bar', 'weight plate', 'cable',
   'resistance band', 'mini band', 'weighted vest', 'medicine ball', 'sandbag',
   'sled', 'smith', 'leg press', 'leg extension', 'leg curl', 'hack squat',
-  'hip abduction', 'hip adduction', 'belt squat', 'hip thrust', 'calf raise',
+  'hip abduction', 'hip adduction', 'belt squat', 'v-squat', 'v squat',
+  'hip thrust', 'glute kickback', 'calf raise',
 ];
 
 const cardioNeedles = [

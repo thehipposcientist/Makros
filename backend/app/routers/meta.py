@@ -4,7 +4,7 @@ from sqlmodel import Session, select
 from app.database import get_session
 from app.enums import GoalType, GoalPace, Gender, MealType, EquipmentType, MuscleGroup, FoodCategory, FoodSource
 from app.models import Exercise, Food, Equipment, ExerciseEquipment, GoalOption, PaceOption
-from app.seed_exercises_data import RETIRED_EXERCISE_SLUGS
+from app.seed_exercises_data import RETIRED_EXERCISE_SLUGS, SEED_EQUIPMENT, SEED_EXERCISES
 
 router = APIRouter(prefix="/meta", tags=["meta"])
 
@@ -68,10 +68,16 @@ def list_exercises(
                 "required": link.required,
             })
 
+    seed_aliases_by_slug = {
+        row.get("slug"): row.get("aliases", [])
+        for row in SEED_EXERCISES
+        if row.get("slug")
+    }
     out: list[dict] = []
     for e in exercises:
         d = e.model_dump() if hasattr(e, "model_dump") else e.dict()
         d["gear"] = gear_by_exercise.get(e.id or -1, [])
+        d["aliases"] = seed_aliases_by_slug.get(e.slug, [])
         # Keep `equipment` (the bucket) as-is for backwards compat. The
         # client reads `gear` first and only falls back to bucket.
         out.append(d)
@@ -201,7 +207,17 @@ def list_equipment(category: str | None = None, db: Session = Depends(get_sessio
     if category:
         query = query.where(Equipment.category == category)
     equipment = db.exec(query.order_by(Equipment.category, Equipment.name)).all()
-    return equipment
+    aliases_by_slug = {
+        row.get("slug"): row.get("aliases", [])
+        for row in SEED_EQUIPMENT
+        if row.get("slug")
+    }
+    out: list[dict] = []
+    for e in equipment:
+        d = e.model_dump() if hasattr(e, "model_dump") else e.dict()
+        d["aliases"] = aliases_by_slug.get(e.slug, [])
+        out.append(d)
+    return out
 
 
 @router.get("/goals")

@@ -40,14 +40,39 @@ _EQUIPMENT_NAME_ALIASES = {
 }
 
 
+def _normalize_equipment_key(raw: str) -> str:
+    return (raw or "").lower().strip()
+
+
+def equipment_name_slug_index() -> dict[str, str]:
+    """Map display names and seed aliases to canonical equipment slugs."""
+    index: dict[str, str] = {}
+    for entry in SEED_EQUIPMENT:
+        slug = entry.get("slug")
+        if not slug:
+            continue
+        names = [entry.get("name", ""), *(entry.get("aliases", []) or [])]
+        for name in names:
+            key = _normalize_equipment_key(str(name))
+            if key:
+                index[key] = slug
+                index[key.replace("-", "_").replace(" ", "_")] = slug
+    return index
+
+
 def resolve_equipment_entry(raw: str, name_to_slug: dict[str, str], valid_slugs: set[str]) -> str | None:
-    lowered = (raw or "").lower().strip()
+    lowered = _normalize_equipment_key(raw)
     slugish = lowered.replace("-", "_").replace(" ", "_")
     if raw in valid_slugs:
         return raw
     if slugish in valid_slugs:
         return slugish
-    return name_to_slug.get(lowered) or _EQUIPMENT_NAME_ALIASES.get(lowered) or _EQUIPMENT_NAME_ALIASES.get(slugish)
+    return (
+        name_to_slug.get(lowered)
+        or name_to_slug.get(slugish)
+        or _EQUIPMENT_NAME_ALIASES.get(lowered)
+        or _EQUIPMENT_NAME_ALIASES.get(slugish)
+    )
 
 
 def expand_owned_equipment_aliases(owned: set[str]) -> set[str]:
@@ -63,7 +88,7 @@ def expand_owned_equipment_aliases(owned: set[str]) -> set[str]:
 
 
 def resolve_owned_equipment_slugs(equipment: list[str] | None) -> set[str]:
-    name_to_slug = {e["name"].lower(): e["slug"] for e in SEED_EQUIPMENT}
+    name_to_slug = equipment_name_slug_index()
     valid_slugs = {e["slug"] for e in SEED_EQUIPMENT}
     owned: set[str] = set()
     for raw in equipment or []:

@@ -29,6 +29,7 @@ const tests = [
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/readinessWorkoutAdjustment.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/exerciseDisplay.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/exerciseGuide.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/exerciseSearch.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/oneRepMax.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/goalTrajectory.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/goalForecast.test.ts'],
@@ -40,6 +41,7 @@ const tests = [
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/mealItems.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/workoutLogPayload.test.ts'],
   ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/eatingWindow.test.ts'],
+  ['scripts/run-jestlike-test.mjs', 'src/utils/__tests__/strengthScore.test.ts'],
 ];
 
 for (const args of tests) {

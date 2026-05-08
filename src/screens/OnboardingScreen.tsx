@@ -79,6 +79,39 @@ import {
 
 const logo = require('../../assets/images/thallo-logo-white-transparent-New.png');
 
+function normalizeEquipmentSearchText(value: unknown): string {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function equipmentSearchTokenVariants(token: string): string[] {
+  const variants = new Set([token]);
+  if (token.endsWith('ies') && token.length > 3) variants.add(`${token.slice(0, -3)}y`);
+  if (token.endsWith('es') && token.length > 4) variants.add(token.slice(0, -2));
+  if (token.endsWith('s') && token.length > 3) variants.add(token.slice(0, -1));
+  return [...variants];
+}
+
+function equipmentItemMatchesSearch(item: { name: string; aliases?: string[] }, query: string): boolean {
+  const tokens = normalizeEquipmentSearchText(query).split(' ').filter(Boolean);
+  if (tokens.length === 0) return true;
+  const haystack = normalizeEquipmentSearchText([item.name, ...(item.aliases ?? [])].join(' '));
+  return tokens.every(token => equipmentSearchTokenVariants(token).some(variant => haystack.includes(variant)));
+}
+
+function equipmentItemNames(item: { name: string; aliases?: string[] }): Set<string> {
+  return new Set([item.name, ...(item.aliases ?? [])].map(name => name.toLowerCase()));
+}
+
+function equipmentItemSelected(item: { name: string; aliases?: string[] }, selected: string[]): boolean {
+  const names = equipmentItemNames(item);
+  return selected.some(name => names.has(name.toLowerCase()));
+}
+
 // ─── Step logic ───────────────────────────────────────────────────────────────
 
 type SetupMode = 'quick' | 'custom';
@@ -355,7 +388,7 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
       'Cable machine', 'Leg press', 'Leg extension', 'Leg curl machine',
       'Lat pulldown', 'Chest press machine', 'Seated row machine',
       'Shoulder press machine', 'Hip abduction machine', 'Hip adduction machine',
-      'Smith machine', 'Assisted pull-up machine', 'Pec deck machine',
+      'Smith machine', 'Assisted pull-up / dip machine', 'Pectoral fly / pec deck machine',
       'Treadmill', 'Stationary bike', 'Elliptical',
     ],
   },
@@ -369,8 +402,10 @@ const EQUIPMENT_TEMPLATES: EquipmentTemplate[] = [
       'Cable machine', 'Leg press', 'Leg extension', 'Leg curl machine',
       'Lat pulldown', 'Chest press machine', 'Seated row machine',
       'Shoulder press machine', 'Hip abduction machine', 'Hip adduction machine',
-      'Smith machine', 'Hack squat machine', 'Assisted pull-up machine',
-      'Pec deck machine', 'Preacher curl bench', 'Hyperextension bench',
+      'Smith machine', 'Hack squat machine', 'Assisted pull-up / dip machine',
+      'Pectoral fly / pec deck machine', 'Preacher curl bench', 'Preacher curl machine',
+      'Plate-loaded chest press machine', 'High row machine', 'V-squat machine',
+      'Rotary torso machine', 'Glute kickback machine', 'Hyperextension bench',
       'Standing calf raise machine', 'Seated calf raise machine',
       'Lateral raise machine', 'Belt squat machine', 'Hip thrust machine',
       'Ab wheel', 'Dip bars', 'Pull-up bar', 'Landmine attachment',
@@ -883,10 +918,14 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
   };
 
   // toggleModifier removed — modifiers are gone.
-  const toggleEquipment = (eq: string) => {
+  const toggleEquipmentItem = (item: { name: string; aliases?: string[] }) => {
+    const names = equipmentItemNames(item);
     setSelectedEquipment(prev =>
-      prev.includes(eq) ? prev.filter(e => e !== eq) : [...prev, eq]
+      prev.some(name => names.has(name.toLowerCase()))
+        ? prev.filter(name => !names.has(name.toLowerCase()))
+        : [...prev, item.name]
     );
+    setSelectedEquipTemplate(null);
   };
 
   const applyTemplate = (template: EquipmentTemplate) => {
@@ -2321,7 +2360,7 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
       ) : (
         meta.equipmentCategories.map(category => {
           const filteredItems = equipmentSearch.trim()
-            ? category.items.filter(item => item.name.toLowerCase().includes(equipmentSearch.toLowerCase()))
+            ? category.items.filter(item => equipmentItemMatchesSearch(item, equipmentSearch))
             : category.items;
           if (filteredItems.length === 0) return null;
           return (
@@ -2332,12 +2371,12 @@ export default function OnboardingScreen({ authToken, onComplete, onExit }: Onbo
               </View>
               <View style={styles.foodChips}>
                 {filteredItems.map(item => {
-                  const selected = selectedEquipment.includes(item.name);
+                  const selected = equipmentItemSelected(item, selectedEquipment);
                   return (
                     <TouchableOpacity
                       key={item.name}
                       style={[styles.foodChip, selected && styles.foodChipActive]}
-                      onPress={() => toggleEquipment(item.name)}>
+                      onPress={() => toggleEquipmentItem(item)}>
                       <Text style={[styles.foodChipText, selected && styles.foodChipTextActive]}>
                         {item.name}
                       </Text>

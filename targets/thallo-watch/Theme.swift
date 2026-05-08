@@ -12,6 +12,7 @@ import SwiftUI
 
 struct WatchPalette: Codable, Equatable {
     var themeName: String?
+    var interfaceStyle: String?
     var syncedAtMs: Double?
     var background:    String
     var surface:       String
@@ -26,6 +27,7 @@ struct WatchPalette: Codable, Equatable {
 
     static let appDefault = WatchPalette(
         themeName: "slate",
+        interfaceStyle: "dark",
         syncedAtMs: nil,
         background:    "#182030",
         surface:       "#222C3E",
@@ -69,6 +71,11 @@ extension Color {
 
 final class ThemeStore: ObservableObject {
     @Published var palette: WatchPalette = .midnight
+    private static let lightThemeNames: Set<String> = [
+        "sunrise", "parchment", "linen", "mint",
+        "butter", "seaglass", "lilac", "sky", "porcelain", "citrus", "rose",
+        "paper"
+    ]
 
     var background:    Color { Color(hex: palette.background) }
     var surface:       Color { Color(hex: palette.surface) }
@@ -80,4 +87,15 @@ final class ThemeStore: ObservableObject {
     var success:       Color { Color(hex: palette.success) }
     var warning:       Color { Color(hex: palette.warning) }
     var error:         Color { Color(hex: palette.error) }
+    var preferredColorScheme: ColorScheme {
+        switch palette.interfaceStyle?.lowercased() {
+        case "light":
+            return .light
+        case "dark":
+            return .dark
+        default:
+            guard let themeName = palette.themeName?.lowercased() else { return .dark }
+            return Self.lightThemeNames.contains(themeName) ? .light : .dark
+        }
+    }
 }

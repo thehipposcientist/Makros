@@ -41,6 +41,7 @@ import {
 import { loadMealRoutines, saveMealRoutines } from '../utils/workoutHistory';
 import SearchInput from '../components/SearchInput';
 import { ExerciseLibraryItem, humanizeToken, buildExerciseGuide } from '../utils/exerciseGuide';
+import { matchesExerciseSearch } from '../utils/exerciseSearch';
 import { tierOf } from '../utils/subscription';
 import { groupKitchenFoodsByCategory } from '../utils/foodGrouping';
 import { badgeLabelForSource } from '../utils/customFoodSearch';
@@ -72,6 +73,15 @@ interface EditProfileScreenProps {
   // bottom nav already provides navigation, so the inner header is
   // redundant. Auto-saves on profile changes via the parent's onSave.
   noHeader?: boolean;
+}
+
+function equipmentItemNames(item: { name: string; aliases?: string[] }): Set<string> {
+  return new Set([item.name, ...(item.aliases ?? [])].map(name => name.toLowerCase()));
+}
+
+function equipmentItemSelected(item: { name: string; aliases?: string[] }, selected: string[]): boolean {
+  const names = equipmentItemNames(item);
+  return selected.some(name => names.has(name.toLowerCase()));
 }
 
 interface PhotoMealDraft {
@@ -805,18 +815,20 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   ).sort((a, b) => humanizeToken(a).localeCompare(humanizeToken(b)));
 
   const filteredExerciseLibrary = exerciseLibrary.filter(item => {
-    const search = exerciseSearch.trim().toLowerCase();
-    const matchesSearch = !search || [
-      item.name, item.description ?? '', humanizeToken(item.primary_muscle),
-      humanizeToken(item.equipment), ...(item.secondary_muscles ?? []).map(humanizeToken),
-    ].some(v => v.toLowerCase().includes(search));
+    const matchesSearch = matchesExerciseSearch(item, exerciseSearch);
     const matchesMuscle = exerciseMuscleFilter === 'all' || item.primary_muscle === exerciseMuscleFilter;
     const matchesEquipment = exerciseEquipmentFilter === 'all' || item.equipment === exerciseEquipmentFilter;
     return matchesSearch && matchesMuscle && matchesEquipment;
   });
 
-  const toggleEquipment = (name: string) =>
-    setEquipment(prev => prev.includes(name) ? prev.filter(e => e !== name) : [...prev, name]);
+  const toggleEquipmentItem = (item: { name: string; aliases?: string[] }) => {
+    const names = equipmentItemNames(item);
+    setEquipment(prev =>
+      prev.some(name => names.has(name.toLowerCase()))
+        ? prev.filter(name => !names.has(name.toLowerCase()))
+        : [...prev, item.name]
+    );
+  };
 
   // ── Routine handlers ──────────────────────────────────────────────────────
 
@@ -1577,7 +1589,7 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
   const eventCategories = new Set<string>(['strength', 'cardio_endurance', 'athletic_performance']);
   const showTargetEvent = cat ? eventCategories.has(cat) : false;
   const paceOptions    = pacesForGoal(selectedGoal, meta.paces);
-  const standardEquipNames = new Set(meta.equipmentCategories.flatMap(c => c.items.map(i => i.name)));
+  const standardEquipNames = new Set(meta.equipmentCategories.flatMap(c => c.items.flatMap(i => [i.name, ...(i.aliases ?? [])])));
   const customEquipItems   = equipment.filter(e => !standardEquipNames.has(e));
   const standardFoodNames  = new Set(meta.allFoods.map(f => f.name));
   const selectedFoodNames = foods.filter(f => !f.startsWith('__supp__'));
@@ -2272,12 +2284,12 @@ export default function EditProfileScreen({ authToken, profile, onSave, onCancel
                   </View>
                   <View style={styles.chips}>
                     {category.items.map(item => {
-                      const selected = equipment.includes(item.name);
+                      const selected = equipmentItemSelected(item, equipment);
                       return (
                         <TouchableOpacity
                           key={item.name}
                           style={[styles.chip, selected && styles.chipActive]}
-                          onPress={() => toggleEquipment(item.name)}>
+                          onPress={() => toggleEquipmentItem(item)}>
                           <Text style={[styles.chipText, selected && styles.chipTextActive]}>{item.name}</Text>
                         </TouchableOpacity>
                       );

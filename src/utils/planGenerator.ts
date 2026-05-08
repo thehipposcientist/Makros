@@ -15,6 +15,9 @@ const GYM_MACHINE_ITEMS = new Set([
   'Cable machine', 'Leg press', 'Smith machine', 'Lat pulldown',
   'Chest press machine', 'Seated row machine', 'Leg extension', 'Leg curl',
   'Shoulder press machine', 'Hack squat machine', 'Leg press v-squat', 'Leverage machines',
+  'Assisted pull-up / dip machine', 'Pectoral fly / pec deck machine',
+  'Plate-loaded chest press machine', 'High row machine', 'V-squat machine',
+  'Rotary torso machine', 'Glute kickback machine', 'Preacher curl machine',
 ]);
 
 const BARBELL_ITEMS = new Set(['Barbell', 'Squat rack', 'Power rack', 'Smith machine']);

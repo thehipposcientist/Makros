@@ -174,6 +174,54 @@ def test_seed_equipment_corrections_are_regressed() -> None:
     _ok("plate, rope, face-pull, and machine equipment mappings verified")
 
 
+def test_machine_naming_aliases_and_missing_pieces_are_regressed() -> None:
+    print("\n[test] machine naming aliases and new gym pieces stay findable")
+    from app.seed_exercises_data import RETIRED_EXERCISE_SLUGS, SEED_EQUIPMENT, SEED_EXERCISES
+    from app.services.workout.equipment import resolve_owned_equipment_slugs
+
+    exercises = {e["slug"]: e for e in SEED_EXERCISES}
+    equipment = {e["slug"]: e for e in SEED_EQUIPMENT}
+
+    pectoral_fly = exercises["machine_chest_fly"]
+    assert pectoral_fly["name"] == "Pectoral Fly"
+    pectoral_aliases = {str(a).lower() for a in pectoral_fly.get("aliases", [])}
+    assert {"machine chest fly", "pec deck", "pectoral flys", "pectoral flies"} <= pectoral_aliases
+    assert exercises["pec_deck"].get("deprecated") is True
+    assert "pec_deck" in RETIRED_EXERCISE_SLUGS
+
+    required_equipment = {
+        "plate_loaded_chest_press_machine",
+        "high_row_machine",
+        "v_squat_machine",
+        "rotary_torso_machine",
+        "glute_kickback_machine",
+        "preacher_curl_machine",
+    }
+    assert required_equipment <= set(equipment), sorted(required_equipment - set(equipment))
+    assert "Iso-lateral incline press machine" in equipment["plate_loaded_chest_press_machine"].get("aliases", [])
+
+    def required(slug: str) -> set[str]:
+        return {
+            gear["slug"]
+            for gear in exercises[slug].get("equipment", [])
+            if gear.get("required", True)
+        }
+
+    assert required("iso_lateral_incline_press") == {"plate_loaded_chest_press_machine", "weight_plates"}
+    assert required("iso_lateral_chest_press") == {"plate_loaded_chest_press_machine", "weight_plates"}
+    assert required("iso_lateral_high_row") == {"high_row_machine", "weight_plates"}
+    assert required("v_squat_machine") == {"v_squat_machine", "weight_plates"}
+    assert required("rotary_torso_machine") == {"rotary_torso_machine"}
+
+    owned = resolve_owned_equipment_slugs([
+        "Iso lateral incline press machine",
+        "Pec deck machine",
+        "Assisted dip machine",
+    ])
+    assert {"plate_loaded_chest_press_machine", "pec_deck_machine", "assisted_pullup_machine"} <= owned
+    _ok("pec fly aliases, retired duplicate, iso-lateral machines, and equipment aliases verified")
+
+
 def test_cardio_backfill_equipment_is_concrete() -> None:
     print("\n[test] cardio backfill exercises use concrete equipment slugs")
     from app.seed_exercises_data import SEED_EQUIPMENT, SEED_EXERCISES
@@ -500,6 +548,8 @@ def test_strength_load_settings_snap_to_available_weights() -> None:
     assert load_increment_lbs("Barbell", plate_settings, fallback=5) == 20
     assert snap_load_lbs(146, "Barbell", plate_settings, fallback_increment=20) == 145
     assert snap_load_lbs(142.5, "Barbell", plate_settings, fallback_increment=20) == 125
+    assert load_increment_lbs("plate_loaded_chest_press_machine, weight_plates", plate_settings, fallback=5) == 20
+    assert snap_load_lbs(146, "plate_loaded_chest_press_machine, weight_plates", plate_settings, fallback_increment=20) == 145
 
     assert snap_load_lbs(82.5, "Cable machine", None, fallback_increment=5) == 85
     assert snap_load_lbs(57.5, "T-bar", None, fallback_increment=5) == 60
@@ -602,6 +652,7 @@ cases = [
     test_required_equipment_preserves_multi_gear_requirements,
     test_seed_tracking_modes_are_valid_and_regressed,
     test_seed_equipment_corrections_are_regressed,
+    test_machine_naming_aliases_and_missing_pieces_are_regressed,
     test_cardio_backfill_equipment_is_concrete,
     test_generate_cardio_day_uses_seeded_names,
     test_generate_cardio_day_60_min_uses_explicit_blocks,

@@ -82,7 +82,7 @@ def is_dumbbell_equipment(equipment: str | None) -> bool:
 
 def is_barbell_equipment(equipment: str | None) -> bool:
     text = _equipment_text(equipment)
-    return any(token in text for token in ("barbell", "ez curl", "trap bar", "smith", "landmine"))
+    return any(token in text for token in ("barbell", "ez curl", "trap bar", "smith", "landmine", "plate loaded", "weight plates"))
 
 
 def load_increment_lbs(

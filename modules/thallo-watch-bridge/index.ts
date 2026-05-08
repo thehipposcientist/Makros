@@ -189,6 +189,7 @@ export type WatchSleepPayload = {
 
 export type WatchPalette = {
   themeName?: string;
+  interfaceStyle?: 'light' | 'dark';
   syncedAtMs?: number;
   background: string;
   surface: string;

@@ -28,6 +28,11 @@ export function hasPlateLoadedEquipment(equipment: string[]): boolean {
     'smith machine',
     'weight plates',
     'weight_plates',
+    'plate-loaded chest press machine',
+    'plate_loaded_chest_press_machine',
+    'plate-loaded row machine',
+    'high row machine',
+    'v-squat machine',
   ].some(name => names.has(name));
 }
 

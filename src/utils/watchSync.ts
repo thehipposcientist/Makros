@@ -29,7 +29,7 @@ import {
 } from '../../modules/thallo-watch-bridge';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { WorkoutDay, AppThemeName, DailyNutritionPlan } from '../types';
-import { getTheme, resolveThemeName } from '../constants/theme';
+import { getTheme, isLightThemeName, resolveThemeName } from '../constants/theme';
 import { recordTelemetryEvent } from '../services/api';
 import { getActiveWatchSessionId } from './activeWatchSession';
 import { isGuideExercise, shouldHideReps } from './exerciseDisplay';
@@ -415,6 +415,7 @@ export function buildWatchPalette(themeName: AppThemeName | undefined): WatchPal
   const fallback = { success: '#59D98E', warning: '#FFB454', error: '#FF5D73' };
   return {
     themeName:     resolvedThemeName,
+    interfaceStyle: isLightThemeName(resolvedThemeName) ? 'light' : 'dark',
     syncedAtMs:    Date.now(),
     background:    String(t.background),
     surface:       String(t.surface),
@@ -579,7 +580,7 @@ export async function pushWorkoutToWatch(
 }
 
 export async function pushThemeToWatch(themeName: AppThemeName | undefined, opts: { force?: boolean } = {}) {
-  const latestThemeName = await getStoredThemePreference() ?? (themeName ? resolveThemeName(themeName) : undefined);
+  const latestThemeName = themeName ? resolveThemeName(themeName) : await getStoredThemePreference();
   const palette = buildWatchPalette(latestThemeName);
   if (!canPush()) { await recordWatchSync('theme', false, 'bridge_unavailable'); return false; }
   await stampBridgeUserId();

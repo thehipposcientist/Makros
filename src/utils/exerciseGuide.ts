@@ -7,10 +7,13 @@
 export interface ExerciseLibraryItem {
   id?: number;
   name: string;
+  slug?: string | null;
   description?: string | null;
   primary_muscle?: string;
   secondary_muscles?: string[];
   equipment?: string;
+  gear?: Array<{ slug?: string | null; name?: string | null; category?: string | null; required?: boolean | null }> | null;
+  aliases?: string[] | null;
   is_compound?: boolean;
   exercise_type?: string | null;
   movement_pattern?: string | null;

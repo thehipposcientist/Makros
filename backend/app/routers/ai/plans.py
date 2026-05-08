@@ -33,6 +33,7 @@ from app.services.workout.planner import (
     PlannerInputs, generate_workout_plan as planner_generate_workout_plan,
 )
 from app.services.workout.equipment import (
+    equipment_name_slug_index,
     expand_owned_equipment_aliases,
     resolve_equipment_entry,
     resolve_owned_equipment_slugs,
@@ -127,7 +128,7 @@ def build_user_exercise_library(equipment_slugs: list[str] | None) -> list[dict]
     # user ends up with an all-bodyweight plan even though they own a gym.
     # Build a name → slug index from SEED_EQUIPMENT and translate the
     # incoming list before any matching happens.
-    name_to_slug = {e["name"].lower(): e["slug"] for e in SEED_EQUIPMENT}
+    name_to_slug = equipment_name_slug_index()
     slug_to_name = {e["slug"]: e["name"] for e in SEED_EQUIPMENT}
     valid_slugs = set(slug_to_name.keys())
 

@@ -1433,11 +1433,12 @@ export async function getGoals() {
 // it in AsyncStorage and return instantly on subsequent opens. TTL is
 // long (24h) because the seed rarely changes. Pass { forceRefresh: true }
 // to bypass the cache.
+// v4: bumped when `aliases` joined exercise rows for picker search.
 // v3: bumped when `gear` (concrete equipment list) was added to the
 // library schema — old v2 caches didn't include it, so the detail page
 // was still falling back to the "Home" bucket label. Bump the suffix
 // any time the shape or required fields change.
-const EXERCISE_LIBRARY_CACHE_KEY = 'exercise_library_cache_v3';
+const EXERCISE_LIBRARY_CACHE_KEY = 'exercise_library_cache_v4';
 const EXERCISE_LIBRARY_TTL_MS = 24 * 60 * 60 * 1000;
 let exerciseLibraryMemoryCache: { ts: number; rows: any[] } | null = null;
 let exerciseLibraryInflight: Promise<any[]> | null = null;

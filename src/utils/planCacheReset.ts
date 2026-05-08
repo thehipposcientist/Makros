@@ -126,6 +126,7 @@ export const PRESERVED_KEYS: ReadonlyArray<string> = Object.freeze([
 
   // Metadata cache — kept to avoid re-hydrating a 500KB blob on next open
   'metaData_v1',
+  'metaData_v4',
 ]);
 
 const PRESERVED_SET = new Set(PRESERVED_KEYS);

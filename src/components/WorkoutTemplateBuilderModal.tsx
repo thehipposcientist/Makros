@@ -21,13 +21,17 @@ import { AppThemeName, SavedWorkoutTemplate, WorkoutDay, Exercise } from '../typ
 import { upsertWorkoutTemplate } from '../utils/workoutHistory';
 import { parseWorkoutPhoto } from '../services/api';
 import { isTimeBasedReps, shouldHideReps } from '../utils/exerciseDisplay';
+import { matchesExerciseSearch } from '../utils/exerciseSearch';
 
 interface LibraryItem {
   id?: number | string;
   name: string;
   slug?: string | null;
+  aliases?: string[] | null;
   primary_muscle?: string | null;
+  secondary_muscles?: string[] | null;
   equipment?: string | null;
+  gear?: Array<{ slug?: string | null; name?: string | null; category?: string | null }> | null;
   movement_pattern?: string | null;
   exercise_type?: string | null;
 }
@@ -157,7 +161,10 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
           // technically work too but mostly off-pattern for templates.
           const items: LibraryItem[] = (rows || []).map(r => ({
             id: r.id, name: r.name, slug: r.slug,
+            aliases: r.aliases ?? [],
             primary_muscle: r.primary_muscle, equipment: r.equipment,
+            secondary_muscles: r.secondary_muscles ?? [],
+            gear: r.gear ?? [],
             movement_pattern: r.movement_pattern, exercise_type: r.exercise_type,
           }));
           setLibrary(items);
@@ -170,11 +177,7 @@ export default function WorkoutTemplateBuilderModal({ visible, themeName, onClos
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return library.slice(0, 80);
-    return library.filter(it =>
-      it.name.toLowerCase().includes(q)
-      || (it.primary_muscle ?? '').toLowerCase().includes(q)
-      || (it.equipment ?? '').toLowerCase().includes(q),
-    ).slice(0, 80);
+    return library.filter(it => matchesExerciseSearch(it, q)).slice(0, 80);
   }, [library, search]);
 
   const handleAddExercise = (lib: LibraryItem) => {

@@ -165,6 +165,7 @@ import { workoutSessionToLoggedPayload } from '../utils/workoutLogPayload';
 import { HYDRATION_QUICK_ADD_OUNCES, formatHydrationQuickAddLabel } from '../utils/hydration';
 import { applyCachedHydrationDelta, loadCachedHydration, loadHydrationCache, pendingCachedHydrationRows, removeCachedHydration, saveCachedHydration } from '../utils/hydrationCache';
 import { buildUserFoodCategories } from '../utils/customFoodSearch';
+import { matchesExerciseSearch } from '../utils/exerciseSearch';
 import { enqueueActiveWatchCommand, hasActiveWatchCommandConsumer, isActiveWorkoutWatchCommand } from '../utils/watchCommandBacklog';
 import { applyWatchLogSetToActiveWorkoutStorage } from '../utils/watchWorkoutMirror';
 import { coachApplyNeedsDayStatusRefresh, skippedDayBadgeLabel, skippedDayTitle, skippedDayUndoLabel } from '../utils/coachApplyState';
@@ -386,6 +387,7 @@ interface ExerciseLibraryItem {
   image_url?: string | null;
   video_id?: string | null;
   movement_pattern?: string | null;
+  aliases?: string[] | null;
 }
 
 const ExerciseLibraryRow = React.memo(function ExerciseLibraryRow({
@@ -5346,14 +5348,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
   ).sort((a, b) => humanizeToken(a).localeCompare(humanizeToken(b))), [exerciseLibrary]);
 
   const filteredExerciseLibrary = useMemo(() => exerciseLibrary.filter((item) => {
-    const search = deferredExerciseSearch.trim().toLowerCase();
-    const matchesSearch = !search || [
-      item.name,
-      item.description ?? '',
-      humanizeToken(item.primary_muscle),
-      humanizeToken(item.equipment),
-      ...(item.secondary_muscles ?? []).map(humanizeToken),
-    ].some((value) => value.toLowerCase().includes(search));
+    const matchesSearch = matchesExerciseSearch(item, deferredExerciseSearch);
     const matchesMuscle = exerciseMuscleFilter === 'all' || item.primary_muscle === exerciseMuscleFilter;
     const matchesEquipment = exerciseEquipmentFilter === 'all' || item.equipment === exerciseEquipmentFilter;
     return matchesSearch && matchesMuscle && matchesEquipment;

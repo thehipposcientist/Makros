@@ -174,6 +174,12 @@ def validate_exercise_seed(
                     report.warn(
                         f"'{e.get('slug')}' has '{token}' in name but no bench in equipment"
                     )
+            elif required_slug == "preacher_bench":
+                if not any(s in eq_slugs for s in ("preacher_bench", "preacher_curl_machine")):
+                    report.missing_required_support += 1
+                    report.warn(
+                        f"'{e.get('slug')}' has '{token}' in name but no preacher bench/machine in equipment"
+                    )
             elif required_slug not in eq_slugs:
                 report.missing_required_support += 1
                 report.warn(

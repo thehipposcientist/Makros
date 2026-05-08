@@ -53,6 +53,9 @@ entries keep working without update.
   substitution_group:  short key shared across exercises that swap cleanly
                        (e.g. "horizontal_press_bilateral"). Used by the
                        planner's replace-exercise flow. Optional.
+  aliases:             Alternate search terms and common gym-floor names.
+                       These are exposed to the app's exercise picker but
+                       do not change canonical slugs/history identity.
   cardio_intensity:    "intervals" | "steady" | "easy"
                        Optional override for cardio classification. Use it
                        when the exercise name would otherwise be ambiguous
@@ -80,6 +83,9 @@ RETIRED_EXERCISE_SLUGS = {
     # Generic placeholder. Replaced by concrete bodyweight drills in
     # _NEW_2026_05_01 so users see real movements instead of "do HIIT".
     "hiit_circuit",
+    # Replaced in the public picker by machine_chest_fly -> Pectoral Fly.
+    # Kept in the DB/seed for legacy history references and old plan rows.
+    "pec_deck",
 }
 
 
@@ -110,6 +116,7 @@ def hydrated_exercise(entry: dict) -> dict:
     out.setdefault("difficulty", "intermediate")
     out.setdefault("default_tracking_mode", _TRACKING_DEFAULTS.get(ex_type, "reps"))
     out.setdefault("track_per_side", out["laterality"] in _UNILATERAL_LATERALITIES)
+    out.setdefault("aliases", [])
     return out
 
 # ─── Chest ───────────────────────────────────────────────────────────────────
@@ -345,6 +352,7 @@ CHEST = [
         "laterality": "bilateral",
         "difficulty": "beginner",
         "substitution_group": "chest_fly",
+        "deprecated": True,
         "description": "Machine chest fly isolation",
         "equipment": [
             {"slug": "pec_deck_machine", "role": "primary", "required": True},
@@ -2734,7 +2742,7 @@ SEED_EQUIPMENT = [
     {"slug": "cable_machine",          "name": "Cable machine",            "category": "Gym Machines", "icon": "\U0001f517"},
     {"slug": "leg_press_machine",      "name": "Leg press",                "category": "Gym Machines", "icon": "\U0001f9b5"},
     {"slug": "lat_pulldown_machine",   "name": "Lat pulldown",             "category": "Gym Machines", "icon": "\u2b07\ufe0f"},
-    {"slug": "chest_press_machine",    "name": "Chest press machine",      "category": "Gym Machines", "icon": "\U0001f4aa"},
+    {"slug": "chest_press_machine",    "name": "Chest press machine",      "category": "Gym Machines", "icon": "\U0001f4aa", "aliases": ["machine chest press", "selectorized chest press"]},
     {"slug": "seated_row_machine",     "name": "Seated row machine",       "category": "Gym Machines", "icon": "\U0001f519"},
     {"slug": "leg_extension_machine",  "name": "Leg extension",            "category": "Gym Machines", "icon": "\U0001f9b5"},
     {"slug": "leg_curl_machine",       "name": "Leg curl machine",         "category": "Gym Machines", "icon": "\U0001f9b5"},
@@ -2743,14 +2751,14 @@ SEED_EQUIPMENT = [
     {"slug": "hip_adduction_machine",  "name": "Hip adduction machine",    "category": "Gym Machines", "icon": "\U0001f9b5"},
     {"slug": "smith_machine",          "name": "Smith machine",            "category": "Gym Machines", "icon": "\U0001f4cd"},
     {"slug": "hack_squat_machine",     "name": "Hack squat machine",       "category": "Gym Machines", "icon": "\U0001f9b5"},
-    {"slug": "assisted_pullup_machine","name": "Assisted pull-up machine", "category": "Gym Machines", "icon": "\U0001f91d"},
+    {"slug": "assisted_pullup_machine","name": "Assisted pull-up / dip machine", "category": "Gym Machines", "icon": "\U0001f91d", "aliases": ["Assisted pull-up machine", "Assisted dip machine", "Dip assist machine"]},
     {"slug": "leverage_machines",      "name": "Leverage machines",        "category": "Gym Machines", "icon": "\u2699\ufe0f"},
     # 2026-04-13: specific machine slugs. `leverage_machines` was being
     # used as a catch-all for pec deck, preacher bench, hyperextension,
     # and calf machines — four physically distinct pieces of equipment
     # that a gym may or may not have independently.
     {"slug": "preacher_bench",             "name": "Preacher curl bench",      "category": "Gym Machines", "icon": "\U0001f4aa"},
-    {"slug": "pec_deck_machine",           "name": "Pec deck machine",         "category": "Gym Machines", "icon": "\U0001f4aa"},
+    {"slug": "pec_deck_machine",           "name": "Pectoral fly / pec deck machine", "category": "Gym Machines", "icon": "\U0001f4aa", "aliases": ["Pec deck machine", "Pectoral fly machine", "Chest fly machine", "Pec fly machine"]},
     {"slug": "hyperextension_bench",       "name": "Hyperextension bench",     "category": "Gym Machines", "icon": "\U0001f4d0"},
     {"slug": "standing_calf_raise_machine","name": "Standing calf raise machine","category": "Gym Machines", "icon": "\U0001f9b5"},
     {"slug": "seated_calf_raise_machine",  "name": "Seated calf raise machine","category": "Gym Machines", "icon": "\U0001f9b5"},
@@ -2772,6 +2780,12 @@ SEED_EQUIPMENT = [
     {"slug": "pullover_machine",           "name": "Pullover machine",          "category": "Gym Machines", "icon": "\u2b07\ufe0f"},
     {"slug": "ab_crunch_machine",          "name": "Ab crunch machine",         "category": "Gym Machines", "icon": "\u2699\ufe0f"},
     {"slug": "tibialis_raise_machine",     "name": "Tibialis raise machine",    "category": "Gym Machines", "icon": "\U0001f9b5"},
+    {"slug": "plate_loaded_chest_press_machine", "name": "Plate-loaded chest press machine", "category": "Gym Machines", "icon": "\U0001f4aa", "aliases": ["Iso-lateral chest press machine", "Iso-lateral incline press machine", "Hammer Strength chest press", "Hammer Strength incline press", "Leverage chest press machine", "Plate-loaded incline press machine", "Incline chest press machine"]},
+    {"slug": "high_row_machine",            "name": "High row machine",          "category": "Gym Machines", "icon": "\U0001f519", "aliases": ["Iso-lateral high row", "Hammer Strength high row", "Plate-loaded high row"]},
+    {"slug": "v_squat_machine",             "name": "V-squat machine",           "category": "Gym Machines", "icon": "\U0001f9b5", "aliases": ["V squat", "Vertical squat machine"]},
+    {"slug": "rotary_torso_machine",        "name": "Rotary torso machine",      "category": "Gym Machines", "icon": "\u2699\ufe0f", "aliases": ["Torso rotation machine", "Rotary trunk machine", "Oblique twist machine"]},
+    {"slug": "glute_kickback_machine",      "name": "Glute kickback machine",    "category": "Gym Machines", "icon": "\U0001f9b5", "aliases": ["Booty builder kickback", "Kickback machine"]},
+    {"slug": "preacher_curl_machine",       "name": "Preacher curl machine",     "category": "Gym Machines", "icon": "\U0001f4aa", "aliases": ["Machine preacher curl", "Preacher machine"]},
     {"slug": "weighted_vest",              "name": "Weighted vest",            "category": "Athletic / Functional", "icon": "\U0001f9ba"},
 
     # Cardio
@@ -3000,7 +3014,7 @@ _NEW_2026_04_13_PASS_2 = [
     },
     {
         "slug": "machine_chest_fly",
-        "name": "Machine Chest Fly",
+        "name": "Pectoral Fly",
         "primary_muscle": "chest",
         "secondary_muscles": [],
         "equipment_bucket": "gym",
@@ -3010,7 +3024,22 @@ _NEW_2026_04_13_PASS_2 = [
         "laterality": "bilateral",
         "difficulty": "beginner",
         "substitution_group": "chest_fly",
-        "description": "Plate-loaded or selectorized chest fly machine",
+        "aliases": [
+            "Machine Chest Fly",
+            "Chest Fly Machine",
+            "Pec Deck",
+            "Pec Fly",
+            "Pec Flye",
+            "Pec Flys",
+            "Pec Flies",
+            "Pectoral Flys",
+            "Pectoral Flies",
+            "Pectoral Fly Machine",
+            "Machine Pec Fly",
+            "Seated Chest Fly",
+            "Fly Machine",
+        ],
+        "description": "Plate-loaded or selectorized pectoral fly machine",
         "equipment": [
             {"slug": "pec_deck_machine", "role": "primary", "required": True},
         ],
@@ -3121,7 +3150,7 @@ _NEW_2026_04_13_PASS_2 = [
     },
     {
         "slug": "machine_row",
-        "name": "Plate-Loaded Machine Row",
+        "name": "Iso-Lateral Row",
         "primary_muscle": "back",
         "secondary_muscles": ["biceps"],
         "equipment_bucket": "gym",
@@ -3130,7 +3159,16 @@ _NEW_2026_04_13_PASS_2 = [
         "is_compound": True, "is_machine": True, "is_unilateral": False,
         "laterality": "either",  # most plate-loaded rows can be done one side at a time
         "substitution_group": "horizontal_pull_machine",
-        "description": "Chest-supported plate-loaded row machine — strict back work",
+        "aliases": [
+            "Plate-Loaded Machine Row",
+            "Plate-Loaded Row",
+            "Hammer Strength Row",
+            "Machine Row",
+            "Iso Lateral Row",
+            "Iso-Lateral Machine Row",
+            "Chest-Supported Machine Row",
+        ],
+        "description": "Chest-supported iso-lateral plate-loaded row machine — strict back work",
         "equipment": [
             {"slug": "machine_row_station", "role": "primary", "required": True},
         ],
@@ -4740,9 +4778,9 @@ _NEW_2026_04_27 = [
         "laterality": "bilateral",
         "difficulty": "beginner",
         "substitution_group": "bicep_curl_machine",
+        "aliases": ["Preacher Curl Machine", "Selectorized Preacher Curl", "Preacher Machine"],
         "description": "Preacher pad machine curl — great for beginners and drop sets",
-        # TODO(equipment): replace with preacher_curl_machine when that equipment slug exists.
-        "equipment": [{"slug": "preacher_bench", "role": "primary", "required": True}],
+        "equipment": [{"slug": "preacher_curl_machine", "role": "primary", "required": True}],
     },
     {
         "slug": "cable_hammer_curl",
@@ -4793,7 +4831,7 @@ _NEW_2026_04_27 = [
     # ── TRICEPS ───────────────────────────────────────────────────────
     {
         "slug": "machine_tricep_dip",
-        "name": "Machine Tricep Dip",
+        "name": "Seated Dip Machine",
         "primary_muscle": "triceps",
         "secondary_muscles": ["chest", "shoulders"],
         "equipment_bucket": "gym",
@@ -4803,6 +4841,7 @@ _NEW_2026_04_27 = [
         "laterality": "bilateral",
         "difficulty": "beginner",
         "substitution_group": "dip",
+        "aliases": ["Machine Tricep Dip", "Tricep Dip Machine", "Dip Machine", "Seated Tricep Dip"],
         "description": "Plate-loaded dip machine — safer for shoulder-compromised users",
         "equipment": [{"slug": "assisted_pullup_machine", "role": "primary", "required": True}],
     },
@@ -5342,9 +5381,9 @@ _NEW_2026_04_27 = [
         "laterality": "unilateral",
         "difficulty": "beginner",
         "substitution_group": "glute_kickback",
+        "aliases": ["Machine Glute Kickback", "Kickback Machine", "Booty Builder Kickback"],
         "description": "Lever kickback machine — targeted glute isolation at peak contraction",
-        # TODO(equipment): replace with glute_kickback_machine when that equipment slug exists.
-        "equipment": [{"slug": "hip_abduction_machine", "role": "primary", "required": True}],
+        "equipment": [{"slug": "glute_kickback_machine", "role": "primary", "required": True}],
     },
 
     # ── ADDUCTORS / HIP STABILITY ─────────────────────────────────────
@@ -7564,6 +7603,131 @@ _NEW_2026_05_03_CORE_FLOOR = [
 ]
 
 
+_NEW_2026_05_08_MACHINE_NAMING = [
+    {
+        "slug": "iso_lateral_incline_press",
+        "name": "Iso-Lateral Incline Press",
+        "primary_muscle": "chest",
+        "secondary_muscles": ["triceps", "shoulders"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "horizontal_press",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": True,
+        "is_unilateral": False,
+        "laterality": "either",
+        "difficulty": "intermediate",
+        "substitution_group": "incline_press",
+        "aliases": [
+            "Hammer Strength Incline Press",
+            "Plate-Loaded Incline Press",
+            "Leverage Incline Press",
+            "Machine Incline Chest Press",
+            "Incline Press Machine",
+            "Iso Lateral Incline Chest Press",
+        ],
+        "description": "Plate-loaded iso-lateral incline press for upper-chest emphasis",
+        "equipment": [
+            {"slug": "plate_loaded_chest_press_machine", "role": "primary", "required": True},
+            {"slug": "weight_plates", "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "iso_lateral_chest_press",
+        "name": "Iso-Lateral Chest Press",
+        "primary_muscle": "chest",
+        "secondary_muscles": ["triceps", "shoulders"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "horizontal_press",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": True,
+        "is_unilateral": False,
+        "laterality": "either",
+        "difficulty": "intermediate",
+        "substitution_group": "horizontal_press_machine",
+        "aliases": [
+            "Hammer Strength Chest Press",
+            "Plate-Loaded Chest Press",
+            "Leverage Chest Press",
+            "Iso Lateral Chest Press",
+            "Machine Chest Press Plate Loaded",
+        ],
+        "description": "Plate-loaded iso-lateral chest press with independent handles",
+        "equipment": [
+            {"slug": "plate_loaded_chest_press_machine", "role": "primary", "required": True},
+            {"slug": "weight_plates", "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "iso_lateral_high_row",
+        "name": "Iso-Lateral High Row",
+        "primary_muscle": "back",
+        "secondary_muscles": ["biceps", "shoulders"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "horizontal_pull",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": True,
+        "is_unilateral": False,
+        "laterality": "either",
+        "difficulty": "intermediate",
+        "substitution_group": "horizontal_pull_machine",
+        "aliases": [
+            "Hammer Strength High Row",
+            "Plate-Loaded High Row",
+            "Leverage High Row",
+            "Iso Lateral High Row",
+            "High Row Machine",
+        ],
+        "description": "Plate-loaded high row machine with independent handles for upper-back and lat work",
+        "equipment": [
+            {"slug": "high_row_machine", "role": "primary", "required": True},
+            {"slug": "weight_plates", "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "v_squat_machine",
+        "name": "V-Squat Machine",
+        "primary_muscle": "quads",
+        "secondary_muscles": ["glutes", "hamstrings"],
+        "equipment_bucket": "gym",
+        "movement_pattern": "squat",
+        "exercise_type": "strength",
+        "is_compound": True,
+        "is_machine": True,
+        "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "intermediate",
+        "substitution_group": "squat_machine",
+        "aliases": ["V Squat", "Vertical Squat Machine", "Plate-Loaded V Squat"],
+        "description": "Guided V-squat machine for quad-biased squatting with external support",
+        "equipment": [
+            {"slug": "v_squat_machine", "role": "primary", "required": True},
+            {"slug": "weight_plates", "role": "support", "required": True},
+        ],
+    },
+    {
+        "slug": "rotary_torso_machine",
+        "name": "Rotary Torso Machine",
+        "primary_muscle": "core",
+        "secondary_muscles": [],
+        "equipment_bucket": "gym",
+        "movement_pattern": "anti_rotation",
+        "exercise_type": "strength",
+        "is_compound": False,
+        "is_machine": True,
+        "is_unilateral": False,
+        "laterality": "bilateral",
+        "difficulty": "beginner",
+        "substitution_group": "core_anti_rotation",
+        "aliases": ["Torso Rotation Machine", "Rotary Trunk Machine", "Oblique Twist Machine"],
+        "description": "Seated torso-rotation machine for controlled oblique and anti-rotation work",
+        "equipment": [{"slug": "rotary_torso_machine", "role": "primary", "required": True}],
+    },
+]
+
+
 SEED_EXERCISES: list[dict] = (
     CHEST
     + BACK
@@ -7589,6 +7753,7 @@ SEED_EXERCISES: list[dict] = (
     + _NEW_2026_04_30
     + _NEW_2026_05_01
     + _NEW_2026_05_03_CORE_FLOOR
+    + _NEW_2026_05_08_MACHINE_NAMING
 )
 
 # Apply the legacy substitution-group backfill in-place. Done as a single

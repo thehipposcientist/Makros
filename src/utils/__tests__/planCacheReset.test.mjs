@@ -47,6 +47,7 @@ async function test_wipe_preserves_safelist() {
     workoutHistoryList: '[]',
     user_username: 'alice',
     themePreference: 'dark',
+    metaData_v4: '{}',
     // Wipe targets
     aiWorkoutPlan: '{}',
     aiNutritionPlan: '{}',
@@ -75,7 +76,7 @@ async function test_wipe_preserves_safelist() {
   const expectedKept = new Set([
     'authToken', 'userProfile', 'weightHistory', 'weightEntries',
     'workoutTemplates',
-    'workoutHistoryList', 'user_username', 'themePreference',
+    'workoutHistoryList', 'user_username', 'themePreference', 'metaData_v4',
   ]);
   for (const k of expectedKept) {
     if (!remainingKeys.has(k)) {
@@ -133,7 +134,7 @@ async function test_empty_storage_noop() {
 function test_preserved_keys_shape() {
   const required = [
     'authToken', 'userProfile', 'weightEntries', 'workoutHistoryList',
-    'weightHistory', 'workoutTemplates', 'user_username', 'themePreference', 'metaData_v1',
+    'weightHistory', 'workoutTemplates', 'user_username', 'themePreference', 'metaData_v1', 'metaData_v4',
   ];
   for (const r of required) {
     if (!PRESERVED_KEYS.includes(r)) {

@@ -559,6 +559,12 @@ _PRIMARY_LOAD_TIER = {
     "machine_row_station": 2,
     "pec_deck_machine": 2,
     "preacher_bench": 2,
+    "preacher_curl_machine": 2,
+    "plate_loaded_chest_press_machine": 2,
+    "high_row_machine": 2,
+    "v_squat_machine": 2,
+    "rotary_torso_machine": 2,
+    "glute_kickback_machine": 2,
     "belt_squat_machine": 2,
     "hip_thrust_machine": 2,
     "pullover_machine": 2,
@@ -2874,11 +2880,8 @@ def generate_cardio_day(
     """
     equipment_name_to_slug = {}
     try:
-        from app.seed_exercises_data import SEED_EQUIPMENT
-        equipment_name_to_slug = {
-            str(e.get("name", "")).lower().strip(): e.get("slug")
-            for e in SEED_EQUIPMENT
-        }
+        from app.services.workout.equipment import equipment_name_slug_index
+        equipment_name_to_slug = equipment_name_slug_index()
     except Exception:
         equipment_name_to_slug = {}
 

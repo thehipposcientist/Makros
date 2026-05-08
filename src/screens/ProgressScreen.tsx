@@ -48,6 +48,7 @@ import { buildGoalForecast } from '../utils/goalForecast';
 import { useMetaData } from '../hooks/useMetaData';
 import { humanizeToken } from '../utils/exerciseGuide';
 import { estimate1RM } from '../utils/oneRepMax';
+import { computeStrengthScore, strengthBandLabel } from '../utils/strengthScore';
 import { getInsights, getGuardrails, getCoachMemory, getProgressionInsights, scanBody, BodyScanResult, getPaceHistory, PaceHistoryPoint, listWorkoutCompletions, WorkoutCompletionRecord, listWorkoutSessions, WorkoutSessionRecord, getWeightEntries, saveWeightEntryAPI, deleteWeightEntryAPI, clearWeightEntriesAPI } from '../services/api';
 import { colors, elevations, getContrastingTextColor, getTheme, radius, typography } from '../constants/theme';
 import { AppThemeName } from '../types';
@@ -915,7 +916,7 @@ function buildProgressMilestones(
   if (visibility.showWorkoutProgress && topLift) {
     cards.push({
       key: 'top-lift',
-      title: 'Top strength marker',
+      title: 'Heaviest 1RM',
 	      value: formatWeight(topLift.oneRepMaxLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 }),
       detail: `${topLift.name} estimated 1RM`,
       icon: 'barbell-outline',
@@ -2274,6 +2275,16 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
   const [healthConnecting, setHealthConnecting] = useState<boolean>(false);
   const [healthScore, setHealthScore] = useState<HealthScoreResult | null>(null);
   const [oneRepMaxLifts, setOneRepMaxLifts] = useState<import('../services/api').OneRepMaxLift[]>([]);
+  // Bulk rolling-e1RM map keyed by lowercased exercise name. Powers
+  // the Strength Score card — the showcase tuple only covers 8 named
+  // slugs and misses anything we want to opportunistically include
+  // (lat pulldown, dumbbell variants etc.). The map gives us
+  // everything the user has logged.
+  const [bulkE1RMMap, setBulkE1RMMap] = useState<Record<string, number>>({});
+  // Detail bottom sheet for the Strength Score — shows per-lift 1RM,
+  // bodyweight ratio, and target ratio so the user can see exactly
+  // what makes their score.
+  const [strengthScoreDetailOpen, setStrengthScoreDetailOpen] = useState(false);
   // 1RM history for the top lift — fetched lazily after `oneRepMaxLifts`
   // resolves so the bars render immediately. Used to draw the trend chart
   // below the bar list.
@@ -2634,6 +2645,14 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
               }
             })
             .catch(() => setOneRepMaxLifts([]))
+        );
+        // Bulk e1RM map for the Strength Score card. Independent of the
+        // showcase so it loads in parallel; Strength Score reads both
+        // sources and prefers whichever has the higher number.
+        import('../services/api').then(({ getAllE1RM }) =>
+          getAllE1RM(authToken)
+            .then(r => setBulkE1RMMap(r?.exercises ?? {}))
+            .catch(() => setBulkE1RMMap({}))
         );
         import('../services/api').then(({ getPlateaus }) =>
           getPlateaus(authToken, 4)
@@ -3377,42 +3396,70 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
         </ScrollView>
       ) : tab === 'trends' && showWorkoutProgress ? (
         <ScrollView contentContainerStyle={styles.content}>
-          {displayedOneRepMaxLifts.length > 0 && (() => {
-            const topLift = displayedOneRepMaxLifts[0];
+          {(() => {
+            // Comprehensive strength score — replaces the prior single-
+            // lift "Top strength marker" tile. Scores the user's logged
+            // 1RMs against intermediate-trainee bodyweight ratios across
+            // squat / bench / deadlift / OHP / row / front squat / RDL /
+            // lat pulldown, then averages. Tap → per-lift breakdown.
+            const strength = computeStrengthScore({
+              bulkE1RMMap,
+              showcase: oneRepMaxLifts,
+              bodyweightLbs: weightLbs,
+            });
+            const tileColor =
+              strength.band === 'elite' ? '#22C55E'
+              : strength.band === 'advanced' ? tc.primary
+              : strength.band === 'intermediate' ? '#F59E0B'
+              : strength.band === 'novice' ? tc.textMuted
+              : tc.textMuted;
+            const empty = strength.band === 'unknown' || strength.liftsCovered === 0;
             return (
-              <View testID="progress-1rm-showcase" style={{ marginBottom: 16 }}>
-                <Text style={styles.sectionLabel}>Top strength marker</Text>
-                <View style={{
-                  backgroundColor: tc.surfaceRaised,
-                  borderRadius: 12,
-                  borderWidth: 1,
-                  borderColor: tc.border,
-                  padding: 14,
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 12,
-                }}>
+              <View testID="progress-strength-score" style={{ marginBottom: 16 }}>
+                <Text style={styles.sectionLabel}>Strength score</Text>
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  onPress={() => {
+                    import('../utils/feedback').then(f => f.hapticSelection()).catch(() => {});
+                    setStrengthScoreDetailOpen(true);
+                  }}
+                  style={{
+                    backgroundColor: tc.surfaceRaised,
+                    borderRadius: 12,
+                    borderWidth: 1,
+                    borderColor: tc.border,
+                    padding: 14,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                  }}>
                   <View style={{ flex: 1 }}>
                     <Text style={{ fontSize: 16, fontWeight: '800', color: tc.textPrimary }} numberOfLines={1}>
-                      {topLift.name}
+                      {empty ? 'Not enough data' : strengthBandLabel(strength.band)}
                     </Text>
-                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 4 }}>
-                      Top set: {formatWeight(topLift.topWeightLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} x {topLift.topReps}
+                    <Text style={{ fontSize: 12, color: tc.textMuted, marginTop: 4 }} numberOfLines={2}>
+                      {empty
+                        ? (weightLbs && weightLbs > 0
+                          ? 'Log a few key compound lifts to unlock your score.'
+                          : 'Set your bodyweight in Settings to unlock your score.')
+                        : `${strength.liftsCovered}/${strength.liftsTotal} lifts · tap for breakdown`}
                     </Text>
                   </View>
                   <View style={{ alignItems: 'flex-end' }}>
                     <Text
-                      style={{ fontSize: 28, fontWeight: '900', color: tc.primary, fontVariant: ['tabular-nums'] as any }}
+                      style={{ fontSize: 36, fontWeight: '900', color: tileColor, fontVariant: ['tabular-nums'] as any }}
                       numberOfLines={1}
                       adjustsFontSizeToFit
                       minimumFontScale={0.72}
                     >
-                      {formatWeight(topLift.oneRepMaxLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })}
+                      {empty ? '—' : strength.score}
                     </Text>
-                    <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '700' }}>estimated 1RM</Text>
+                    <Text style={{ fontSize: 11, color: tc.textMuted, fontWeight: '700' }}>
+                      {empty ? '—' : 'out of 100'}
+                    </Text>
                   </View>
-                </View>
+                </TouchableOpacity>
               </View>
             );
           })()}
@@ -6835,6 +6882,129 @@ export default function ProgressScreen({ onBack, authToken, userProfile, onUpdat
                 </View>
               </View>
             </ScrollView>
+          </View>
+        </View>
+      </Modal>
+      {/* Strength Score detail — bottom sheet showing per-lift 1RM,
+          bodyweight ratio, and target ratio so users can see exactly
+          what feeds the score. Triggered from the tile on the Trends
+          tab. */}
+      <Modal
+        visible={strengthScoreDetailOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setStrengthScoreDetailOpen(false)}>
+        <View style={styles.quickDetailBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setStrengthScoreDetailOpen(false)}
+          />
+          <View style={styles.quickDetailSheet}>
+            {(() => {
+              const detail = computeStrengthScore({
+                bulkE1RMMap,
+                showcase: oneRepMaxLifts,
+                bodyweightLbs: weightLbs,
+              });
+              const headerColor =
+                detail.band === 'elite' ? '#22C55E'
+                : detail.band === 'advanced' ? tc.primary
+                : detail.band === 'intermediate' ? '#F59E0B'
+                : detail.band === 'novice' ? tc.textMuted
+                : tc.textMuted;
+              return (
+                <>
+                  <View style={styles.quickDetailHandle} />
+                  <View style={styles.quickDetailHeader}>
+                    <View style={[styles.quickDetailIcon, { backgroundColor: headerColor + '20' }]}>
+                      <Ionicons name="barbell-outline" size={18} color={headerColor} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.quickDetailEyebrow}>STRENGTH SCORE</Text>
+                      <Text style={styles.quickDetailTitle} numberOfLines={2}>
+                        {detail.band === 'unknown'
+                          ? 'Not enough data yet'
+                          : `${strengthBandLabel(detail.band)} · ${detail.score}/100`}
+                      </Text>
+                    </View>
+                    <TouchableOpacity onPress={() => setStrengthScoreDetailOpen(false)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                      <Ionicons name="close" size={20} color={tc.textMuted} />
+                    </TouchableOpacity>
+                  </View>
+                  <ScrollView style={styles.quickDetailScroll} contentContainerStyle={{ paddingBottom: 6 }} showsVerticalScrollIndicator={false}>
+                    <Text style={styles.quickDetailBody}>
+                      {detail.band === 'unknown'
+                        ? (weightLbs && weightLbs > 0
+                          ? 'Log a few key compound lifts (squat, bench, deadlift, OHP, row) and your score will appear here.'
+                          : 'Set your bodyweight in Settings — strength is scored relative to it.')
+                        : `Each lift is scored as the ratio of your estimated 1RM to a typical "intermediate trainee" target for your bodyweight (${weightLbs ? Math.round(weightLbs) : 0} lb), capped at 130. The overall score is the average of every lift you've logged.`}
+                    </Text>
+                    {detail.rows.length > 0 && (
+                      <View style={styles.quickDetailSection}>
+                        <Text style={styles.quickDetailSectionTitle}>Your lifts</Text>
+                        {detail.rows.map(row => {
+                          const rowColor =
+                            row.band === 'elite' ? '#22C55E'
+                            : row.band === 'advanced' ? tc.primary
+                            : row.band === 'intermediate' ? '#F59E0B'
+                            : tc.textMuted;
+                          return (
+                            <View key={row.key} style={{ marginBottom: 14 }}>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                                <Text style={{ fontSize: 14, fontWeight: '700', color: tc.textPrimary, flex: 1 }} numberOfLines={1}>{row.display}</Text>
+                                <Text style={{ fontSize: 16, fontWeight: '900', color: rowColor, fontVariant: ['tabular-nums'] as any }}>{row.score}</Text>
+                              </View>
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                                <View style={{ flex: 1, height: 5, borderRadius: 3, backgroundColor: tc.border, overflow: 'hidden' }}>
+                                  <View style={{ width: `${Math.min(100, row.score)}%`, height: 5, borderRadius: 3, backgroundColor: rowColor }} />
+                                </View>
+                              </View>
+                              <Text style={{ fontSize: 11, color: tc.textMuted }}>
+                                {formatWeight(row.oneRepMaxLbs, weightUnit, { precision: weightUnit === 'kg' ? 1 : 0 })} estimated 1RM · {row.ratio}× bodyweight (target {row.targetRatio}×)
+                              </Text>
+                            </View>
+                          );
+                        })}
+                      </View>
+                    )}
+                    {detail.missing.length > 0 && (
+                      <View style={styles.quickDetailSection}>
+                        <Text style={styles.quickDetailSectionTitle}>Lifts not yet logged</Text>
+                        <Text style={styles.quickDetailMuted}>
+                          Adding any of these to your training (with a logged top set) raises your score:
+                        </Text>
+                        {detail.missing.map(m => (
+                          <View key={m.key} style={[styles.quickDetailRow, { paddingVertical: 4 }]}>
+                            <Text style={styles.quickDetailRowLabel}>{m.display}</Text>
+                            <Ionicons name="add-circle-outline" size={14} color={tc.textMuted} />
+                          </View>
+                        ))}
+                      </View>
+                    )}
+                    <View style={styles.quickDetailSection}>
+                      <Text style={styles.quickDetailSectionTitle}>Bands</Text>
+                      <View style={styles.quickDetailRow}>
+                        <Text style={styles.quickDetailRowLabel}>Elite</Text>
+                        <Text style={[styles.quickDetailRowValue, { color: '#22C55E' }]}>115+</Text>
+                      </View>
+                      <View style={styles.quickDetailRow}>
+                        <Text style={styles.quickDetailRowLabel}>Advanced</Text>
+                        <Text style={[styles.quickDetailRowValue, { color: tc.primary }]}>90–114</Text>
+                      </View>
+                      <View style={styles.quickDetailRow}>
+                        <Text style={styles.quickDetailRowLabel}>Intermediate</Text>
+                        <Text style={[styles.quickDetailRowValue, { color: '#F59E0B' }]}>60–89</Text>
+                      </View>
+                      <View style={styles.quickDetailRow}>
+                        <Text style={styles.quickDetailRowLabel}>Novice</Text>
+                        <Text style={[styles.quickDetailRowValue, { color: tc.textMuted }]}>Below 60</Text>
+                      </View>
+                    </View>
+                  </ScrollView>
+                </>
+              );
+            })()}
           </View>
         </View>
       </Modal>

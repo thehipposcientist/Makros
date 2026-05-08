@@ -22,6 +22,7 @@ export interface ExerciseLibraryItem {
   image_url?: string | null;
   video_id?: string | null;
   is_custom?: boolean;
+  aliases?: string[] | null;
 }
 
 function normalizedEquipmentKeys(raw?: string | null): string[] {
@@ -43,6 +44,9 @@ function normalizedEquipmentKeys(raw?: string | null): string[] {
     resistancebandstube: ['band', 'bands', 'resistance band', 'resistance bands', 'resistance_bands'],
     pullupbar: ['pull up bar', 'pull-up bar', 'pull_up_bar'],
     pullup: ['pull up bar', 'pull-up bar', 'pull_up_bar'],
+    assistedpullupmachine: ['assisted pull up machine', 'assisted pull-up machine', 'assisted pull-up / dip machine', 'assisted_pullup_machine'],
+    assistedpullupdipmachine: ['assisted pull up dip machine', 'assisted pull-up / dip machine', 'assisted_pullup_machine'],
+    assisteddipmachine: ['assisted dip machine', 'dip assist machine', 'assisted_pullup_machine'],
     ezbar: ['ez curl bar', 'ez_curl_bar'],
     ezcurlbar: ['ez bar', 'ez_curl_bar'],
     adjustablebench: ['adjustable bench', 'adjustable_bench', 'flat bench', 'flat_bench', 'incline bench', 'incline_bench', 'decline bench', 'decline_bench'],
@@ -73,6 +77,19 @@ function normalizedEquipmentKeys(raw?: string | null): string[] {
     stationarybike: ['bike', 'stationary_bike'],
     cablemachine: ['cable machine', 'cable_machine'],
     cable_machine: ['cable machine', 'cablemachine'],
+    pectoralflypecdeckmachine: ['pectoral fly machine', 'pec deck machine', 'chest fly machine', 'pec_deck_machine'],
+    pectoralflymachine: ['pectoral fly / pec deck machine', 'pec deck machine', 'chest fly machine', 'pec_deck_machine'],
+    pecdeckmachine: ['pectoral fly machine', 'chest fly machine', 'pec_deck_machine'],
+    chestflymachine: ['pectoral fly machine', 'pec deck machine', 'pec_deck_machine'],
+    plateloadedchestpressmachine: ['plate-loaded chest press machine', 'iso-lateral chest press machine', 'iso lateral chest press machine', 'iso-lateral incline press machine', 'hammer strength chest press', 'hammer strength incline press', 'plate_loaded_chest_press_machine'],
+    plateloadedinclinepressmachine: ['plate-loaded incline press machine', 'iso-lateral incline press machine', 'plate_loaded_chest_press_machine'],
+    isolateralchestpressmachine: ['iso-lateral chest press machine', 'plate-loaded chest press machine', 'plate_loaded_chest_press_machine'],
+    isolateralinclinepressmachine: ['iso-lateral incline press machine', 'plate-loaded chest press machine', 'plate_loaded_chest_press_machine'],
+    highrowmachine: ['high row machine', 'iso-lateral high row', 'hammer strength high row', 'plate-loaded high row', 'high_row_machine'],
+    vsquatmachine: ['v-squat machine', 'v squat machine', 'vertical squat machine', 'v_squat_machine'],
+    rotarytorsomachine: ['rotary torso machine', 'torso rotation machine', 'rotary trunk machine', 'rotary_torso_machine'],
+    glutekickbackmachine: ['glute kickback machine', 'kickback machine', 'booty builder kickback', 'glute_kickback_machine'],
+    preachercurlmachine: ['preacher curl machine', 'machine preacher curl', 'preacher machine', 'preacher_curl_machine'],
     machine: [
       'machines',
       'selectorized machine',

@@ -125,7 +125,7 @@ const LEGAL_LOCAL_ACCEPTED_KEY = 'legal_locally_accepted_version';
 const USER_SCOPED_KEYS = [
   'userProfile', 'aiWorkoutPlan',
   'aiNutritionPlan', 'aiNutritionPlanA', 'aiNutritionPlanB', 'aiNutritionPlanC', 'aiNutritionPlans',
-  'trainerNote', 'nutritionistNote', 'supplementStack', 'metaData_v1',
+  'trainerNote', 'nutritionistNote', 'supplementStack', 'metaData_v1', 'metaData_v4',
   'weekStartDate', 'mealEdits', 'mealChecks',
   'workoutHistory', 'userLog', 'skippedWorkouts',
   'mealRoutines', 'workoutTemplates', 'planChangeHistory', 'goalHistory',
@@ -816,7 +816,7 @@ export default function Index() {
         'trainerNote', 'nutritionistNote', 'supplementStack',
         'workoutHistory', 'skippedWorkouts',
         'mealChecks', 'mealEdits', 'userLog',
-        'weekStartDate', 'metaData_v1',
+        'weekStartDate', 'metaData_v1', 'metaData_v4',
       ]);
       await AsyncStorage.setItem('cacheVersion', CACHE_VERSION);
     }

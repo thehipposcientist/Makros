@@ -30,6 +30,7 @@ export interface FoodCategoryGroup {
 export interface EquipmentItem {
   name: string;
   icon: string;
+  aliases?: string[];
 }
 
 export interface EquipmentCategoryGroup {
@@ -75,9 +76,9 @@ export interface MetaData {
 
 // ── Cache key ─────────────────────────────────────────────────────────────────
 
-// Bumped to v3 when `/meta/foods` became the curated template feed only.
-// Full USDA/imported catalog rows now stay behind live food search.
-const CACHE_KEY = 'metaData_v3';
+// v3 separated curated foods from live USDA/imported search.
+// v4 preserves `/meta/equipment` aliases for search.
+const CACHE_KEY = 'metaData_v4';
 
 // ── Defaults (used until fetch completes) ─────────────────────────────────────
 
@@ -159,7 +160,7 @@ export function useMetaData(): MetaData {
         const equipByCat: Record<string, EquipmentItem[]> = {};
         for (const e of rawEquipment as any[]) {
           if (!equipByCat[e.category]) equipByCat[e.category] = [];
-          equipByCat[e.category].push({ name: e.name, icon: e.icon });
+          equipByCat[e.category].push({ name: e.name, icon: e.icon, aliases: e.aliases ?? [] });
         }
         const categoryIcons: Record<string, string> = {
           'Bodyweight & Home': 'home-outline',

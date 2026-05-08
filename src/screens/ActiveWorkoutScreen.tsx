@@ -80,6 +80,7 @@ import { drainActiveWatchCommands, setActiveWatchCommandConsumerMounted } from '
 import { WatchBridge } from '../../modules/thallo-watch-bridge';
 import { cancelRestNotifications, scheduleRestNotifications, configureWorkoutNotifications, ensureWorkoutNotificationPermission } from '../utils/restNotifications';
 import { humanizeToken } from '../utils/exerciseGuide';
+import { matchesExerciseSearch } from '../utils/exerciseSearch';
 import { shouldHideWeight, shouldHideReps, formatDurationTarget, isGuideExercise } from '../utils/exerciseDisplay';
 import { startRestActivity, updateRestActivity, getRestActivityState, endRestActivity, endAllActivities, getLastStartDiagnostic } from '../services/liveActivity';
 import type { RestActivityState } from '../services/liveActivity';
@@ -232,6 +233,7 @@ interface ExerciseLibraryItem {
   image_url?: string | null;
   video_id?: string | null;
   is_custom?: boolean;
+  aliases?: string[] | null;
 }
 
 function exerciseLibraryItemFromAiResult(ex: AIExerciseResult, id?: number | string): ExerciseLibraryItem {
@@ -1369,6 +1371,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     // async after the initial push).
     const warmupStepsRef = useRef<string[]>(warmupSteps);
     useEffect(() => { warmupStepsRef.current = warmupSteps; }, [warmupSteps]);
+    const authTokenRef = useRef(authToken);
+    useEffect(() => { authTokenRef.current = authToken; }, [authToken]);
     const startTime = useRef(Date.now());
     // Show the 3-2-1 countdown only on a true fresh start. If we find a
     // persisted start time on mount, the user is resuming after a
@@ -1835,7 +1839,8 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
           if (command === 'log_hydration') {
             (async () => {
               try {
-                if (!authToken) return;
+                const currentAuthToken = authTokenRef.current;
+                if (!currentAuthToken) return;
                 const commandUserId = typeof payload?.userId === 'string' && payload.userId.trim()
                   ? payload.userId.trim()
                   : null;
@@ -1848,9 +1853,9 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
                 if (!hasDelta && (!Number.isFinite(rawOunces) || rawOunces < 0 || rawOunces > 400)) return;
                 const dateISO = String(payload?.dateISO || dateKey(new Date())).slice(0, 10);
                 const result = hasDelta
-                  ? await logHydrationDelta(authToken, rawDelta, dateISO)
-                  : await logHydration(authToken, Math.max(0, Math.round(rawOunces * 10) / 10), dateISO);
-                const fresh = await getHydration(authToken, result.date).catch(() => null);
+                  ? await logHydrationDelta(currentAuthToken, rawDelta, dateISO)
+                  : await logHydration(currentAuthToken, Math.max(0, Math.round(rawOunces * 10) / 10), dateISO);
+                const fresh = await getHydration(currentAuthToken, result.date).catch(() => null);
                 const saved = fresh ?? {
                   date: result.date,
                   ounces: result.ounces,
@@ -5502,13 +5507,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         return exerciseLibrary
           .filter(item => isExerciseUsableWithEquipment(item, ownedEquipment))
           .filter(item => !candidateConflictsWithActiveInjuries(item, activeInjuryTokens))
-          .filter(item => {
-            if (!q) return true;
-            return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
-              .join(' ')
-              .toLowerCase()
-              .includes(q);
-          })
+          .filter(item => !q || matchesExerciseSearch(item, q))
           .map(item => {
             const historySignal = exerciseHistorySignals[exerciseHistoryKey(item.name)];
             return {
@@ -5523,7 +5522,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
         if (item.name === targetName) continue;
         if (!isExerciseUsableWithEquipment(item, ownedEquipment)) continue;
         if (candidateConflictsWithActiveInjuries(item, activeInjuryTokens)) continue;
-        if (q && ![item.name, item.primary_muscle ?? '', item.equipment ?? ''].join(' ').toLowerCase().includes(q)) continue;
+        if (q && !matchesExerciseSearch(item, q)) continue;
         const s = scoreSwapCandidate(base, item);
         if (s <= 0) continue;
         const historySignal = exerciseHistorySignals[exerciseHistoryKey(item.name)];
@@ -5545,13 +5544,7 @@ export default function ActiveWorkoutScreen({ authToken, workout, goal, themeNam
     }
     const searchableLibrary = exerciseLibrary
       .filter(item => !candidateConflictsWithActiveInjuries(item, activeInjuryTokens))
-      .filter(item => {
-        if (!q) return true;
-        return [item.name, item.primary_muscle ?? '', item.equipment ?? '']
-          .join(' ')
-          .toLowerCase()
-          .includes(q);
-      });
+      .filter(item => !q || matchesExerciseSearch(item, q));
     return rankWorkoutAddCandidates(
       currentWorkoutAddContext,
       searchableLibrary,
