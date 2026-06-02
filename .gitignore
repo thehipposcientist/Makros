@@ -16,8 +16,15 @@ dist/
 *.ipa
 *.apk
 *.aab
+*.dump
 ios/DerivedData/
+ios/build/
+ios/Pods/
 android/.gradle/
+android/build/
+android/app/build/
+# Web export output — not part of the native app bundle.
+dist-web/
 # Input zip for scripts/sync-move-kit-demos.mjs. The generated runtime
 # output (src/utils/moveKitExerciseVideos.ts) is tracked — the zip isn't.
 assets/full-library.zip
