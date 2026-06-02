@@ -191,7 +191,10 @@ deploy-ios:
 	@# EAS_SKIP_AUTO_FINGERPRINT: the bare-workflow fingerprint step traverses
 	@# node_modules + native autolinking and stalls for 20+ min on this project.
 	@# We don't use a fingerprint runtimeVersion policy, so skipping is safe.
-	@EAS_SKIP_AUTO_FINGERPRINT=1 eas build --platform ios --profile production --local --non-interactive --output build-latest.ipa
+	@# EAS_NO_VCS: skip eas-cli's git copy step. The repo's .git history is huge
+	@# (tens of GB), so the default git-based "Compressing project files" copy
+	@# hangs. With this set, eas-cli archives the working dir honoring .easignore.
+	@EAS_NO_VCS=1 EAS_SKIP_AUTO_FINGERPRINT=1 eas build --platform ios --profile production --local --non-interactive --output build-latest.ipa
 	@echo ""
 	@echo "Build finished. Submitting to TestFlight..."
 	@eas submit --platform ios --path build-latest.ipa --non-interactive
@@ -205,7 +208,7 @@ deploy-ios-clean:
 	@echo "Building iOS locally with --clear-cache (fresh entitlements)..."
 	@echo "(~20-30 min. Use after any entitlement / provisioning change.)"
 	@echo ""
-	@EAS_SKIP_AUTO_FINGERPRINT=1 eas build --platform ios --profile production --local --non-interactive --clear-cache --output build-latest.ipa
+	@EAS_NO_VCS=1 EAS_SKIP_AUTO_FINGERPRINT=1 eas build --platform ios --profile production --local --non-interactive --clear-cache --output build-latest.ipa
 	@echo ""
 	@echo "Build finished. Submitting to TestFlight..."
 	@eas submit --platform ios --path build-latest.ipa --non-interactive

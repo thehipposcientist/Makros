@@ -88,6 +88,52 @@ final class WatchCellularClient {
         }.resume()
     }
 
+    func fetchReadiness(completion: @escaping (WatchReadinessSnapshot?) -> Void) {
+        guard let token = token(),
+              let apiBaseUrl = UserDefaults.standard.string(forKey: apiBaseUrlKey),
+              let url = URL(string: "\(apiBaseUrl)/watch/readiness")
+        else {
+            completion(nil)
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            guard error == nil,
+                  let data,
+                  let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode),
+                  let decoded = Self.decodeReadinessSnapshot(from: data)
+            else {
+                completion(nil)
+                return
+            }
+            completion(decoded)
+        }.resume()
+    }
+
+    private static func decodeReadinessSnapshot(from data: Data) -> WatchReadinessSnapshot? {
+        guard var dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+        if dict["syncedAtMs"] == nil {
+            dict["syncedAtMs"] = dict["computed_at_ms"] ?? Int(Date().timeIntervalSince1970 * 1000)
+        }
+        let payload: [String: Any] = [
+            "score": dict["score"] ?? NSNull(),
+            "label": dict["label"] ?? NSNull(),
+            "summary": dict["summary"] ?? NSNull(),
+            "factors": dict["factors"] ?? [],
+            "syncedAtMs": dict["syncedAtMs"] ?? 0,
+        ]
+        guard JSONSerialization.isValidJSONObject(payload),
+              let normalized = try? JSONSerialization.data(withJSONObject: payload)
+        else { return nil }
+        return try? JSONDecoder().decode(WatchReadinessSnapshot.self, from: normalized)
+    }
+
     private func token() -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,

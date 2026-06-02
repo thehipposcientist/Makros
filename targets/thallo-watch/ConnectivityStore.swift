@@ -85,8 +85,12 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     private let pullRequestCooldownSeconds: TimeInterval = 5
     private let phoneSyncTimeoutSeconds: TimeInterval = 6
     private let startupLoadingTimeoutSeconds: TimeInterval = 6
+    private let directReadinessRefreshCooldownSeconds: TimeInterval = 60
+    private let directReadinessRefreshStaleSeconds: TimeInterval = 10 * 60
     private var queuedCommands: [[String: Any]] = []
     private var lastPullRequestAt: Date = .distantPast
+    private var lastDirectReadinessRefreshAt: Date = .distantPast
+    private var directReadinessRefreshInFlight: Bool = false
     private var wakePullRetryItems: [DispatchWorkItem] = []
     private var phoneSyncTimeoutItem: DispatchWorkItem?
     private var startupLoadingTimeoutItem: DispatchWorkItem?
@@ -262,6 +266,46 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         isSyncingWithPhone = false
     }
 
+    private var readinessAgeSeconds: TimeInterval? {
+        guard let syncedAtMs = readiness?.syncedAtMs, syncedAtMs > 0 else { return nil }
+        return max(0, Date().timeIntervalSince1970 - (syncedAtMs / 1000))
+    }
+
+    private func refreshReadinessDirectIfNeeded(reason: String) {
+        guard WatchCellularClient.shared.hasUsableConfig else { return }
+        if directReadinessRefreshInFlight {
+            HeartRateStore.saveDiag("readiness direct skipped: in flight")
+            return
+        }
+        if let age = readinessAgeSeconds, age < directReadinessRefreshStaleSeconds {
+            HeartRateStore.saveDiag("readiness direct skipped: fresh")
+            return
+        }
+        let now = Date()
+        if now.timeIntervalSince(lastDirectReadinessRefreshAt) < directReadinessRefreshCooldownSeconds {
+            HeartRateStore.saveDiag("readiness direct skipped: cooldown")
+            return
+        }
+        directReadinessRefreshInFlight = true
+        lastDirectReadinessRefreshAt = now
+        HeartRateStore.saveDiag("readiness direct start: \(reason)")
+        WatchCellularClient.shared.fetchReadiness { [weak self] snapshot in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.directReadinessRefreshInFlight = false
+                if let snapshot {
+                    _ = self.absorbReadinessSnapshot(snapshot, source: "direct")
+                    self.finishPhoneSync()
+                    self.completeStartupLoadingIfReady("readiness direct")
+                    HeartRateStore.saveDiag("readiness direct ok")
+                } else {
+                    self.finishPhoneSync()
+                    HeartRateStore.saveDiag("readiness direct failed")
+                }
+            }
+        }
+    }
+
     /// Persist the in-flight outgoing-command queue so taps that
     /// happened while WC wasn't yet activated survive an app kill.
     private func persistQueuedCommands() {
@@ -422,6 +466,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
     @discardableResult
     func requestPull(force: Bool = false) -> Bool {
         guard let session else {
+            refreshReadinessDirectIfNeeded(reason: "wc_unavailable")
             finishPhoneSync()
             completeStartupLoading("unavailable")
             HeartRateStore.saveDiag("pull_state skipped: unavailable")
@@ -437,6 +482,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         let payload: [String: Any] = force ? ["force": true] : [:]
         cancelWakePullRetries()
         beginPhoneSync()
+        refreshReadinessDirectIfNeeded(reason: session.isReachable ? "pull_reachable" : "phone_unreachable")
         if !session.isReachable {
             if force {
                 sendCommand("pull_state", payload: payload)
@@ -576,10 +622,7 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
         if let r = ctx["readiness"] as? [String: Any], userScopedAllowed {
             if let data = try? JSONSerialization.data(withJSONObject: r),
                let decoded = try? JSONDecoder().decode(WatchReadinessSnapshot.self, from: data) {
-                if readiness == nil || decoded.syncedAtMs >= (readiness?.syncedAtMs ?? 0) {
-                    self.readiness = decoded
-                    Self.persistOptional(decoded, key: Self.storedReadinessKey)
-                }
+                _ = absorbReadinessSnapshot(decoded, source: "phone")
             }
         }
         if let w = ctx["weight"] as? [String: Any], userScopedAllowed {
@@ -628,6 +671,19 @@ final class ConnectivityStore: NSObject, ObservableObject, WCSessionDelegate {
             readiness: readiness,
             sleep: sleep
         )
+    }
+
+    @discardableResult
+    private func absorbReadinessSnapshot(_ decoded: WatchReadinessSnapshot, source: String) -> Bool {
+        guard readiness == nil || decoded.syncedAtMs >= (readiness?.syncedAtMs ?? 0) else {
+            HeartRateStore.saveDiag("readiness \(source) ignored: stale")
+            return false
+        }
+        readiness = decoded
+        Self.persistOptional(decoded, key: Self.storedReadinessKey)
+        syncComplicationSnapshot()
+        HeartRateStore.saveDiag("readiness \(source) accepted")
+        return true
     }
 
     private func absorbTheme(_ raw: Any?) {

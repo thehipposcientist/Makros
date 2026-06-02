@@ -5,7 +5,9 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlmodel import Session, select
 
 from app.database import get_session
+from app.entitlements import ensure_pro
 from app.models import PlanDay, PlanWeek, UserDayState, WatchCommandEvent
+from app.services.readiness.compute import compute_readiness
 from app.watch_auth import WatchAuthContext, get_current_watch_context
 
 router = APIRouter(prefix="/watch", tags=["watch"])
@@ -204,6 +206,15 @@ def watch_snapshot(
             "ounces": hydration_oz,
         },
     }
+
+
+@router.get("/readiness")
+def watch_readiness(
+    ctx: WatchAuthContext = Depends(get_current_watch_context),
+    db: Session = Depends(get_session),
+):
+    ensure_pro(ctx.user, "Readiness tracking")
+    return compute_readiness(db, ctx.user.id).to_dict()
 
 
 @router.post("/commands")

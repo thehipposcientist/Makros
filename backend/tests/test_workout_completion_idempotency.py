@@ -141,9 +141,50 @@ def test_watch_cellular_end_workout_is_idempotent():
     _ok("watch cellular end_workout creates one completion, session, set, and command event")
 
 
+def test_watch_readiness_uses_watch_auth_context():
+    from sqlmodel import Session
+    from app.models import DailyHealthSnapshot, SleepLog, WatchDevice
+    from app.routers.watch import watch_readiness
+    from app.watch_auth import WatchAuthContext, hash_watch_token
+
+    eng = _engine()
+    with Session(eng) as s:
+        u = _user(s)
+        today = date.today()
+        device = WatchDevice(
+            user_id=u.id,
+            device_id="watch-readiness-test",
+            token_hash=hash_watch_token("watch-readiness-token"),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+        )
+        s.add(device)
+        s.add(SleepLog(user_id=u.id, night_date=today, total_hours=7.5, score=86))
+        s.add(DailyHealthSnapshot(
+            user_id=u.id,
+            snapshot_date=today,
+            resting_hr=57,
+            hrv_ms=64,
+            source="apple_health",
+        ))
+        s.commit()
+        s.refresh(device)
+
+        payload = watch_readiness(WatchAuthContext(user=u, device=device), s)
+
+        assert payload["computed_at_ms"] > 0
+        assert isinstance(payload["factors"], list)
+        labels = {factor["label"] for factor in payload["factors"]}
+        assert "Sleep" in labels
+        assert "RHR" in labels
+        assert "HRV" in labels
+
+    _ok("watch readiness route returns canonical readiness for watch token users")
+
+
 cases = [
     test_same_workout_idempotency_key_creates_one_completion,
     test_watch_cellular_end_workout_is_idempotent,
+    test_watch_readiness_uses_watch_auth_context,
 ]
 
 
