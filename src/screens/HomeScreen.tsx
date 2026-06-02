@@ -8441,13 +8441,17 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         //      applyRoutines a SECOND time so the dedup logic there can
         //      reconcile anything the overlay brought in.
         if (routines.length > 0) {
-          // Three generated meals is the default target, not a cap. Routines
-          // are explicit user choices and should never push out other
-          // logged/manual meals just because the setting is lower.
-          const isSavedOrRemote = pickedPathRef.name === 'saved' || pickedPathRef.name === 'remote';
-          if (!isSavedOrRemote) {
-            picked = applyRoutines(picked, routines);
-          }
+          // Apply routines on EVERY day regardless of source — saved/remote
+          // included. Routines are derive-on-load (the design invariant: every
+          // plan write passes through applyRoutines). The old skip for
+          // saved/remote plans is exactly why a routine created AFTER a day's
+          // plan was persisted to day-state "showed then vanished": the day
+          // reloads as 'remote' and the routine, never baked into that stored
+          // plan, was dropped. applyRoutines is idempotent, dedupes to one row
+          // per routine, and honors the plan's persisted suppressedRoutineIds,
+          // so re-applying a saved/remote plan re-adds active routines without
+          // duplicating or resurrecting ones the user removed for that day.
+          picked = applyRoutines(picked, routines);
         }
         const preserved = await getPreservedMeals(d.key);
         const skipPreservedOverlay = pickedPathRef.name === 'saved' || pickedPathRef.name === 'remote';
@@ -10262,7 +10266,13 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
     // with `userInitiated=false` and must NOT silently mark meals
     // complete on the user's behalf. Existing-log edits are handled above,
     // so they're excluded here to avoid a second backend write.
-    const shouldAutoCheck = userInitiated && date <= todayKey() && !!opts?.markEaten && !isExistingLogEdit && savedIdx >= 0;
+    // Adding a meal to a PAST day unambiguously means "I ate this" — there is
+    // no forward planning for a day that already happened. So a user-initiated
+    // manual add on a past day logs + checks it, creating the backend Meal row.
+    // Without this the meal only landed in the day-plan and never appeared,
+    // because the past-day view is driven by logged meals, not the plan.
+    const isPastManualAdd = userInitiated && isNewMeal && date < todayKey();
+    const shouldAutoCheck = userInitiated && date <= todayKey() && (!!opts?.markEaten || isPastManualAdd) && !isExistingLogEdit && savedIdx >= 0;
     if (shouldAutoCheck) {
       const checkMutation = setMealCheckedInChecksByDate(checkedMealsByDateRef.current, date, savedMealType, true, nextPlan);
       checkedMealsByDateRef.current = checkMutation.checksByDate as Record<string, MealChecks>;
@@ -10273,7 +10283,7 @@ export default function HomeScreen({ authToken, userProfile, planRefreshKey = 0,
         try { await savePreservedMeal(date, savedMealType, updated); } catch {}
       }
     }
-    const shouldLog = userInitiated && date <= todayKey() && (!!opts?.markEaten || wasAlreadyChecked) && !isExistingLogEdit;
+    const shouldLog = userInitiated && date <= todayKey() && (!!opts?.markEaten || wasAlreadyChecked || isPastManualAdd) && !isExistingLogEdit;
     if (shouldLog && authToken && savedIdx >= 0) {
       // An EDIT of a freshly-added meal can land before that meal's
       // initial `logMealChecked` round-trip has stamped `_loggedMealId`
